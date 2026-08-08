@@ -23,7 +23,7 @@ store API, operator tools, or to embed storage without the collection layer.
 
 ```toml
 [dependencies]
-residiuum-store = "0.2.1"
+residiuum-store = { version = "0.2.3", features = ["legacy-raw-store"] }
 ```
 
 Or: `cargo add residiuum-store`
@@ -48,7 +48,9 @@ assert!(store.get("user-42")?.is_none());
 
 ## Status
 
-**Packaging 0.2.1** (P0 segment-identity / immutable publish).  
+**Packaging 0.2.3** adds bounded clean-open diagnostics and exact smart-client
+mutation recovery across restart and history-loss compaction.
+
 **0.2.0 is unsafe for continued writes across reopen/rotation** — see
 [SECURITY_ADVISORY_SEGID_0.2.0.md](../../doc/todo/performance-qualification/SECURITY_ADVISORY_SEGID_0.2.0.md).
 

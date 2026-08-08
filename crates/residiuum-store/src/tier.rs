@@ -590,10 +590,10 @@ pub fn discover_placements(
                 let Some(id) = segment_id_from_filename(&path) else {
                     continue;
                 };
-                let (hash, size) = hash_file(&path)?;
-                let rel = relative_segment_path(paths, &path);
                 // Honour operator-chosen primary placement when its file still
                 // exists (copy leaves dual residency; do not snap back to hot).
+                // Check this before hashing: sealed media is immutable and a
+                // retained placement already carries its verified hash/size.
                 if let Some(existing) = placement.get(&id) {
                     let existing_path = resolve_placement_path(paths, existing)?;
                     if existing_path.is_file() {
@@ -601,6 +601,8 @@ pub fn discover_placements(
                     }
                     // Primary missing: adopt this available copy.
                 }
+                let (hash, size) = hash_file(&path)?;
+                let rel = relative_segment_path(paths, &path);
                 placement.upsert(SegmentPlacement {
                     segment_id: id,
                     tier,

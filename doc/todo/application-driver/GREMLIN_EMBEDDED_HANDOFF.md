@@ -1,0 +1,142 @@
+# Gremlin embedded-driver handoff
+
+Status: **qualified integration candidate; use the bounded embedded slice only**
+
+Authority: [Async Driver Spine Specification](./ASYNC_DRIVER_SPINE_SPEC.md)
+
+## What Gremlin should adopt now
+
+Use `residiuum_sdk::driver::Client` as the sole owner of the embedded database
+inside one application process. Create it once during application startup,
+clone the `Client` or a typed `Collection<T>` into concurrent tasks, and close
+it once during application shutdown.
+
+The application must not put a mutex or semaphore around the client, open the
+deployment for each request, call the synchronous Heap API from async tasks, or
+create its own blocking worker pool. The client already provides a bounded
+queue and dedicated synchronous-kernel workers.
+
+```rust
+use residiuum_sdk::driver::{
+    Client, Collection, EmbeddedOptions, ErrorCode, OperationContext,
+    OperationId, PutOptions,
+};
+use serde_json::Value;
+
+// `capability` is the existing validated Heap capability owned by Gremlin.
+let client = Client::open_embedded(
+    EmbeddedOptions::new(database_path, capability)
+        .workers(4)
+        .queue_capacity(1024),
+).await?;
+
+let sessions: Collection<Value> = client.open_collection("sessions").await?;
+
+// Collection handles are cheap Clone + Send + Sync values.
+let sessions_for_task = sessions.clone();
+
+// Mint this before the first attempt and retain it if this logical mutation is
+// retried. Reusing it with different content is refused.
+let operation_id = OperationId(existing_or_new_128_bit_id);
+let receipt = sessions_for_task.put_with(
+    session_key,
+    &document,
+    PutOptions {
+        context: OperationContext {
+            operation_id: Some(operation_id),
+            ..OperationContext::default()
+        },
+    },
+).await?;
+
+client.close().await?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+For ordinary one-attempt writes, `Collection::put` safely mints the operation
+identity. When Gremlin owns a retry loop or persists a command identity, it
+must supply the same non-zero `OperationId` on every attempt for that same
+logical mutation.
+
+## Failure handling
+
+Decisions use `Error.code` and `Error.retry`; Gremlin must not parse error
+messages.
+
+- `Overloaded` means the hard queue bound protected the process. Respect the
+  `RetryDisposition`; do not create an unbounded retry task set.
+- `Conflict` means a create/replace/delete precondition lost a race. Re-read
+  application state before deciding on a new logical operation.
+- `OperationIdentityConflict` means one operation ID was reused for different
+  content. This is an application identity bug and must not be retried.
+- `CommitOutcomeUnknown` means the deadline crossed after kernel dispatch.
+  Resubmit the identical mutation with the same `OperationId`; authoritative
+  media resolves the original receipt without appending the command twice.
+- `Unavailable` on a mutation may require the same operation-identity
+  resolution. Never report failure as proof that the mutation did not commit.
+- `Closed` means shared shutdown has started; every clone observes it.
+
+## Supported handoff surface
+
+- cloneable Heap-bound `Client` and `Collection<T>` handles;
+- bounded embedded workers and admission queue;
+- collection create/open/list;
+- typed JSON get;
+- durable idempotent put and create-if-absent;
+- version-conditional replace and delete;
+- stable structured errors, retry dispositions, and receipts;
+- active queued deadlines, truthful dispatched-mutation outcomes, and
+  queued-cancellation enforcement;
+- authoritative operation identity recovery across the append-to-dedup update
+  crash window and history-loss compaction; and
+- redacted scheduler and store-open inspection.
+
+## Explicit residuals
+
+This handoff does not claim remote pooling, streamed RQL, cancellation of a
+running synchronous kernel call, automatic retry, a separate status-only
+outcome API, or bulk calls. Those remain driver work and must not be recreated
+in Gremlin.
+
+## Canonical Gremlin persistence profile
+
+Do not reproduce Koderra's content-addressed persistent tree through the new
+client. For the immediate migration, use one collection key per conversation
+and store the complete conversation document. Each completed command is one
+version-conditional `replace` using the command's stable `OperationId`.
+
+This gives Gremlin one authoritative document mutation, one event, one index
+entry, exact retry, history, and optimistic concurrency. Residiuum supports
+large values directly; Koderra branch nodes, commit maps, turn locators, and
+application-owned publication machinery are unnecessary on this path.
+
+If full-document rewriting later becomes measurably expensive, the supported
+next profile is one authoritative `TurnCommit` record per ordinal with derived
+current-state and turn-ID indexes. Do not split one command into several writes
+and call it atomic: LocalHeap multi-key Atomics are a separate unimplemented
+product capability.
+
+Gremlin's runtime-agent/session-domain consistency remains an application
+invariant. The driver protects database access and mutation identity; it cannot
+invent or repair a missing Gremlin aggregate.
+
+## Qualification evidence
+
+The embedded contract suite exercises concurrent cloned handles, hard admission
+bounds, exact replay, identity conflicts, version-conditional replace/delete,
+shared close, active queued deadlines, dispatched-mutation outcome uncertainty,
+and release of completed deadline registrations.
+
+The Gremlin profile test writes and version-conditionally replaces one roughly
+half-megabyte conversation document, proves same-operation replay produces no
+second event, and proves a stale writer cannot replace the current document.
+Store crash tests prove put and delete recovery after an authoritative append
+whose ledger update failed, including compaction with source reclaim before the
+retry.
+
+The supplied 2.9 GiB Gremlin/Tinker fixture opened successfully with 1,203,046
+live records and no integrity findings. Its existing Koderra collections are
+ordinary Heap collections and remain readable, but their content-addressed
+schema is application data: adopting this client does not automatically fold
+those 1.2 million records into conversation documents. That is a separate,
+explicit migration.

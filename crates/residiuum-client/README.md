@@ -22,7 +22,7 @@ in [`residiuum-sdk`](https://crates.io/crates/residiuum-sdk); TCP serve lives in
 
 ```toml
 [dependencies]
-residiuum-client = "0.1"
+residiuum-client = "0.2.3"
 ```
 
 Or: `cargo add residiuum-client`
@@ -91,6 +91,8 @@ assert_eq!(RPC_WIRE_LABEL, "1.0-draft");
 | `REQUIRED_FEATURES` | Features this build always requires |
 | `REQUIRED_WRITE_RECEIPT_FIELDS` / `REQUIRED_DELETE_RECEIPT_FIELDS` | Receipt field contracts |
 | `Error` / `ErrorCode` | Stable machine-readable failure codes |
+| `RequestId` / `OperationId` | Stable request and mutation identities |
+| `TerminalOutcome` / `RetryDisposition` | Closed outcome and retry contracts shared by SDK clients |
 
 ## Related crates
 

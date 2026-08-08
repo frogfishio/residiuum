@@ -11,6 +11,8 @@
 //! | 4 | `segment_id` | bstr(16) |
 //! | 5 | `created_ns` | uint |
 //! | 6 | `subject_id` | bstr |
+//! | 31 | `operation_id` | bstr(16), optional |
+//! | 32 | `operation_content_hash` | bstr(32), optional |
 
 use residiuum_format::{decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue};
 
@@ -66,6 +68,10 @@ pub struct ItemEnvelope {
     pub created_ns: u64,
     /// Logical subject key bytes (UTF-8 for Stage 4 string APIs; SubjectV2 binary on heap path).
     pub subject: Vec<u8>,
+    /// Stable client mutation identity when this event is an idempotent command.
+    pub operation_id: Option<[u8; 16]>,
+    /// Canonical logical request hash bound to `operation_id`.
+    pub operation_content_hash: Option<[u8; 32]>,
 }
 
 fn bstr16(bytes: &[u8]) -> Option<[u8; 16]> {
@@ -80,7 +86,10 @@ pub fn encode_item_envelope(env: &ItemEnvelope) -> Result<Vec<u8>, &'static str>
     if env.subject.len() > MAX_SUBJECT_LEN {
         return Err("subject too long");
     }
-    let entries = [
+    if env.operation_id.is_some() != env.operation_content_hash.is_some() {
+        return Err("operation identity must include id and content hash");
+    }
+    let mut entries = vec![
         (1u64, CborValue::Bytes(env.item_id.to_vec())),
         (2u64, CborValue::Uint(u64::from(env.event_kind.as_u8()))),
         (3u64, CborValue::Bytes(env.store_id.to_vec())),
@@ -88,6 +97,11 @@ pub fn encode_item_envelope(env: &ItemEnvelope) -> Result<Vec<u8>, &'static str>
         (5u64, CborValue::Uint(env.created_ns)),
         (6u64, CborValue::Bytes(env.subject.clone())),
     ];
+    if let (Some(operation_id), Some(content_hash)) = (env.operation_id, env.operation_content_hash)
+    {
+        entries.push((31u64, CborValue::Bytes(operation_id.to_vec())));
+        entries.push((32u64, CborValue::Bytes(content_hash.to_vec())));
+    }
     encode_deterministic_uint_map(&entries).map_err(|_| "cbor encode failed")
 }
 
@@ -101,6 +115,8 @@ pub fn decode_item_envelope(bytes: &[u8]) -> Option<ItemEnvelope> {
     let mut segment_id = None;
     let mut created_ns = None;
     let mut subject = None;
+    let mut operation_id = None;
+    let mut operation_content_hash = None;
     for (k, v) in map {
         match k {
             1 => {
@@ -145,9 +161,24 @@ pub fn decode_item_envelope(bytes: &[u8]) -> Option<ItemEnvelope> {
                 }
                 subject = Some(b);
             }
+            31 => {
+                let CborValue::Bytes(b) = v else {
+                    return None;
+                };
+                operation_id = Some(bstr16(&b)?);
+            }
+            32 => {
+                let CborValue::Bytes(b) = v else {
+                    return None;
+                };
+                operation_content_hash = Some(b.as_slice().try_into().ok()?);
+            }
             // Unknown keys retained by lossless tools; readers may ignore.
             _ => {}
         }
+    }
+    if operation_id.is_some() != operation_content_hash.is_some() {
+        return None;
     }
     Some(ItemEnvelope {
         store_id: store_id?,
@@ -156,6 +187,8 @@ pub fn decode_item_envelope(bytes: &[u8]) -> Option<ItemEnvelope> {
         event_kind: event_kind?,
         created_ns: created_ns.unwrap_or(0),
         subject: subject.unwrap_or_default(),
+        operation_id,
+        operation_content_hash,
     })
 }
 
@@ -173,6 +206,8 @@ mod tests {
             event_kind: EventKind::Put,
             created_ns: 99,
             subject: b"user-42".to_vec(),
+            operation_id: Some([4; 16]),
+            operation_content_hash: Some([5; 32]),
         };
         let bytes = encode_item_envelope(&env).unwrap();
         validate_deterministic_cbor_envelope(&bytes).unwrap();
@@ -189,6 +224,8 @@ mod tests {
             event_kind: EventKind::Delete,
             created_ns: 0,
             subject: b"k".to_vec(),
+            operation_id: None,
+            operation_content_hash: None,
         };
         let decoded = decode_item_envelope(&encode_item_envelope(&env).unwrap()).unwrap();
         assert_eq!(decoded.event_kind, EventKind::Delete);

@@ -44,10 +44,10 @@ residiuum-heap = { path = "crates/residiuum-heap", version = "0.2.2" }
 residiuum-authority = { path = "crates/residiuum-authority", version = "0.2.2" }
 # default-features false: public raw `Store` is opt-in via `legacy-raw-store`
 # (HP-003 / CPR-001). Dependents that need Stages 3–9 flat store enable the feature.
-residiuum-store = { path = "crates/residiuum-store", version = "0.2.2", default-features = false }
+residiuum-store = { path = "crates/residiuum-store", version = "0.2.3", default-features = false }
 residiuum-store-model = { path = "crates/residiuum-store-model", version = "0.2.2" }
-residiuum-client = { path = "crates/residiuum-client", version = "0.2.2" }
-residiuum-sdk = { path = "crates/residiuum-sdk", version = "0.2.2" }
+residiuum-client = { path = "crates/residiuum-client", version = "0.2.3" }
+residiuum-sdk = { path = "crates/residiuum-sdk", version = "0.2.3" }
 residiuum-server = { path = "crates/residiuum-server", version = "0.2.2" }
 residiuum-examine = { path = "crates/residiuum-examine", version = "0.2.2" }
 residiuum-cluster = { path = "crates/residiuum-cluster", version = "0.2.2" }

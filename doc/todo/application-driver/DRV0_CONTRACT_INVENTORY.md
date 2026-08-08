@@ -52,12 +52,13 @@ the authoritative dialogue commit.
 
 - No remote pool, reconnect, or non-blocking transport exists yet.
 - No streamed RQL/query cursor is claimed.
-- Cancellation and deadlines are authoritative before embedded kernel entry;
-  an already-running synchronous kernel call continues to completion, and a
-  queued future is not yet timer-woken at the exact deadline instant.
-- Mutation dedup records are durably replaced after the authoritative append;
-  the crash window between those two durable writes still needs outcome
-  reconstruction or an operation identity in authoritative event media.
+- Queued deadlines actively wake through one bounded scheduler timer. An
+  already-running synchronous kernel call continues to completion; a mutation
+  crossing its deadline reports `CommitOutcomeUnknown` and preserves its
+  operation identity for exact replay/outcome resolution.
+- New idempotent put/delete frames carry their operation identity and canonical
+  request hash in authoritative media. If the derived dedup update is
+  interrupted, retry reconstructs the original receipt without another append.
 - Receipt-stable idempotent delete currently requires `if_present=true`.
 - The existing synchronous façade remains unchanged and legacy-only.
 - No second RQL executor is introduced.

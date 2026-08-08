@@ -7,7 +7,7 @@ use residiuum_heap::{
 };
 use residiuum_sdk::driver::{
     Client, Collection, CreateCollectionOptions, DeleteOptions, EmbeddedOptions, ErrorCode,
-    OperationContext, PutOptions, ReplaceOptions,
+    OperationContext, OperationId, PutOptions, ReplaceOptions,
 };
 use residiuum_sdk::ResidiuumDeployment;
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
@@ -108,8 +108,8 @@ fn prepared_deployment() -> (tempfile::TempDir, HeapCap) {
     (directory, capability)
 }
 
-fn operation(byte: u8) -> residiuum_client::OperationId {
-    residiuum_client::OperationId([byte; 16])
+fn operation(byte: u8) -> OperationId {
+    OperationId([byte; 16])
 }
 
 fn assert_handle_contract<T: Clone + Send + Sync>() {}
@@ -209,9 +209,133 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
     assert!(delete_replay.deduplicated);
     assert_eq!(deleted.storage.event_id, delete_replay.storage.event_id);
 
+    let original = block_on(collection.put("cas-delete", &json!({ "v": 1 }))).unwrap();
+    let current = block_on(collection.put("cas-delete", &json!({ "v": 2 }))).unwrap();
+    let stale_delete = block_on(collection.delete(
+        "cas-delete",
+        DeleteOptions {
+            if_version: Some(original.storage.event_id),
+            context: OperationContext {
+                operation_id: Some(operation(5)),
+                ..OperationContext::default()
+            },
+            ..DeleteOptions::default()
+        },
+    ))
+    .unwrap_err();
+    assert_eq!(stale_delete.code, ErrorCode::Conflict);
+    assert_eq!(
+        block_on(collection.get("cas-delete")).unwrap(),
+        Some(json!({ "v": 2 }))
+    );
+    let current_delete = block_on(collection.delete(
+        "cas-delete",
+        DeleteOptions {
+            if_version: Some(current.storage.event_id),
+            context: OperationContext {
+                operation_id: Some(operation(6)),
+                ..OperationContext::default()
+            },
+            ..DeleteOptions::default()
+        },
+    ))
+    .unwrap();
+    assert!(current_delete.storage.removed);
+
     let clone = client.clone();
     block_on(client.close()).unwrap();
     assert!(clone.inspect().closed);
     let closed = block_on(collection.get("stable")).unwrap_err();
     assert_eq!(closed.code, ErrorCode::Closed);
+}
+
+#[test]
+fn gremlin_profile_replaces_one_large_conversation_document_per_command() {
+    let (directory, capability) = prepared_deployment();
+    let client = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path(), capability)
+            .workers(2)
+            .queue_capacity(16),
+    ))
+    .unwrap();
+    let conversations: Collection<Value> = block_on(client.create_collection(
+        "conversations",
+        CreateCollectionOptions {
+            context: OperationContext {
+                operation_id: Some(operation(20)),
+                ..OperationContext::default()
+            },
+        },
+    ))
+    .unwrap();
+
+    let initial = json!({
+        "conversation_id": "gremlin-7",
+        "version": 0,
+        "turns": [],
+    });
+    let established = block_on(conversations.put_with(
+        "gremlin-7",
+        &initial,
+        PutOptions {
+            context: OperationContext {
+                operation_id: Some(operation(21)),
+                ..OperationContext::default()
+            },
+        },
+    ))
+    .unwrap();
+
+    // Deliberately larger than ordinary chat turns: the supported profile is
+    // still one logical document mutation, not an application-owned tree.
+    let rambling = "agent-stream ".repeat(40_000);
+    let completed_turn = json!({
+        "conversation_id": "gremlin-7",
+        "version": 1,
+        "turns": [{
+            "ordinal": 1,
+            "turn_id": "turn-1",
+            "role": "agent",
+            "content": rambling,
+        }],
+    });
+    let replace_options = ReplaceOptions {
+        if_version: established.storage.event_id,
+        context: OperationContext {
+            operation_id: Some(operation(22)),
+            ..OperationContext::default()
+        },
+    };
+    let committed = block_on(conversations.replace(
+        "gremlin-7",
+        &completed_turn,
+        replace_options.clone(),
+    ))
+    .unwrap();
+    let replay = block_on(conversations.replace(
+        "gremlin-7",
+        &completed_turn,
+        replace_options,
+    ))
+    .unwrap();
+    assert!(replay.deduplicated);
+    assert_eq!(committed.storage.event_id, replay.storage.event_id);
+
+    let stale = block_on(conversations.replace(
+        "gremlin-7",
+        &json!({ "conversation_id": "gremlin-7", "version": 2, "turns": [] }),
+        ReplaceOptions {
+            if_version: established.storage.event_id,
+            context: OperationContext {
+                operation_id: Some(operation(23)),
+                ..OperationContext::default()
+            },
+        },
+    ))
+    .unwrap_err();
+    assert_eq!(stale.code, ErrorCode::Conflict);
+    assert_eq!(
+        block_on(conversations.get("gremlin-7")).unwrap(),
+        Some(completed_turn)
+    );
 }

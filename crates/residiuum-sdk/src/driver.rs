@@ -9,7 +9,7 @@ use crate::heap::{Heap, HeapCollection, ResidiuumDeployment};
 use crate::{
     DeleteReceipt as SdkDeleteReceipt, Error as SdkError, WriteReceipt as SdkWriteReceipt,
 };
-use residiuum_client::{OperationId, RequestId, RetryDisposition, TerminalOutcome};
+pub use residiuum_client::{OperationId, RequestId, RetryDisposition, TerminalOutcome};
 use residiuum_heap::{CollectionId, HeapCap, HeapId};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
@@ -17,8 +17,8 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -79,7 +79,8 @@ pub struct OperationContext {
 impl OperationContext {
     /// Set a deadline relative to now.
     pub fn timeout(mut self, duration: Duration) -> Self {
-        self.deadline = Instant::now().checked_add(duration);
+        let now = Instant::now();
+        self.deadline = Some(now.checked_add(duration).unwrap_or(now));
         self
     }
 }
@@ -160,6 +161,8 @@ pub enum ErrorCode {
     Closed,
     /// Deadline expired before a result was available.
     DeadlineExceeded,
+    /// A dispatched mutation crossed its deadline and requires outcome lookup.
+    CommitOutcomeUnknown,
     /// Work was cancelled before reaching a kernel worker.
     CancelledBeforeDispatch,
     /// Operation identity was reused with different canonical content.
@@ -586,8 +589,13 @@ where
         let request_id = resolve_request_id(options.context.request_id)?;
         let operation_id = resolve_operation_id(options.context.operation_id)?;
         let deadline = options.context.deadline;
-        let content_hash =
-            canonical_mutation_hash(b"put-v1", self.heap_id(), self.id(), key.as_bytes(), &body);
+        let content_hash = canonical_mutation_hash(
+            b"put-v1",
+            self.heap_id(),
+            self.id(),
+            key.as_bytes(),
+            &[body.as_slice()],
+        );
         let collection = self.inner.clone();
         let heap_id = self.heap_id();
         let collection_id = self.id();
@@ -668,7 +676,7 @@ where
             self.heap_id(),
             self.id(),
             key.as_bytes(),
-            &[body.as_slice(), condition_bytes.as_slice()].concat(),
+            &[body.as_slice(), condition_bytes.as_slice()],
         );
         let collection = self.inner.clone();
         let heap_id = self.heap_id();
@@ -738,7 +746,7 @@ where
             self.heap_id(),
             self.id(),
             key.as_bytes(),
-            &condition_bytes,
+            &[condition_bytes.as_slice()],
         );
         let collection = self.inner.clone();
         let heap_id = self.heap_id();
@@ -746,8 +754,12 @@ where
         self.client
             .scheduler
             .dispatch(request_id, Some(operation_id), deadline, move || {
-                let (storage, deduplicated) =
-                    collection.delete_with_operation(&key, operation_id.0, content_hash)?;
+                let (storage, deduplicated) = collection.delete_with_operation(
+                    &key,
+                    condition,
+                    operation_id.0,
+                    content_hash,
+                )?;
                 Ok(DeleteReceipt {
                     request_id,
                     operation_id,
@@ -779,7 +791,7 @@ fn canonical_mutation_hash(
     heap_id: HeapId,
     collection_id: CollectionId,
     key: &[u8],
-    payload: &[u8],
+    request_fields: &[&[u8]],
 ) -> [u8; 32] {
     let mut hash = blake3::Hasher::new();
     let heap_bytes = heap_id.as_bytes();
@@ -789,12 +801,17 @@ fn canonical_mutation_hash(
         heap_bytes.as_slice(),
         collection_bytes.as_slice(),
         key,
-        payload,
-        b"durable".as_slice(),
     ] {
         hash.update(&(field.len() as u64).to_le_bytes());
         hash.update(field);
     }
+    for field in request_fields {
+        hash.update(&(field.len() as u64).to_le_bytes());
+        hash.update(field);
+    }
+    let durability = b"durable";
+    hash.update(&(durability.len() as u64).to_le_bytes());
+    hash.update(durability);
     *hash.finalize().as_bytes()
 }
 
@@ -861,10 +878,144 @@ struct Counters {
     cancelled_before_dispatch: AtomicU64,
 }
 
+type DeadlineCallback = Box<dyn FnOnce() + Send + 'static>;
+
+struct DeadlineEntry {
+    id: u64,
+    at: Instant,
+    callback: Option<DeadlineCallback>,
+}
+
+#[derive(Default)]
+struct DeadlineState {
+    entries: Vec<DeadlineEntry>,
+    stopped: bool,
+}
+
+struct DeadlineService {
+    state: Arc<(Mutex<DeadlineState>, Condvar)>,
+    next_id: AtomicU64,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl DeadlineService {
+    fn new() -> Result<Self, Error> {
+        let state = Arc::new((Mutex::new(DeadlineState::default()), Condvar::new()));
+        let worker_state = Arc::clone(&state);
+        let worker = thread::Builder::new()
+            .name("residiuum-driver-deadlines".into())
+            .spawn(move || deadline_loop(worker_state))
+            .map_err(|error| {
+                Error::local(
+                    ErrorCode::Unavailable,
+                    ErrorClass::Service,
+                    error.to_string(),
+                )
+            })?;
+        Ok(Self {
+            state,
+            next_id: AtomicU64::new(1),
+            worker: Mutex::new(Some(worker)),
+        })
+    }
+
+    fn register(&self, at: Instant, callback: DeadlineCallback) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed).max(1);
+        let (lock, wake) = &*self.state;
+        if let Ok(mut state) = lock.lock() {
+            if !state.stopped {
+                state.entries.push(DeadlineEntry {
+                    id,
+                    at,
+                    callback: Some(callback),
+                });
+                wake.notify_one();
+            }
+        }
+        id
+    }
+
+    fn cancel(&self, id: u64) {
+        if id == 0 {
+            return;
+        }
+        let (lock, wake) = &*self.state;
+        if let Ok(mut state) = lock.lock() {
+            if let Some(index) = state.entries.iter().position(|entry| entry.id == id) {
+                state.entries.swap_remove(index);
+                wake.notify_one();
+            }
+        }
+    }
+
+    fn stop(&self) {
+        let (lock, wake) = &*self.state;
+        if let Ok(mut state) = lock.lock() {
+            state.stopped = true;
+            state.entries.clear();
+            wake.notify_all();
+        }
+        if let Ok(mut worker) = self.worker.lock() {
+            if let Some(worker) = worker.take() {
+                let _ = worker.join();
+            }
+        }
+    }
+}
+
+fn deadline_loop(shared: Arc<(Mutex<DeadlineState>, Condvar)>) {
+    let (lock, wake) = &*shared;
+    loop {
+        let mut callbacks = Vec::new();
+        let mut state = match lock.lock() {
+            Ok(state) => state,
+            Err(_) => return,
+        };
+        if state.stopped {
+            return;
+        }
+        let now = Instant::now();
+        let mut index = 0;
+        while index < state.entries.len() {
+            if state.entries[index].at <= now {
+                let mut entry = state.entries.swap_remove(index);
+                if let Some(callback) = entry.callback.take() {
+                    callbacks.push(callback);
+                }
+            } else {
+                index += 1;
+            }
+        }
+        if callbacks.is_empty() {
+            let next = state.entries.iter().map(|entry| entry.at).min();
+            state = match next {
+                Some(at) => {
+                    let wait = at.saturating_duration_since(Instant::now());
+                    match wake.wait_timeout(state, wait) {
+                        Ok((state, _)) => state,
+                        Err(_) => return,
+                    }
+                }
+                None => match wake.wait(state) {
+                    Ok(state) => state,
+                    Err(_) => return,
+                },
+            };
+            drop(state);
+            continue;
+        }
+        drop(state);
+        for callback in callbacks {
+            callback();
+        }
+    }
+}
+
 struct Scheduler {
     sender: Mutex<Option<mpsc::SyncSender<Message>>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
     counters: Arc<Counters>,
+    deadlines: Arc<DeadlineService>,
     worker_count: usize,
     queue_capacity: usize,
     closed: AtomicBool,
@@ -875,6 +1026,7 @@ impl Scheduler {
         let (sender, receiver) = mpsc::sync_channel(queue_capacity);
         let receiver = Arc::new(Mutex::new(receiver));
         let counters = Arc::new(Counters::default());
+        let deadlines = Arc::new(DeadlineService::new()?);
         let mut workers = Vec::with_capacity(worker_count);
         for index in 0..worker_count {
             let receiver = Arc::clone(&receiver);
@@ -899,6 +1051,7 @@ impl Scheduler {
             sender: Mutex::new(Some(sender)),
             workers: Mutex::new(workers),
             counters,
+            deadlines,
             worker_count,
             queue_capacity,
             closed: AtomicBool::new(false),
@@ -931,24 +1084,16 @@ impl Scheduler {
         }
         let cancelled = Arc::clone(&future.cancelled);
         let counters = Arc::clone(&self.counters);
+        let stage = Arc::new(AtomicU8::new(0)); // 0 queued, 1 dispatched, 2 terminal
+        let deadline_registration = Arc::new(AtomicU64::new(0));
+        let task_stage = Arc::clone(&stage);
+        let task_registration = Arc::clone(&deadline_registration);
+        let deadlines = Arc::clone(&self.deadlines);
         let task = Box::new(move || {
             counters.queued.fetch_sub(1, Ordering::AcqRel);
-            if cancelled.load(Ordering::Acquire) {
-                counters
-                    .cancelled_before_dispatch
-                    .fetch_add(1, Ordering::Relaxed);
-                responder.complete(Err(Error::for_request(
-                    ErrorCode::CancelledBeforeDispatch,
-                    ErrorClass::Cancellation,
-                    "request cancelled before dispatch",
-                    request_id,
-                    operation_id,
-                    TerminalOutcome::CancelledBeforeDispatch,
-                    RetryDisposition::Never,
-                )));
-                return;
-            }
             if deadline.map(|at| Instant::now() >= at).unwrap_or(false) {
+                task_stage.store(2, Ordering::Release);
+                deadlines.cancel(task_registration.load(Ordering::Acquire));
                 responder.complete(Err(Error::for_request(
                     ErrorCode::DeadlineExceeded,
                     ErrorClass::Cancellation,
@@ -960,10 +1105,30 @@ impl Scheduler {
                 )));
                 return;
             }
+            if cancelled.load(Ordering::Acquire) {
+                counters
+                    .cancelled_before_dispatch
+                    .fetch_add(1, Ordering::Relaxed);
+                task_stage.store(2, Ordering::Release);
+                deadlines.cancel(task_registration.load(Ordering::Acquire));
+                responder.complete(Err(Error::for_request(
+                    ErrorCode::CancelledBeforeDispatch,
+                    ErrorClass::Cancellation,
+                    "request cancelled before dispatch",
+                    request_id,
+                    operation_id,
+                    TerminalOutcome::CancelledBeforeDispatch,
+                    RetryDisposition::Never,
+                )));
+                return;
+            }
+            task_stage.store(1, Ordering::Release);
             counters.running.fetch_add(1, Ordering::AcqRel);
             let result = operation().map_err(|e| Error::from_sdk(e, request_id, operation_id));
             counters.running.fetch_sub(1, Ordering::AcqRel);
             counters.completed.fetch_add(1, Ordering::Relaxed);
+            task_stage.store(2, Ordering::Release);
+            deadlines.cancel(task_registration.load(Ordering::Acquire));
             responder.complete(result);
         });
 
@@ -1021,7 +1186,55 @@ impl Scheduler {
             .expect("open sender")
             .try_send(Message::Run(task))
         {
-            Ok(()) => {}
+            Ok(()) => {
+                if let Some(at) = deadline {
+                    let callback_shared = Arc::clone(&future.shared);
+                    let callback_cancelled = Arc::clone(&future.cancelled);
+                    let callback_stage = Arc::clone(&stage);
+                    let registration = self.deadlines.register(
+                        at,
+                        Box::new(move || {
+                            let observed = callback_stage.load(Ordering::Acquire);
+                            if observed >= 2 {
+                                return;
+                            }
+                            if observed == 0 {
+                                callback_cancelled.store(true, Ordering::Release);
+                            }
+                            let error = if observed == 0 || operation_id.is_none() {
+                                Error::for_request(
+                                    ErrorCode::DeadlineExceeded,
+                                    ErrorClass::Cancellation,
+                                    if observed == 0 {
+                                        "deadline exceeded while queued"
+                                    } else {
+                                        "deadline exceeded after read dispatch"
+                                    },
+                                    request_id,
+                                    operation_id,
+                                    TerminalOutcome::DeadlineExceeded,
+                                    RetryDisposition::Never,
+                                )
+                            } else {
+                                Error::for_request(
+                                    ErrorCode::CommitOutcomeUnknown,
+                                    ErrorClass::Cancellation,
+                                    "mutation deadline exceeded after dispatch; resolve by operation id",
+                                    request_id,
+                                    operation_id,
+                                    TerminalOutcome::CommitOutcomeUnknown,
+                                    RetryDisposition::OutcomeLookupRequired,
+                                )
+                            };
+                            complete_response_shared(&callback_shared, Err(error));
+                        }),
+                    );
+                    deadline_registration.store(registration, Ordering::Release);
+                    if stage.load(Ordering::Acquire) >= 2 {
+                        self.deadlines.cancel(registration);
+                    }
+                }
+            }
             Err(mpsc::TrySendError::Full(_)) => {
                 self.counters.queued.fetch_sub(1, Ordering::AcqRel);
                 self.counters.refused.fetch_add(1, Ordering::Relaxed);
@@ -1084,6 +1297,7 @@ impl Scheduler {
             .map(|mut workers| std::mem::take(&mut *workers))
             .unwrap_or_default();
         let worker_count = self.worker_count;
+        let deadlines = Arc::clone(&self.deadlines);
         run_join(move || {
             if let Some(sender) = sender {
                 for _ in 0..worker_count {
@@ -1093,6 +1307,7 @@ impl Scheduler {
             for handle in handles {
                 let _ = handle.join();
             }
+            deadlines.stop();
         })
         .await
     }
@@ -1126,6 +1341,7 @@ impl Drop for Scheduler {
                 let _ = worker.join();
             }
         }
+        self.deadlines.stop();
     }
 }
 
@@ -1144,11 +1360,18 @@ struct Responder<T> {
 
 impl<T> Responder<T> {
     fn complete(self, result: Result<T, Error>) {
-        if let Ok(mut state) = self.shared.state.lock() {
-            state.result = Some(result);
-            if let Some(waker) = state.waker.take() {
-                waker.wake();
-            }
+        complete_response_shared(&self.shared, result);
+    }
+}
+
+fn complete_response_shared<T>(shared: &ResponseShared<T>, result: Result<T, Error>) {
+    if let Ok(mut state) = shared.state.lock() {
+        if state.result.is_some() {
+            return;
+        }
+        state.result = Some(result);
+        if let Some(waker) = state.waker.take() {
+            waker.wake();
         }
     }
 }
@@ -1207,12 +1430,7 @@ fn response_pair<T>() -> (ResponseFuture<T>, Responder<T>) {
 }
 
 fn responder_error<T>(future: &ResponseFuture<T>, error: Error) {
-    if let Ok(mut state) = future.shared.state.lock() {
-        state.result = Some(Err(error));
-        if let Some(waker) = state.waker.take() {
-            waker.wake();
-        }
-    }
+    complete_response_shared(&future.shared, Err(error));
 }
 
 fn run_open<F>(operation: F) -> ResponseFuture<(Heap, crate::StoreOpenReport)>
@@ -1274,6 +1492,27 @@ mod tests {
         fn assert_clone<T: Clone>() {}
         assert_clone::<Client>();
         assert_clone::<Collection<serde_json::Value>>();
+    }
+
+    #[test]
+    fn canonical_mutation_hash_preserves_request_field_boundaries() {
+        let heap_id = HeapId::new_random().unwrap();
+        let collection_id = CollectionId::new_random().unwrap();
+        let left = canonical_mutation_hash(
+            b"conditional-v1",
+            heap_id,
+            collection_id,
+            b"key",
+            &[b"ab", b"c"],
+        );
+        let right = canonical_mutation_hash(
+            b"conditional-v1",
+            heap_id,
+            collection_id,
+            b"key",
+            &[b"a", b"bc"],
+        );
+        assert_ne!(left, right);
     }
 
     #[test]
@@ -1346,7 +1585,8 @@ mod tests {
         let (lock, cv) = &*gate;
         *lock.lock().unwrap() = true;
         cv.notify_all();
-        while scheduler.inspect().queued != 0 {
+        let wait_until = Instant::now() + Duration::from_secs(1);
+        while scheduler.inspect().cancelled_before_dispatch != 1 && Instant::now() < wait_until {
             thread::yield_now();
         }
         assert_eq!(scheduler.inspect().cancelled_before_dispatch, 1);
@@ -1362,5 +1602,116 @@ mod tests {
         ));
         drop(state);
         drop(blocker);
+    }
+
+    #[test]
+    fn queued_deadline_wakes_without_waiting_for_a_worker() {
+        let scheduler = Scheduler::new(1, 2).unwrap();
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let blocker_gate = Arc::clone(&gate);
+        let blocker = scheduler.dispatch(RequestId([1; 16]), None, None, move || {
+            let (lock, wake) = &*blocker_gate;
+            let mut open = lock.lock().unwrap();
+            while !*open {
+                open = wake.wait(open).unwrap();
+            }
+            Ok(())
+        });
+        while scheduler.inspect().running == 0 {
+            thread::yield_now();
+        }
+
+        let deadline = scheduler.dispatch(
+            RequestId([2; 16]),
+            None,
+            Some(Instant::now() + Duration::from_millis(20)),
+            || Ok(()),
+        );
+        thread::sleep(Duration::from_millis(60));
+        let state = deadline.shared.state.lock().unwrap();
+        assert!(matches!(
+            state
+                .result
+                .as_ref()
+                .map(|result| result.as_ref().err().map(|error| error.code)),
+            Some(Some(ErrorCode::DeadlineExceeded))
+        ));
+        drop(state);
+
+        let (lock, wake) = &*gate;
+        *lock.lock().unwrap() = true;
+        wake.notify_all();
+        drop(blocker);
+    }
+
+    #[test]
+    fn dispatched_mutation_deadline_reports_unknown_outcome() {
+        let scheduler = Scheduler::new(1, 1).unwrap();
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let mutation_gate = Arc::clone(&gate);
+        let mutation = scheduler.dispatch(
+            RequestId([1; 16]),
+            Some(OperationId([2; 16])),
+            Some(Instant::now() + Duration::from_millis(20)),
+            move || {
+                let (lock, wake) = &*mutation_gate;
+                let mut open = lock.lock().unwrap();
+                while !*open {
+                    open = wake.wait(open).unwrap();
+                }
+                Ok(())
+            },
+        );
+        while scheduler.inspect().running == 0 {
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(60));
+        let state = mutation.shared.state.lock().unwrap();
+        let error = state.result.as_ref().unwrap().as_ref().unwrap_err();
+        assert_eq!(error.code, ErrorCode::CommitOutcomeUnknown);
+        assert_eq!(error.terminal, TerminalOutcome::CommitOutcomeUnknown);
+        assert_eq!(error.retry, RetryDisposition::OutcomeLookupRequired);
+        drop(state);
+
+        let (lock, wake) = &*gate;
+        *lock.lock().unwrap() = true;
+        wake.notify_all();
+        while scheduler.inspect().running != 0 {
+            thread::yield_now();
+        }
+        let state = mutation.shared.state.lock().unwrap();
+        assert!(matches!(
+            state
+                .result
+                .as_ref()
+                .map(|result| result.as_ref().err().map(|error| error.code)),
+            Some(Some(ErrorCode::CommitOutcomeUnknown))
+        ));
+    }
+
+    #[test]
+    fn completed_requests_release_long_deadline_registrations() {
+        let scheduler = Scheduler::new(2, 64).unwrap();
+        let mut requests = Vec::new();
+        for byte in 1..=32u8 {
+            requests.push(scheduler.dispatch(
+                RequestId([byte; 16]),
+                None,
+                Some(Instant::now() + Duration::from_secs(60)),
+                || Ok(()),
+            ));
+        }
+        let wait_until = Instant::now() + Duration::from_secs(1);
+        while scheduler.inspect().completed != 32 && Instant::now() < wait_until {
+            thread::yield_now();
+        }
+        assert_eq!(scheduler.inspect().completed, 32);
+        let state = scheduler.deadlines.state.0.lock().unwrap();
+        assert!(
+            state.entries.is_empty(),
+            "completed requests must not retain deadline callbacks"
+        );
+        drop(state);
+        drop(requests);
     }
 }

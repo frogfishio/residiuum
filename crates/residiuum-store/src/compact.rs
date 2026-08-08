@@ -655,6 +655,8 @@ pub fn write_live_segment(
             event_kind: EventKind::Put,
             created_ns,
             subject: subject.clone(),
+            operation_id: None,
+            operation_content_hash: None,
         };
         let envelope = encode_item_envelope(&env).map_err(StoreError::BadEnvelope)?;
         seg.append(FrameKind::ItemEvent, &envelope, &body, event_id)?;

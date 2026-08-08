@@ -214,6 +214,17 @@ Core envelope keys are:
 | 28 | `partition_term` | strong partition event |
 | 29 | `partition_position` | ordered partition event |
 | 30 | `commit_evidence` | when portable commit evidence is present |
+| 31 | `operation_id` | idempotent client mutation frames |
+| 32 | `operation_content_hash` | when `operation_id` is present |
+
+Keys 31 and 32 form one pair. Writers MUST emit both or neither. The operation
+ID is an opaque 16-byte string and the content hash is a 32-byte canonical
+request digest. They make an accepted mutation outcome reconstructable from
+authoritative media when a derived retry cache is absent or interrupted.
+Before history-loss compaction reclaims frames carrying this evidence, the
+implementation MUST durably materialize their decisions in the retained
+operation ledger. An identity-reassigned clone establishes a new operation-ID
+namespace and MUST NOT replay decisions belonging to the source store ID.
 
 The value types and exact event envelopes will be frozen before wire version 1
 is declared stable. A draft reader MUST preserve unknown or not-yet-frozen

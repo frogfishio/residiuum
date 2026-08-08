@@ -1,8 +1,9 @@
 //! Client-operation deduplication for idempotent mutations (DEF-010).
 //!
-//! Derived side-channel under `store-info/`: loss of the file does not erase
-//! authoritative segment bytes, but exact retry safety requires it to survive
-//! restarts. Records are written atomically after the authoritative append.
+//! Derived side-channel under `store-info/`. New idempotent item-event frames
+//! carry their operation identity and canonical request hash in authoritative
+//! media, so an interrupted or missing table entry can be reconstructed on
+//! demand. Records are written atomically after the authoritative append.
 
 use crate::durability::DurabilityMode;
 use crate::envelope::EventKind;
@@ -98,7 +99,8 @@ pub fn content_identity(op: &str, collection: &str, key: &str, payload: &[u8]) -
 /// Load dedup table when present and valid; otherwise empty.
 ///
 /// Tries the previous known-good generation when the primary fails validation
-/// (DEF-021). Loss of the table resets retry memory only; segment bytes stay.
+/// (DEF-021). Loss of the table affects fast lookup only; new-profile segment
+/// envelopes retain authoritative retry evidence for on-demand reconstruction.
 pub fn load_write_dedup(path: &Path) -> Result<WriteDedupTable, StoreError> {
     if path.is_file() {
         if let Ok(bytes) = fs::read(path) {

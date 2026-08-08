@@ -1,6 +1,6 @@
 [package]
 name = "residiuum-sdk"
-version.workspace = true
+version = "0.2.3"
 edition.workspace = true
 rust-version.workspace = true
 # MPL-2.0 for embedded + remote. Enabling the `cluster` feature pulls AGPL

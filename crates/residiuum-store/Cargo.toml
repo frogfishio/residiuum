@@ -1,6 +1,6 @@
 [package]
 name = "residiuum-store"
-version.workspace = true
+version = "0.2.3"
 edition.workspace = true
 rust-version.workspace = true
 license = "MPL-2.0"
@@ -76,6 +76,10 @@ required-features = ["legacy-raw-store"]
 
 [[test]]
 name = "stage_def_021_atomic_meta"
+required-features = ["legacy-raw-store"]
+
+[[test]]
+name = "driver_operation_recovery"
 required-features = ["legacy-raw-store"]
 
 [[test]]

@@ -104,6 +104,8 @@ pub fn cook_item_frame(task: &CookTask) -> Result<Vec<u8>, String> {
         event_kind: task.event_kind,
         created_ns: task.created_ns,
         subject: task.subject.as_ref().to_vec(),
+        operation_id: None,
+        operation_content_hash: None,
     };
     let envelope = encode_item_envelope(&env).map_err(|e| e.to_string())?;
     let header = FrameHeader {

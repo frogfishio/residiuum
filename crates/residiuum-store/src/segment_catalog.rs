@@ -213,6 +213,22 @@ pub fn rebuild_segment_catalog(
             });
             continue;
         }
+        // Sealed segments are immutable. A matching prior summary plus the
+        // placement's verified hash/size is sufficient for normal open; full
+        // re-hashing and frame verification belongs to explicit scrub. This
+        // keeps clean startup O(segment metadata), not O(retained bytes).
+        let actual_size = fs::metadata(&path).map(|metadata| metadata.len())?;
+        if let Some(summary) = prior.and_then(|catalog| catalog.get(&p.segment_id)) {
+            if summary.available
+                && summary.tier == p.tier
+                && summary.size == actual_size
+                && p.size == actual_size
+                && summary.content_hash == p.content_hash
+            {
+                cat.upsert(summary.clone());
+                continue;
+            }
+        }
         let summary =
             summarize_segment_file(p.segment_id, p.tier, &path, p.content_hash, p.size, limits)?;
         cat.upsert(summary);
@@ -367,6 +383,8 @@ fn decode_catalog(bytes: &[u8], store_id: [u8; 16]) -> Option<SegmentCatalog> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tier::{SegmentPlacement, TierPlacement};
+    use tempfile::tempdir;
 
     #[test]
     fn segment_catalog_roundtrip() {
@@ -387,5 +405,46 @@ mod tests {
         let s = decoded.get(&[5u8; 16]).unwrap();
         assert_eq!(s.tier, TierClass::Warm);
         assert_eq!(s.item_events, 2);
+    }
+
+    #[test]
+    fn clean_rebuild_reuses_matching_immutable_summary() {
+        let directory = tempdir().unwrap();
+        let paths = StorePaths::new(directory.path());
+        fs::create_dir_all(paths.segments_dir()).unwrap();
+        let segment_id = [7u8; 16];
+        let bytes = b"immutable-sealed-media";
+        fs::write(paths.sealed_segment(&segment_id), bytes).unwrap();
+        let hash = ContentHashState::Known([8u8; 32]);
+        let mut placement = TierPlacement::new();
+        placement.upsert(SegmentPlacement {
+            segment_id,
+            tier: TierClass::Hot,
+            relative_path: format!("segments/{}.residiuum", crate::layout::hex16(&segment_id)),
+            content_hash: hash,
+            size: bytes.len() as u64,
+            available: true,
+        });
+        let expected = SegmentSummary {
+            segment_id,
+            tier: TierClass::Hot,
+            size: bytes.len() as u64,
+            content_hash: hash,
+            verified_frames: 123,
+            item_events: 120,
+            holes: 0,
+            available: true,
+        };
+        let mut prior = SegmentCatalog::new();
+        prior.upsert(expected.clone());
+
+        let rebuilt = rebuild_segment_catalog(
+            &paths,
+            &placement,
+            Some(&prior),
+            SafetyLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(rebuilt.get(&segment_id), Some(&expected));
     }
 }

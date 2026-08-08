@@ -417,6 +417,7 @@ impl HeapCollection {
     pub(crate) fn delete_with_operation(
         &self,
         key: &str,
+        condition: residiuum_store::WriteCondition,
         operation_id: [u8; 16],
         content_hash: [u8; 32],
     ) -> Result<(DeleteReceipt, bool), Error> {
@@ -424,7 +425,7 @@ impl HeapCollection {
         let (receipt, deduplicated) = self.store.delete_collection_with_operation(
             self.id.as_bytes(),
             key.as_bytes(),
-            residiuum_store::WriteCondition::Present,
+            condition,
             operation_id,
             content_hash,
         )?;

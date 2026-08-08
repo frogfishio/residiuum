@@ -26,7 +26,7 @@ Freeze label: `SDK_API_VERSION` = `1.0`.
 
 ```toml
 [dependencies]
-residiuum-sdk = "0.2"   # MPL-2.0: embedded + remote (index + engine + RQL cut)
+residiuum-sdk = "0.2.3"   # MPL-2.0: bounded embedded client + Heap collection SDK
 ```
 
 Optional in-process multi-node cluster (pulls AGPL `residiuum-cluster`):
@@ -49,7 +49,57 @@ dependency of this SDK.
 
 ## Quick examples
 
-### Embedded
+### Bounded embedded client
+
+Use one shared client per process. Handles are cheap to clone across tasks; the
+client owns the bounded blocking workers and admission queue.
+
+```rust,no_run
+use residiuum_sdk::driver::{
+    Client, Collection, EmbeddedOptions, OperationContext, OperationId,
+    ReplaceOptions,
+};
+use serde_json::Value;
+
+# async fn example(
+#     database_path: &std::path::Path,
+#     document: Value,
+#     current_version: [u8; 16],
+#     command_id: [u8; 16],
+# ) -> Result<(), residiuum_sdk::driver::Error> {
+# let capability = todo!("load Gremlin's validated Heap capability");
+let client = Client::open_embedded(
+    EmbeddedOptions::new(database_path, capability)
+        .workers(4)
+        .queue_capacity(1024),
+).await?;
+let conversations: Collection<Value> =
+    client.open_collection("conversations").await?;
+conversations.replace(
+    "conversation-7",
+    &document,
+    ReplaceOptions {
+        if_version: current_version,
+        context: OperationContext {
+            // Retain and reuse this ID when resolving an uncertain outcome.
+            operation_id: Some(OperationId(command_id)),
+            ..OperationContext::default()
+        },
+    },
+).await?;
+client.close().await?;
+# Ok(())
+# }
+```
+
+This slice provides exact operation replay, version-conditional replacement,
+hard queue bounds, active queued deadlines, and an honest
+`CommitOutcomeUnknown` result when a mutation deadline crosses after dispatch.
+
+### Legacy flat embedded API
+
+The following older flat surface requires
+`residiuum-sdk = { version = "0.2.3", features = ["legacy-flat-sdk"] }`.
 
 ```rust
 use residiuum_sdk::{json, Residiuum, Filter};

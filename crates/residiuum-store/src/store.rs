@@ -70,6 +70,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+type MutationIdentity = ([u8; 16], [u8; 32]);
+
 /// Draft meta format version written under `store-info/meta`.
 const META_VERSION: &str = "residiuum-store-9\n";
 
@@ -399,6 +401,12 @@ pub struct StoreOpenMetrics {
     pub index_cache_decision: IndexCacheDecision,
     /// On-disk primary checkpoint bytes examined.
     pub index_cache_bytes: u64,
+    /// Time spent reading and decoding an accepted primary checkpoint.
+    pub index_cache_decode_ns: u64,
+    /// Time spent cloning the durable projection into the live projection.
+    pub index_install_clone_ns: u64,
+    /// Time spent deriving collection catalogues from an accepted checkpoint.
+    pub index_catalog_derive_ns: u64,
     /// Primary entries installed after load/rebuild.
     pub index_entries: u64,
     /// Chunk locator records installed after load/rebuild.
@@ -470,6 +478,9 @@ struct IndexOpenStats {
     disposition: IndexOpenDisposition,
     cache_decision: IndexCacheDecision,
     cache_bytes: u64,
+    cache_decode_ns: u64,
+    install_clone_ns: u64,
+    catalog_derive_ns: u64,
     index_entries: u64,
     chunk_locator_entries: u64,
     segments_examined: u64,
@@ -995,6 +1006,9 @@ impl Store {
         open_metrics.index_disposition = index_stats.disposition;
         open_metrics.index_cache_decision = index_stats.cache_decision;
         open_metrics.index_cache_bytes = index_stats.cache_bytes;
+        open_metrics.index_cache_decode_ns = index_stats.cache_decode_ns;
+        open_metrics.index_install_clone_ns = index_stats.install_clone_ns;
+        open_metrics.index_catalog_derive_ns = index_stats.catalog_derive_ns;
         open_metrics.index_entries = index_stats.index_entries;
         open_metrics.chunk_locator_entries = index_stats.chunk_locator_entries;
         open_metrics.index_segments_examined = index_stats.segments_examined;
@@ -1974,6 +1988,17 @@ impl Store {
         mode: DurabilityMode,
         condition: WriteCondition,
     ) -> Result<WriteReceipt, StoreError> {
+        self.put_subject_bytes_if_awo_owned_with_identity(subject, value, mode, condition, None)
+    }
+
+    fn put_subject_bytes_if_awo_owned_with_identity(
+        &mut self,
+        subject: &[u8],
+        value: &[u8],
+        mode: DurabilityMode,
+        condition: WriteCondition,
+        identity: Option<MutationIdentity>,
+    ) -> Result<WriteReceipt, StoreError> {
         if self.awo_writer_poisoned {
             return Err(StoreError::AdaptiveWriterPoisoned);
         }
@@ -1991,13 +2016,13 @@ impl Store {
         // never append frames (avoids later durable flushes contaminating disk).
         if mode == DurabilityMode::Memory {
             return Ok(self
-                .write_event(subject, EventKind::Put, value, mode)?
+                .write_event(subject, EventKind::Put, value, mode, identity)?
                 .with_layout(admit, &self.large_value_policy.profile_id));
         }
         let receipt = if admit.layout == PayloadLayout::Chunked {
-            self.write_chunked_put(subject, value, mode)?
+            self.write_chunked_put(subject, value, mode, identity)?
         } else {
-            self.write_event(subject, EventKind::Put, value, mode)?
+            self.write_event(subject, EventKind::Put, value, mode, identity)?
         };
         Ok(receipt.with_layout(admit, &self.large_value_policy.profile_id))
     }
@@ -2253,6 +2278,8 @@ impl Store {
                 event_kind: EventKind::Put,
                 created_ns: now_ns(),
                 subject: subject_bytes.to_vec(),
+                operation_id: None,
+                operation_content_hash: None,
             };
             let t_enc = std::time::Instant::now();
             let envelope = encode_item_envelope(&env).map_err(StoreError::BadEnvelope)?;
@@ -2383,6 +2410,8 @@ impl Store {
                 event_kind: EventKind::Put,
                 created_ns: now_ns(),
                 subject: subject_bytes.to_vec(),
+                operation_id: None,
+                operation_content_hash: None,
             };
             let t_enc = std::time::Instant::now();
             let envelope = encode_item_envelope(&env).map_err(StoreError::BadEnvelope)?;
@@ -2635,6 +2664,8 @@ impl Store {
                             event_kind: EventKind::Put,
                             created_ns: p.created_ns,
                             subject: p.subject.clone(),
+                            operation_id: None,
+                            operation_content_hash: None,
                         };
                         let r = (|| {
                             let envelope = encode_item_envelope(&env).map_err(|e| e.to_string())?;
@@ -2790,6 +2821,8 @@ impl Store {
                     event_kind: EventKind::Put,
                     created_ns: now_ns(),
                     subject: subject_bytes.to_vec(),
+                    operation_id: None,
+                    operation_content_hash: None,
                 };
                 let envelope = encode_item_envelope(&env).map_err(StoreError::BadEnvelope)?;
                 if !self
@@ -3092,6 +3125,110 @@ impl Store {
         }
     }
 
+    /// Recover an idempotent mutation outcome from authoritative item-event
+    /// envelopes when the derived dedup table missed the post-append update.
+    fn recover_write_dedup_from_media(
+        &self,
+        operation_id: &[u8; 16],
+        content_hash: &[u8; 32],
+        durability: DurabilityMode,
+    ) -> Result<Option<WriteReceipt>, StoreError> {
+        for path in all_segment_paths(
+            &self.paths,
+            Some(&self.tier_placement),
+            self.writer_shards(),
+        )? {
+            let bytes = fs::read(path)?;
+            let report = scan_forward(&bytes, self.limits);
+            for (offset, frame) in report.verified_frames() {
+                if frame.header.known_kind() != Some(FrameKind::ItemEvent) {
+                    continue;
+                }
+                let Some(envelope) = decode_item_envelope(&frame.envelope) else {
+                    continue;
+                };
+                // An identity-reassigned restore is a new operation namespace.
+                // Its byte-identical source segments still carry the former
+                // store id and must not replay commands accepted by that store.
+                if envelope.store_id != self.store_id {
+                    continue;
+                }
+                if envelope.operation_id.as_ref() != Some(operation_id) {
+                    continue;
+                }
+                if envelope.operation_content_hash.as_ref() != Some(content_hash) {
+                    return Err(StoreError::OperationIdentityConflict);
+                }
+                return Ok(Some(WriteReceipt::base(
+                    envelope.store_id,
+                    envelope.segment_id,
+                    envelope.item_id,
+                    frame.header.event_id,
+                    envelope.event_kind,
+                    durability,
+                    offset,
+                )));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Materialize every on-media operation decision into the durable ledger.
+    ///
+    /// Live-projection compaction may intentionally reclaim historical item
+    /// events. Reconciliation before reclaim ensures those operation decisions
+    /// remain available for exact retry after their source frames are removed.
+    fn reconcile_write_dedup_from_media(&mut self) -> Result<(), StoreError> {
+        for path in all_segment_paths(
+            &self.paths,
+            Some(&self.tier_placement),
+            self.writer_shards(),
+        )? {
+            let bytes = fs::read(path)?;
+            let report = scan_forward(&bytes, self.limits);
+            for (offset, frame) in report.verified_frames() {
+                if frame.header.known_kind() != Some(FrameKind::ItemEvent) {
+                    continue;
+                }
+                let Some(envelope) = decode_item_envelope(&frame.envelope) else {
+                    continue;
+                };
+                if envelope.store_id != self.store_id {
+                    continue;
+                }
+                let (Some(operation_id), Some(content_hash)) =
+                    (envelope.operation_id, envelope.operation_content_hash)
+                else {
+                    continue;
+                };
+                match self.write_dedup.get(&operation_id) {
+                    Some(record) if record.content_hash == content_hash => continue,
+                    Some(_) => return Err(StoreError::OperationIdentityConflict),
+                    None => {}
+                }
+                self.write_dedup.insert(
+                    operation_id,
+                    DedupRecord {
+                        content_hash,
+                        store_id: self.store_id,
+                        segment_id: envelope.segment_id,
+                        item_id: envelope.item_id,
+                        event_id: frame.header.event_id,
+                        event_kind: envelope.event_kind,
+                        // Reclaim only follows durable compact output. The
+                        // recovered decision is therefore durable now even if
+                        // its initial acceptance requested a weaker mode.
+                        durability: DurabilityMode::Durable,
+                        offset,
+                    },
+                );
+            }
+        }
+        // Persist even when every frame was already represented in memory: a
+        // prior atomic-file failure can leave the in-memory table ahead of disk.
+        save_write_dedup(&write_dedup_path(&self.paths), &self.write_dedup)
+    }
+
     /// Persist a successful mutation under `operation_id` (DEF-010).
     ///
     /// Called after the authoritative append so restart recovers the receipt.
@@ -3134,7 +3271,20 @@ impl Store {
         if let Some(receipt) = self.resolve_write_dedup(&operation_id, &content_hash)? {
             return Ok((receipt, true));
         }
-        let receipt = self.put_subject_bytes_if(subject, body, mode, condition)?;
+        if let Some(receipt) =
+            self.recover_write_dedup_from_media(&operation_id, &content_hash, mode)?
+        {
+            self.record_write_dedup(operation_id, content_hash, &receipt)?;
+            return Ok((receipt, true));
+        }
+        self.refuse_direct_mutation_if_awo()?;
+        let receipt = self.put_subject_bytes_if_awo_owned_with_identity(
+            subject,
+            body,
+            mode,
+            condition,
+            Some((operation_id, content_hash)),
+        )?;
         self.record_write_dedup(operation_id, content_hash, &receipt)?;
         Ok((receipt, false))
     }
@@ -3151,7 +3301,19 @@ impl Store {
         if let Some(receipt) = self.resolve_write_dedup(&operation_id, &content_hash)? {
             return Ok((receipt, true));
         }
-        let receipt = self.delete_subject_bytes_if(subject, mode, condition)?;
+        if let Some(receipt) =
+            self.recover_write_dedup_from_media(&operation_id, &content_hash, mode)?
+        {
+            self.record_write_dedup(operation_id, content_hash, &receipt)?;
+            return Ok((receipt, true));
+        }
+        self.refuse_direct_mutation_if_awo()?;
+        let receipt = self.delete_subject_bytes_if_awo_owned_with_identity(
+            subject,
+            mode,
+            condition,
+            Some((operation_id, content_hash)),
+        )?;
         self.record_write_dedup(operation_id, content_hash, &receipt)?;
         Ok((receipt, false))
     }
@@ -3291,11 +3453,21 @@ impl Store {
         mode: DurabilityMode,
         condition: WriteCondition,
     ) -> Result<WriteReceipt, StoreError> {
+        self.delete_subject_bytes_if_awo_owned_with_identity(subject, mode, condition, None)
+    }
+
+    fn delete_subject_bytes_if_awo_owned_with_identity(
+        &mut self,
+        subject: &[u8],
+        mode: DurabilityMode,
+        condition: WriteCondition,
+        identity: Option<MutationIdentity>,
+    ) -> Result<WriteReceipt, StoreError> {
         if self.awo_writer_poisoned {
             return Err(StoreError::AdaptiveWriterPoisoned);
         }
         self.check_write_condition(subject, condition)?;
-        self.write_event(subject, EventKind::Delete, &[], mode)
+        self.write_event(subject, EventKind::Delete, &[], mode, identity)
     }
 
     #[inline]
@@ -3973,6 +4145,10 @@ impl Store {
     }
 
     fn reclaim_compact_job_inner(&mut self, job: &mut CompactJob) -> Result<(), StoreError> {
+        // Source frames may be the only evidence left when the append succeeded
+        // but the post-append ledger write was interrupted. Persist that
+        // evidence before history-loss compaction is allowed to remove it.
+        self.reconcile_write_dedup_from_media()?;
         let (reclaimed, retained, deleted_ids) = reclaim_source_segments(&self.paths, job)?;
         for id in &deleted_ids {
             self.tier_placement.remove(id);
@@ -4240,7 +4416,9 @@ impl Store {
         };
 
         // DEF-023: v2/v3 checkpoint + active-tail delta (O(changed bytes), not full rescan).
+        let cache_decode_started = Instant::now();
         if let Some(loaded) = try_load_primary_index_frontier(&cache_path, self.store_id)? {
+            let cache_decode_ns = elapsed_ns(cache_decode_started);
             let format_version = loaded.format_version;
             let mut index = loaded.index;
             let frontier = loaded.frontier;
@@ -4292,7 +4470,8 @@ impl Store {
                     }
                 };
                 if active_ok {
-                    self.install_loaded_index(index, &all_paths)?;
+                    let (install_clone_ns, catalog_derive_ns) =
+                        self.install_loaded_index(index, &all_paths)?;
                     if let Some(locators) = chunk_locators {
                         if chunk_locator_coverage_complete(&self.durable_index, &locators) {
                             self.chunk_locators = locators;
@@ -4306,6 +4485,9 @@ impl Store {
                                 },
                                 cache_decision: IndexCacheDecision::AcceptedV4,
                                 cache_bytes,
+                                cache_decode_ns,
+                                install_clone_ns,
+                                catalog_derive_ns,
                                 index_entries: self.index.len() as u64,
                                 chunk_locator_entries: chunk_locator_count(&self.chunk_locators),
                                 segments_examined,
@@ -4332,6 +4514,9 @@ impl Store {
                             IndexCacheDecision::AcceptedLegacy
                         },
                         cache_bytes,
+                        cache_decode_ns,
+                        install_clone_ns,
+                        catalog_derive_ns,
                         index_entries: self.index.len() as u64,
                         chunk_locator_entries: chunk_locator_count(&self.chunk_locators),
                         segments_examined,
@@ -4344,8 +4529,11 @@ impl Store {
 
         // Legacy v1: exact full fingerprint match (sealed + active lengths).
         let fp = segment_fingerprint(&all_paths)?;
+        let v1_decode_started = Instant::now();
         if let Some(index) = try_load_primary_index(&cache_path, self.store_id, fp)? {
-            self.install_loaded_index(index, &all_paths)?;
+            let cache_decode_ns = elapsed_ns(v1_decode_started);
+            let (install_clone_ns, catalog_derive_ns) =
+                self.install_loaded_index(index, &all_paths)?;
             self.rebuild_chunk_locators_from_segments()?;
             let full_scan_bytes = total_segment_bytes(
                 &self.paths,
@@ -4357,6 +4545,9 @@ impl Store {
                 disposition: IndexOpenDisposition::LegacyUpgraded,
                 cache_decision: IndexCacheDecision::AcceptedV1,
                 cache_bytes,
+                cache_decode_ns,
+                install_clone_ns,
+                catalog_derive_ns,
                 index_entries: self.index.len() as u64,
                 chunk_locator_entries: chunk_locator_count(&self.chunk_locators),
                 segments_examined,
@@ -4370,13 +4561,17 @@ impl Store {
         &mut self,
         index: PrimaryIndex,
         _all_paths: &[PathBuf],
-    ) -> Result<(), StoreError> {
+    ) -> Result<(u64, u64), StoreError> {
+        let clone_started = Instant::now();
         self.index = index.clone();
         self.durable_index = index;
+        let clone_ns = elapsed_ns(clone_started);
+        let catalog_started = Instant::now();
         self.recompute_collection_catalogs_from_index();
+        let catalog_ns = elapsed_ns(catalog_started);
         // Allocator is sole authority for `segment_seq` — index must not touch it.
         self.derived_ops_since_checkpoint = 0;
-        Ok(())
+        Ok((clone_ns, catalog_ns))
     }
 
     fn rebuild_index_from_segments(&mut self) -> Result<(), StoreError> {
@@ -6717,6 +6912,7 @@ impl Store {
         subject: &[u8],
         value: &[u8],
         mode: DurabilityMode,
+        identity: Option<MutationIdentity>,
     ) -> Result<WriteReceipt, StoreError> {
         let subject_bytes = subject;
         if subject_bytes.len() > MAX_SUBJECT_LEN {
@@ -6756,6 +6952,8 @@ impl Store {
                     event_kind: EventKind::Put,
                     created_ns,
                     subject: subject_bytes.to_vec(),
+                    operation_id: None,
+                    operation_content_hash: None,
                 })
                 .map_err(StoreError::BadEnvelope)
             })
@@ -6824,6 +7022,8 @@ impl Store {
             event_kind: EventKind::Put,
             created_ns,
             subject: subject_bytes.to_vec(),
+            operation_id: identity.map(|value| value.0),
+            operation_content_hash: identity.map(|value| value.1),
         })
         .map_err(StoreError::BadEnvelope)?;
 
@@ -7105,6 +7305,7 @@ impl Store {
         kind: EventKind,
         body: &[u8],
         mode: DurabilityMode,
+        identity: Option<MutationIdentity>,
     ) -> Result<WriteReceipt, StoreError> {
         let subject_bytes = subject;
         if subject_bytes.len() > MAX_SUBJECT_LEN {
@@ -7191,6 +7392,8 @@ impl Store {
             event_kind: kind,
             created_ns,
             subject: subject_bytes.to_vec(),
+            operation_id: identity.map(|value| value.0),
+            operation_content_hash: identity.map(|value| value.1),
         };
         if probe {
             let prep_ns = t_prep.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
