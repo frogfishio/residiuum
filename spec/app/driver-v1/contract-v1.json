@@ -44,7 +44,9 @@
     "embedded": {
       "workers": "min(4, available_parallelism), at least 1",
       "queue": 1024,
-      "scan_max_page_items": 1000
+      "scan_max_page_items": 1000,
+      "point_read_cas_version": "authoritative_live_event_id",
+      "scan_rows_include_cas_version": true
     },
     "cursor_prefetch_pages": 1
   }

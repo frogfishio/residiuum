@@ -26,7 +26,7 @@ Freeze label: `SDK_API_VERSION` = `1.0`.
 
 ```toml
 [dependencies]
-residiuum-sdk = "0.2.4"   # MPL-2.0: bounded embedded client + Heap collection SDK
+residiuum-sdk = "0.2.5"   # MPL-2.0: bounded embedded client + Heap collection SDK
 ```
 
 Optional in-process multi-node cluster (pulls AGPL `residiuum-cluster`):
@@ -64,7 +64,6 @@ use serde_json::Value;
 # async fn example(
 #     database_path: &std::path::Path,
 #     document: Value,
-#     current_version: [u8; 16],
 #     command_id: [u8; 16],
 # ) -> Result<(), residiuum_sdk::driver::Error> {
 # let capability = todo!("load Gremlin's validated Heap capability");
@@ -76,11 +75,15 @@ let client = Client::open_embedded(
 ).await?;
 let conversations: Collection<Value> =
     client.open_collection("conversations").await?;
+let current = conversations
+    .get_versioned("conversation-7")
+    .await?
+    .expect("conversation exists");
 conversations.replace(
     "conversation-7",
     &document,
     ReplaceOptions {
-        if_version: current_version,
+        if_version: current.version,
         context: OperationContext {
             // Retain and reuse this ID when resolving an uncertain outcome.
             operation_id: Some(OperationId(command_id)),
@@ -116,6 +119,9 @@ loop {
     if !page.complete {
         // Inspect page.incomplete; do not infer absence from page.rows.
     }
+    for row in &page.rows {
+        // row.version is the CAS token for row.value; no point reread required.
+    }
     continuation = page.continuation;
     if continuation.is_none() {
         break;
@@ -132,7 +138,7 @@ idempotently rebuildable projections.
 ### Legacy flat embedded API
 
 The following older flat surface requires
-`residiuum-sdk = { version = "0.2.4", features = ["legacy-flat-sdk"] }`.
+`residiuum-sdk = { version = "0.2.5", features = ["legacy-flat-sdk"] }`.
 
 ```rust
 use residiuum_sdk::{json, Residiuum, Filter};

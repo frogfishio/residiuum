@@ -1199,7 +1199,7 @@ dependencies = [
 
 [[package]]
 name = "residiuum-sdk"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -1249,7 +1249,7 @@ dependencies = [
 
 [[package]]
 name = "residiuum-store"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "blake3",
  "getrandom 0.3.4",

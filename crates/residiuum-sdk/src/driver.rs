@@ -182,6 +182,17 @@ pub struct ScanRow<T> {
     pub key: String,
     /// Decoded typed value.
     pub value: T,
+    /// Event that established this live value; usable for conditional mutation.
+    pub version: [u8; 16],
+}
+
+/// One typed value paired with its establishing event identifier.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VersionedValue<T> {
+    /// Decoded typed value.
+    pub value: T,
+    /// Event that established this live value; usable for conditional mutation.
+    pub version: [u8; 16],
 }
 
 /// A live key whose body could not be resolved completely.
@@ -785,15 +796,34 @@ where
 
     /// Read and decode one typed value.
     pub async fn get(&self, key: impl Into<String>) -> Result<Option<T>, Error> {
+        Ok(self
+            .get_versioned(key)
+            .await?
+            .map(|versioned| versioned.value))
+    }
+
+    /// Read and decode one typed value together with its CAS version.
+    ///
+    /// The value and version are observed atomically at the store boundary.
+    /// The version may be passed to [`ReplaceOptions::if_version`] or
+    /// [`DeleteOptions::if_version`].
+    pub async fn get_versioned(
+        &self,
+        key: impl Into<String>,
+    ) -> Result<Option<VersionedValue<T>>, Error> {
         let key = key.into();
         let collection = self.inner.clone();
         let request_id = mint_request_id()?;
         self.client
             .scheduler
             .dispatch(request_id, None, None, move || {
-                match collection.get(&key)? {
+                match collection.get_versioned_raw_body(&key)? {
                     None => Ok(None),
-                    Some(value) => Ok(Some(serde_json::from_value(value)?)),
+                    Some((body, version)) => {
+                        let json = crate::value::decode_json(&body)?;
+                        let value = serde_json::from_value(json)?;
+                        Ok(Some(VersionedValue { value, version }))
+                    }
                 }
             })
             .await
@@ -839,13 +869,17 @@ where
             .dispatch(request_id, None, deadline, move || {
                 let raw = collection.scan_page_raw(page_size, after_key.as_deref())?;
                 let mut rows = Vec::with_capacity(raw.entries.len());
-                for (key, body) in raw.entries {
+                for (key, body, version) in raw.entries {
                     let key = String::from_utf8(key).map_err(|_| {
                         SdkError::Internal("scan returned a non-UTF-8 application key".into())
                     })?;
                     let json = crate::value::decode_json(&body)?;
                     let value = serde_json::from_value(json)?;
-                    rows.push(ScanRow { key, value });
+                    rows.push(ScanRow {
+                        key,
+                        value,
+                        version,
+                    });
                 }
                 let incomplete = raw
                     .incomplete

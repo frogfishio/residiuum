@@ -194,6 +194,35 @@ pub struct CollectionScanPage {
     pub last_key: Option<Vec<u8>>,
 }
 
+/// One live collection value paired with its establishing event identifier.
+///
+/// The body and version are observed under the same store lock, so the version
+/// is a valid [`WriteCondition::LiveEventId`] token for the returned body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionedCollectionValue {
+    /// Fully resolved raw value body.
+    pub body: Vec<u8>,
+    /// Event that established this live value.
+    pub version: [u8; 16],
+}
+
+/// One version-bearing page of a heap collection scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionedCollectionScanPage {
+    /// Fully resolved `(key, body, establishing event id)` rows.
+    pub entries: Vec<(Vec<u8>, Vec<u8>, [u8; 16])>,
+    /// Keys examined that could not be fully resolved (distinct reasons).
+    pub incomplete: Vec<CollectionScanHole>,
+    /// Live subjects examined while filling this page (including holes).
+    pub examined: usize,
+    /// True only when `incomplete` is empty.
+    pub complete: bool,
+    /// More subjects may exist after this page (complete-row budget filled).
+    pub has_more: bool,
+    /// Last examined collection key (complete or hole), for continuation.
+    pub last_key: Option<Vec<u8>>,
+}
+
 impl CollectionScanPage {
     /// True when no complete rows and no holes — an empty live set for this prefix.
     pub fn is_empty_live(&self) -> bool {
@@ -331,6 +360,14 @@ impl HeapStore {
 
     /// Get by SubjectV2 key within the bound heap.
     pub fn get(&self, subject: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+        Ok(self.get_versioned(subject)?.map(|value| value.body))
+    }
+
+    /// Get a SubjectV2 body and its establishing event id atomically.
+    pub fn get_versioned(
+        &self,
+        subject: &[u8],
+    ) -> Result<Option<VersionedCollectionValue>, StoreError> {
         self.gate()?;
         self.require_right(Rights::READ)?;
         self.require_subject_v2(subject, None, None)?;
@@ -338,7 +375,15 @@ impl HeapStore {
             .physical
             .lock()
             .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
-        guard.get_subject_bytes(subject)
+        let version = guard.live_event_id(subject);
+        let body = guard.get_subject_bytes(subject)?;
+        match (body, version) {
+            (None, None) => Ok(None),
+            (Some(body), Some(version)) => Ok(Some(VersionedCollectionValue { body, version })),
+            _ => Err(StoreError::CorruptMeta(
+                "live collection body/version invariant violated",
+            )),
+        }
     }
 
     /// Current store segment fingerprint (authoritative frontier candidate).
@@ -476,6 +521,22 @@ impl HeapStore {
         )
         .map_err(|e| StoreError::HeapAdmit(format!("subject v2 encode: {e}")))?;
         self.get(&subject)
+    }
+
+    /// Get a collection value and its establishing event id atomically.
+    pub fn get_collection_versioned(
+        &self,
+        collection_id: &[u8; 16],
+        key: &[u8],
+    ) -> Result<Option<VersionedCollectionValue>, StoreError> {
+        let subject = residiuum_format::encode_subject_v2(
+            self.cap.heap_id().as_bytes(),
+            SubjectObjectKind::Collection,
+            collection_id,
+            key,
+        )
+        .map_err(|e| StoreError::HeapAdmit(format!("subject v2 encode: {e}")))?;
+        self.get_versioned(&subject)
     }
 
     /// Delete a collection-scoped SubjectV2 value.
@@ -843,6 +904,32 @@ impl HeapStore {
         limit: usize,
         after_key: Option<&[u8]>,
     ) -> Result<CollectionScanPage, StoreError> {
+        let page = self.scan_collection_page_versioned(collection_id, limit, after_key)?;
+        Ok(CollectionScanPage {
+            entries: page
+                .entries
+                .into_iter()
+                .map(|(key, body, _version)| (key, body))
+                .collect(),
+            incomplete: page.incomplete,
+            examined: page.examined,
+            complete: page.complete,
+            has_more: page.has_more,
+            last_key: page.last_key,
+        })
+    }
+
+    /// Scan live rows with establishing event ids and explicit holes.
+    ///
+    /// Each body/version pair is read under one store lock. The page is not a
+    /// snapshot across rows; a returned version can therefore become stale
+    /// immediately, which a conditional mutation will correctly refuse.
+    pub fn scan_collection_page_versioned(
+        &self,
+        collection_id: &[u8; 16],
+        limit: usize,
+        after_key: Option<&[u8]>,
+    ) -> Result<VersionedCollectionScanPage, StoreError> {
         self.gate()?;
         self.require_right(Rights::READ)?;
         let limit = limit.clamp(1, 4096);
@@ -891,8 +978,8 @@ impl HeapStore {
             let key = sv2.key.to_vec();
             examined += 1;
             last_key = Some(key.clone());
-            match self.get(&subject) {
-                Ok(Some(body)) => entries.push((key, body)),
+            match self.get_versioned(&subject) {
+                Ok(Some(value)) => entries.push((key, value.body, value.version)),
                 Ok(None) => {}
                 Err(e) => {
                     if let Some(hole) = CollectionScanHole::from_error(key, &e) {
@@ -904,7 +991,7 @@ impl HeapStore {
             }
         }
         let complete = incomplete.is_empty();
-        Ok(CollectionScanPage {
+        Ok(VersionedCollectionScanPage {
             entries,
             incomplete,
             examined,

@@ -544,14 +544,25 @@ impl HeapCollection {
         Ok(self.store.get_collection(self.id.as_bytes(), key.as_bytes())?)
     }
 
+    pub(crate) fn get_versioned_raw_body(
+        &self,
+        key: &str,
+    ) -> Result<Option<(Vec<u8>, [u8; 16])>, Error> {
+        validate_key(key)?;
+        Ok(self
+            .store
+            .get_collection_versioned(self.id.as_bytes(), key.as_bytes())?
+            .map(|value| (value.body, value.version)))
+    }
+
     pub(crate) fn scan_page_raw(
         &self,
         limit: usize,
         after_key: Option<&[u8]>,
-    ) -> Result<residiuum_store::CollectionScanPage, Error> {
+    ) -> Result<residiuum_store::VersionedCollectionScanPage, Error> {
         Ok(self
             .store
-            .scan_collection_page(self.id.as_bytes(), limit, after_key)?)
+            .scan_collection_page_versioned(self.id.as_bytes(), limit, after_key)?)
     }
 
     /// Delete `key` (SubjectV2, durable).

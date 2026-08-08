@@ -2,7 +2,7 @@
 
 Status: **qualified integration candidate; use the bounded embedded slice only**
 
-Minimum SDK package for named-Heap validation and bounded scans: **0.2.4**.
+Minimum SDK package for restart-safe CAS reads and version-bearing scans: **0.2.5**.
 
 Authority: [Async Driver Spine Specification](./ASYNC_DRIVER_SPINE_SPEC.md)
 
@@ -21,7 +21,7 @@ queue and dedicated synchronous-kernel workers.
 ```rust
 use residiuum_sdk::driver::{
     Client, Collection, EmbeddedOptions, ErrorCode, HeapCap, OperationContext,
-    OperationId, PutOptions, ScanOptions,
+    OperationId, ReplaceOptions, ScanOptions,
 };
 use serde_json::Value;
 
@@ -38,13 +38,20 @@ let sessions: Collection<Value> = client.open_collection("sessions").await?;
 // Collection handles are cheap Clone + Send + Sync values.
 let sessions_for_task = sessions.clone();
 
+// Version and value are read atomically and survive process restart.
+let current = sessions_for_task
+    .get_versioned(session_key)
+    .await?
+    .expect("session exists");
+
 // Mint this before the first attempt and retain it if this logical mutation is
 // retried. Reusing it with different content is refused.
 let operation_id = OperationId(existing_or_new_128_bit_id);
-let receipt = sessions_for_task.put_with(
+let receipt = sessions_for_task.replace(
     session_key,
     &document,
-    PutOptions {
+    ReplaceOptions {
+        if_version: current.version,
         context: OperationContext {
             operation_id: Some(operation_id),
             ..OperationContext::default()
@@ -56,10 +63,11 @@ client.close().await?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-For ordinary one-attempt writes, `Collection::put` safely mints the operation
-identity. When Gremlin owns a retry loop or persists a command identity, it
-must supply the same non-zero `OperationId` on every attempt for that same
-logical mutation.
+Use unconditional `Collection::put` only where last-writer-wins overwrite is
+an intentional application rule. Authoritative conversation/session updates
+must use `get_versioned` plus `replace`. When Gremlin owns a retry loop or
+persists a command identity, it must supply the same non-zero `OperationId` on
+every attempt for that same logical mutation.
 
 ## Failure handling
 
@@ -84,7 +92,8 @@ messages.
 - cloneable Heap-bound `Client` and `Collection<T>` handles;
 - bounded embedded workers and admission queue;
 - collection create/open/list;
-- typed JSON get and bounded ordered scan pages;
+- typed JSON get, atomic value-plus-version get, and version-bearing bounded
+  ordered scan pages;
 - durable idempotent put and create-if-absent;
 - version-conditional replace and delete;
 - stable structured errors, retry dispositions, and receipts;
@@ -111,7 +120,14 @@ For bounded migration or projection repair, use `Collection::scan_page` with
 `ScanOptions`. Page size is hard-limited to 1,000 complete rows. Continue only
 with the opaque continuation returned by the preceding page. Check `complete`
 and `incomplete`; an empty `rows` vector alone is not proof that no live keys
-exist when the page reports holes.
+exist when the page reports holes. Every complete `ScanRow` carries the
+establishing event ID in `version`, obtained with its body under the same store
+lock and usable as a `ReplaceOptions::if_version` CAS token.
+
+Use `Collection::get_versioned` whenever a point read will feed a conditional
+replace or delete. Its `VersionedValue::version` remains available after a
+process restart because it is reconstructed from authoritative store state;
+applications must not rely on an earlier in-memory write receipt.
 
 ## Canonical Gremlin persistence profile
 

@@ -29,6 +29,7 @@ pub use catalog::{
 };
 pub use heap_store::{
     CollectionScanHole, CollectionScanHoleReason, CollectionScanPage, HeapStore,
+    VersionedCollectionScanPage, VersionedCollectionValue,
 };
 pub use host::StoreHost;
 pub use maintenance_store::MaintenanceStore;

@@ -203,6 +203,7 @@ pub use heap::{
     MaintenanceStore, MediaDomain, MigrationPhase, MigrationStateV1, MixedHeapSalvageClass,
     ObjectCatalogEntry, ObjectKind, PayloadOnlyRestore, PurgeCoverageUnit, PurgePlan, PurgeReceipt,
     RecoveryStore, ReplicaStore, RetentionScheduler, SourceInventory, StagedGenesis, StoreHost,
+    VersionedCollectionScanPage, VersionedCollectionValue,
     TombstoneKind, ADMIN_OP_DEDUP_FILE, COLLECTION_CREATE_OP,
     ADMITTED_FILE as HEAP_MIGRATE_ADMITTED_FILE,
     ASSIGNMENTS_FILE as HEAP_MIGRATE_ASSIGNMENTS_FILE,

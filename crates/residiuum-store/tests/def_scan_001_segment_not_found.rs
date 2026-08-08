@@ -21,7 +21,7 @@ use residiuum_heap::{
 use residiuum_store::{
     create_object, publish_staged_genesis, stage_heap_genesis, CollectionScanHole,
     CollectionScanHoleReason, CollectionScanPage, CompactOptions, HeapMetaLayout, ObjectKind,
-    StoreError, StoreHost, StorePaths,
+    StoreError, StoreHost, StorePaths, WriteCondition,
 };
 use std::fs;
 use std::sync::Arc;
@@ -159,6 +159,53 @@ fn scan_collection_returns_page_entries_when_complete() {
     assert_eq!(legacy.len(), 1);
     assert_eq!(legacy[0].0, b"k1");
     assert_eq!(legacy[0].1, b"v1");
+}
+
+#[test]
+fn versioned_point_and_scan_reads_return_establishing_event_ids() {
+    let ctx = open_heap_with_collection("gremlin.work.versioned_reads");
+    let first = ctx
+        .heap
+        .put_collection(&ctx.collection_id, b"conversation-1", b"v1")
+        .unwrap();
+
+    let point = ctx
+        .heap
+        .get_collection_versioned(&ctx.collection_id, b"conversation-1")
+        .unwrap()
+        .expect("live versioned point value");
+    assert_eq!(point.body, b"v1");
+    assert_eq!(point.version, first.event_id);
+
+    let page = ctx
+        .heap
+        .scan_collection_page_versioned(&ctx.collection_id, 16, None)
+        .unwrap();
+    assert_eq!(page.entries.len(), 1);
+    assert_eq!(page.entries[0].0, b"conversation-1");
+    assert_eq!(page.entries[0].1, b"v1");
+    assert_eq!(page.entries[0].2, first.event_id);
+
+    let second = ctx
+        .heap
+        .put_collection_if(
+            &ctx.collection_id,
+            b"conversation-1",
+            b"v2",
+            WriteCondition::LiveEventId(point.version),
+        )
+        .unwrap();
+    assert_ne!(second.event_id, point.version);
+    let stale = ctx
+        .heap
+        .put_collection_if(
+            &ctx.collection_id,
+            b"conversation-1",
+            b"stale",
+            WriteCondition::LiveEventId(point.version),
+        )
+        .unwrap_err();
+    assert!(matches!(stale, StoreError::VersionConflict { .. }));
 }
 
 /// Legacy Vec API must hard-fail on holes — never soft-skip into Ok(partial).

@@ -332,6 +332,107 @@ fn embedded_named_heap_and_bounded_scan_pages_are_honest() {
 }
 
 #[test]
+fn versioned_reads_survive_restart_and_supply_real_cas_tokens() {
+    let (directory, capability) = prepared_deployment();
+    let first_client = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path(), capability.clone()).heap_name("driver-test"),
+    ))
+    .unwrap();
+    let first_records: Collection<Value> = block_on(first_client.create_collection(
+        "restart-records",
+        CreateCollectionOptions {
+            context: OperationContext {
+                operation_id: Some(operation(40)),
+                ..OperationContext::default()
+            },
+        },
+    ))
+    .unwrap();
+    let established = block_on(first_records.put_with(
+        "conversation-1",
+        &json!({ "revision": 1 }),
+        PutOptions {
+            context: OperationContext {
+                operation_id: Some(operation(41)),
+                ..OperationContext::default()
+            },
+        },
+    ))
+    .unwrap();
+    block_on(first_client.close()).unwrap();
+    drop(first_records);
+    drop(first_client);
+
+    let second_client = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path(), capability.clone()).heap_name("driver-test"),
+    ))
+    .unwrap();
+    let second_records: Collection<Value> =
+        block_on(second_client.open_collection("restart-records")).unwrap();
+    let after_restart = block_on(second_records.get_versioned("conversation-1"))
+        .unwrap()
+        .expect("record after restart");
+    assert_eq!(after_restart.value, json!({ "revision": 1 }));
+    assert_eq!(after_restart.version, established.storage.event_id);
+
+    let replaced = block_on(second_records.replace(
+        "conversation-1",
+        &json!({ "revision": 2 }),
+        ReplaceOptions {
+            if_version: after_restart.version,
+            context: OperationContext {
+                operation_id: Some(operation(42)),
+                ..OperationContext::default()
+            },
+        },
+    ))
+    .unwrap();
+    let stale = block_on(second_records.replace(
+        "conversation-1",
+        &json!({ "revision": "stale" }),
+        ReplaceOptions {
+            if_version: after_restart.version,
+            context: OperationContext {
+                operation_id: Some(operation(43)),
+                ..OperationContext::default()
+            },
+        },
+    ))
+    .unwrap_err();
+    assert_eq!(stale.code, ErrorCode::Conflict);
+    block_on(second_client.close()).unwrap();
+    drop(second_records);
+    drop(second_client);
+
+    let third_client = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path(), capability).heap_name("driver-test"),
+    ))
+    .unwrap();
+    let third_records: Collection<Value> =
+        block_on(third_client.open_collection("restart-records")).unwrap();
+    let page = block_on(third_records.scan_page(ScanOptions {
+        page_size: 8,
+        ..ScanOptions::default()
+    }))
+    .unwrap();
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].value, json!({ "revision": 2 }));
+    assert_eq!(page.rows[0].version, replaced.storage.event_id);
+    block_on(third_records.replace(
+        "conversation-1",
+        &json!({ "revision": 3 }),
+        ReplaceOptions {
+            if_version: page.rows[0].version,
+            context: OperationContext {
+                operation_id: Some(operation(44)),
+                ..OperationContext::default()
+            },
+        },
+    ))
+    .unwrap();
+}
+
+#[test]
 fn embedded_named_heap_refuses_a_capability_name_mismatch() {
     let (directory, capability) = prepared_deployment();
     let error = block_on(Client::open_embedded(

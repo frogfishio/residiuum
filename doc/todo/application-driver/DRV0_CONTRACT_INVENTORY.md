@@ -41,6 +41,8 @@ the authoritative dialogue commit.
 - overload, queued cancellation, pre-dispatch deadline, and shared-close behavior;
 - collection create/open/list plus get, put, create-if-absent,
   version-conditional replace, and version/presence-conditional delete;
+- atomic typed value-plus-version point reads and version-bearing scan rows, so
+  every public CAS precondition can be obtained after restart;
 - SDK-reexported `HeapCap`, authoritative named-Heap/capability matching, and
   bounded typed collection scan pages with collection-bound continuations;
 - persistent `OperationId` deduplication, canonical request hashing, exact
