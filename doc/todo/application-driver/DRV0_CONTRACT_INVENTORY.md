@@ -35,8 +35,11 @@ the authoritative dialogue commit.
 - frozen v1 resource defaults and required wire-feature identifiers;
 - machine-readable current blocking/synchronization inventory; and
 - a verification gate that rejects `Arc<Mutex<RemoteHeap>>` in new driver code.
-- public `driver::Client` and `driver::Collection<T>` handles that are
-  `Clone + Send + Sync` and use `&self` operations;
+- deployment-level `driver::Client`, capability-bound `driver::HeapClient`, and
+  `driver::Collection<T>` handles that are `Clone + Send + Sync` and use
+  `&self` operations;
+- simultaneous authorized multi-Heap bindings sharing one physical writer,
+  bounded scheduler, inspection surface, and shutdown domain;
 - bounded embedded admission and dedicated synchronous-kernel workers;
 - overload, queued cancellation, pre-dispatch deadline, and shared-close behavior;
 - collection create/open/list plus get, put, create-if-absent,

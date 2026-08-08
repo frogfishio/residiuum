@@ -7,7 +7,8 @@ use residiuum_heap::{
 };
 use residiuum_sdk::driver::{
     Client, Collection, CreateCollectionOptions, DeleteOptions, EmbeddedOptions, ErrorCode,
-    OperationContext, OperationId, PutOptions, ReplaceOptions, ScanOptions, MAX_SCAN_PAGE_SIZE,
+    HeapClient, OperationContext, OperationId, PutOptions, ReplaceOptions, ScanOptions,
+    MAX_SCAN_PAGE_SIZE,
 };
 use residiuum_sdk::ResidiuumDeployment;
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
@@ -108,6 +109,45 @@ fn prepared_deployment() -> (tempfile::TempDir, HeapCap) {
     (directory, capability)
 }
 
+fn prepared_two_heap_deployment() -> (tempfile::TempDir, HeapCap, HeapCap) {
+    let directory = tempdir().unwrap();
+    let root = directory.path();
+    let deployment = ResidiuumDeployment::create(root).unwrap();
+    let layout = HeapMetaLayout::new(root);
+    let deployment_id = DeploymentId::new_random().unwrap();
+
+    let tinker_id = HeapId::new_random().unwrap();
+    let tinker = stage_heap_genesis(
+        &layout,
+        *deployment_id.as_bytes(),
+        *tinker_id.as_bytes(),
+        *residiuum_heap::CollectionId::new_random()
+            .unwrap()
+            .as_bytes(),
+        "tinker",
+    )
+    .unwrap();
+    publish_staged_genesis(&layout, &tinker.staging_id, &tinker.descriptor_hash).unwrap();
+
+    let gremlin_id = HeapId::new_random().unwrap();
+    let gremlin = stage_heap_genesis(
+        &layout,
+        *deployment_id.as_bytes(),
+        *gremlin_id.as_bytes(),
+        *residiuum_heap::CollectionId::new_random()
+            .unwrap()
+            .as_bytes(),
+        "gremlin",
+    )
+    .unwrap();
+    publish_staged_genesis(&layout, &gremlin.staging_id, &gremlin.descriptor_hash).unwrap();
+
+    let tinker_capability = mint_cap_for(tinker_id, deployment_id);
+    let gremlin_capability = mint_cap_for(gremlin_id, deployment_id);
+    drop(deployment);
+    (directory, tinker_capability, gremlin_capability)
+}
+
 fn operation(byte: u8) -> OperationId {
     OperationId([byte; 16])
 }
@@ -117,19 +157,139 @@ fn assert_handle_contract<T: Clone + Send + Sync>() {}
 #[test]
 fn compile_contract_handles_are_clone_send_sync() {
     assert_handle_contract::<Client>();
+    assert_handle_contract::<HeapClient>();
     assert_handle_contract::<Collection<Value>>();
+}
+
+#[test]
+fn one_physical_connection_serves_multiple_authorized_heaps() {
+    let (directory, tinker_capability, gremlin_capability) = prepared_two_heap_deployment();
+    let connection = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path())
+            .workers(2)
+            .queue_capacity(16),
+    ))
+    .unwrap();
+    assert!(connection.capabilities().multi_heap_bindings);
+    let tinker =
+        block_on(connection.open_named_heap("tinker", tinker_capability.clone())).unwrap();
+    let gremlin =
+        block_on(connection.open_named_heap("gremlin", gremlin_capability.clone())).unwrap();
+    assert_ne!(tinker.heap_id(), gremlin.heap_id());
+
+    let wrong_name = block_on(connection.open_named_heap("gremlin", tinker_capability.clone()))
+        .err()
+        .expect("capability cannot be rebound by another Heap name");
+    assert_eq!(wrong_name.code, ErrorCode::Validation);
+
+    let tinker_sessions: Collection<Value> = block_on(tinker.create_collection(
+        "sessions",
+        CreateCollectionOptions {
+            context: OperationContext {
+                operation_id: Some(operation(50)),
+                ..OperationContext::default()
+            },
+        },
+    ))
+    .unwrap();
+    let gremlin_sessions: Collection<Value> = block_on(gremlin.create_collection(
+        "sessions",
+        CreateCollectionOptions {
+            context: OperationContext {
+                operation_id: Some(operation(51)),
+                ..OperationContext::default()
+            },
+        },
+    ))
+    .unwrap();
+
+    let tinker_writer = {
+        let sessions = tinker_sessions.clone();
+        std::thread::spawn(move || {
+            block_on(sessions.put("shared-key", &json!({ "owner": "tinker" }))).unwrap();
+            block_on(sessions.put("tinker-next", &json!({ "owner": "tinker" }))).unwrap();
+        })
+    };
+    let gremlin_writer = {
+        let sessions = gremlin_sessions.clone();
+        std::thread::spawn(move || {
+            block_on(sessions.put("shared-key", &json!({ "owner": "gremlin" }))).unwrap();
+        })
+    };
+    tinker_writer.join().unwrap();
+    gremlin_writer.join().unwrap();
+
+    assert_eq!(
+        block_on(tinker_sessions.get("shared-key")).unwrap(),
+        Some(json!({ "owner": "tinker" }))
+    );
+    assert_eq!(
+        block_on(gremlin_sessions.get("shared-key")).unwrap(),
+        Some(json!({ "owner": "gremlin" }))
+    );
+
+    let tinker_page = block_on(tinker_sessions.scan_page(ScanOptions {
+        page_size: 1,
+        ..ScanOptions::default()
+    }))
+    .unwrap();
+    let cross_heap_cursor = tinker_page.continuation.expect("second Tinker row");
+    let cursor_error = block_on(gremlin_sessions.scan_page(ScanOptions {
+        page_size: 1,
+        continuation: Some(cross_heap_cursor),
+        ..ScanOptions::default()
+    }))
+    .unwrap_err();
+    assert_eq!(cursor_error.code, ErrorCode::PermissionDenied);
+
+    assert_eq!(tinker.inspect(), gremlin.inspect());
+    block_on(connection.close()).unwrap();
+    assert_eq!(
+        block_on(tinker_sessions.get("shared-key")).unwrap_err().code,
+        ErrorCode::Closed
+    );
+    assert_eq!(
+        block_on(gremlin_sessions.get("shared-key"))
+            .unwrap_err()
+            .code,
+        ErrorCode::Closed
+    );
+    drop(tinker_sessions);
+    drop(gremlin_sessions);
+    drop(tinker);
+    drop(gremlin);
+    drop(connection);
+
+    let reopened =
+        block_on(Client::open_embedded(EmbeddedOptions::new(directory.path()))).unwrap();
+    let reopened_tinker =
+        block_on(reopened.open_named_heap("tinker", tinker_capability)).unwrap();
+    let reopened_gremlin =
+        block_on(reopened.open_named_heap("gremlin", gremlin_capability)).unwrap();
+    let reopened_tinker_sessions: Collection<Value> =
+        block_on(reopened_tinker.open_collection("sessions")).unwrap();
+    let reopened_gremlin_sessions: Collection<Value> =
+        block_on(reopened_gremlin.open_collection("sessions")).unwrap();
+    assert_eq!(
+        block_on(reopened_tinker_sessions.get("shared-key")).unwrap(),
+        Some(json!({ "owner": "tinker" }))
+    );
+    assert_eq!(
+        block_on(reopened_gremlin_sessions.get("shared-key")).unwrap(),
+        Some(json!({ "owner": "gremlin" }))
+    );
 }
 
 #[test]
 fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
     let (directory, capability) = prepared_deployment();
-    let client = block_on(Client::open_embedded(
-        EmbeddedOptions::new(directory.path(), capability)
-            .heap_name("driver-test")
+    let connection = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path())
             .workers(2)
             .queue_capacity(8),
     ))
     .unwrap();
+    let client = block_on(connection.open_named_heap("driver-test", capability)).unwrap();
     assert!(client.capabilities().embedded);
     assert!(client.capabilities().mutation_identity);
     assert!(!client.capabilities().remote_pooling);
@@ -243,8 +403,8 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
     .unwrap();
     assert!(current_delete.storage.removed);
 
-    let clone = client.clone();
-    block_on(client.close()).unwrap();
+    let clone = connection.clone();
+    block_on(connection.close()).unwrap();
     assert!(clone.inspect().closed);
     let closed = block_on(collection.get("stable")).unwrap_err();
     assert_eq!(closed.code, ErrorCode::Closed);
@@ -253,13 +413,13 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
 #[test]
 fn embedded_named_heap_and_bounded_scan_pages_are_honest() {
     let (directory, capability) = prepared_deployment();
-    let client = block_on(Client::open_embedded(
-        EmbeddedOptions::new(directory.path(), capability)
-            .heap_name("driver-test")
+    let connection = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path())
             .workers(2)
             .queue_capacity(16),
     ))
     .unwrap();
+    let client = block_on(connection.open_named_heap("driver-test", capability)).unwrap();
     assert!(client.capabilities().bounded_scan_pages);
     assert!(!client.capabilities().atomics);
 
@@ -334,10 +494,10 @@ fn embedded_named_heap_and_bounded_scan_pages_are_honest() {
 #[test]
 fn versioned_reads_survive_restart_and_supply_real_cas_tokens() {
     let (directory, capability) = prepared_deployment();
-    let first_client = block_on(Client::open_embedded(
-        EmbeddedOptions::new(directory.path(), capability.clone()).heap_name("driver-test"),
-    ))
-    .unwrap();
+    let first_connection =
+        block_on(Client::open_embedded(EmbeddedOptions::new(directory.path()))).unwrap();
+    let first_client =
+        block_on(first_connection.open_named_heap("driver-test", capability.clone())).unwrap();
     let first_records: Collection<Value> = block_on(first_client.create_collection(
         "restart-records",
         CreateCollectionOptions {
@@ -359,14 +519,15 @@ fn versioned_reads_survive_restart_and_supply_real_cas_tokens() {
         },
     ))
     .unwrap();
-    block_on(first_client.close()).unwrap();
+    block_on(first_connection.close()).unwrap();
     drop(first_records);
     drop(first_client);
+    drop(first_connection);
 
-    let second_client = block_on(Client::open_embedded(
-        EmbeddedOptions::new(directory.path(), capability.clone()).heap_name("driver-test"),
-    ))
-    .unwrap();
+    let second_connection =
+        block_on(Client::open_embedded(EmbeddedOptions::new(directory.path()))).unwrap();
+    let second_client =
+        block_on(second_connection.open_named_heap("driver-test", capability.clone())).unwrap();
     let second_records: Collection<Value> =
         block_on(second_client.open_collection("restart-records")).unwrap();
     let after_restart = block_on(second_records.get_versioned("conversation-1"))
@@ -400,14 +561,15 @@ fn versioned_reads_survive_restart_and_supply_real_cas_tokens() {
     ))
     .unwrap_err();
     assert_eq!(stale.code, ErrorCode::Conflict);
-    block_on(second_client.close()).unwrap();
+    block_on(second_connection.close()).unwrap();
     drop(second_records);
     drop(second_client);
+    drop(second_connection);
 
-    let third_client = block_on(Client::open_embedded(
-        EmbeddedOptions::new(directory.path(), capability).heap_name("driver-test"),
-    ))
-    .unwrap();
+    let third_connection =
+        block_on(Client::open_embedded(EmbeddedOptions::new(directory.path()))).unwrap();
+    let third_client =
+        block_on(third_connection.open_named_heap("driver-test", capability)).unwrap();
     let third_records: Collection<Value> =
         block_on(third_client.open_collection("restart-records")).unwrap();
     let page = block_on(third_records.scan_page(ScanOptions {
@@ -435,9 +597,9 @@ fn versioned_reads_survive_restart_and_supply_real_cas_tokens() {
 #[test]
 fn embedded_named_heap_refuses_a_capability_name_mismatch() {
     let (directory, capability) = prepared_deployment();
-    let error = block_on(Client::open_embedded(
-        EmbeddedOptions::new(directory.path(), capability).heap_name("not-driver-test"),
-    ))
+    let connection =
+        block_on(Client::open_embedded(EmbeddedOptions::new(directory.path()))).unwrap();
+    let error = block_on(connection.open_named_heap("not-driver-test", capability))
     .err()
     .expect("heap name mismatch must be refused");
     assert_eq!(error.code, ErrorCode::Validation);
@@ -446,12 +608,13 @@ fn embedded_named_heap_refuses_a_capability_name_mismatch() {
 #[test]
 fn gremlin_profile_replaces_one_large_conversation_document_per_command() {
     let (directory, capability) = prepared_deployment();
-    let client = block_on(Client::open_embedded(
-        EmbeddedOptions::new(directory.path(), capability)
+    let connection = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path())
             .workers(2)
             .queue_capacity(16),
     ))
     .unwrap();
+    let client = block_on(connection.open_heap(capability)).unwrap();
     let conversations: Collection<Value> = block_on(client.create_collection(
         "conversations",
         CreateCollectionOptions {

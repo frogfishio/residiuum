@@ -20,11 +20,12 @@ roadmap.
 
 ## 1. Product decision
 
-Residiuum SHALL expose an **async-first, Heap-bound driver** whose ordinary
-handles are cheap to clone and safe to use concurrently. The driver, not the
-application, owns connection pooling, scheduling, backpressure, deadlines,
-cancellation, retry classification, mutation identity, cursor paging, and
-connection recovery.
+Residiuum SHALL expose an **async-first deployment connection** with separate
+capability-bound Heap handles. One physical connection owns pooling,
+scheduling, backpressure, deadlines, cancellation, retry classification,
+mutation identity, cursor paging, and connection recovery. Any number of
+authorized Heap handles may share that connection and are cheap to clone and
+safe to use concurrently.
 
 Applications MUST NOT need a database mutex, semaphore, `spawn_blocking`,
 socket manager, retry loop, or pagination loop merely to use Residiuum safely
@@ -37,7 +38,10 @@ scheduling concern; it SHALL NOT fork or infect verified storage semantics.
 application futures / streams
           |
           v
-Heap-bound handles (Clone + Send + Sync)
+deployment Client (one physical connection)
+          |
+          v
+authorized HeapClient handles (Clone + Send + Sync)
           |
           v
 driver: pool | admission | deadline | cancellation | retry | telemetry
@@ -70,7 +74,9 @@ The present API is a synchronous façade, not a competitive driver:
 6. cancellation/deadlines are not carried end-to-end remotely;
 7. not every mutation has an idempotency identity;
 8. some remote options and receipts are weaker than embedded equivalents; and
-9. broad store locks can serialize otherwise independent work.
+9. broad store locks can serialize otherwise independent work; and
+10. a physical client connection is incorrectly conflated with one Heap
+    authorization, preventing simultaneous multi-Heap use of one deployment.
 
 Putting `async fn` around the current mutex is explicitly forbidden as the
 final design. It only makes the same one-socket queue asynchronous.
@@ -108,8 +114,9 @@ achieved durability, and retry disposition.
 
 ### DRV-L2 — concurrent handles
 
-`Client`, `Collection<T>`, `RawCollection`, and prepared queries MUST be
-`Clone + Send + Sync`. Ordinary operations use `&self`, never `&mut self`.
+`Client`, `HeapClient`, `Collection<T>`, `RawCollection`, and prepared queries
+MUST be `Clone + Send + Sync`. Ordinary operations use `&self`, never `&mut
+self`.
 
 ### DRV-L3 — bounded resources
 
@@ -168,19 +175,38 @@ unbounded socket backlog, thread pool, task set, or buffer.
 Cancellation stops waiting and requests cooperative termination. A dispatched
 mutation requires a deduplicated outcome or `CommitOutcomeUnknown`.
 
+### DRV-L11 — connection is not Heap
+
+One `Client` represents one physical deployment connection and owns its writer,
+pool/scheduler, and shutdown state. Authorization is introduced only by
+creating a `HeapClient` from a validated `HeapCap`. Opening another authorized
+Heap MUST reuse the existing physical connection and MUST NOT acquire another
+writer lock. Closing the `Client` closes every derived Heap and collection
+handle; dropping one `HeapClient` does not close its siblings.
+
 ## 5. Public Rust contract
 
 Names and observable shapes below are normative for v1. Tokio is the initial
 runtime.
 
 ```rust
-pub struct Client { /* Arc<ClientInner>; bound to one Heap */ }
-pub struct Collection<T = serde_json::Value> { /* Client + CollectionId */ }
+pub struct Client { /* one physical deployment connection */ }
+pub struct HeapClient { /* Client + one validated HeapCap */ }
+pub struct Collection<T = serde_json::Value> { /* HeapClient + CollectionId */ }
 pub struct RawCollection;
 
 impl Client {
     pub async fn connect(options: ConnectOptions) -> Result<Self, Error>;
     pub async fn open_embedded(options: EmbeddedOptions) -> Result<Self, Error>;
+    pub async fn open_heap(&self, capability: HeapCap) -> Result<HeapClient, Error>;
+    pub async fn open_named_heap(&self, name: &str, capability: HeapCap)
+        -> Result<HeapClient, Error>;
+    pub fn capabilities(&self) -> &Capabilities;
+    pub async fn close(&self) -> Result<(), Error>;
+}
+
+impl HeapClient {
+    pub fn connection(&self) -> &Client;
     pub fn heap_id(&self) -> HeapId;
     pub fn capabilities(&self) -> &Capabilities;
     pub async fn create_collection<T>(&self, name: &str, options: CreateCollectionOptions)
@@ -188,7 +214,6 @@ impl Client {
     pub async fn open_collection<T>(&self, name: &str)
         -> Result<Collection<T>, Error>;
     pub async fn list_collections(&self) -> Result<Vec<CollectionInfo>, Error>;
-    pub async fn close(&self) -> Result<(), Error>;
 }
 
 impl<T> Collection<T>
@@ -215,9 +240,13 @@ where T: Serialize + DeserializeOwned + Send + Sync + 'static {
 }
 ```
 
-The client is bound to exactly one authenticated Heap. Ordinary methods that
-accept a caller-supplied `HeapId` are forbidden. Typed decode failures never
-alter stored data and report a stable code, key, and expected host type.
+The `Client` is bound to exactly one physical deployment, writer ownership
+domain, and resource scheduler. A `HeapClient` is bound to exactly one
+authenticated Heap. Multiple `HeapClient`s may share one `Client`; they MUST
+not share capabilities, cursor authority, collection identities, or data.
+Ordinary data methods that accept a caller-supplied `HeapId` are forbidden.
+Typed decode failures never alter stored data and report a stable code, key,
+and expected host type.
 
 ### 5.1 Queries
 
@@ -586,4 +615,3 @@ delivers:
 
 DRV-1/2 begin only after DRV-0 principal review. This prevents an attractive
 async façade from freezing the current serialized architecture underneath it.
-

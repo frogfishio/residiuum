@@ -26,7 +26,7 @@ Freeze label: `SDK_API_VERSION` = `1.0`.
 
 ```toml
 [dependencies]
-residiuum-sdk = "0.2.5"   # MPL-2.0: bounded embedded client + Heap collection SDK
+residiuum-sdk = "0.3.0"   # MPL-2.0: bounded multi-Heap embedded client + Heap SDK
 ```
 
 Optional in-process multi-node cluster (pulls AGPL `residiuum-cluster`):
@@ -51,8 +51,9 @@ dependency of this SDK.
 
 ### Bounded embedded client
 
-Use one shared client per process. Handles are cheap to clone across tasks; the
-client owns the bounded blocking workers and admission queue.
+Use one shared deployment connection per process. It owns the physical writer,
+bounded blocking workers, and admission queue. Bind any number of authorized
+Heaps through it; connection, Heap, and collection handles are cheap to clone.
 
 ```rust,no_run
 use residiuum_sdk::driver::{
@@ -67,14 +68,14 @@ use serde_json::Value;
 #     command_id: [u8; 16],
 # ) -> Result<(), residiuum_sdk::driver::Error> {
 # let capability = todo!("load Gremlin's validated Heap capability");
-let client = Client::open_embedded(
-    EmbeddedOptions::new(database_path, capability)
-        .heap_name("gremlin")
+let connection = Client::open_embedded(
+    EmbeddedOptions::new(database_path)
         .workers(4)
         .queue_capacity(1024),
 ).await?;
+let gremlin = connection.open_named_heap("gremlin", capability).await?;
 let conversations: Collection<Value> =
-    client.open_collection("conversations").await?;
+    gremlin.open_collection("conversations").await?;
 let current = conversations
     .get_versioned("conversation-7")
     .await?
@@ -91,7 +92,7 @@ conversations.replace(
         },
     },
 ).await?;
-client.close().await?;
+connection.close().await?;
 # Ok(())
 # }
 ```
@@ -138,7 +139,7 @@ idempotently rebuildable projections.
 ### Legacy flat embedded API
 
 The following older flat surface requires
-`residiuum-sdk = { version = "0.2.5", features = ["legacy-flat-sdk"] }`.
+`residiuum-sdk = { version = "0.3.0", features = ["legacy-flat-sdk"] }`.
 
 ```rust
 use residiuum_sdk::{json, Residiuum, Filter};

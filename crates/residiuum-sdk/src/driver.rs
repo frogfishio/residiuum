@@ -29,10 +29,6 @@ use std::time::{Duration, Instant};
 pub struct EmbeddedOptions {
     /// Existing Residiuum deployment root.
     pub path: PathBuf,
-    /// Validated capability binding the client to exactly one Heap.
-    pub capability: HeapCap,
-    /// Optional canonical name or live alias expected for the capability Heap.
-    pub expected_heap_name: Option<String>,
     /// Dedicated synchronous-kernel workers.
     pub workers: usize,
     /// Hard bound on queued operations, in addition to running workers.
@@ -41,7 +37,7 @@ pub struct EmbeddedOptions {
 
 impl EmbeddedOptions {
     /// Options with product defaults: min(4, available parallelism), queue 1024.
-    pub fn new(path: impl Into<PathBuf>, capability: HeapCap) -> Self {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
         let workers = thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(1)
@@ -49,17 +45,9 @@ impl EmbeddedOptions {
             .max(1);
         Self {
             path: path.into(),
-            capability,
-            expected_heap_name: None,
             workers,
             queue_capacity: 1024,
         }
-    }
-
-    /// Require the supplied capability to resolve to this published Heap name.
-    pub fn heap_name(mut self, name: impl Into<String>) -> Self {
-        self.expected_heap_name = Some(name.into());
-        self
     }
 
     /// Override the worker bound. Zero is rejected by [`Client::open_embedded`].
@@ -224,6 +212,8 @@ pub struct ScanPage<T> {
 pub struct Capabilities {
     /// Operations execute through the bounded embedded scheduler.
     pub embedded: bool,
+    /// One physical connection can host multiple authorized Heap bindings.
+    pub multi_heap_bindings: bool,
     /// Mutation outcomes are persisted and replayable by operation identity.
     pub mutation_identity: bool,
     /// Query streaming is available.
@@ -484,10 +474,13 @@ pub struct ClientInspection {
     pub closed: bool,
 }
 
-/// Async-first Heap-bound embedded client.
+/// Async connection to one physical Residiuum deployment.
+///
+/// The connection owns exactly one physical writer and one bounded scheduler.
+/// Any number of authorized [`HeapClient`] bindings may share it.
 #[derive(Clone)]
 pub struct Client {
-    heap: Arc<Heap>,
+    deployment: Arc<ResidiuumDeployment>,
     scheduler: Arc<Scheduler>,
     open_report: crate::StoreOpenReport,
     capabilities: Capabilities,
@@ -508,19 +501,16 @@ impl Client {
         let opened = run_open(move || {
             let deployment = ResidiuumDeployment::open(&options.path)?;
             let report = deployment.open_report()?;
-            let heap = match options.expected_heap_name {
-                Some(name) => deployment.open_named_heap(&name, options.capability)?,
-                None => deployment.open_heap(options.capability),
-            };
-            Ok((heap, report))
+            Ok((deployment, report))
         })
         .await?;
         Ok(Self {
-            heap: Arc::new(opened.0),
+            deployment: Arc::new(opened.0),
             scheduler: Arc::new(Scheduler::new(workers, queue_capacity)?),
             open_report: opened.1,
             capabilities: Capabilities {
                 embedded: true,
+                multi_heap_bindings: true,
                 mutation_identity: true,
                 query_streaming: false,
                 bounded_scan_pages: true,
@@ -530,9 +520,41 @@ impl Client {
         })
     }
 
-    /// Bound Heap identity.
-    pub fn heap_id(&self) -> HeapId {
-        self.heap.id()
+    /// Bind one validated capability to a Heap on this connection.
+    pub async fn open_heap(&self, capability: HeapCap) -> Result<HeapClient, Error> {
+        let deployment = Arc::clone(&self.deployment);
+        let request_id = mint_request_id()?;
+        let heap = self
+            .scheduler
+            .dispatch(request_id, None, None, move || {
+                Ok(deployment.open_heap(capability))
+            })
+            .await?;
+        Ok(HeapClient {
+            connection: self.clone(),
+            heap: Arc::new(heap),
+        })
+    }
+
+    /// Bind a capability only when it resolves to the requested Heap name.
+    pub async fn open_named_heap(
+        &self,
+        name: &str,
+        capability: HeapCap,
+    ) -> Result<HeapClient, Error> {
+        let name = name.to_string();
+        let deployment = Arc::clone(&self.deployment);
+        let request_id = mint_request_id()?;
+        let heap = self
+            .scheduler
+            .dispatch(request_id, None, None, move || {
+                deployment.open_named_heap(&name, capability)
+            })
+            .await?;
+        Ok(HeapClient {
+            connection: self.clone(),
+            heap: Arc::new(heap),
+        })
     }
 
     /// Negotiated/implemented behavior for this handle.
@@ -545,6 +567,48 @@ impl Client {
         self.open_report
     }
 
+    /// Redacted bounded scheduler state; performs no store scan.
+    pub fn inspect(&self) -> ClientInspection {
+        self.scheduler.inspect()
+    }
+
+    /// Close the physical connection's shared scheduler.
+    ///
+    /// Every Heap and collection binding created from this connection observes
+    /// the same closed state.
+    pub async fn close(&self) -> Result<(), Error> {
+        self.scheduler.close().await
+    }
+}
+
+/// One capability-authorized Heap binding within a shared [`Client`].
+#[derive(Clone)]
+pub struct HeapClient {
+    connection: Client,
+    heap: Arc<Heap>,
+}
+
+impl HeapClient {
+    /// Shared physical connection that owns this binding.
+    pub fn connection(&self) -> &Client {
+        &self.connection
+    }
+
+    /// Bound Heap identity.
+    pub fn heap_id(&self) -> HeapId {
+        self.heap.id()
+    }
+
+    /// Negotiated/implemented behavior of the shared connection.
+    pub fn capabilities(&self) -> &Capabilities {
+        self.connection.capabilities()
+    }
+
+    /// Structured report from the one physical store open.
+    pub fn open_report(&self) -> crate::StoreOpenReport {
+        self.connection.open_report()
+    }
+
     /// Open a typed collection handle without blocking the caller executor.
     pub async fn open_collection<T>(&self, name: &str) -> Result<Collection<T>, Error>
     where
@@ -554,11 +618,12 @@ impl Client {
         let heap = Arc::clone(&self.heap);
         let request_id = mint_request_id()?;
         let inner = self
+            .connection
             .scheduler
             .dispatch(request_id, None, None, move || heap.collection(&name))
             .await?;
         Ok(Collection {
-            client: self.clone(),
+            heap_client: self.clone(),
             inner,
             marker: PhantomData,
         })
@@ -579,6 +644,7 @@ impl Client {
         let deadline = options.context.deadline;
         let heap = Arc::clone(&self.heap);
         let created = self
+            .connection
             .scheduler
             .dispatch(request_id, Some(operation_id), deadline, move || {
                 heap.create_collection_with(&name, Some(operation_id.0))
@@ -586,7 +652,7 @@ impl Client {
             })
             .await?;
         Ok(Collection {
-            client: self.clone(),
+            heap_client: self.clone(),
             inner: created,
             marker: PhantomData,
         })
@@ -596,7 +662,8 @@ impl Client {
     pub async fn list_collections(&self) -> Result<Vec<crate::CollectionInfo>, Error> {
         let request_id = mint_request_id()?;
         let heap = Arc::clone(&self.heap);
-        self.scheduler
+        self.connection
+            .scheduler
             .dispatch(request_id, None, None, move || {
                 heap.list_collections().map(|items| {
                     items
@@ -613,20 +680,15 @@ impl Client {
             .await
     }
 
-    /// Redacted bounded scheduler state; performs no store scan.
+    /// Redacted state of the shared connection scheduler.
     pub fn inspect(&self) -> ClientInspection {
-        self.scheduler.inspect()
-    }
-
-    /// Close the shared scheduler. All clones observe the same closed state.
-    pub async fn close(&self) -> Result<(), Error> {
-        self.scheduler.close().await
+        self.connection.inspect()
     }
 }
 
 /// Cloneable typed collection handle. Ordinary operations use `&self`.
 pub struct Collection<T = serde_json::Value> {
-    client: Client,
+    heap_client: HeapClient,
     inner: HeapCollection,
     marker: PhantomData<fn() -> T>,
 }
@@ -634,7 +696,7 @@ pub struct Collection<T = serde_json::Value> {
 impl<T> Clone for Collection<T> {
     fn clone(&self) -> Self {
         Self {
-            client: self.client.clone(),
+            heap_client: self.heap_client.clone(),
             inner: self.inner.clone(),
             marker: PhantomData,
         }
@@ -690,7 +752,8 @@ where
         let collection = self.inner.clone();
         let heap_id = self.heap_id();
         let collection_id = self.id();
-        self.client
+        self.heap_client
+            .connection
             .scheduler
             .dispatch(request_id, Some(operation_id), deadline, move || {
                 let (storage, deduplicated) = collection.put_raw_body_with_operation(
@@ -772,7 +835,8 @@ where
         let collection = self.inner.clone();
         let heap_id = self.heap_id();
         let collection_id = self.id();
-        self.client
+        self.heap_client
+            .connection
             .scheduler
             .dispatch(request_id, Some(operation_id), deadline, move || {
                 let (storage, deduplicated) = collection.put_raw_body_with_operation(
@@ -814,7 +878,8 @@ where
         let key = key.into();
         let collection = self.inner.clone();
         let request_id = mint_request_id()?;
-        self.client
+        self.heap_client
+            .connection
             .scheduler
             .dispatch(request_id, None, None, move || {
                 match collection.get_versioned_raw_body(&key)? {
@@ -864,7 +929,8 @@ where
         };
         let page_size = options.page_size;
         let collection = self.inner.clone();
-        self.client
+        self.heap_client
+            .connection
             .scheduler
             .dispatch(request_id, None, deadline, move || {
                 let raw = collection.scan_page_raw(page_size, after_key.as_deref())?;
@@ -939,7 +1005,8 @@ where
         let collection = self.inner.clone();
         let heap_id = self.heap_id();
         let collection_id = self.id();
-        self.client
+        self.heap_client
+            .connection
             .scheduler
             .dispatch(request_id, Some(operation_id), deadline, move || {
                 let (storage, deduplicated) = collection.delete_with_operation(
@@ -1634,9 +1701,10 @@ fn responder_error<T>(future: &ResponseFuture<T>, error: Error) {
     complete_response_shared(&future.shared, Err(error));
 }
 
-fn run_open<F>(operation: F) -> ResponseFuture<(Heap, crate::StoreOpenReport)>
+fn run_open<T, F>(operation: F) -> ResponseFuture<T>
 where
-    F: FnOnce() -> Result<(Heap, crate::StoreOpenReport), SdkError> + Send + 'static,
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, SdkError> + Send + 'static,
 {
     let (future, responder) = response_pair();
     let request_id = mint_request_id().unwrap_or(RequestId([0; 16]));
@@ -1689,9 +1757,11 @@ mod tests {
     #[test]
     fn public_handles_are_clone_send_sync() {
         assert_send_sync::<Client>();
+        assert_send_sync::<HeapClient>();
         assert_send_sync::<Collection<serde_json::Value>>();
         fn assert_clone<T: Clone>() {}
         assert_clone::<Client>();
+        assert_clone::<HeapClient>();
         assert_clone::<Collection<serde_json::Value>>();
     }
 

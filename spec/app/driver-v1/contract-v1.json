@@ -44,6 +44,10 @@
     "embedded": {
       "workers": "min(4, available_parallelism), at least 1",
       "queue": 1024,
+      "client_scope": "one_physical_deployment_connection",
+      "physical_writers_per_client": 1,
+      "heap_client_scope": "one_validated_heap_capability",
+      "multiple_heap_clients_per_client": true,
       "scan_max_page_items": 1000,
       "point_read_cas_version": "authoritative_live_event_id",
       "scan_rows_include_cas_version": true

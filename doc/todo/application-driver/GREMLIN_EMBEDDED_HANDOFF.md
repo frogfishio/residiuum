@@ -2,16 +2,19 @@
 
 Status: **qualified integration candidate; use the bounded embedded slice only**
 
-Minimum SDK package for restart-safe CAS reads and version-bearing scans: **0.2.5**.
+Minimum SDK package for one physical connection with simultaneous Tinker and
+Gremlin Heap bindings: **0.3.0**.
 
 Authority: [Async Driver Spine Specification](./ASYNC_DRIVER_SPINE_SPEC.md)
 
 ## What Gremlin should adopt now
 
-Use `residiuum_sdk::driver::Client` as the sole owner of the embedded database
-inside one application process. Create it once during application startup,
-clone the `Client` or a typed `Collection<T>` into concurrent tasks, and close
-it once during application shutdown.
+Use one `residiuum_sdk::driver::Client` as the physical deployment connection
+inside one application process. It owns the sole writer and bounded scheduler.
+Bind both the Tinker and Gremlin capabilities through that connection to obtain
+separate `HeapClient`s. Clone the connection, a `HeapClient`, or a typed
+`Collection<T>` into concurrent tasks, and close the connection once during
+application shutdown.
 
 The application must not put a mutex or semaphore around the client, open the
 deployment for each request, call the synchronous Heap API from async tasks, or
@@ -25,15 +28,16 @@ use residiuum_sdk::driver::{
 };
 use serde_json::Value;
 
-// `capability` is the existing validated Heap capability owned by Gremlin.
-let client = Client::open_embedded(
-    EmbeddedOptions::new(database_path, capability)
-        .heap_name("gremlin")
+// Both capabilities were validated by Residiuum authority handling.
+let connection = Client::open_embedded(
+    EmbeddedOptions::new(database_path)
         .workers(4)
         .queue_capacity(1024),
 ).await?;
+let tinker = connection.open_named_heap("tinker", tinker_capability).await?;
+let gremlin = connection.open_named_heap("gremlin", gremlin_capability).await?;
 
-let sessions: Collection<Value> = client.open_collection("sessions").await?;
+let sessions: Collection<Value> = gremlin.open_collection("sessions").await?;
 
 // Collection handles are cheap Clone + Send + Sync values.
 let sessions_for_task = sessions.clone();
@@ -59,7 +63,7 @@ let receipt = sessions_for_task.replace(
     },
 ).await?;
 
-client.close().await?;
+connection.close().await?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
@@ -89,7 +93,10 @@ messages.
 
 ## Supported handoff surface
 
-- cloneable Heap-bound `Client` and `Collection<T>` handles;
+- one cloneable deployment-level `Client`, multiple capability-bound
+  `HeapClient`s, and typed `Collection<T>` handles;
+- simultaneous Tinker and Gremlin Heap access through one physical writer and
+  one bounded scheduler;
 - bounded embedded workers and admission queue;
 - collection create/open/list;
 - typed JSON get, atomic value-plus-version get, and version-bearing bounded
@@ -110,9 +117,10 @@ cancellation of a running synchronous kernel call, automatic retry, a separate
 status-only outcome API, bulk calls, or multi-record Atomics. Those remain
 driver work and must not be recreated in Gremlin.
 
-`HeapCap` is re-exported from `residiuum_sdk::driver`, and `.heap_name(...)`
-verifies the supplied capability against the authoritative published Heap
-descriptor. The SDK still does not create authority or mint a Heap capability:
+`HeapCap` is re-exported from `residiuum_sdk::driver`, and
+`Client::open_named_heap(...)` verifies the supplied capability against the
+authoritative published Heap descriptor. The SDK still does not create
+authority or mint a Heap capability:
 new-Heap creation remains an explicit authority ceremony, not a name-only
 database open that bypasses isolation.
 
