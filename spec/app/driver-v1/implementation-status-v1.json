@@ -5,6 +5,8 @@
   "claims": {
     "clone_send_sync_handles": true,
     "heap_bound_client": true,
+    "heap_capability_reexport": true,
+    "named_heap_capability_match": true,
     "bounded_embedded_scheduler": true,
     "typed_overload": true,
     "queued_cancellation": true,
@@ -19,6 +21,10 @@
     "mutation_identity_survives_history_loss_compaction": true,
     "completed_deadlines_release_registrations": true,
     "gremlin_single_document_profile_qualified": true,
+    "bounded_typed_scan_pages": true,
+    "collection_bound_scan_continuation": true,
+    "scan_incompleteness_explicit": true,
+    "multi_record_atomics": false,
     "structured_open_report": true,
     "remote_pool": false,
     "streamed_rql": false,
@@ -37,6 +43,8 @@
   "residuals": [
     "bounded remote non-blocking connection pool",
     "streamed RQL and cursor backpressure through canonical QVM",
+    "heap-local multi-record Atomics and transaction compatibility surface",
+    "SDK-owned authority ceremony for creating a new named Heap",
     "cooperative cancellation checkpoints inside the synchronous kernel",
     "direct operation-status lookup without resubmitting the same mutation",
     "receipt-stable optional delete when the key is already absent",

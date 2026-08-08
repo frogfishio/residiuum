@@ -43,7 +43,8 @@
     },
     "embedded": {
       "workers": "min(4, available_parallelism), at least 1",
-      "queue": 1024
+      "queue": 1024,
+      "scan_max_page_items": 1000
     },
     "cursor_prefetch_pages": 1
   }

@@ -12,8 +12,9 @@ use crate::subject::{validate_collection_name, validate_key};
 use blake3::Hasher;
 use residiuum_heap::{CollectionId, HeapCap, HeapId, StreamId};
 use residiuum_store::{
-    create_collection_idempotent, rebuild_object_entry_from_chain, try_load_collections_catalog,
-    try_load_streams_catalog, HeapMetaLayout, HeapStore, ObjectKind, StoreError, StoreHost,
+    create_collection_idempotent, rebuild_heap_entry_from_chain, rebuild_object_entry_from_chain,
+    try_load_collections_catalog, try_load_streams_catalog, HeapMetaLayout, HeapStore, ObjectKind,
+    StoreError, StoreHost,
 };
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -55,6 +56,23 @@ impl ResidiuumDeployment {
             layout: HeapMetaLayout::new(&self.data_root),
             pool: Arc::new(Mutex::new(HeapPoolInner::default())),
         }
+    }
+
+    /// Bind a capability only when it names the requested published Heap.
+    ///
+    /// Name resolution is verified from the authoritative descriptor chain,
+    /// not trusted from a rebuildable catalogue. This is an ergonomic guard;
+    /// the unforgeable capability remains the authorization boundary.
+    pub fn open_named_heap(&self, name: &str, cap: HeapCap) -> Result<Heap, Error> {
+        let heap_id = *cap.heap_id().as_bytes();
+        let entry = rebuild_heap_entry_from_chain(&HeapMetaLayout::new(&self.data_root), &heap_id)?
+            .ok_or_else(|| Error::ValidationMsg("capability heap is not published".into()))?;
+        if entry.name != name && !entry.aliases.iter().any(|alias| alias == name) {
+            return Err(Error::ValidationMsg(format!(
+                "heap name {name:?} does not match the supplied capability"
+            )));
+        }
+        Ok(self.open_heap(cap))
     }
 
     /// Data root (catalog / meta layout).
@@ -524,6 +542,16 @@ impl HeapCollection {
     fn get_raw_body(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
         validate_key(key)?;
         Ok(self.store.get_collection(self.id.as_bytes(), key.as_bytes())?)
+    }
+
+    pub(crate) fn scan_page_raw(
+        &self,
+        limit: usize,
+        after_key: Option<&[u8]>,
+    ) -> Result<residiuum_store::CollectionScanPage, Error> {
+        Ok(self
+            .store
+            .scan_collection_page(self.id.as_bytes(), limit, after_key)?)
     }
 
     /// Delete `key` (SubjectV2, durable).

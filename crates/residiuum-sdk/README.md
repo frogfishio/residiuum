@@ -26,7 +26,7 @@ Freeze label: `SDK_API_VERSION` = `1.0`.
 
 ```toml
 [dependencies]
-residiuum-sdk = "0.2.3"   # MPL-2.0: bounded embedded client + Heap collection SDK
+residiuum-sdk = "0.2.4"   # MPL-2.0: bounded embedded client + Heap collection SDK
 ```
 
 Optional in-process multi-node cluster (pulls AGPL `residiuum-cluster`):
@@ -57,7 +57,7 @@ client owns the bounded blocking workers and admission queue.
 ```rust,no_run
 use residiuum_sdk::driver::{
     Client, Collection, EmbeddedOptions, OperationContext, OperationId,
-    ReplaceOptions,
+    ReplaceOptions, ScanOptions,
 };
 use serde_json::Value;
 
@@ -70,6 +70,7 @@ use serde_json::Value;
 # let capability = todo!("load Gremlin's validated Heap capability");
 let client = Client::open_embedded(
     EmbeddedOptions::new(database_path, capability)
+        .heap_name("gremlin")
         .workers(4)
         .queue_capacity(1024),
 ).await?;
@@ -95,11 +96,43 @@ client.close().await?;
 This slice provides exact operation replay, version-conditional replacement,
 hard queue bounds, active queued deadlines, and an honest
 `CommitOutcomeUnknown` result when a mutation deadline crosses after dispatch.
+`HeapCap` is re-exported from `residiuum_sdk::driver`; applications do not need
+to name the lower-level heap crate merely to open the driver. A new Heap still
+requires an authority ceremony—the SDK will not mint authority from a name.
+
+Bounded record traversal uses typed pages rather than an unbounded vector:
+
+```rust,no_run
+# use residiuum_sdk::driver::{Collection, ScanOptions};
+# use serde_json::Value;
+# async fn scan(conversations: Collection<Value>) -> Result<(), residiuum_sdk::driver::Error> {
+let mut continuation = None;
+loop {
+    let page = conversations.scan_page(ScanOptions {
+        page_size: 256,
+        continuation,
+        ..ScanOptions::default()
+    }).await?;
+    if !page.complete {
+        // Inspect page.incomplete; do not infer absence from page.rows.
+    }
+    continuation = page.continuation;
+    if continuation.is_none() {
+        break;
+    }
+}
+# Ok(())
+# }
+```
+
+Heap-local multi-record Atomics are not implemented in this release. Keep hard
+invariants in one version-CAS aggregate record and treat additional keys as
+idempotently rebuildable projections.
 
 ### Legacy flat embedded API
 
 The following older flat surface requires
-`residiuum-sdk = { version = "0.2.3", features = ["legacy-flat-sdk"] }`.
+`residiuum-sdk = { version = "0.2.4", features = ["legacy-flat-sdk"] }`.
 
 ```rust
 use residiuum_sdk::{json, Residiuum, Filter};

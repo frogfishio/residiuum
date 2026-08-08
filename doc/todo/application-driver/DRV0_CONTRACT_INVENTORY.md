@@ -41,6 +41,8 @@ the authoritative dialogue commit.
 - overload, queued cancellation, pre-dispatch deadline, and shared-close behavior;
 - collection create/open/list plus get, put, create-if-absent,
   version-conditional replace, and version/presence-conditional delete;
+- SDK-reexported `HeapCap`, authoritative named-Heap/capability matching, and
+  bounded typed collection scan pages with collection-bound continuations;
 - persistent `OperationId` deduplication, canonical request hashing, exact
   receipt replay, and typed conflicting-ID refusal;
 - structured client errors, retry dispositions, receipts, scheduler inspection,
@@ -51,7 +53,10 @@ the authoritative dialogue commit.
 ## Deliberate non-claims
 
 - No remote pool, reconnect, or non-blocking transport exists yet.
-- No streamed RQL/query cursor is claimed.
+- Bounded ordered collection scan pages are implemented. No streamed RQL or
+  predicate query cursor is claimed.
+- `Capabilities::atomics` is false. No multi-record transaction or Atomic
+  behavior is implemented; applications must not infer it from key-level CAS.
 - Queued deadlines actively wake through one bounded scheduler timer. An
   already-running synchronous kernel call continues to completion; a mutation
   crossing its deadline reports `CommitOutcomeUnknown` and preserves its
@@ -83,5 +88,6 @@ not replace the separate P0 Gremlin session-lifecycle correction.
 - Freeze sync migration naming and module placement.
 - Implement the bounded remote pool and negotiated wire features.
 - Add streamed RQL using the canonical QVM path.
+- Implement Heap-local Atomics before exposing any transaction-shaped API.
 - Add dispatched cancellation, outcome lookup, and crash-window closure.
 - Complete bulk/history/raw/prepared-query surfaces and embedded/remote parity.

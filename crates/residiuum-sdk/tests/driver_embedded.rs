@@ -7,7 +7,7 @@ use residiuum_heap::{
 };
 use residiuum_sdk::driver::{
     Client, Collection, CreateCollectionOptions, DeleteOptions, EmbeddedOptions, ErrorCode,
-    OperationContext, OperationId, PutOptions, ReplaceOptions,
+    OperationContext, OperationId, PutOptions, ReplaceOptions, ScanOptions, MAX_SCAN_PAGE_SIZE,
 };
 use residiuum_sdk::ResidiuumDeployment;
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
@@ -125,6 +125,7 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
     let (directory, capability) = prepared_deployment();
     let client = block_on(Client::open_embedded(
         EmbeddedOptions::new(directory.path(), capability)
+            .heap_name("driver-test")
             .workers(2)
             .queue_capacity(8),
     ))
@@ -247,6 +248,98 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
     assert!(clone.inspect().closed);
     let closed = block_on(collection.get("stable")).unwrap_err();
     assert_eq!(closed.code, ErrorCode::Closed);
+}
+
+#[test]
+fn embedded_named_heap_and_bounded_scan_pages_are_honest() {
+    let (directory, capability) = prepared_deployment();
+    let client = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path(), capability)
+            .heap_name("driver-test")
+            .workers(2)
+            .queue_capacity(16),
+    ))
+    .unwrap();
+    assert!(client.capabilities().bounded_scan_pages);
+    assert!(!client.capabilities().atomics);
+
+    let records: Collection<Value> = block_on(client.create_collection(
+        "records",
+        CreateCollectionOptions {
+            context: OperationContext {
+                operation_id: Some(operation(30)),
+                ..OperationContext::default()
+            },
+        },
+    ))
+    .unwrap();
+    let other: Collection<Value> = block_on(client.create_collection(
+        "other",
+        CreateCollectionOptions {
+            context: OperationContext {
+                operation_id: Some(operation(31)),
+                ..OperationContext::default()
+            },
+        },
+    ))
+    .unwrap();
+    for index in 0..5u8 {
+        block_on(records.put(format!("k-{index}"), &json!({ "n": index }))).unwrap();
+    }
+
+    let first = block_on(records.scan_page(ScanOptions {
+        page_size: 2,
+        ..ScanOptions::default()
+    }))
+    .unwrap();
+    assert!(first.complete);
+    assert!(first.incomplete.is_empty());
+    assert_eq!(first.rows.len(), 2);
+    assert_eq!(first.rows[0].key, "k-0");
+    let first_cursor = first.continuation.clone().expect("more records");
+
+    let mismatch = block_on(other.scan_page(ScanOptions {
+        page_size: 2,
+        continuation: Some(first_cursor.clone()),
+        ..ScanOptions::default()
+    }))
+    .unwrap_err();
+    assert_eq!(mismatch.code, ErrorCode::PermissionDenied);
+
+    let second = block_on(records.scan_page(ScanOptions {
+        page_size: 2,
+        continuation: Some(first_cursor),
+        ..ScanOptions::default()
+    }))
+    .unwrap();
+    assert_eq!(second.rows[0].key, "k-2");
+    let third = block_on(records.scan_page(ScanOptions {
+        page_size: 2,
+        continuation: second.continuation,
+        ..ScanOptions::default()
+    }))
+    .unwrap();
+    assert_eq!(third.rows.len(), 1);
+    assert_eq!(third.rows[0].key, "k-4");
+    assert!(third.continuation.is_none());
+
+    let oversized = block_on(records.scan_page(ScanOptions {
+        page_size: MAX_SCAN_PAGE_SIZE + 1,
+        ..ScanOptions::default()
+    }))
+    .unwrap_err();
+    assert_eq!(oversized.code, ErrorCode::Validation);
+}
+
+#[test]
+fn embedded_named_heap_refuses_a_capability_name_mismatch() {
+    let (directory, capability) = prepared_deployment();
+    let error = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path(), capability).heap_name("not-driver-test"),
+    ))
+    .err()
+    .expect("heap name mismatch must be refused");
+    assert_eq!(error.code, ErrorCode::Validation);
 }
 
 #[test]

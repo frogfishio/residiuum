@@ -2,6 +2,8 @@
 
 Status: **qualified integration candidate; use the bounded embedded slice only**
 
+Minimum SDK package for named-Heap validation and bounded scans: **0.2.4**.
+
 Authority: [Async Driver Spine Specification](./ASYNC_DRIVER_SPINE_SPEC.md)
 
 ## What Gremlin should adopt now
@@ -18,14 +20,15 @@ queue and dedicated synchronous-kernel workers.
 
 ```rust
 use residiuum_sdk::driver::{
-    Client, Collection, EmbeddedOptions, ErrorCode, OperationContext,
-    OperationId, PutOptions,
+    Client, Collection, EmbeddedOptions, ErrorCode, HeapCap, OperationContext,
+    OperationId, PutOptions, ScanOptions,
 };
 use serde_json::Value;
 
 // `capability` is the existing validated Heap capability owned by Gremlin.
 let client = Client::open_embedded(
     EmbeddedOptions::new(database_path, capability)
+        .heap_name("gremlin")
         .workers(4)
         .queue_capacity(1024),
 ).await?;
@@ -81,7 +84,7 @@ messages.
 - cloneable Heap-bound `Client` and `Collection<T>` handles;
 - bounded embedded workers and admission queue;
 - collection create/open/list;
-- typed JSON get;
+- typed JSON get and bounded ordered scan pages;
 - durable idempotent put and create-if-absent;
 - version-conditional replace and delete;
 - stable structured errors, retry dispositions, and receipts;
@@ -93,10 +96,22 @@ messages.
 
 ## Explicit residuals
 
-This handoff does not claim remote pooling, streamed RQL, cancellation of a
-running synchronous kernel call, automatic retry, a separate status-only
-outcome API, or bulk calls. Those remain driver work and must not be recreated
-in Gremlin.
+This handoff does not claim remote pooling, streamed RQL/predicate queries,
+cancellation of a running synchronous kernel call, automatic retry, a separate
+status-only outcome API, bulk calls, or multi-record Atomics. Those remain
+driver work and must not be recreated in Gremlin.
+
+`HeapCap` is re-exported from `residiuum_sdk::driver`, and `.heap_name(...)`
+verifies the supplied capability against the authoritative published Heap
+descriptor. The SDK still does not create authority or mint a Heap capability:
+new-Heap creation remains an explicit authority ceremony, not a name-only
+database open that bypasses isolation.
+
+For bounded migration or projection repair, use `Collection::scan_page` with
+`ScanOptions`. Page size is hard-limited to 1,000 complete rows. Continue only
+with the opaque continuation returned by the preceding page. Check `complete`
+and `incomplete`; an empty `rows` vector alone is not proof that no live keys
+exist when the page reports holes.
 
 ## Canonical Gremlin persistence profile
 
@@ -115,6 +130,24 @@ next profile is one authoritative `TurnCommit` record per ordinal with derived
 current-state and turn-ID indexes. Do not split one command into several writes
 and call it atomic: LocalHeap multi-key Atomics are a separate unimplemented
 product capability.
+
+### Multi-record recovery protocol
+
+Until Heap-local Atomics exist, every hard invariant must linearize in one
+authoritative record. Gremlin should use the conversation document as that
+record and commit it with version CAS plus the command `OperationId`.
+
+Anything requiring another key—session directory entries, turn-ID lookup,
+search material, summaries, and caches—is a derived projection. Projection
+writers must be deterministic and idempotent from `(aggregate_id, version)`,
+may lag the authoritative record, and must be rebuildable by bounded scans.
+Write projection progress only after the derived write succeeds. On restart,
+resume after the recorded progress and safely repeat the last projection.
+
+Reads that enforce a hard invariant must consult the authoritative aggregate,
+not treat a missing or stale projection as proof of absence. If Gremlin finds
+an invariant that genuinely requires two authoritative keys to change as one
+decision, stop and retain the current schema until Residiuum Atomics ship.
 
 Gremlin's runtime-agent/session-domain consistency remains an application
 invariant. The driver protects database access and mutation identity; it cannot

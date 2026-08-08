@@ -5,12 +5,13 @@
 //! request identity, cancellation-before-dispatch, deadlines, telemetry, and
 //! orderly shared shutdown. It intentionally contains no second query engine.
 
-use crate::heap::{Heap, HeapCollection, ResidiuumDeployment};
+use crate::heap::{Heap, HeapCollection, ResidiuumDeployment, SignedCursor};
 use crate::{
     DeleteReceipt as SdkDeleteReceipt, Error as SdkError, WriteReceipt as SdkWriteReceipt,
 };
 pub use residiuum_client::{OperationId, RequestId, RetryDisposition, TerminalOutcome};
-use residiuum_heap::{CollectionId, HeapCap, HeapId};
+pub use residiuum_heap::HeapCap;
+use residiuum_heap::{CollectionId, HeapId};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt;
 use std::future::Future;
@@ -30,6 +31,8 @@ pub struct EmbeddedOptions {
     pub path: PathBuf,
     /// Validated capability binding the client to exactly one Heap.
     pub capability: HeapCap,
+    /// Optional canonical name or live alias expected for the capability Heap.
+    pub expected_heap_name: Option<String>,
     /// Dedicated synchronous-kernel workers.
     pub workers: usize,
     /// Hard bound on queued operations, in addition to running workers.
@@ -47,9 +50,16 @@ impl EmbeddedOptions {
         Self {
             path: path.into(),
             capability,
+            expected_heap_name: None,
             workers,
             queue_capacity: 1024,
         }
+    }
+
+    /// Require the supplied capability to resolve to this published Heap name.
+    pub fn heap_name(mut self, name: impl Into<String>) -> Self {
+        self.expected_heap_name = Some(name.into());
+        self
     }
 
     /// Override the worker bound. Zero is rejected by [`Client::open_embedded`].
@@ -137,6 +147,67 @@ pub struct CreateCollectionOptions {
     pub context: OperationContext,
 }
 
+/// Maximum complete rows admitted in one embedded scan page.
+pub const MAX_SCAN_PAGE_SIZE: usize = 1_000;
+
+/// Bounded collection scan options.
+#[derive(Debug, Clone)]
+pub struct ScanOptions {
+    /// Complete-row target for this page (`1..=MAX_SCAN_PAGE_SIZE`).
+    pub page_size: usize,
+    /// Opaque continuation returned by the preceding page.
+    pub continuation: Option<ScanContinuation>,
+    /// Request identity and deadline. `operation_id` must be absent for reads.
+    pub context: OperationContext,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self {
+            page_size: 64,
+            continuation: None,
+            context: OperationContext::default(),
+        }
+    }
+}
+
+/// Capability- and collection-bound scan continuation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanContinuation(SignedCursor);
+
+/// One fully decoded row in a scan page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanRow<T> {
+    /// Application key.
+    pub key: String,
+    /// Decoded typed value.
+    pub value: T,
+}
+
+/// A live key whose body could not be resolved completely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanHole {
+    /// Application key, lossily decoded only when damaged key bytes are not UTF-8.
+    pub key: String,
+    /// Stable storage hole classification.
+    pub reason: &'static str,
+}
+
+/// One bounded, coverage-honest scan page.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScanPage<T> {
+    /// Fully decoded rows, ordered by application key.
+    pub rows: Vec<ScanRow<T>>,
+    /// Examined live keys whose payload could not be completed.
+    pub incomplete: Vec<ScanHole>,
+    /// Number of live keys examined, including incomplete keys.
+    pub examined: usize,
+    /// True only when this page contains no incomplete key.
+    pub complete: bool,
+    /// Opaque continuation when more live keys remain.
+    pub continuation: Option<ScanContinuation>,
+}
+
 /// Capabilities of this driver handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {
@@ -146,6 +217,10 @@ pub struct Capabilities {
     pub mutation_identity: bool,
     /// Query streaming is available.
     pub query_streaming: bool,
+    /// Bounded collection scan pages are available.
+    pub bounded_scan_pages: bool,
+    /// Heap-local multi-record Atomics are implemented.
+    pub atomics: bool,
     /// Remote transport pooling is available.
     pub remote_pooling: bool,
 }
@@ -422,7 +497,10 @@ impl Client {
         let opened = run_open(move || {
             let deployment = ResidiuumDeployment::open(&options.path)?;
             let report = deployment.open_report()?;
-            let heap = deployment.open_heap(options.capability);
+            let heap = match options.expected_heap_name {
+                Some(name) => deployment.open_named_heap(&name, options.capability)?,
+                None => deployment.open_heap(options.capability),
+            };
             Ok((heap, report))
         })
         .await?;
@@ -434,6 +512,8 @@ impl Client {
                 embedded: true,
                 mutation_identity: true,
                 query_streaming: false,
+                bounded_scan_pages: true,
+                atomics: false,
                 remote_pooling: false,
             },
         })
@@ -715,6 +795,80 @@ where
                     None => Ok(None),
                     Some(value) => Ok(Some(serde_json::from_value(value)?)),
                 }
+            })
+            .await
+    }
+
+    /// Read one bounded page in canonical key order.
+    ///
+    /// The continuation is authenticated to this exact capability and
+    /// collection. Incomplete payloads are returned as explicit holes and do
+    /// not silently disappear from the page.
+    pub async fn scan_page(&self, options: ScanOptions) -> Result<ScanPage<T>, Error> {
+        if !(1..=MAX_SCAN_PAGE_SIZE).contains(&options.page_size) {
+            return Err(Error::local(
+                ErrorCode::Validation,
+                ErrorClass::Request,
+                format!(
+                    "scan page_size must be between 1 and {MAX_SCAN_PAGE_SIZE}"
+                ),
+            ));
+        }
+        if options.context.operation_id.is_some() {
+            return Err(Error::local(
+                ErrorCode::Validation,
+                ErrorClass::Request,
+                "scan reads do not accept operation_id",
+            ));
+        }
+        let request_id = resolve_request_id(options.context.request_id)?;
+        let deadline = options.context.deadline;
+        let after_key = match options.continuation {
+            Some(continuation) => {
+                self.inner
+                    .verify_cursor(&continuation.0)
+                    .map_err(|source| Error::from_sdk(source, request_id, None))?;
+                Some(continuation.0.position().to_vec())
+            }
+            None => None,
+        };
+        let page_size = options.page_size;
+        let collection = self.inner.clone();
+        self.client
+            .scheduler
+            .dispatch(request_id, None, deadline, move || {
+                let raw = collection.scan_page_raw(page_size, after_key.as_deref())?;
+                let mut rows = Vec::with_capacity(raw.entries.len());
+                for (key, body) in raw.entries {
+                    let key = String::from_utf8(key).map_err(|_| {
+                        SdkError::Internal("scan returned a non-UTF-8 application key".into())
+                    })?;
+                    let json = crate::value::decode_json(&body)?;
+                    let value = serde_json::from_value(json)?;
+                    rows.push(ScanRow { key, value });
+                }
+                let incomplete = raw
+                    .incomplete
+                    .into_iter()
+                    .map(|hole| ScanHole {
+                        key: String::from_utf8_lossy(&hole.key).into_owned(),
+                        reason: hole.reason.as_str(),
+                    })
+                    .collect();
+                let continuation = if raw.has_more {
+                    raw.last_key
+                        .as_deref()
+                        .map(|key| ScanContinuation(collection.sign_cursor(key)))
+                } else {
+                    None
+                };
+                Ok(ScanPage {
+                    rows,
+                    incomplete,
+                    examined: raw.examined,
+                    complete: raw.complete,
+                    continuation,
+                })
             })
             .await
     }
@@ -1126,9 +1280,11 @@ impl Scheduler {
             counters.running.fetch_add(1, Ordering::AcqRel);
             let result = operation().map_err(|e| Error::from_sdk(e, request_id, operation_id));
             counters.running.fetch_sub(1, Ordering::AcqRel);
-            counters.completed.fetch_add(1, Ordering::Relaxed);
             task_stage.store(2, Ordering::Release);
             deadlines.cancel(task_registration.load(Ordering::Acquire));
+            // Inspection must not observe `completed` while scheduler-owned
+            // deadline state for the request is still retained.
+            counters.completed.fetch_add(1, Ordering::Release);
             responder.complete(result);
         });
 
@@ -1181,61 +1337,69 @@ impl Scheduler {
             );
             return future;
         }
+        // Register before enqueue. Otherwise a fast worker can complete, load
+        // registration id 0, and race with a late callback registration.
+        let registration = deadline.map(|at| {
+            let callback_shared = Arc::clone(&future.shared);
+            let callback_cancelled = Arc::clone(&future.cancelled);
+            let callback_stage = Arc::clone(&stage);
+            let registration = self.deadlines.register(
+                at,
+                Box::new(move || {
+                    let observed = callback_stage.load(Ordering::Acquire);
+                    if observed >= 2 {
+                        return;
+                    }
+                    if observed == 0 {
+                        callback_cancelled.store(true, Ordering::Release);
+                    }
+                    let error = if observed == 0 || operation_id.is_none() {
+                        Error::for_request(
+                            ErrorCode::DeadlineExceeded,
+                            ErrorClass::Cancellation,
+                            if observed == 0 {
+                                "deadline exceeded while queued"
+                            } else {
+                                "deadline exceeded after read dispatch"
+                            },
+                            request_id,
+                            operation_id,
+                            TerminalOutcome::DeadlineExceeded,
+                            RetryDisposition::Never,
+                        )
+                    } else {
+                        Error::for_request(
+                            ErrorCode::CommitOutcomeUnknown,
+                            ErrorClass::Cancellation,
+                            "mutation deadline exceeded after dispatch; resolve by operation id",
+                            request_id,
+                            operation_id,
+                            TerminalOutcome::CommitOutcomeUnknown,
+                            RetryDisposition::OutcomeLookupRequired,
+                        )
+                    };
+                    complete_response_shared(&callback_shared, Err(error));
+                }),
+            );
+            deadline_registration.store(registration, Ordering::Release);
+            registration
+        });
         match guard
             .as_ref()
             .expect("open sender")
             .try_send(Message::Run(task))
         {
             Ok(()) => {
-                if let Some(at) = deadline {
-                    let callback_shared = Arc::clone(&future.shared);
-                    let callback_cancelled = Arc::clone(&future.cancelled);
-                    let callback_stage = Arc::clone(&stage);
-                    let registration = self.deadlines.register(
-                        at,
-                        Box::new(move || {
-                            let observed = callback_stage.load(Ordering::Acquire);
-                            if observed >= 2 {
-                                return;
-                            }
-                            if observed == 0 {
-                                callback_cancelled.store(true, Ordering::Release);
-                            }
-                            let error = if observed == 0 || operation_id.is_none() {
-                                Error::for_request(
-                                    ErrorCode::DeadlineExceeded,
-                                    ErrorClass::Cancellation,
-                                    if observed == 0 {
-                                        "deadline exceeded while queued"
-                                    } else {
-                                        "deadline exceeded after read dispatch"
-                                    },
-                                    request_id,
-                                    operation_id,
-                                    TerminalOutcome::DeadlineExceeded,
-                                    RetryDisposition::Never,
-                                )
-                            } else {
-                                Error::for_request(
-                                    ErrorCode::CommitOutcomeUnknown,
-                                    ErrorClass::Cancellation,
-                                    "mutation deadline exceeded after dispatch; resolve by operation id",
-                                    request_id,
-                                    operation_id,
-                                    TerminalOutcome::CommitOutcomeUnknown,
-                                    RetryDisposition::OutcomeLookupRequired,
-                                )
-                            };
-                            complete_response_shared(&callback_shared, Err(error));
-                        }),
-                    );
-                    deadline_registration.store(registration, Ordering::Release);
+                if let Some(registration) = registration {
                     if stage.load(Ordering::Acquire) >= 2 {
                         self.deadlines.cancel(registration);
                     }
                 }
             }
             Err(mpsc::TrySendError::Full(_)) => {
+                if let Some(registration) = registration {
+                    self.deadlines.cancel(registration);
+                }
                 self.counters.queued.fetch_sub(1, Ordering::AcqRel);
                 self.counters.refused.fetch_add(1, Ordering::Relaxed);
                 responder_error(
@@ -1252,6 +1416,9 @@ impl Scheduler {
                 );
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
+                if let Some(registration) = registration {
+                    self.deadlines.cancel(registration);
+                }
                 self.counters.queued.fetch_sub(1, Ordering::AcqRel);
                 responder_error(
                     &future,
