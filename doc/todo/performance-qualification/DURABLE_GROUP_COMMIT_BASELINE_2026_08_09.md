@@ -955,3 +955,51 @@ logical validation in 44.24 s. Its report is archived as
 `81b4c47-stable-prefix-4g.report.json`. The next throughput target is therefore
 the 515 real cohort acknowledgement barriers and the work surrounding them,
 not rotation/start re-syncs and not a larger entry ceiling.
+
+### Gathered physical cohorts (`d13f741`)
+
+The failed `bea6a9d` experiment established that merely raising the logical
+entry ceiling consumed the entire 2,048-request client window, destroyed
+follower cook/I/O overlap, and usually failed to fill 16 MiB before the 250 µs
+collection deadline. A second local spike confirmed that holding a small
+remainder for the next refill halves barriers but creates an acknowledgement-
+gated refill bubble. Neither is the product design.
+
+Commit `d13f741` instead divides the existing window into two bounded logical
+halves (at most 1,024 entries / 8 MiB each). When both halves are already
+present and their union fits 2,048 entries / 16 MiB, the coordinator treats the
+union as one physical cohort: all frames are cooked and installed, one gathered
+authoritative write crosses one `sync_data` boundary, and only then are all
+individual outcomes returned. No acknowledgement is issued between the halves.
+Oversized singleton and edge shapes retain the previously qualified depth-two
+path rather than exceeding the gathered bound. Admission remains 32 MiB.
+
+The clean matched 4 GiB Bonzo run sustained 413.41, 414.39, 414.23 and 416.55
+MiB/s, for **414.46 MiB/s overall and 53,051 durable operations/s**. This is
+14.43% above the accepted `81b4c47` repeat (362.21 MiB/s) and 23.17% above the
+exact-I/O baseline (336.50 MiB/s). The last interval exceeded the first, so
+there is no terminal throughput collapse in this run.
+
+The accounting closes exactly:
+
+- 524,288 operations formed 261 physical cohorts;
+- those cohorts submitted 261 authoritative writes and 261 authoritative
+  barriers (approximately 65/GiB, down from approximately 129/GiB);
+- maximum observed cohort was 2,028 entries / 16,763,448 bytes, below the
+  2,048-entry / 16 MiB bounds;
+- all 524,288 operations used concurrent frame cooking;
+- all 63 rotations published 63 Shadows, with no protection backlog;
+- zero operation failures, admission waits, scheduler refusals or swaps.
+
+Batching did not trade throughput for worse client latency in this saturated
+shape. Compared with `81b4c47`, p50 fell from 36.48 to 33.06 ms, p95 from 69.87
+to 57.74 ms, and p99 from 74.77 to 65.63 ms. Close took 0.258 s, clean reopen
+0.436 s, and the exhaustive logical validation 44.25 s. Every record and all
+4,294,967,296 payload bytes validated after restart.
+
+The report is archived as `d13f741-gathered-cohort-4g.report.json` under the
+2026-08-10 sustained-bisection archive, and Bonzo was restored to 88 GiB free.
+Gathered physical cohorts are accepted as the product path. This still does not
+establish 500 MiB/s; the remaining delta is approximately 85.5 MiB/s, with one
+real stable barrier per approximately 16 MiB cohort plus frame/index/outcome
+publication and rotation costs.
