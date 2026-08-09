@@ -160,6 +160,17 @@ fn crash_at(name: &'static str) {
     assert!(!before.is_empty());
     put_n(&mut store, 2, "live");
     let before_lens = sealed_file_lens(&root);
+    // A leased allocator normally performs no metadata transaction for the
+    // next segment. Reopen skips the unused lease tail, deliberately placing
+    // the next allocation on a new durable lease boundary for reservation
+    // failpoint coverage.
+    if matches!(
+        name,
+        "segalloc.before_reserve_persist" | "segalloc.after_reserve_persist"
+    ) {
+        drop(store);
+        store = Store::open(&root).unwrap();
+    }
     arm_panic(name);
     let crashed = catch_unwind(AssertUnwindSafe(|| {
         store.seal_active().unwrap();

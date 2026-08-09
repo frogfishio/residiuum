@@ -6,9 +6,10 @@
 //!
 //! Protocol:
 //! 1. Reconstruct `reserved_thru` = max(durable file, every media-derived seq).
-//! 2. **Reserve** `next = reserved_thru + 1` by atomically persisting it **before**
-//!    creating any active/pending bytes that carry that id.
-//! 3. Never mint `seq ≤ reserved_thru` after a successful reservation.
+//! 2. **Lease** a bounded range above `reserved_thru` by atomically persisting
+//!    its inclusive end **before** creating any active/pending bytes in it.
+//! 3. Issue ids from that durable lease in memory. A crash may leave gaps, but
+//!    never permits an id to be reused.
 //! 4. If durable state is corrupt **and** media ids cannot be reconstructed
 //!    unambiguously, **refuse** open without mutating existing media.
 
@@ -25,6 +26,13 @@ use std::path::{Path, PathBuf};
 pub const SEGMENT_SEQ_FILE: &str = "segment_seq.v1";
 
 const MAGIC: &[u8; 8] = b"SEGSEQ01";
+
+/// Number of segment ids durably leased at once.
+///
+/// At the default 64 MiB seal threshold this covers 4 GiB of new authoritative
+/// media while replacing 64 tiny atomic metadata transactions with one. Gaps
+/// after a crash are intentional; ids are identities, not a dense record count.
+pub const SEGMENT_ID_LEASE: u64 = 64;
 
 /// `store-info/segment_seq.v1`.
 pub fn segment_seq_path(paths: &StorePaths) -> PathBuf {
@@ -292,6 +300,7 @@ pub fn note_in_memory_high_water(reserved_thru: &mut u64, observed_seq: u64) {
 
 /// Reserve and return the next segment id. Persists the reservation **before**
 /// the caller creates media for this id.
+#[cfg(test)]
 pub fn reserve_next_segment_id(
     paths: &StorePaths,
     store_id: [u8; 16],
@@ -302,6 +311,30 @@ pub fn reserve_next_segment_id(
     *reserved_thru = next;
     crate::failpoint::hit("segalloc.after_reserve_before_media")?;
     Ok(mint_sortable_segment_id(next, &store_id))
+}
+
+/// Issue the next id from an already-durable lease, extending the lease first
+/// when exhausted.
+///
+/// `issued_thru` is the last id handed to media in this process;
+/// `reserved_thru` is the inclusive end durably recorded in `segment_seq.v1`.
+pub fn next_segment_id_from_lease(
+    paths: &StorePaths,
+    store_id: [u8; 16],
+    issued_thru: &mut u64,
+    reserved_thru: &mut u64,
+) -> Result<[u8; 16], StoreError> {
+    if *issued_thru >= *reserved_thru {
+        let lease_end = issued_thru.saturating_add(SEGMENT_ID_LEASE);
+        if lease_end == *issued_thru {
+            return Err(StoreError::CorruptMeta("segment id sequence exhausted"));
+        }
+        persist_reserved_thru(paths, store_id, lease_end)?;
+        *reserved_thru = lease_end;
+    }
+    *issued_thru = issued_thru.saturating_add(1);
+    crate::failpoint::hit("segalloc.after_reserve_before_media")?;
+    Ok(mint_sortable_segment_id(*issued_thru, &store_id))
 }
 
 #[cfg(test)]
@@ -334,6 +367,57 @@ mod tests {
         assert_eq!(thru, 2);
         let loaded = load_reserved_thru(&paths, store_id).unwrap().unwrap();
         assert_eq!(loaded, 2);
+    }
+
+    #[test]
+    fn lease_persists_range_once_and_issues_unique_ids() {
+        let dir = tempdir().unwrap();
+        let paths = StorePaths::new(dir.path());
+        fs::create_dir_all(paths.store_info()).unwrap();
+        let store_id = [8u8; 16];
+        let mut issued = 0u64;
+        let mut reserved = 0u64;
+
+        let first =
+            next_segment_id_from_lease(&paths, store_id, &mut issued, &mut reserved).unwrap();
+        assert_eq!(segment_seq_from_id(&first), 1);
+        assert_eq!(reserved, SEGMENT_ID_LEASE);
+        assert_eq!(
+            load_reserved_thru(&paths, store_id).unwrap(),
+            Some(SEGMENT_ID_LEASE)
+        );
+
+        for expect in 2..=SEGMENT_ID_LEASE {
+            let id =
+                next_segment_id_from_lease(&paths, store_id, &mut issued, &mut reserved).unwrap();
+            assert_eq!(segment_seq_from_id(&id), expect);
+        }
+        assert_eq!(
+            load_reserved_thru(&paths, store_id).unwrap(),
+            Some(SEGMENT_ID_LEASE)
+        );
+
+        let next =
+            next_segment_id_from_lease(&paths, store_id, &mut issued, &mut reserved).unwrap();
+        assert_eq!(segment_seq_from_id(&next), SEGMENT_ID_LEASE + 1);
+        assert_eq!(reserved, SEGMENT_ID_LEASE * 2);
+    }
+
+    #[test]
+    fn lease_skips_abandoned_tail_after_reopen() {
+        let dir = tempdir().unwrap();
+        let paths = StorePaths::new(dir.path());
+        fs::create_dir_all(paths.store_info()).unwrap();
+        let store_id = [9u8; 16];
+        persist_reserved_thru(&paths, store_id, SEGMENT_ID_LEASE).unwrap();
+
+        // Reopen initializes both counters from durable reserved_thru. The
+        // unused tail of the prior process's lease is never issued again.
+        let mut issued = load_reserved_thru(&paths, store_id).unwrap().unwrap();
+        let mut reserved = issued;
+        let id = next_segment_id_from_lease(&paths, store_id, &mut issued, &mut reserved).unwrap();
+        assert_eq!(segment_seq_from_id(&id), SEGMENT_ID_LEASE + 1);
+        assert_eq!(reserved, SEGMENT_ID_LEASE * 2);
     }
 
     #[test]

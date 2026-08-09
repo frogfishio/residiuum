@@ -658,6 +658,8 @@ pub struct Store {
     writer_shards: usize,
     /// Counter used to mint sortable segment ids (recovered from on-disk max).
     segment_seq: u64,
+    /// Inclusive end of the segment-id range already reserved durably.
+    segment_seq_reserved_thru: u64,
     /// Seal active segment when it reaches this many bytes.
     seal_threshold: u64,
     /// Bodies larger than this are written as chunked payloads (Stage 6).
@@ -991,6 +993,7 @@ impl Store {
             actives: (0..writer_shards).map(|_| None).collect(),
             writer_shards,
             segment_seq: 0,
+            segment_seq_reserved_thru: 0,
             seal_threshold: DEFAULT_SEAL_THRESHOLD,
             chunk_threshold: DEFAULT_CHUNK_THRESHOLD,
             chunk_size: DEFAULT_CHUNK_SIZE,
@@ -1125,6 +1128,7 @@ impl Store {
             actives: (0..writer_shards).map(|_| None).collect(),
             writer_shards,
             segment_seq: 0,
+            segment_seq_reserved_thru: 0,
             seal_threshold: DEFAULT_SEAL_THRESHOLD,
             chunk_threshold: DEFAULT_CHUNK_THRESHOLD,
             chunk_size: DEFAULT_CHUNK_SIZE,
@@ -1247,6 +1251,9 @@ impl Store {
                 store.limits,
             )?
         };
+        // Reopen deliberately skips the unused tail of a prior lease. The
+        // durable high-water is authoritative and gaps are harmless.
+        store.segment_seq_reserved_thru = store.segment_seq;
         open_metrics.allocator_ns = elapsed_ns(phase);
         let phase = Instant::now();
         let (write_dedup, write_dedup_journal_complete) =
@@ -1370,6 +1377,7 @@ impl Store {
             actives: (0..writer_shards).map(|_| None).collect(),
             writer_shards,
             segment_seq: 0,
+            segment_seq_reserved_thru: 0,
             seal_threshold: DEFAULT_SEAL_THRESHOLD,
             chunk_threshold: DEFAULT_CHUNK_THRESHOLD,
             chunk_size: DEFAULT_CHUNK_SIZE,
@@ -7722,12 +7730,17 @@ impl Store {
                 true,
             );
         }
+        // Async rotation is the product seal path; keep the same crash-boundary
+        // proof points as synchronous seal publication.
+        crate::failpoint::hit("store.seal.before_dest_write")?;
         let t_rename = std::time::Instant::now();
         fs::rename(&active_path, &pending_path)?;
         if require_fsync {
             sync_dir(&self.paths.active_shard_dir(shard, n))?;
             let _ = sync_dir(&pending_dir);
         }
+        crate::failpoint::hit("store.seal.after_dest_sync")?;
+        crate::failpoint::hit("store.seal.after_active_remove")?;
         self.rotation_stage_totals.rename_pending_ns = self
             .rotation_stage_totals
             .rename_pending_ns
@@ -10046,11 +10059,14 @@ impl Store {
     }
 
     fn next_segment_id(&mut self) -> Result<[u8; 16], StoreError> {
-        // Durable reservation before media: never remint a published/reserved seq.
-        crate::segment_allocator::reserve_next_segment_id(
+        // Durable range reservation before media: never remint a
+        // published/reserved seq, while keeping atomic metadata I/O out of
+        // almost every segment rotation.
+        crate::segment_allocator::next_segment_id_from_lease(
             &self.paths,
             self.store_id,
             &mut self.segment_seq,
+            &mut self.segment_seq_reserved_thru,
         )
     }
 
