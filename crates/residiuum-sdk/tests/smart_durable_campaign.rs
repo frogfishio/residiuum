@@ -118,6 +118,23 @@ fn available_bytes(path: &Path) -> u64 {
         .saturating_mul(1024)
 }
 
+fn resident_bytes() -> Option<u64> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p"])
+        .arg(std::process::id().to_string())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|kib| kib.saturating_mul(1024))
+}
+
 fn payload_pool(payload_bytes: usize) -> Arc<Vec<Arc<Value>>> {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_";
     let mut state = 0x9e37_79b9_7f4a_7c15u64;
@@ -182,6 +199,7 @@ fn sustained_sample(
     previous_payload_bytes: u64,
     previous_elapsed_ns: u64,
     free_bytes: u64,
+    resident_bytes: Option<u64>,
     previous: &ClientInspection,
     current: &ClientInspection,
 ) -> Value {
@@ -206,6 +224,7 @@ fn sustained_sample(
                 / (1024.0 * 1024.0)
         } else { 0.0 },
         "free_bytes": free_bytes,
+        "resident_bytes": resident_bytes,
         "scheduler": {
             "queued": current.queued,
             "running": current.running,
@@ -262,6 +281,10 @@ fn sustained_sample(
             let prior = prior_write_path.unwrap_or_default();
             json!({
                 "current": {
+                    "primary_index_entries": path.primary_index_entries,
+                    "durable_index_entries": path.durable_index_entries,
+                    "write_dedup_entries": path.write_dedup_entries,
+                    "derived_ops_since_checkpoint": path.derived_ops_since_checkpoint,
                     "enrichment_backlog": path.enrichment_backlog,
                     "async_lifecycle_enabled": path.async_lifecycle_enabled,
                     "shadow_dual_stream": path.shadow_dual_stream,
@@ -537,6 +560,7 @@ fn smart_client_durable_retained_media_campaign() {
                         previous_payload,
                         previous_elapsed_ns,
                         available_bytes(&root),
+                        resident_bytes(),
                         &previous,
                         &current,
                     );

@@ -203,6 +203,14 @@ pub struct RotationStageTotals {
 /// workload is running without turning inspection into a store scan.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StoreWritePathStats {
+    /// Subjects retained in the visible primary projection, including tombstones.
+    pub primary_index_entries: usize,
+    /// Subjects retained in the durable primary projection, including tombstones.
+    pub durable_index_entries: usize,
+    /// Operation identities retained for retry/outcome resolution.
+    pub write_dedup_entries: usize,
+    /// Durable operations since the last complete primary checkpoint.
+    pub derived_ops_since_checkpoint: u64,
     /// Cumulative authoritative auto-rotation stages.
     pub rotation: RotationStageTotals,
     /// Cumulative derived Hydra/Chimera enrichment stages.
@@ -7022,6 +7030,10 @@ impl Store {
     /// Redacted constant-time snapshot for sustained-write diagnostics.
     pub fn write_path_stats(&self) -> StoreWritePathStats {
         StoreWritePathStats {
+            primary_index_entries: self.index.len(),
+            durable_index_entries: self.durable_index.len(),
+            write_dedup_entries: self.write_dedup.len(),
+            derived_ops_since_checkpoint: self.derived_ops_since_checkpoint,
             rotation: self.rotation_stage_totals,
             enrichment: self.enrichment_stage_totals,
             enrichment_backlog: self.enrichment_backlog(),

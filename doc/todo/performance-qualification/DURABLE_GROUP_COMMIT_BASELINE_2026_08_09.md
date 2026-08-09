@@ -675,3 +675,32 @@ CompactShadow + enrichment 4 GiB shape with this fix. If the per-GiB curve is
 flat, the remaining work separates bounded enrichment scheduling and Shadow
 write amplification from the now-fixed retention-size cliff. A 10 GiB gate is
 not justified until that 4 GiB comparison passes.
+
+### First post-fix rerun: checkpoint defect real, sustained gate still failed
+
+Commit `2941698` repeated the ordinary CompactShadow + enrichment 4 GiB shape
+after removing fixed-count full checkpoints. It again recovered all 524,288
+records, but it did not flatten the complete sustained curve:
+
+| GiB interval | 1 | 2 | 3 | 4 | Total |
+|---|---:|---:|---:|---:|---:|
+| Payload MiB/s | 257 | 292 | 199 | 143 | 207 |
+| Cook/install/publish seconds | 1.751 | 1.369 | 1.790 | 2.674 | — |
+| Media-boundary seconds | 2.233 | 1.788 | 3.170 | 4.483 | — |
+
+This run began after three retained controls on the same device and free space
+fell from 37.1 GB to 28.0 GB. Its absolute throughput is therefore contaminated
+by a much harsher APFS/device state and cannot quantify the checkpoint removal
+against the earlier run. The phase data is nevertheless sufficient to reject
+the claim that periodic index cloning was the only sustained defect. Removing
+it is still required: the regression proves it performed repeated foreground
+O(N) snapshots and the resulting lifetime curve was quadratic.
+
+A read-only snapshot during validation found a 16 GiB machine, approximately
+1.10 GiB campaign RSS at that point, active VM compression and historical swap
+traffic. The next instrumentation adds per-GiB process RSS plus constant-time
+counts for the two B-tree primary projections, operation-dedup table and
+checkpoint lag. Before another comparison, the retained diagnostic stores must
+be archived/reclaimed so both candidates begin with equivalent free space and
+the device is not tested back-to-back under an exhausted cache/thermal state.
+The 10 GiB gate remains blocked.
