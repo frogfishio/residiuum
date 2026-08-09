@@ -837,3 +837,36 @@ authoritative barriers per GiB (128 cohort acknowledgements plus rotation/start
 boundaries), and/or remove Shadow's full-byte duplicate from the foreground
 dirty-page set while preserving honest P★ lag. Changing the 1 MiB threshold
 alone is not justified by the measured write sizes.
+
+### Cohort ceiling falsification and deferred Shadow candidate
+
+Commit `bea6a9d` raised the entry ceiling from 1,024 to 2,048 while retaining
+the 16 MiB byte ceiling and 32 MiB admission window. A clean matched 4 GiB run
+recovered all 524,288 records and occasionally formed a 2,029-entry,
+16,771,714-byte cohort. It nevertheless submitted 496 cohorts versus roughly
+512 at baseline and delivered 337.24 MiB/s versus 336.50 MiB/s: +0.22%, inside
+run noise. Product admission timing, not the old entry ceiling alone, closed
+most cohorts. The candidate is therefore reverted; it is not credited as a
+barrier optimization.
+
+The next candidate moves the complete duplicate Shadow image out of the
+foreground write window:
+
+1. Durable acknowledgement continues to require authoritative `sync_data`.
+2. At rotation, a durable shard-tagged intent records the protection debt.
+3. The authoritative image is published before Shadow work starts.
+4. The protection worker copies that immutable sealed image through bounded
+   1 MiB read/write buffers, syncs it, atomically publishes it, then advances
+   P★. Sealed coverage is published before the copy so lag is observable.
+5. Restart completes a pending or sealed deferred intent before claiming P★.
+6. Deferred protection is bounded to 16 in-flight 64 MiB segments (about 1 GiB
+   of protection lag); saturation backpressures writers rather than allowing a
+   10 GiB benchmark to hide an unbounded Shadow debt.
+
+The explicit RSHD0004 write-time path and its failpoint matrix remain available
+as a qualified reference. CompactShadow product mode selects the deferred path.
+A local 64 MiB smart-client smoke observed zero Shadow writes and zero Shadow
+syncs during acknowledgement, then closed, reopened and validated all 8,192
+records after producing the durable duplicate. This proves separation of the
+foreground window; the matched Bonzo campaign must still determine sustained
+throughput once the bounded protection queue fills.

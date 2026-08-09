@@ -347,8 +347,9 @@ pub enum LifecycleJob {
         pending_path: PathBuf,
         /// Destination sealed path.
         sealed_path: PathBuf,
-        /// Prepared Shadow staging (encoded; needs sync+rename).
-        prepared_shadow: crate::recovery_shadow::PreparedShadowPublish,
+        /// Optional write-time staging. `None` means copy the now-sealed
+        /// authoritative image on this worker in bounded 1 MiB chunks.
+        prepared_shadow: Option<crate::recovery_shadow::PreparedShadowPublish>,
         /// Store paths for frontier / shadow dir.
         paths: StorePaths,
         /// When true, fsync auth sealed image + parent dirs.
@@ -851,11 +852,56 @@ fn seal_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<LifecycleR
                     });
                     continue;
                 }
+                // Authority is visible, but P★ is not. Publish that gap before
+                // starting the potentially long bounded Shadow copy so lag is
+                // observable and crash recovery has an honest sealed frontier.
+                if let Err(e) = crate::recovery_shadow::note_segment_sealed(
+                    &paths,
+                    store_id,
+                    &segment_id,
+                    shard,
+                ) {
+                    let _ = result_tx.send(LifecycleResult::SealFailed {
+                        segment_id,
+                        error: format!("sealed coverage: {e}"),
+                    });
+                    continue;
+                }
                 let t_shadow = Instant::now();
-                let shadow_res =
-                    crate::recovery_shadow::publish_prepared_shadow(prepared_shadow, &paths);
+                let shadow_res = match prepared_shadow {
+                    Some(prepared) => crate::recovery_shadow::publish_prepared_shadow(
+                        prepared, &paths,
+                    )
+                    .map(|timing| {
+                        (
+                            timing.staging_write_operations,
+                            timing.staging_write_bytes,
+                            timing.staging_write_ns,
+                            timing.file_sync_ns,
+                        )
+                    }),
+                    None => crate::recovery_shadow::publish_mirror_shadow_from_path(
+                        &paths,
+                        store_id,
+                        &segment_id,
+                        &sealed_path,
+                    )
+                    .map(|timing| {
+                        (
+                            timing.copy_operations,
+                            timing.bytes_written,
+                            timing.copy_ns,
+                            timing.file_sync_ns,
+                        )
+                    }),
+                };
                 let shadow_publish_ns = elapsed_ns(t_shadow);
-                let shadow_timing = match shadow_res {
+                let (
+                    shadow_staging_write_operations,
+                    shadow_staging_write_bytes,
+                    shadow_staging_write_ns,
+                    shadow_sync_ns,
+                ) = match shadow_res {
                     Ok(timing) => timing,
                     Err(e) => {
                         let _ = result_tx.send(LifecycleResult::SealFailed {
@@ -867,12 +913,6 @@ fn seal_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<LifecycleR
                 };
                 // P★ only after both sides durable.
                 let frontier_ok = (|| -> Result<(), StoreError> {
-                    let _ = crate::recovery_shadow::note_segment_sealed(
-                        &paths,
-                        store_id,
-                        &segment_id,
-                        shard,
-                    );
                     crate::failpoint::hit("rshd4.frontier.publish")?;
                     let seq = crate::ids::segment_seq_from_id(&segment_id);
                     let mut cov =
@@ -889,16 +929,20 @@ fn seal_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<LifecycleR
                     });
                     continue;
                 }
+                crate::recovery_shadow::PreparedShadowPublish::clear_shard_meta(
+                    &paths,
+                    &segment_id,
+                );
                 let _ = result_tx.send(LifecycleResult::ProtectedPairDone {
                     segment_id,
                     size,
                     summary,
                     auth_publish_ns,
                     shadow_publish_ns,
-                    shadow_staging_write_operations: shadow_timing.staging_write_operations,
-                    shadow_staging_write_bytes: shadow_timing.staging_write_bytes,
-                    shadow_staging_write_ns: shadow_timing.staging_write_ns,
-                    shadow_sync_ns: shadow_timing.file_sync_ns,
+                    shadow_staging_write_operations,
+                    shadow_staging_write_bytes,
+                    shadow_staging_write_ns,
+                    shadow_sync_ns,
                 });
             }
             LifecycleJob::EnrichDerived { segment_id, .. } => {
@@ -915,10 +959,7 @@ fn seal_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<LifecycleR
     }
 }
 
-fn wait_for_enrichment_window(
-    foreground_activity: &AtomicU64,
-    shutting_down: &AtomicBool,
-) -> u64 {
+fn wait_for_enrichment_window(foreground_activity: &AtomicU64, shutting_down: &AtomicBool) -> u64 {
     wait_for_enrichment_window_with(
         foreground_activity,
         shutting_down,
@@ -982,8 +1023,7 @@ fn enrich_worker_loop(
                 // busy workload, allow only bounded sparse derived progress.
                 // Once writes go quiet, drain normally. Shutdown abandons the
                 // queue after any job already past the worker-loop check.
-                let gap_wait_ns =
-                    wait_for_enrichment_window(&foreground_activity, &shutting_down);
+                let gap_wait_ns = wait_for_enrichment_window(&foreground_activity, &shutting_down);
                 let sealed_path = paths.sealed_segment(&segment_id);
                 let mut stages = EnrichmentStageTiming {
                     gap_wait_ns,

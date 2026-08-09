@@ -243,7 +243,7 @@ pub struct StoreWritePathStats {
     pub enrichment_backlog: usize,
     /// Whether asynchronous authoritative seal lifecycle is active.
     pub async_lifecycle_enabled: bool,
-    /// Whether write-time Recovery Shadow dual streaming is active.
+    /// Whether Recovery Shadow publication is active (legacy field name).
     pub shadow_dual_stream: bool,
     /// Recovery Shadows published since this store was opened.
     pub shadow_dual_published: u64,
@@ -708,16 +708,17 @@ pub struct Store {
     ///
     /// Authoritative seal still runs; enrichment backlog may stay empty.
     enrichment_enabled: bool,
-    /// Experimental: write-time dual-stream Recovery Shadow (RSHD0004).
+    /// Recovery Shadow publication is enabled for new segments.
     ///
-    /// When enabled, each cooked frame append is mirrored into an independently
-    /// allocated Shadow staging file; seal finalizes Shadow before
-    /// `protected_frontier` advances. **Not** a product flip (Materialized
-    /// remains recovery authority until Stage 2 step 8).
+    /// CompactShadow uses deferred post-seal copying; explicit qualification
+    /// may select write-time RSHD0004. Neither path advances P★ before the
+    /// independently allocated Shadow is durably published.
     shadow_dual_stream: bool,
-    /// Cumulative dual-stream Shadow finalize nanoseconds (measurement).
+    /// Product path: build Shadow from sealed authority on the lifecycle worker.
+    deferred_shadow_copy: bool,
+    /// Cumulative Shadow protection-worker nanoseconds (measurement).
     shadow_dual_finalize_ns: u64,
-    /// Dual-stream Shadows successfully published this process (measurement).
+    /// Shadows successfully published this process (measurement).
     shadow_dual_published: u64,
     /// Active authoritative file write/sync activity.
     authoritative_io_totals: WriteIoTotals,
@@ -999,6 +1000,7 @@ impl Store {
             async_lifecycle: true,
             enrichment_enabled: true,
             shadow_dual_stream: false,
+            deferred_shadow_copy: false,
             shadow_dual_finalize_ns: 0,
             shadow_dual_published: 0,
             authoritative_io_totals: WriteIoTotals::default(),
@@ -1131,6 +1133,7 @@ impl Store {
             async_lifecycle: true,
             enrichment_enabled: true,
             shadow_dual_stream: false,
+            deferred_shadow_copy: false,
             shadow_dual_finalize_ns: 0,
             shadow_dual_published: 0,
             authoritative_io_totals: WriteIoTotals::default(),
@@ -1374,6 +1377,7 @@ impl Store {
             async_lifecycle: false,
             enrichment_enabled: false,
             shadow_dual_stream: false,
+            deferred_shadow_copy: false,
             shadow_dual_finalize_ns: 0,
             shadow_dual_published: 0,
             authoritative_io_totals: WriteIoTotals::default(),
@@ -6754,7 +6758,20 @@ impl Store {
         out.drain_lifecycle_ns = elapsed_ns(t_drain);
         let n = self.writer_shards();
         for shard in 0..n {
-            self.seal_active_shard_timed(shard, &mut out)?;
+            let deferred = self.deferred_shadow_copy
+                && self.async_lifecycle_enabled()
+                && self
+                    .active_ref(shard)
+                    .is_some_and(|writer| writer.item_events > 0);
+            if deferred {
+                let t_rotate = Instant::now();
+                self.rotate_active_async(shard)?;
+                out.final_active_seal_ns = out
+                    .final_active_seal_ns
+                    .saturating_add(elapsed_ns(t_rotate));
+            } else {
+                self.seal_active_shard_timed(shard, &mut out)?;
+            }
         }
         // Explicit seal_active is synchronous for authoritative publish (DEF-096):
         // CompactShadow may enqueue protected-pair finalize; wait until applied
@@ -6936,7 +6953,7 @@ impl Store {
                         shard: shard as u16,
                         pending_path,
                         sealed_path: dest,
-                        prepared_shadow: prepared,
+                        prepared_shadow: Some(prepared),
                         paths: self.paths.clone(),
                         require_fsync: flush_mode == DurabilityMode::Durable,
                         size,
@@ -6977,10 +6994,8 @@ impl Store {
                 .shadow_io_totals
                 .write_ns
                 .saturating_add(timing.staging_write_ns);
-            self.shadow_io_totals.sync_operations = self
-                .shadow_io_totals
-                .sync_operations
-                .saturating_add(1);
+            self.shadow_io_totals.sync_operations =
+                self.shadow_io_totals.sync_operations.saturating_add(1);
             self.shadow_io_totals.sync_ns = self
                 .shadow_io_totals
                 .sync_ns
@@ -7159,19 +7174,19 @@ impl Store {
         self.enrichment_enabled = enabled;
     }
 
-    /// Experimental write-time dual-stream Recovery Shadow (RSHD0004).
+    /// Enable the experimental write-time RSHD0004 path.
     ///
-    /// Affects newly started active segments. Call
-    /// [`Self::attach_shadow_dual_to_actives`] to also arm the current actives.
-    /// Not a product flip.
+    /// Product CompactShadow mode instead selects deferred, bounded post-seal
+    /// copying so duplicate bytes do not ride the foreground write path.
     pub fn set_shadow_dual_stream(&mut self, enabled: bool) {
         self.shadow_dual_stream = enabled;
+        self.deferred_shadow_copy = false;
         // Dual-stream uses the Protected Seal-Pair Pipeline (async finalize).
         // Do **not** disable async_lifecycle — that serialized ~167ms/seal onto
         // the writer. Keep async so detach → next active overlaps protection.
     }
 
-    /// Attach dual-stream staging to current actives (seeded from durable prefix).
+    /// Arm Recovery Shadow protection for current actives.
     ///
     /// Used by qualification harnesses that enable dual-stream after `create`.
     pub fn attach_shadow_dual_to_actives(&mut self) -> Result<(), StoreError> {
@@ -7205,12 +7220,12 @@ impl Store {
         Ok(())
     }
 
-    /// Whether experimental dual-stream Shadow staging is enabled.
+    /// Whether Recovery Shadow publication is enabled.
     pub fn shadow_dual_stream(&self) -> bool {
         self.shadow_dual_stream
     }
 
-    /// Cumulative dual-stream finalize nanoseconds (summary+sync+rename+dir).
+    /// Cumulative Shadow protection-worker nanoseconds.
     pub fn shadow_dual_finalize_ns(&self) -> u64 {
         self.shadow_dual_finalize_ns
     }
@@ -7241,14 +7256,27 @@ impl Store {
                 );
             }
             crate::recovery_shadow::RecoveryMode::Transitioning => {
-                let _ = self.attach_shadow_dual_to_actives();
+                self.enable_deferred_shadow_copy();
             }
             crate::recovery_shadow::RecoveryMode::CompactShadow => {
-                let _ = self.attach_shadow_dual_to_actives();
+                self.enable_deferred_shadow_copy();
                 crate::recovery_shadow::set_shadow_reclaim_policy(
                     crate::recovery_shadow::ShadowReclaimPolicy::RequireReplacementShadow,
                 );
             }
+        }
+    }
+
+    fn enable_deferred_shadow_copy(&mut self) {
+        self.shadow_dual_stream = true;
+        self.deferred_shadow_copy = true;
+        if let Some(pipe) = self.seal_pipeline.as_mut() {
+            pipe.max_pending_seals = DEFAULT_MAX_PENDING_SEALS;
+        }
+        // A mode change may replace explicit experimental RSHD0004 staging.
+        // Dropping it is safe: no protection was claimed for active segments.
+        for writer in self.actives.iter_mut().flatten() {
+            writer.shadow_dual = None;
         }
     }
 
@@ -7273,6 +7301,7 @@ impl Store {
         self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::Materialized);
         // Dual-stream may stay attached for experimental use; product default off.
         self.shadow_dual_stream = false;
+        self.deferred_shadow_copy = false;
         Ok(())
     }
 
@@ -7482,14 +7511,10 @@ impl Store {
                     .shadow_io_totals
                     .write_ns
                     .saturating_add(shadow_staging_write_ns);
-                self.shadow_io_totals.sync_operations = self
-                    .shadow_io_totals
-                    .sync_operations
-                    .saturating_add(1);
-                self.shadow_io_totals.sync_ns = self
-                    .shadow_io_totals
-                    .sync_ns
-                    .saturating_add(shadow_sync_ns);
+                self.shadow_io_totals.sync_operations =
+                    self.shadow_io_totals.sync_operations.saturating_add(1);
+                self.shadow_io_totals.sync_ns =
+                    self.shadow_io_totals.sync_ns.saturating_add(shadow_sync_ns);
                 self.rotation_stage_totals.rotations =
                     self.rotation_stage_totals.rotations.saturating_add(1);
                 self.rotation_stage_totals.auth_publish_ns = self
@@ -7596,10 +7621,36 @@ impl Store {
             prepared.persist_shard_meta(&self.paths)?;
             crate::positioned_io::write_all_at(&mut writer.file, prefix_len, &plan.summary_frame)?;
             writer.file.set_len(plan.sealed_len)?;
-            Some((prepared, plan))
+            Some((Some(prepared), plan))
+        } else if self.deferred_shadow_copy {
+            if !zero_scan_meta {
+                return Err(StoreError::CorruptMeta(
+                    "deferred Shadow active lacks summary metadata",
+                ));
+            }
+            let plan = crate::incremental_seal::meta_publish_plan(
+                ids,
+                prefix_len,
+                frame_count,
+                writer_sequence,
+                item_events,
+            )?;
+            crate::positioned_io::write_all_at(&mut writer.file, prefix_len, &plan.summary_frame)?;
+            writer.file.set_len(plan.sealed_len)?;
+            // A tiny persistent intent makes sealed-without-Shadow recovery
+            // deterministic if the process stops before the worker reaches it.
+            crate::recovery_shadow::PreparedShadowPublish::persist_shard_meta_for(
+                &self.paths,
+                &segment_id,
+                shard as u16,
+            )?;
+            Some((None, plan))
         } else {
             None
         };
+        let deferred_protection = protected
+            .as_ref()
+            .is_some_and(|(prepared, _)| prepared.is_none());
         drop(writer);
 
         let n = self.writer_shards();
@@ -7647,10 +7698,11 @@ impl Store {
 
         if let Some(pipe) = self.seal_pipeline.as_mut() {
             pipe.inflight_seals = pipe.inflight_seals.saturating_add(1);
-            let max = pipe
-                .max_pending_seals
-                .max(DEFAULT_MAX_PENDING_SEALS.saturating_mul(n.max(1)));
-            pipe.max_pending_seals = max;
+            if !deferred_protection {
+                pipe.max_pending_seals = pipe
+                    .max_pending_seals
+                    .max(DEFAULT_MAX_PENDING_SEALS.saturating_mul(n.max(1)));
+            }
             if let Some((prepared_shadow, plan)) = protected {
                 pipe.submit_seal(LifecycleJob::FinalizeProtectedPair {
                     store_id: self.store_id,
@@ -9504,7 +9556,7 @@ impl Store {
         segment_id: [u8; 16],
         initial_image: &[u8],
     ) -> Result<Option<crate::recovery_shadow::ShadowDualStream>, StoreError> {
-        if !self.shadow_dual_stream {
+        if !self.shadow_dual_stream || self.deferred_shadow_copy {
             return Ok(None);
         }
         let mut dual = crate::recovery_shadow::ShadowDualStream::begin(

@@ -14,11 +14,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-// 8 KiB product records previously hit the 1,024-entry ceiling at ~8 MiB,
-// leaving the already-qualified 16 MiB byte bound unused and doubling stable
-// boundaries. Keep bytes authoritative; this entry cap only prevents tiny-row
-// cohorts from growing without bound.
-const MAX_COHORT_ENTRIES: usize = 2_048;
+// Bound both per-cohort object count and encoded bytes. Qualification showed
+// that raising the entry cap to 2,048 only reduced barriers by ~3% at the
+// product scheduler depth and did not materially improve throughput.
+const MAX_COHORT_ENTRIES: usize = 1_024;
 const MAX_COHORT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ADMITTED_BYTES: usize = 2 * MAX_COHORT_BYTES;
 const MAX_COLLECTION_DELAY: Duration = Duration::from_micros(250);

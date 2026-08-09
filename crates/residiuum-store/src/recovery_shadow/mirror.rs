@@ -7,9 +7,7 @@
 //! No value decode / re-encode. Physical buffered copy only (never APFS
 //! clone/reflink). Atomic publish still uses `sync_all` → rename → dir sync.
 
-use super::wire::{
-    shadow_dir, shadow_path, DecodedShadow, ShadowLoad, ShadowRecord,
-};
+use super::wire::{shadow_dir, shadow_path, DecodedShadow, ShadowLoad, ShadowRecord};
 use crate::atomic_file;
 use crate::envelope::{decode_item_envelope, EventKind};
 use crate::error::StoreError;
@@ -46,6 +44,8 @@ pub struct MirroredShadow {
 /// Stage timings for one mirror publish (qualification).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MirrorPublishTiming {
+    /// Logical copy chunks submitted to the buffered writer.
+    pub copy_operations: u64,
     /// Buffered physical copy of the segment image (read+write+hash).
     pub copy_ns: u64,
     /// Envelope + commitment framing write (usually folded into copy).
@@ -113,13 +113,10 @@ pub fn decode_mirror_to_struct(
     let segment_id: [u8; 16] = bytes[24..40].try_into().map_err(|_| ShadowLoad::Corrupt {
         detail: "segment_id truncated".into(),
     })?;
-    let encoded_len = u64::from_le_bytes(
-        bytes[40..48]
-            .try_into()
-            .map_err(|_| ShadowLoad::Corrupt {
-                detail: "encoded_len truncated".into(),
-            })?,
-    ) as usize;
+    let encoded_len =
+        u64::from_le_bytes(bytes[40..48].try_into().map_err(|_| ShadowLoad::Corrupt {
+            detail: "encoded_len truncated".into(),
+        })?) as usize;
     let need = MIRROR_ENVELOPE_LEN + encoded_len + HASH_LEN;
     if bytes.len() < need {
         return Err(ShadowLoad::Incomplete);
@@ -190,11 +187,7 @@ pub fn mirror_to_decoded_shadow(m: &MirroredShadow) -> DecodedShadow {
 }
 
 /// Encode a complete V3 mirror blob in memory (tests / small segments).
-pub fn encode_mirror_shadow(
-    store_id: [u8; 16],
-    segment_id: [u8; 16],
-    image: &[u8],
-) -> Vec<u8> {
+pub fn encode_mirror_shadow(store_id: [u8; 16], segment_id: [u8; 16], image: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(MIRROR_ENVELOPE_LEN + image.len() + HASH_LEN);
     out.extend_from_slice(RSH_MAGIC_V3);
     out.extend_from_slice(&store_id);
@@ -268,10 +261,7 @@ pub fn publish_mirror_shadow_timed(
     {
         // Direct file writes: image is already contiguous in memory — avoid an
         // extra BufWriter memcpy on the hot path.
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)?;
+        let mut file = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
         let mut content = Hasher::new();
 
         let mut write_part = |part: &[u8]| -> Result<(), StoreError> {
@@ -290,6 +280,7 @@ pub fn publish_mirror_shadow_timed(
         while offset < image.len() {
             let end = (offset + COPY_BUF).min(image.len());
             write_part(&image[offset..end])?;
+            timing.copy_operations = timing.copy_operations.saturating_add(1);
             offset = end;
         }
 
@@ -297,8 +288,7 @@ pub fn publish_mirror_shadow_timed(
         file.write_all(&commit)?;
         timing.copy_ns = t_copy.elapsed().as_nanos() as u64;
         timing.encode_ns = 0; // framing folded into copy
-        timing.bytes_written =
-            (MIRROR_ENVELOPE_LEN + image.len() + HASH_LEN) as u64;
+        timing.bytes_written = (MIRROR_ENVELOPE_LEN + image.len() + HASH_LEN) as u64;
 
         let t_sync = Instant::now();
         file.sync_all()?;
@@ -336,8 +326,20 @@ pub fn publish_mirror_shadow_from_path(
     let tmp = atomic_file::temp_path_for(&path);
 
     if path.is_file() {
-        // Compact / retry: Shadow for this segment_id already durable.
-        return Ok(MirrorPublishTiming::default());
+        // Retry is idempotent only when the already-published Shadow verifies
+        // and contains the exact current authoritative image. Never convert a
+        // same-name corrupt or divergent artifact into a protection claim.
+        let existing = try_load_mirror(&path, Some(store_id))?;
+        if let Ok(mirror) = existing {
+            let authority = fs::read(segment_path)?;
+            if mirror.segment_id == *segment_id && mirror.image == authority {
+                return Ok(MirrorPublishTiming::default());
+            }
+        }
+        return Err(StoreError::SegmentIdCollision {
+            segment_id: *segment_id,
+            paths: vec![path.clone(), segment_path.to_path_buf()],
+        });
     }
 
     let _ = fs::remove_file(&tmp);
@@ -348,10 +350,7 @@ pub fn publish_mirror_shadow_from_path(
     {
         let src = File::open(segment_path)?;
         let mut reader = BufReader::with_capacity(COPY_BUF, src);
-        let dst = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)?;
+        let dst = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
         let mut w = BufWriter::with_capacity(COPY_BUF, dst);
         let mut content = Hasher::new();
 
@@ -376,6 +375,7 @@ pub fn publish_mirror_shadow_from_path(
             }
             let take = (n as u64).min(remaining) as usize;
             write_part(&buf[..take])?;
+            timing.copy_operations = timing.copy_operations.saturating_add(1);
             remaining -= take as u64;
         }
 
@@ -463,6 +463,22 @@ mod tests {
         let seg = [4u8; 16];
         publish_mirror_shadow(&paths, store, &seg, b"aaa").unwrap();
         let err = publish_mirror_shadow(&paths, store, &seg, b"bbb").unwrap_err();
+        assert!(matches!(err, StoreError::SegmentIdCollision { .. }));
+    }
+
+    #[test]
+    fn publish_mirror_from_path_refuses_corrupt_existing_shadow() {
+        let dir = tempdir().unwrap();
+        let paths = StorePaths::new(dir.path());
+        paths.create_dirs().unwrap();
+        let store = [5u8; 16];
+        let seg = [6u8; 16];
+        let segment_path = dir.path().join("sealed.residiuum");
+        fs::write(&segment_path, b"authoritative").unwrap();
+        fs::create_dir_all(shadow_dir(&paths)).unwrap();
+        fs::write(shadow_path(&paths, &seg), b"corrupt").unwrap();
+
+        let err = publish_mirror_shadow_from_path(&paths, store, &seg, &segment_path).unwrap_err();
         assert!(matches!(err, StoreError::SegmentIdCollision { .. }));
     }
 

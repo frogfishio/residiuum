@@ -84,6 +84,47 @@ pub fn recover_protected_pairs(
         n = n.saturating_add(1);
     }
 
+    // Deferred 1 MiB mirror intents have no write-time Shadow temp. Complete
+    // them from authoritative pending/sealed media before claiming protection.
+    if shadow.is_dir() {
+        let mut intents = Vec::new();
+        for ent in fs::read_dir(&shadow)? {
+            let p = ent?.path();
+            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let Some(stem) = name.strip_suffix(".rsh.dual.shard") else {
+                continue;
+            };
+            if let Some(segment_id) = crate::layout::unhex16(stem) {
+                intents.push((p, segment_id));
+            }
+        }
+        for (intent, segment_id) in intents {
+            let pending = paths.pending_segment(&segment_id);
+            let sealed = paths.sealed_segment(&segment_id);
+            let rsh = shadow_path(paths, &segment_id);
+            if rsh.is_file() {
+                continue; // claim_missing_frontiers verifies then clears intent
+            }
+            if pending.is_file() && !sealed.is_file() {
+                crate::media_inventory::rename_exclusive(&pending, &sealed, segment_id)?;
+                let _ = crate::atomic_file::sync_dir(&paths.segments_dir());
+            }
+            if !sealed.is_file() {
+                let _ = fs::remove_file(&intent);
+                continue;
+            }
+            let shard = PreparedShadowPublish::load_shard_meta(paths, &segment_id).unwrap_or(0);
+            crate::recovery_shadow::publish_mirror_shadow_from_path(
+                paths,
+                store_id,
+                &segment_id,
+                &sealed,
+            )?;
+            claim_pair_protection(paths, store_id, &segment_id, shard)?;
+            n = n.saturating_add(1);
+        }
+    }
+
     // Sealed + verified `.rsh` but frontier never published (e.g. crash after
     // rename, before coverage write). Claim P★ only when both sides verify.
     n = n.saturating_add(claim_missing_frontiers(paths, store_id)?);
@@ -186,11 +227,7 @@ fn claim_missing_frontiers(paths: &StorePaths, store_id: [u8; 16]) -> Result<usi
             continue;
         }
         // Also skip if any shard already claimed this seq durable (legacy).
-        if cov
-            .durable_by_shard
-            .values()
-            .any(|s| s.contains(&seq))
-        {
+        if cov.durable_by_shard.values().any(|s| s.contains(&seq)) {
             continue;
         }
         match try_load_shadow(&path, Some(store_id))? {
@@ -273,6 +310,32 @@ mod tests {
     }
 
     #[test]
+    fn recover_deferred_intent_builds_shadow_before_claiming_p_star() {
+        let dir = tempdir().unwrap();
+        let paths = StorePaths::new(dir.path());
+        paths.create_dirs().unwrap();
+        let store_id = [0xD1u8; 16];
+        let segment_id = crate::ids::mint_sortable_segment_id(4, &store_id);
+        let image = tiny_image(store_id, segment_id);
+        fs::create_dir_all(paths.segments_dir()).unwrap();
+        fs::write(paths.sealed_segment(&segment_id), &image).unwrap();
+        PreparedShadowPublish::persist_shard_meta_for(&paths, &segment_id, 5).unwrap();
+
+        let n = recover_protected_pairs(&paths, store_id).unwrap();
+        assert!(n >= 1);
+        assert!(matches!(
+            try_load_shadow(&shadow_path(&paths, &segment_id), Some(store_id)).unwrap(),
+            ShadowLoad::Ok(_)
+        ));
+        let cov = load_protected_coverage(&paths, store_id).unwrap();
+        assert!(cov
+            .durable_by_shard
+            .get(&5)
+            .is_some_and(|seqs| seqs.contains(&4)));
+        assert!(!PreparedShadowPublish::shard_meta_path(&paths, &segment_id).exists());
+    }
+
+    #[test]
     fn recover_uses_shard_sidecar_not_zero() {
         let dir = tempdir().unwrap();
         let paths = StorePaths::new(dir.path());
@@ -302,9 +365,7 @@ mod tests {
         assert!(n >= 1);
         let cov = load_protected_coverage(&paths, store_id).unwrap();
         assert!(
-            cov.durable_by_shard
-                .get(&3)
-                .is_some_and(|s| s.contains(&2)),
+            cov.durable_by_shard.get(&3).is_some_and(|s| s.contains(&2)),
             "durable must land on shard 3, not 0: {cov:?}"
         );
         assert!(!cov.durable_by_shard.get(&0).is_some_and(|s| s.contains(&2)));
@@ -348,7 +409,8 @@ mod tests {
         let prepared = dual.prepare_async_publish(&[], 0).unwrap();
         crate::recovery_shadow::publish_prepared_shadow(prepared, &paths).unwrap();
         // Deliberately skip frontier publish (crash after Shadow rename).
-        let lag0 = protection_lag_from_coverage(&load_protected_coverage(&paths, store_id).unwrap());
+        let lag0 =
+            protection_lag_from_coverage(&load_protected_coverage(&paths, store_id).unwrap());
         assert_eq!(lag0.protected_frontier, 0);
 
         let n = recover_protected_pairs(&paths, store_id).unwrap();

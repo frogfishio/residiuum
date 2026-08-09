@@ -119,9 +119,7 @@ pub fn metas_from_image_chunk(
             .checked_add(envelope_len as u64)
             .and_then(|n| n.checked_add(body_len))
             .and_then(|n| n.checked_add(FRAME_SUFFIX_LEN as u64))
-            .ok_or(StoreError::CorruptMeta(
-                "dual-stream frame length overflow",
-            ))?;
+            .ok_or(StoreError::CorruptMeta("dual-stream frame length overflow"))?;
         let fl = frame_len as usize;
         if chunk.len() - pos < fl {
             return Err(StoreError::CorruptMeta(
@@ -161,7 +159,7 @@ pub fn commitment_from_image(
 pub fn decode_dual_mirror(
     bytes: &[u8],
     expect_store: Option<[u8; 16]>,
-) -> Result<( [u8; 16], [u8; 16], Vec<u8> ), ShadowLoad> {
+) -> Result<([u8; 16], [u8; 16], Vec<u8>), ShadowLoad> {
     if bytes.len() < DUAL_ENVELOPE_LEN + HASH_LEN {
         return Err(if bytes.is_empty() {
             ShadowLoad::Missing
@@ -187,13 +185,10 @@ pub fn decode_dual_mirror(
     let segment_id: [u8; 16] = bytes[24..40].try_into().map_err(|_| ShadowLoad::Corrupt {
         detail: "segment_id truncated".into(),
     })?;
-    let encoded_len = u64::from_le_bytes(
-        bytes[40..48]
-            .try_into()
-            .map_err(|_| ShadowLoad::Corrupt {
-                detail: "encoded_len truncated".into(),
-            })?,
-    ) as usize;
+    let encoded_len =
+        u64::from_le_bytes(bytes[40..48].try_into().map_err(|_| ShadowLoad::Corrupt {
+            detail: "encoded_len truncated".into(),
+        })?) as usize;
     let need = DUAL_ENVELOPE_LEN + encoded_len + HASH_LEN;
     if bytes.len() < need {
         return Err(ShadowLoad::Incomplete);
@@ -205,11 +200,10 @@ pub fn decode_dual_mirror(
     }
     let image = bytes[DUAL_ENVELOPE_LEN..DUAL_ENVELOPE_LEN + encoded_len].to_vec();
     let got = &bytes[need - HASH_LEN..];
-    let expect = commitment_from_image(&store_id, &segment_id, &image).map_err(|e| {
-        ShadowLoad::Corrupt {
+    let expect =
+        commitment_from_image(&store_id, &segment_id, &image).map_err(|e| ShadowLoad::Corrupt {
             detail: format!("dual-stream image unreadable: {e}"),
-        }
-    })?;
+        })?;
     if expect.as_slice() != got {
         return Err(ShadowLoad::Corrupt {
             detail: "dual-stream frame-hash commitment mismatch".into(),
@@ -273,12 +267,20 @@ impl PreparedShadowPublish {
 
     /// Persist shard for crash recovery of partial pairs.
     pub fn persist_shard_meta(&self, paths: &StorePaths) -> Result<(), StoreError> {
-        let path = Self::shard_meta_path(paths, &self.segment_id);
+        Self::persist_shard_meta_for(paths, &self.segment_id, self.shard)
+    }
+
+    /// Persist a shard-tagged protection intent without write-time staging.
+    pub fn persist_shard_meta_for(
+        paths: &StorePaths,
+        segment_id: &[u8; 16],
+        shard: u16,
+    ) -> Result<(), StoreError> {
+        let path = Self::shard_meta_path(paths, segment_id);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&path, self.shard.to_le_bytes())?;
-        Ok(())
+        crate::atomic_file::write_atomic(&path, &shard.to_le_bytes())
     }
 
     /// Load shard sidecar; missing → `None` (legacy / single-shard recover).
@@ -335,8 +337,7 @@ pub fn publish_prepared_shadow(
         crate::failpoint::hit("rshd4.finalize.dir_sync")?;
         atomic_file::sync_dir(parent)?;
         timing.dir_sync_ns = t_dir.elapsed().as_nanos() as u64;
-        timing.bytes_written =
-            DUAL_ENVELOPE_LEN as u64 + prepared.encoded_len + HASH_LEN as u64;
+        timing.bytes_written = DUAL_ENVELOPE_LEN as u64 + prepared.encoded_len + HASH_LEN as u64;
         // Transferred — do not delete on Drop.
         prepared.tmp_path = PathBuf::new();
         PreparedShadowPublish::clear_shard_meta(paths, &segment_id);
@@ -479,12 +480,7 @@ impl ShadowDualStream {
         self.flush_buf()?;
 
         let encoded_len = self.image_len;
-        let commit = dual_commitment(
-            &self.store_id,
-            &self.segment_id,
-            encoded_len,
-            &self.metas,
-        );
+        let commit = dual_commitment(&self.store_id, &self.segment_id, encoded_len, &self.metas);
 
         let mut env = [0u8; DUAL_ENVELOPE_LEN];
         env[0..8].copy_from_slice(RSH_MAGIC_V4);
@@ -551,12 +547,7 @@ impl ShadowDualStream {
         timing.staging_write_ns = self.staging_write_ns;
 
         let encoded_len = self.image_len;
-        let commit = dual_commitment(
-            &self.store_id,
-            &self.segment_id,
-            encoded_len,
-            &self.metas,
-        );
+        let commit = dual_commitment(&self.store_id, &self.segment_id, encoded_len, &self.metas);
 
         let t_enc = Instant::now();
         // Patch envelope encoded_len.
@@ -595,7 +586,6 @@ impl ShadowDualStream {
         self.tmp_path = PathBuf::new();
         Ok(timing)
     }
-
 }
 
 impl Drop for ShadowDualStream {
@@ -624,7 +614,7 @@ mod tests {
     use super::*;
     use crate::layout::StorePaths;
     use residiuum_format::{
-        encode_frame, FrameHeader, FrameKind, FrameParts, SegmentId, ActiveSegment, SafetyLimits,
+        encode_frame, ActiveSegment, FrameHeader, FrameKind, FrameParts, SafetyLimits, SegmentId,
         WIRE_MAJOR, WIRE_MINOR,
     };
     use tempfile::tempdir;
