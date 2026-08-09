@@ -11,14 +11,24 @@ use crate::error::StoreError;
 use crate::layout::StorePaths;
 use blake3::Hasher;
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// Filename under `store-info/` for the write dedup table.
 pub const WRITE_DEDUP_FILE: &str = "write_dedup.v1";
+/// Append-only derived outcome journal. The authoritative item-event envelope
+/// remains the recovery source; this file is the bounded fast-lookup path.
+pub const WRITE_DEDUP_JOURNAL_FILE: &str = "write_dedup.journal.v1";
 
 const MAGIC: &[u8; 8] = b"RDED0001";
 const VERSION: u32 = 1;
+const JOURNAL_MAGIC: &[u8; 8] = b"RDEJ0001";
+const JOURNAL_VERSION: u32 = 1;
+const JOURNAL_HEADER_LEN: usize = 12;
+// content(32) + store/segment/item/event(4 * 16) + kind/durability(2) + offset(8)
+const JOURNAL_PAYLOAD_LEN: usize = 106;
+const JOURNAL_RECORD_LEN: usize = 16 + JOURNAL_PAYLOAD_LEN + 32;
 
 /// One accepted client operation and the receipt it produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +89,11 @@ pub fn write_dedup_path(paths: &StorePaths) -> PathBuf {
     paths.store_info().join(WRITE_DEDUP_FILE)
 }
 
+/// Absolute path of the append-only outcome journal.
+pub fn write_dedup_journal_path(paths: &StorePaths) -> PathBuf {
+    paths.store_info().join(WRITE_DEDUP_JOURNAL_FILE)
+}
+
 /// Content identity over mutation fields (DEF-010).
 ///
 /// Covers operation name, collection, key, and payload bytes. Durability is
@@ -102,10 +117,19 @@ pub fn content_identity(op: &str, collection: &str, key: &str, payload: &[u8]) -
 /// (DEF-021). Loss of the table affects fast lookup only; new-profile segment
 /// envelopes retain authoritative retry evidence for on-demand reconstruction.
 pub fn load_write_dedup(path: &Path) -> Result<WriteDedupTable, StoreError> {
+    let mut table = load_write_dedup_checkpoint(path);
+    let journal = path.with_file_name(WRITE_DEDUP_JOURNAL_FILE);
+    if let Ok(bytes) = fs::read(journal) {
+        replay_journal(&bytes, &mut table);
+    }
+    Ok(table)
+}
+
+fn load_write_dedup_checkpoint(path: &Path) -> WriteDedupTable {
     if path.is_file() {
         if let Ok(bytes) = fs::read(path) {
             if let Some(table) = decode_table(&bytes) {
-                return Ok(table);
+                return table;
             }
         }
     }
@@ -113,11 +137,49 @@ pub fn load_write_dedup(path: &Path) -> Result<WriteDedupTable, StoreError> {
     if prev.is_file() {
         if let Ok(bytes) = fs::read(&prev) {
             if let Some(table) = decode_table(&bytes) {
-                return Ok(table);
+                return table;
             }
         }
     }
-    Ok(WriteDedupTable::new())
+    WriteDedupTable::new()
+}
+
+/// Append one accepted operation outcome and cross its stable-storage boundary.
+///
+/// Unlike the former full-table atomic replacement this performs O(1) work and
+/// writes a fixed-size checksummed record. A torn or corrupt suffix is ignored
+/// on load because authoritative item-event envelopes remain recoverable.
+pub fn append_write_dedup(
+    path: &Path,
+    operation_id: [u8; 16],
+    record: &DedupRecord,
+) -> Result<(), StoreError> {
+    append_write_dedup_batch(path, &[(operation_id, record)])
+}
+
+/// Append a cohort of outcomes and cross one shared journal boundary.
+pub fn append_write_dedup_batch(
+    path: &Path,
+    records: &[([u8; 16], &DedupRecord)],
+) -> Result<(), StoreError> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    fs::create_dir_all(parent)?;
+    let new_file = !path.is_file() || fs::metadata(path)?.len() == 0;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    if new_file {
+        file.write_all(JOURNAL_MAGIC)?;
+        file.write_all(&JOURNAL_VERSION.to_le_bytes())?;
+    }
+    crate::failpoint::hit("store.dedup.before_write")?;
+    for (operation_id, record) in records {
+        file.write_all(&encode_journal_record(*operation_id, record))?;
+    }
+    file.sync_data()?;
+    crate::failpoint::hit("store.dedup.after_append")?;
+    Ok(())
 }
 
 /// Persist the full dedup table (atomic durable replace; keeps prior generation).
@@ -153,6 +215,83 @@ fn encode_table(table: &WriteDedupTable) -> Vec<u8> {
     hasher.update(&out);
     out.extend_from_slice(hasher.finalize().as_bytes());
     out
+}
+
+fn encode_journal_record(operation_id: [u8; 16], record: &DedupRecord) -> Vec<u8> {
+    let mut out = Vec::with_capacity(JOURNAL_RECORD_LEN);
+    out.extend_from_slice(&operation_id);
+    encode_record_payload(&mut out, record);
+    let checksum = blake3::hash(&out);
+    out.extend_from_slice(checksum.as_bytes());
+    out
+}
+
+fn encode_record_payload(out: &mut Vec<u8>, rec: &DedupRecord) {
+    out.extend_from_slice(&rec.content_hash);
+    out.extend_from_slice(&rec.store_id);
+    out.extend_from_slice(&rec.segment_id);
+    out.extend_from_slice(&rec.item_id);
+    out.extend_from_slice(&rec.event_id);
+    out.push(event_kind_byte(rec.event_kind));
+    out.push(durability_byte(rec.durability));
+    out.extend_from_slice(&rec.offset.to_le_bytes());
+}
+
+fn replay_journal(bytes: &[u8], table: &mut WriteDedupTable) {
+    if bytes.len() < JOURNAL_HEADER_LEN
+        || &bytes[..8] != JOURNAL_MAGIC
+        || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != JOURNAL_VERSION
+    {
+        return;
+    }
+    let mut cursor = JOURNAL_HEADER_LEN;
+    while cursor + JOURNAL_RECORD_LEN <= bytes.len() {
+        let record = &bytes[cursor..cursor + JOURNAL_RECORD_LEN];
+        let payload_end = 16 + JOURNAL_PAYLOAD_LEN;
+        if blake3::hash(&record[..payload_end]).as_bytes()
+            != &record[payload_end..JOURNAL_RECORD_LEN]
+        {
+            break;
+        }
+        let operation_id: [u8; 16] = record[..16].try_into().unwrap();
+        let Some(decoded) = decode_record_payload(&record[16..payload_end]) else {
+            break;
+        };
+        table.insert(operation_id, decoded);
+        cursor += JOURNAL_RECORD_LEN;
+    }
+}
+
+fn decode_record_payload(bytes: &[u8]) -> Option<DedupRecord> {
+    if bytes.len() != JOURNAL_PAYLOAD_LEN {
+        return None;
+    }
+    let mut cursor = 0usize;
+    let content_hash = bytes[cursor..cursor + 32].try_into().ok()?;
+    cursor += 32;
+    let store_id = bytes[cursor..cursor + 16].try_into().ok()?;
+    cursor += 16;
+    let segment_id = bytes[cursor..cursor + 16].try_into().ok()?;
+    cursor += 16;
+    let item_id = bytes[cursor..cursor + 16].try_into().ok()?;
+    cursor += 16;
+    let event_id = bytes[cursor..cursor + 16].try_into().ok()?;
+    cursor += 16;
+    let event_kind = event_kind_from_byte(bytes[cursor])?;
+    cursor += 1;
+    let durability = durability_from_byte(bytes[cursor])?;
+    cursor += 1;
+    let offset = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().ok()?);
+    Some(DedupRecord {
+        content_hash,
+        store_id,
+        segment_id,
+        item_id,
+        event_id,
+        event_kind,
+        durability,
+        offset,
+    })
 }
 
 fn decode_table(bytes: &[u8]) -> Option<WriteDedupTable> {
@@ -284,5 +423,50 @@ mod tests {
         let bytes = encode_table(&table);
         let decoded = decode_table(&bytes).unwrap();
         assert_eq!(decoded.get(&op), table.get(&op));
+    }
+
+    #[test]
+    fn journal_replays_complete_records_and_ignores_torn_tail() {
+        let op = [9u8; 16];
+        let record = DedupRecord {
+            content_hash: [1u8; 32],
+            store_id: [2u8; 16],
+            segment_id: [3u8; 16],
+            item_id: [4u8; 16],
+            event_id: [5u8; 16],
+            event_kind: EventKind::Put,
+            durability: DurabilityMode::Durable,
+            offset: 42,
+        };
+        let mut bytes = Vec::from(JOURNAL_MAGIC.as_slice());
+        bytes.extend_from_slice(&JOURNAL_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&encode_journal_record(op, &record));
+        bytes.extend_from_slice(&encode_journal_record([8u8; 16], &record)[..37]);
+        let mut table = WriteDedupTable::new();
+        replay_journal(&bytes, &mut table);
+        assert_eq!(table.get(&op), Some(&record));
+        assert!(table.get(&[8u8; 16]).is_none());
+    }
+
+    #[test]
+    fn journal_growth_is_constant_per_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(WRITE_DEDUP_JOURNAL_FILE);
+        let record = DedupRecord {
+            content_hash: [1u8; 32],
+            store_id: [2u8; 16],
+            segment_id: [3u8; 16],
+            item_id: [4u8; 16],
+            event_id: [5u8; 16],
+            event_kind: EventKind::Put,
+            durability: DurabilityMode::Durable,
+            offset: 42,
+        };
+        append_write_dedup(&path, [7u8; 16], &record).unwrap();
+        let first = fs::metadata(&path).unwrap().len();
+        append_write_dedup(&path, [8u8; 16], &record).unwrap();
+        let second = fs::metadata(&path).unwrap().len();
+        assert_eq!(first, (JOURNAL_HEADER_LEN + JOURNAL_RECORD_LEN) as u64);
+        assert_eq!(second - first, JOURNAL_RECORD_LEN as u64);
     }
 }

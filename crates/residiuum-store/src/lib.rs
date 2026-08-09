@@ -331,7 +331,8 @@ pub use tier::{
     TIER_PLACEMENT_FILE,
 };
 pub use write_dedup::{
-    content_identity, write_dedup_path, DedupRecord, WriteDedupTable, WRITE_DEDUP_FILE,
+    append_write_dedup_batch, content_identity, write_dedup_journal_path, write_dedup_path,
+    DedupRecord, WriteDedupTable, WRITE_DEDUP_FILE, WRITE_DEDUP_JOURNAL_FILE,
 };
 pub use writer_lock::{
     PidLiveness, StoreOpenOptions, WriterLock, WriterLockClass, WriterLockObservation,

@@ -55,7 +55,8 @@ use crate::tier::{
 };
 use crate::token_keys::ContinuationKeyring;
 use crate::write_dedup::{
-    load_write_dedup, save_write_dedup, write_dedup_path, DedupRecord, WriteDedupTable,
+    append_write_dedup, load_write_dedup, save_write_dedup, write_dedup_journal_path,
+    write_dedup_path, DedupRecord, WriteDedupTable,
 };
 use crate::writer_lock::{StoreOpenOptions, WriterLock, WriterLockObservation};
 use residiuum_format::{
@@ -3238,20 +3239,23 @@ impl Store {
         content_hash: [u8; 32],
         receipt: &WriteReceipt,
     ) -> Result<(), StoreError> {
-        self.write_dedup.insert(
+        let record = DedupRecord {
+            content_hash,
+            store_id: receipt.store_id,
+            segment_id: receipt.segment_id,
+            item_id: receipt.item_id,
+            event_id: receipt.event_id,
+            event_kind: receipt.event_kind,
+            durability: receipt.durability,
+            offset: receipt.offset,
+        };
+        append_write_dedup(
+            &write_dedup_journal_path(&self.paths),
             operation_id,
-            DedupRecord {
-                content_hash,
-                store_id: receipt.store_id,
-                segment_id: receipt.segment_id,
-                item_id: receipt.item_id,
-                event_id: receipt.event_id,
-                event_kind: receipt.event_kind,
-                durability: receipt.durability,
-                offset: receipt.offset,
-            },
-        );
-        save_write_dedup(&write_dedup_path(&self.paths), &self.write_dedup)
+            &record,
+        )?;
+        self.write_dedup.insert(operation_id, record);
+        Ok(())
     }
 
     /// Atomically resolve or execute an idempotent conditional put.

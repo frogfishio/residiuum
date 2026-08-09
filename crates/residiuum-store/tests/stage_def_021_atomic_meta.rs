@@ -52,14 +52,15 @@ fn store_meta_writes_survive_reopen() {
     let root = dir.path().join("s");
     {
         let mut store = Store::create(&root).unwrap();
-        store
-            .put("k", b"v", DurabilityMode::Durable)
-            .unwrap();
+        store.put("k", b"v", DurabilityMode::Durable).unwrap();
     }
     // Identity files present.
     assert!(root.join("store-info").join("store_id").is_file());
     assert!(root.join("store-info").join("meta").is_file());
-    assert!(root.join("store-info").join("descriptor.residiuum").is_file());
+    assert!(root
+        .join("store-info")
+        .join("descriptor.residiuum")
+        .is_file());
 
     let store = Store::open(&root).unwrap();
     assert_eq!(store.get("k").unwrap().as_deref(), Some(b"v".as_slice()));
@@ -71,9 +72,7 @@ fn index_cache_and_catalog_use_atomic_helper() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("s");
     let mut store = Store::create(&root).unwrap();
-    store
-        .put("a", b"1", DurabilityMode::Durable)
-        .unwrap();
+    store.put("a", b"1", DurabilityMode::Durable).unwrap();
     // Derived caches written after durable put.
     let idx = root.join("indexes").join(PRIMARY_CACHE_FILE);
     assert!(idx.is_file(), "primary index cache should exist");
@@ -111,7 +110,7 @@ fn lifecycle_policy_keeps_previous_and_loads_fallback() {
 }
 
 #[test]
-fn write_dedup_table_keeps_previous_generation() {
+fn write_dedup_journal_replays_complete_prefix_after_torn_tail() {
     let _g = suite_lock();
     let dir = tempdir().unwrap();
     let root = dir.path().join("s");
@@ -122,9 +121,11 @@ fn write_dedup_table_keeps_previous_generation() {
             .record_write_dedup([7u8; 16], [1u8; 32], &receipt)
             .unwrap();
     }
-    let dedup = root.join("store-info").join("write_dedup.v1");
+    let dedup = root
+        .join("store-info")
+        .join(residiuum_store::WRITE_DEDUP_JOURNAL_FILE);
     assert!(dedup.is_file());
-    // Second write creates .prev
+    // A second accepted operation appends rather than replacing the table.
     {
         let mut store = Store::open(&root).unwrap();
         let receipt = store.put("k2", b"v2", DurabilityMode::Durable).unwrap();
@@ -132,21 +133,19 @@ fn write_dedup_table_keeps_previous_generation() {
             .record_write_dedup([8u8; 16], [2u8; 32], &receipt)
             .unwrap();
     }
-    assert!(
-        previous_path(&dedup).is_file(),
-        "write_dedup.v1.prev must be retained"
-    );
-    // Corrupt primary; open must still succeed (loads .prev or empty).
-    fs::write(&dedup, b"GARBAGE").unwrap();
+    let stable_len = fs::metadata(&dedup).unwrap().len();
+    // Simulate a torn final append. The complete prefix must still replay.
+    use std::io::Write as _;
+    let mut file = fs::OpenOptions::new().append(true).open(&dedup).unwrap();
+    file.write_all(b"TORN").unwrap();
+    assert!(fs::metadata(&dedup).unwrap().len() > stable_len);
     let store = Store::open(&root).unwrap();
     assert_eq!(store.get("k").unwrap().as_deref(), Some(b"v".as_slice()));
-    // Prev generation should still have op 7 if primary is garbage.
-    let retry = store
-        .resolve_write_dedup(&[7u8; 16], &[1u8; 32])
-        .unwrap();
+    // The complete journal prefix still contains operation 7.
+    let retry = store.resolve_write_dedup(&[7u8; 16], &[1u8; 32]).unwrap();
     assert!(
         retry.is_some(),
-        "previous write_dedup generation must supply the retry receipt"
+        "complete journal prefix must supply the retry receipt"
     );
 }
 

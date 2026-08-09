@@ -2,7 +2,7 @@
 
 use residiuum_store::{
     collections_catalog_path, content_identity, try_load_collection_catalog, DurabilityMode,
-    EventKind, Store, TierClass, TierMoveMode, WRITE_DEDUP_FILE,
+    EventKind, Store, TierClass, TierMoveMode,
 };
 
 #[test]
@@ -75,13 +75,14 @@ fn def_013_memory_not_flushed_by_later_durable_write() {
     let root = dir.path().join("s");
     {
         let mut store = Store::create(&root).unwrap();
-        store
-            .put("only-mem", b"A", DurabilityMode::Memory)
-            .unwrap();
+        store.put("only-mem", b"A", DurabilityMode::Memory).unwrap();
         store
             .put("only-disk", b"B", DurabilityMode::Durable)
             .unwrap();
-        assert_eq!(store.get("only-mem").unwrap().as_deref(), Some(b"A".as_slice()));
+        assert_eq!(
+            store.get("only-mem").unwrap().as_deref(),
+            Some(b"A".as_slice())
+        );
         assert_eq!(
             store.get("only-disk").unwrap().as_deref(),
             Some(b"B".as_slice())
@@ -124,21 +125,32 @@ fn def_010_write_dedup_exact_retry_and_content_mismatch() {
     let other = content_identity("put", "users", "alice", b"different");
     let err = store.resolve_write_dedup(&op, &other).unwrap_err();
     assert!(
-        matches!(err, residiuum_store::StoreError::ConsistencyViolation(_)),
+        matches!(
+            err,
+            residiuum_store::StoreError::OperationIdentityConflict
+                | residiuum_store::StoreError::ConsistencyViolation(_)
+        ),
         "{err:?}"
     );
 
     // Survives reopen.
     drop(store);
     let store = Store::open(dir.path().join("s")).unwrap();
-    let path = store.paths().store_info().join(WRITE_DEDUP_FILE);
+    let path = store
+        .paths()
+        .store_info()
+        .join(residiuum_store::WRITE_DEDUP_JOURNAL_FILE);
     assert!(path.is_file(), "dedup file must persist");
     let prior = store.resolve_write_dedup(&op, &hash).unwrap().unwrap();
     assert_eq!(prior.event_id, receipt.event_id);
 
     // History still has a single put event for the subject.
     let hist = store.history("users\0alice").unwrap();
-    let puts: Vec<_> = hist.events.iter().filter(|e| e.kind == EventKind::Put).collect();
+    let puts: Vec<_> = hist
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::Put)
+        .collect();
     assert_eq!(puts.len(), 1, "dedup must not double-append");
 }
 

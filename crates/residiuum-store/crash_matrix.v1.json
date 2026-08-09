@@ -413,13 +413,12 @@
     },
     {
       "id": "write_dedup_persist",
-      "description": "Persist write_dedup.v1 after authoritative append (DEF-010)",
+      "description": "Append a fixed-size checksummed operation outcome after authoritative append (DEF-010)",
       "persistence_order": [
         "authoritative_append",
-        "dedup.table_insert_memory",
-        "dedup.tmp_write",
-        "dedup.rename",
-        "dedup.parent_sync"
+        "dedup.journal_append",
+        "dedup.journal_sync",
+        "dedup.table_insert_memory"
       ],
       "failpoints": [
         {
@@ -430,18 +429,18 @@
             "no_fabricated_commit": true,
             "salvageable": true,
             "prior_durable_retained": true,
-            "notes": "Append durable; dedup table missing \u2192 retry may create a second event until DEF-010 full recovery lands. Skeleton records expected honesty gap."
+            "notes": "Authoritative append is durable; the outcome journal did not advance, so retry recovery must consult authoritative media."
           }
         },
         {
-          "name": "store.dedup.after_rename",
+          "name": "store.dedup.after_append",
           "ci_subset": false,
           "expected_on_reopen": {
             "acknowledged_visible": true,
             "no_fabricated_commit": true,
             "salvageable": true,
             "prior_durable_retained": true,
-            "notes": "Dedup table present; exact retry returns original receipt."
+            "notes": "The checksummed journal record crossed its stable boundary; exact retry returns the original receipt."
           }
         }
       ]
