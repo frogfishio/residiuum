@@ -455,6 +455,34 @@ fn coordinator_loop(inner: Arc<CoordinatorInner>) {
             }
 
             let first = take_batch(&mut state);
+            // A follower gets the same bounded fill opportunity as a leading
+            // cohort. Taking it immediately fragmented the second half of a
+            // two-cohort window and added avoidable durability boundaries.
+            if !state.queue.is_empty()
+                && state.queue.len() < MAX_COHORT_ENTRIES
+                && state.queued_bytes < MAX_COHORT_BYTES
+                && !state.shutdown
+            {
+                let follower_deadline = Instant::now() + MAX_COLLECTION_DELAY;
+                while !state.queue.is_empty()
+                    && state.queue.len() < MAX_COHORT_ENTRIES
+                    && state.queued_bytes < MAX_COHORT_BYTES
+                    && !state.shutdown
+                {
+                    let Some(remaining) = follower_deadline.checked_duration_since(Instant::now())
+                    else {
+                        break;
+                    };
+                    let (next_state, timed_out) = match inner.wake.wait_timeout(state, remaining) {
+                        Ok((state, timeout)) => (state, timeout.timed_out()),
+                        Err(_) => return,
+                    };
+                    state = next_state;
+                    if timed_out {
+                        break;
+                    }
+                }
+            }
             let second = take_batch(&mut state);
             (first, second)
         };
