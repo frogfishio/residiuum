@@ -11,7 +11,7 @@ use residiuum_authority::{
 use residiuum_heap::Rights;
 use residiuum_sdk::driver::{
     Client, Collection, CreateCollectionOptions, EmbeddedOptions, PutManyEntry, ScanOptions,
-    MAX_SCAN_PAGE_SIZE,
+    DEFAULT_EMBEDDED_QUEUE_CAPACITY, MAX_SCAN_PAGE_SIZE,
 };
 use residiuum_sdk::ResidiuumDeployment;
 use serde_json::{json, Value};
@@ -186,6 +186,14 @@ fn smart_client_durable_retained_media_campaign() {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(30 * GIB);
+    let scheduler_queue_capacity = std::env::var("RESIDIUUM_SMART_DURABLE_QUEUE_CAPACITY")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            concurrency
+                .saturating_mul(client_batch.max(4))
+                .max(DEFAULT_EMBEDDED_QUEUE_CAPACITY)
+        });
     assert!(logical_target > 0);
     assert!(payload_bytes > 0);
     assert!(concurrency > 0);
@@ -216,7 +224,7 @@ fn smart_client_durable_retained_media_campaign() {
     let client = block_on(Client::open_embedded(
         EmbeddedOptions::new(&store)
             .workers(read_workers)
-            .queue_capacity(concurrency.saturating_mul(client_batch.max(4))),
+            .queue_capacity(scheduler_queue_capacity),
     ))
     .unwrap();
     let open_ns = open_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
@@ -322,7 +330,7 @@ fn smart_client_durable_retained_media_campaign() {
     let reopened = block_on(Client::open_embedded(
         EmbeddedOptions::new(&store)
             .workers(read_workers)
-            .queue_capacity(concurrency.saturating_mul(client_batch.max(4))),
+            .queue_capacity(scheduler_queue_capacity),
     ))
     .unwrap();
     let reopened_heap = block_on(reopened.open_named_heap("campaign", capability)).unwrap();
@@ -374,6 +382,7 @@ fn smart_client_durable_retained_media_campaign() {
         "concurrency": concurrency,
         "client_batch": client_batch,
         "read_query_workers": read_workers,
+        "scheduler_queue_capacity": scheduler_queue_capacity,
         "free_bytes_at_start": free_at_start,
         "file_logical_bytes_after_close": file_logical_bytes_after_close,
         "allocated_bytes_after_close": allocated_bytes_after_close,
@@ -424,6 +433,9 @@ fn smart_client_durable_retained_media_campaign() {
             "parallel_cooked_operations": inspection.operation_commits.parallel_cooked_operations,
             "reserved_cooked_cohorts": inspection.operation_commits.reserved_cooked_cohorts,
             "reserved_cooked_operations": inspection.operation_commits.reserved_cooked_operations,
+            "overlapped_cooked_cohorts": inspection.operation_commits.overlapped_cooked_cohorts,
+            "overlapped_cooked_operations": inspection.operation_commits.overlapped_cooked_operations,
+            "phase_ns_aggregate_may_overlap": inspection.operation_commits.overlapped_cooked_cohorts > 0,
             "phase_ns": {
                 "total": inspection.operation_commits.cohort_total_ns,
                 "prepare": inspection.operation_commits.cohort_prepare_ns,

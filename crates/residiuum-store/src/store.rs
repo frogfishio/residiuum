@@ -651,9 +651,9 @@ pub struct Store {
     /// lock. Frames stay in the active-segment buffer until one gathered tail
     /// write crosses the cohort boundary.
     operation_cohort_gathering: bool,
-    /// Exact product reservation currently cooking outside the store lock.
-    /// Direct mutation refuses while set; reads remain available.
-    operation_reservation_active: Option<[u8; 16]>,
+    /// Ordered exact product reservations cooking outside the store lock.
+    /// V1 permits at most two; direct mutation refuses while non-empty.
+    operation_reservation_chain: Vec<[u8; 16]>,
     /// Records cooked concurrently by the most recent operation cohort.
     last_operation_parallel_cooked: usize,
     /// Redacted phase timing for the most recent successful operation cohort.
@@ -947,7 +947,7 @@ impl Store {
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
             operation_cohort_gathering: false,
-            operation_reservation_active: None,
+            operation_reservation_chain: Vec::new(),
             last_operation_parallel_cooked: 0,
             last_operation_cohort_timing: OperationCohortTiming::default(),
             seal_pipeline: Some(SealPipeline::start()),
@@ -1077,7 +1077,7 @@ impl Store {
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
             operation_cohort_gathering: false,
-            operation_reservation_active: None,
+            operation_reservation_chain: Vec::new(),
             last_operation_parallel_cooked: 0,
             last_operation_cohort_timing: OperationCohortTiming::default(),
             seal_pipeline: Some(SealPipeline::start()),
@@ -1318,7 +1318,7 @@ impl Store {
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
             operation_cohort_gathering: false,
-            operation_reservation_active: None,
+            operation_reservation_chain: Vec::new(),
             last_operation_parallel_cooked: 0,
             last_operation_cohort_timing: OperationCohortTiming::default(),
             seal_pipeline: None,
@@ -3452,7 +3452,7 @@ impl Store {
         &mut self,
         items: &[OperationMutation<'_>],
     ) -> Result<Vec<Result<OperationPutOutcome, StoreError>>, StoreError> {
-        if self.operation_reservation_active.is_some() {
+        if !self.operation_reservation_chain.is_empty() {
             return Err(StoreError::AdaptiveWriterActive);
         }
         let cohort_started = Instant::now();
@@ -3673,7 +3673,7 @@ impl Store {
         if self.awo_writer_poisoned {
             return Err(StoreError::AdaptiveWriterPoisoned);
         }
-        if self.operation_reservation_active.is_some()
+        if !self.operation_reservation_chain.is_empty()
             || items.len() < 2
             || self.writer_shards() != 1
         {
@@ -3776,9 +3776,9 @@ impl Store {
             writer_sequence += 1;
         }
 
-        self.operation_reservation_active = Some(reservation_id);
+        self.operation_reservation_chain.push(reservation_id);
         if let Err(error) = crate::failpoint::hit("awo.reserve.after") {
-            self.operation_reservation_active = None;
+            self.operation_reservation_chain.clear();
             return Err(error);
         }
         Ok(Some(OperationPutReservation {
@@ -3793,17 +3793,233 @@ impl Store {
         }))
     }
 
+    /// Reserve one follower after its predecessor has cooked but before that
+    /// predecessor crosses the media boundary.
+    ///
+    /// The follower is admitted only when both cohorts are subject/operation
+    /// disjoint and the predecessor cannot rotate the active segment. Its exact
+    /// checkpoint is the deterministic post-persist state of the predecessor.
+    pub(crate) fn reserve_following_operation_put_cohort(
+        &mut self,
+        items: &[OwnedOperationPut],
+        first_ticket: u64,
+        predecessor: &OperationPutReservation,
+        predecessor_cooked: &[crate::adaptive_write::CookedMutation],
+    ) -> Result<Option<OperationPutReservation>, StoreError> {
+        let started = Instant::now();
+        if self.awo_writer_poisoned {
+            return Err(StoreError::AdaptiveWriterPoisoned);
+        }
+        if self.operation_reservation_chain.len() != 1
+            || self.operation_reservation_chain.first().copied() != Some(predecessor.reservation_id)
+            || items.len() < 2
+            || self.writer_shards() != 1
+        {
+            return Ok(None);
+        }
+        if predecessor_cooked.len() != predecessor.items.len()
+            || predecessor_cooked
+                .iter()
+                .zip(&predecessor.items)
+                .any(|(cooked, item)| cooked.ticket != item.ticket)
+        {
+            return Err(StoreError::ConsistencyViolation(
+                "operation follower predecessor cook mismatch".into(),
+            ));
+        }
+        let active_matches = self
+            .active_ref(0)
+            .map(|writer| {
+                writer.segment_id == predecessor.segment_id
+                    && writer.segment.checkpoint() == predecessor.checkpoint
+                    && writer.item_events == predecessor.item_events_before
+            })
+            .unwrap_or(false);
+        if !active_matches {
+            return Err(StoreError::ConsistencyViolation(
+                "operation follower predecessor checkpoint changed".into(),
+            ));
+        }
+
+        let predecessor_bytes = predecessor_cooked.iter().try_fold(0u64, |total, cooked| {
+            total.checked_add(cooked.encoded_frame.len() as u64)
+        });
+        let Some(predecessor_bytes) = predecessor_bytes else {
+            return Err(StoreError::ConsistencyViolation(
+                "operation follower frame length overflow".into(),
+            ));
+        };
+        let predecessor_end = predecessor
+            .checkpoint
+            .base_offset
+            .checked_add(predecessor.checkpoint.retained_len as u64)
+            .and_then(|value| value.checked_add(predecessor_bytes))
+            .ok_or_else(|| {
+                StoreError::ConsistencyViolation("operation follower offset exhausted".into())
+            })?;
+        // `maybe_auto_seal` runs before a predecessor completes. A follower may
+        // only exist when that call is provably a no-op.
+        if predecessor_end >= self.seal_threshold {
+            return Ok(None);
+        }
+
+        self.ensure_write_dedup_reconciled()?;
+        let effective_max = self
+            .large_value_policy
+            .effective_with(self.limits.max_body_len);
+        let predecessor_subjects: HashSet<&[u8]> = predecessor
+            .items
+            .iter()
+            .map(|item| item.subject.as_ref())
+            .collect();
+        let predecessor_operations: HashSet<[u8; 16]> = predecessor
+            .items
+            .iter()
+            .map(|item| item.operation_id)
+            .collect();
+        let mut subjects = HashSet::<&[u8]>::with_capacity(items.len());
+        let mut operation_ids = HashSet::<[u8; 16]>::with_capacity(items.len());
+        for item in items {
+            if predecessor_subjects.contains(item.subject.as_ref())
+                || predecessor_operations.contains(&item.operation_id)
+                || !subjects.insert(item.subject.as_ref())
+                || !operation_ids.insert(item.operation_id)
+                || item.subject.len() > MAX_SUBJECT_LEN
+                || item.body.len() as u64 > effective_max
+                || !matches!(
+                    self.large_value_policy.admit(item.body.len()),
+                    Ok(AdmitDecision {
+                        layout: PayloadLayout::Inline,
+                        ..
+                    })
+                )
+                || self
+                    .resolve_write_dedup(&item.operation_id, &item.content_hash)
+                    .map_or(true, |outcome| outcome.is_some())
+                || self
+                    .check_write_condition(item.subject.as_ref(), item.condition)
+                    .is_err()
+            {
+                return Ok(None);
+            }
+        }
+
+        first_ticket
+            .checked_add(items.len() as u64)
+            .ok_or_else(|| {
+                StoreError::ConsistencyViolation("operation cooker ticket exhausted".into())
+            })?;
+        let writer_sequence = predecessor
+            .checkpoint
+            .writer_sequence
+            .checked_add(predecessor.items.len() as u64)
+            .ok_or_else(|| {
+                StoreError::ConsistencyViolation("operation writer sequence exhausted".into())
+            })?;
+        writer_sequence
+            .checked_add(items.len() as u64)
+            .ok_or_else(|| {
+                StoreError::ConsistencyViolation("operation writer sequence exhausted".into())
+            })?;
+        let frame_count = predecessor
+            .checkpoint
+            .frame_count
+            .checked_add(predecessor.items.len() as u64)
+            .ok_or_else(|| {
+                StoreError::ConsistencyViolation("operation frame counter exhausted".into())
+            })?;
+        let item_events_before = predecessor
+            .item_events_before
+            .checked_add(predecessor.items.len() as u64)
+            .ok_or_else(|| {
+                StoreError::ConsistencyViolation("operation item-event counter exhausted".into())
+            })?;
+        item_events_before
+            .checked_add(items.len() as u64)
+            .ok_or_else(|| {
+                StoreError::ConsistencyViolation("operation item-event counter exhausted".into())
+            })?;
+
+        let checkpoint = residiuum_format::ActiveSegmentCheckpoint {
+            base_offset: predecessor_end,
+            retained_len: 0,
+            writer_sequence,
+            frame_count,
+            sealed: false,
+        };
+        let reservation_id = random_id()?;
+        let mut reserved = Vec::with_capacity(items.len());
+        let mut cook_tasks = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let admit = self.large_value_policy.admit(item.body.len())?;
+            let item_id = self
+                .index
+                .get(item.subject.as_ref())
+                .map(IndexEntry::item_id)
+                .unwrap_or_else(|| subject_item_id(item.subject.as_ref()));
+            let event_id = self.next_event_id()?;
+            let ticket = crate::adaptive_write::LaneTicket {
+                ticket: first_ticket + index as u64,
+            };
+            cook_tasks.push(crate::adaptive_write::CookTask {
+                ticket,
+                subject: Arc::clone(&item.subject),
+                body: Arc::clone(&item.body),
+                store_id: self.store_id,
+                segment_id: predecessor.segment_id,
+                item_id,
+                event_id,
+                writer_sequence: writer_sequence + index as u64,
+                created_ns: now_ns(),
+                event_kind: EventKind::Put,
+                operation_id: Some(item.operation_id),
+                operation_content_hash: Some(item.content_hash),
+            });
+            reserved.push(ReservedOperationPut {
+                ticket,
+                subject: Arc::clone(&item.subject),
+                body: Arc::clone(&item.body),
+                item_id,
+                event_id,
+                admit,
+                operation_id: item.operation_id,
+                content_hash: item.content_hash,
+            });
+        }
+
+        self.operation_reservation_chain.push(reservation_id);
+        if let Err(error) = crate::failpoint::hit("awo.reserve.after") {
+            self.operation_reservation_chain.pop();
+            return Err(error);
+        }
+        Ok(Some(OperationPutReservation {
+            reservation_id,
+            segment_id: predecessor.segment_id,
+            checkpoint,
+            item_events_before,
+            items: reserved,
+            cook_tasks,
+            reserved_at: started,
+            prepare_ns: elapsed_ns(started),
+        }))
+    }
+
     /// Abort a reservation before any physical installation.
     pub(crate) fn abort_operation_put_reservation(
         &mut self,
         reservation: OperationPutReservation,
     ) -> Result<(), StoreError> {
-        if self.operation_reservation_active != Some(reservation.reservation_id) {
+        let Some(position) = self
+            .operation_reservation_chain
+            .iter()
+            .position(|id| *id == reservation.reservation_id)
+        else {
             return Err(StoreError::ConsistencyViolation(
                 "operation reservation abort identity mismatch".into(),
             ));
-        }
-        self.operation_reservation_active = None;
+        };
+        // Aborting a predecessor invalidates every conceptual checkpoint after it.
+        self.operation_reservation_chain.truncate(position);
         Ok(())
     }
 
@@ -3816,7 +4032,7 @@ impl Store {
         let cohort_started = reservation.reserved_at;
         self.last_operation_parallel_cooked = 0;
         self.last_operation_cohort_timing = OperationCohortTiming::default();
-        if self.operation_reservation_active != Some(reservation.reservation_id) {
+        if self.operation_reservation_chain.first().copied() != Some(reservation.reservation_id) {
             return Err(StoreError::ConsistencyViolation(
                 "operation reservation install identity mismatch".into(),
             ));
@@ -3827,7 +4043,7 @@ impl Store {
                 .zip(&reservation.items)
                 .any(|(cooked, item)| cooked.ticket != item.ticket)
         {
-            self.operation_reservation_active = None;
+            self.operation_reservation_chain.clear();
             return Err(StoreError::ConsistencyViolation(
                 "operation reservation cooked outcome mismatch".into(),
             ));
@@ -3841,7 +4057,7 @@ impl Store {
             })
             .unwrap_or(false);
         if !active_matches {
-            self.operation_reservation_active = None;
+            self.operation_reservation_chain.clear();
             return Err(StoreError::ConsistencyViolation(
                 "operation reservation active checkpoint changed".into(),
             ));
@@ -3856,7 +4072,7 @@ impl Store {
                     writer.item_events = reservation.item_events_before;
                 }
                 self.operation_cohort_gathering = false;
-                self.operation_reservation_active = None;
+                self.operation_reservation_chain.clear();
                 return Err(error);
             }
             let append_started = Instant::now();
@@ -3873,7 +4089,7 @@ impl Store {
                         writer.item_events = reservation.item_events_before;
                     }
                     self.operation_cohort_gathering = false;
-                    self.operation_reservation_active = None;
+                    self.operation_reservation_chain.clear();
                     return Err(error.into());
                 }
             };
@@ -3899,7 +4115,7 @@ impl Store {
                     writer.item_events = reservation.item_events_before;
                 }
                 self.operation_cohort_gathering = false;
-                self.operation_reservation_active = None;
+                self.operation_reservation_chain.clear();
                 return Err(error);
             }
         }
@@ -3910,23 +4126,23 @@ impl Store {
                 let _ = writer.segment.restore_checkpoint(&reservation.checkpoint);
                 writer.item_events = reservation.item_events_before;
             }
-            self.operation_reservation_active = None;
+            self.operation_reservation_chain.clear();
             return Err(error);
         }
         let media_started = Instant::now();
         if let Err(error) = self.persist_all_actives(DurabilityMode::Durable) {
-            self.operation_reservation_active = None;
+            self.operation_reservation_chain.clear();
             self.awo_writer_poisoned = true;
             return Err(error);
         }
         let media_ns = elapsed_ns(media_started);
         if let Err(error) = crate::failpoint::hit("awo.persist.after_write") {
-            self.operation_reservation_active = None;
+            self.operation_reservation_chain.clear();
             self.awo_writer_poisoned = true;
             return Err(error);
         }
         if let Err(error) = crate::failpoint::hit("awo.persist.after_sync") {
-            self.operation_reservation_active = None;
+            self.operation_reservation_chain.clear();
             self.awo_writer_poisoned = true;
             return Err(error);
         }
@@ -3936,7 +4152,7 @@ impl Store {
         }
 
         if let Err(error) = crate::failpoint::hit("awo.publish.before") {
-            self.operation_reservation_active = None;
+            self.operation_reservation_chain.clear();
             self.awo_writer_poisoned = true;
             return Err(error);
         }
@@ -3982,14 +4198,14 @@ impl Store {
             }));
         }
         if let Err(error) = crate::failpoint::hit("awo.publish.after") {
-            self.operation_reservation_active = None;
+            self.operation_reservation_chain.clear();
             self.awo_writer_poisoned = true;
             return Err(error);
         }
 
         let rotation_started = Instant::now();
         if let Err(error) = self.maybe_auto_seal(0) {
-            self.operation_reservation_active = None;
+            self.operation_reservation_chain.clear();
             self.awo_writer_poisoned = true;
             return Err(error);
         }
@@ -4004,11 +4220,11 @@ impl Store {
             self.write_dedup.insert(operation_id, record);
         }
         if let Err(error) = crate::failpoint::hit("awo.complete.before") {
-            self.operation_reservation_active = None;
+            self.operation_reservation_chain.clear();
             self.awo_writer_poisoned = true;
             return Err(error);
         }
-        self.operation_reservation_active = None;
+        self.operation_reservation_chain.remove(0);
         self.last_operation_parallel_cooked = reservation.items.len();
         let total_ns = elapsed_ns(cohort_started);
         let outcome_journal_ns = elapsed_ns(outcome_started);
@@ -4514,7 +4730,7 @@ impl Store {
         if self.awo_lease_active {
             return Err(StoreError::AdaptiveWriterActive);
         }
-        if self.operation_reservation_active.is_some() {
+        if !self.operation_reservation_chain.is_empty() {
             return Err(StoreError::AdaptiveWriterActive);
         }
         Ok(())
@@ -10355,6 +10571,141 @@ mod tests {
         store
             .put("unblocked", b"after-install", DurabilityMode::Durable)
             .unwrap();
+    }
+
+    #[test]
+    fn operation_follower_cooks_before_predecessor_install_and_installs_in_order() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::create(dir.path()).unwrap();
+        store.enable_boundary_probe();
+        let make_items = |prefix: &str, id: u8| {
+            vec![
+                OwnedOperationPut {
+                    subject: Arc::from(format!("reserved/{prefix}/a").into_bytes()),
+                    body: Arc::from(b"alpha".as_slice()),
+                    condition: WriteCondition::Absent,
+                    operation_id: [id; 16],
+                    content_hash: [id.wrapping_add(0x40); 32],
+                },
+                OwnedOperationPut {
+                    subject: Arc::from(format!("reserved/{prefix}/b").into_bytes()),
+                    body: Arc::from(b"bravo".as_slice()),
+                    condition: WriteCondition::Absent,
+                    operation_id: [id.wrapping_add(1); 16],
+                    content_hash: [id.wrapping_add(0x41); 32],
+                },
+            ]
+        };
+        let first_items = make_items("first", 0x71);
+        let mut first = store
+            .reserve_operation_put_cohort(&first_items, 0)
+            .unwrap()
+            .expect("eligible predecessor");
+        let first_cooked: Vec<_> = first
+            .cook_tasks
+            .drain(..)
+            .map(|task| crate::adaptive_write::CookedMutation {
+                ticket: task.ticket,
+                encoded_frame: crate::adaptive_write::cook_item_frame(&task).unwrap(),
+            })
+            .collect();
+        let second_items = make_items("second", 0x73);
+        let second = store
+            .reserve_following_operation_put_cohort(&second_items, 2, &first, &first_cooked)
+            .unwrap()
+            .expect("eligible follower");
+        let second_cooked: Vec<_> = second
+            .cook_tasks
+            .iter()
+            .map(|task| crate::adaptive_write::CookedMutation {
+                ticket: task.ticket,
+                encoded_frame: crate::adaptive_write::cook_item_frame(task).unwrap(),
+            })
+            .collect();
+
+        store
+            .install_operation_put_reservation(first, first_cooked)
+            .unwrap();
+        assert!(matches!(
+            store.put("blocked", b"until-follower", DurabilityMode::Durable),
+            Err(StoreError::AdaptiveWriterActive)
+        ));
+        store
+            .install_operation_put_reservation(second, second_cooked)
+            .unwrap();
+
+        assert_eq!(
+            store.get("reserved/first/a").unwrap().as_deref(),
+            Some(b"alpha".as_slice())
+        );
+        assert_eq!(
+            store.get("reserved/second/b").unwrap().as_deref(),
+            Some(b"bravo".as_slice())
+        );
+        let probe = store.take_boundary_snapshot();
+        assert_eq!(probe.counters.count(BoundaryKind::FileWrite), 2);
+        assert_eq!(probe.counters.count(BoundaryKind::FileSync), 2);
+    }
+
+    #[test]
+    fn operation_follower_refuses_cross_cohort_subject_dependency() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::create(dir.path()).unwrap();
+        let first_items = vec![
+            OwnedOperationPut {
+                subject: Arc::from(b"dependent/shared".as_slice()),
+                body: Arc::from(b"first".as_slice()),
+                condition: WriteCondition::Absent,
+                operation_id: [0x81; 16],
+                content_hash: [0x91; 32],
+            },
+            OwnedOperationPut {
+                subject: Arc::from(b"dependent/other".as_slice()),
+                body: Arc::from(b"other".as_slice()),
+                condition: WriteCondition::Absent,
+                operation_id: [0x82; 16],
+                content_hash: [0x92; 32],
+            },
+        ];
+        let mut first = store
+            .reserve_operation_put_cohort(&first_items, 0)
+            .unwrap()
+            .expect("eligible predecessor");
+        let first_cooked: Vec<_> = first
+            .cook_tasks
+            .drain(..)
+            .map(|task| crate::adaptive_write::CookedMutation {
+                ticket: task.ticket,
+                encoded_frame: crate::adaptive_write::cook_item_frame(&task).unwrap(),
+            })
+            .collect();
+        let dependent = vec![
+            OwnedOperationPut {
+                subject: Arc::from(b"dependent/shared".as_slice()),
+                body: Arc::from(b"second".as_slice()),
+                condition: WriteCondition::Unconditional,
+                operation_id: [0x83; 16],
+                content_hash: [0x93; 32],
+            },
+            OwnedOperationPut {
+                subject: Arc::from(b"dependent/last".as_slice()),
+                body: Arc::from(b"last".as_slice()),
+                condition: WriteCondition::Absent,
+                operation_id: [0x84; 16],
+                content_hash: [0x94; 32],
+            },
+        ];
+        assert!(store
+            .reserve_following_operation_put_cohort(&dependent, 2, &first, &first_cooked)
+            .unwrap()
+            .is_none());
+        store
+            .install_operation_put_reservation(first, first_cooked)
+            .unwrap();
+        assert_eq!(
+            store.get("dependent/shared").unwrap().as_deref(),
+            Some(b"first".as_slice())
+        );
     }
 
     #[test]

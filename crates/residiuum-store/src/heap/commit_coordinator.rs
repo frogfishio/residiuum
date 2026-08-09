@@ -63,11 +63,17 @@ pub struct OperationCommitStats {
     pub reserved_cooked_cohorts: u64,
     /// Operations installed through exact out-of-lock reservations.
     pub reserved_cooked_operations: u64,
-    /// Aggregate store-lock wall time across completed cohorts.
+    /// Follower cohorts whose cooking overlapped predecessor durable I/O.
+    pub overlapped_cooked_cohorts: u64,
+    /// Operations in those overlapped follower cohorts.
+    pub overlapped_cooked_operations: u64,
+    /// Aggregate reservation-to-publication time across completed cohorts.
+    /// Depth-two cohorts overlap, so this is not additive client wall time.
     pub cohort_total_ns: u64,
     /// Aggregate deduplication/eligibility preparation wall time.
     pub cohort_prepare_ns: u64,
-    /// Aggregate frame cook, install and visibility-publication wall time.
+    /// Aggregate frame cook/wait, install and visibility-publication time.
+    /// A follower's value includes time overlapped with predecessor durable I/O.
     pub cohort_cook_install_publish_ns: u64,
     /// Aggregate authoritative write and stable-boundary wall time.
     pub cohort_media_boundary_ns: u64,
@@ -98,6 +104,8 @@ struct CoordinatorCounters {
     parallel_cooked_operations: AtomicU64,
     reserved_cooked_cohorts: AtomicU64,
     reserved_cooked_operations: AtomicU64,
+    overlapped_cooked_cohorts: AtomicU64,
+    overlapped_cooked_operations: AtomicU64,
     cohort_total_ns: AtomicU64,
     cohort_prepare_ns: AtomicU64,
     cohort_cook_install_publish_ns: AtomicU64,
@@ -135,6 +143,8 @@ impl CoordinatorCounters {
             parallel_cooked_operations: self.parallel_cooked_operations.load(Ordering::Relaxed),
             reserved_cooked_cohorts: self.reserved_cooked_cohorts.load(Ordering::Relaxed),
             reserved_cooked_operations: self.reserved_cooked_operations.load(Ordering::Relaxed),
+            overlapped_cooked_cohorts: self.overlapped_cooked_cohorts.load(Ordering::Relaxed),
+            overlapped_cooked_operations: self.overlapped_cooked_operations.load(Ordering::Relaxed),
             cohort_total_ns: self.cohort_total_ns.load(Ordering::Relaxed),
             cohort_prepare_ns: self.cohort_prepare_ns.load(Ordering::Relaxed),
             cohort_cook_install_publish_ns: self
@@ -444,29 +454,39 @@ fn coordinator_loop(inner: Arc<CoordinatorInner>) {
                 }
             }
 
-            let mut batch = Vec::new();
-            let mut bytes = 0usize;
-            while batch.len() < MAX_COHORT_ENTRIES {
-                let Some(next) = state.queue.front() else {
-                    break;
-                };
-                let next_bytes = next.subject.len().saturating_add(match &next.kind {
-                    PendingOperationKind::Put(body) => body.len(),
-                    PendingOperationKind::Delete => 0,
-                });
-                if !batch.is_empty() && bytes.saturating_add(next_bytes) > MAX_COHORT_BYTES {
-                    break;
-                }
-                let next = state.queue.pop_front().expect("front existed");
-                state.queued_bytes = state.queued_bytes.saturating_sub(next_bytes);
-                bytes = bytes.saturating_add(next_bytes);
-                batch.push(next);
-            }
-            batch
+            let first = take_batch(&mut state);
+            let second = take_batch(&mut state);
+            (first, second)
         };
 
-        install_batch(&inner, batch);
+        if batch.1.is_empty() {
+            install_batch(&inner, batch.0);
+        } else {
+            install_batch_pair(&inner, batch.0, batch.1);
+        }
     }
+}
+
+fn take_batch(state: &mut CoordinatorState) -> Vec<PendingOperation> {
+    let mut batch = Vec::new();
+    let mut bytes = 0usize;
+    while batch.len() < MAX_COHORT_ENTRIES {
+        let Some(next) = state.queue.front() else {
+            break;
+        };
+        let next_bytes = next.subject.len().saturating_add(match &next.kind {
+            PendingOperationKind::Put(body) => body.len(),
+            PendingOperationKind::Delete => 0,
+        });
+        if !batch.is_empty() && bytes.saturating_add(next_bytes) > MAX_COHORT_BYTES {
+            break;
+        }
+        let next = state.queue.pop_front().expect("front existed");
+        state.queued_bytes = state.queued_bytes.saturating_sub(next_bytes);
+        bytes = bytes.saturating_add(next_bytes);
+        batch.push(next);
+    }
+    batch
 }
 
 fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
@@ -584,6 +604,371 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
             fail_batch(batch, &format!("commit cohort failed: {error}"));
         }
     }
+}
+
+fn install_batch_pair(
+    inner: &CoordinatorInner,
+    first: Vec<PendingOperation>,
+    second: Vec<PendingOperation>,
+) {
+    note_batch_attempt(inner, &first);
+    note_batch_attempt(inner, &second);
+    let (first_result, second_result) = commit_batch_pair(inner, &first, &second);
+    finish_precommitted_batch(inner, first, first_result);
+    finish_precommitted_batch(inner, second, second_result);
+}
+
+fn note_batch_attempt(inner: &CoordinatorInner, batch: &[PendingOperation]) {
+    let bytes = batch.iter().fold(0usize, |total, pending| {
+        total
+            .saturating_add(pending.subject.len())
+            .saturating_add(match &pending.kind {
+                PendingOperationKind::Put(body) => body.len(),
+                PendingOperationKind::Delete => 0,
+            })
+    });
+    inner.counters.cohorts.fetch_add(1, Ordering::Relaxed);
+    inner
+        .counters
+        .max_cohort_entries
+        .fetch_max(batch.len(), Ordering::Relaxed);
+    inner
+        .counters
+        .max_cohort_bytes
+        .fetch_max(bytes, Ordering::Relaxed);
+}
+
+type CohortCommitResult = Result<
+    (
+        Vec<Result<OperationPutOutcome, StoreError>>,
+        usize,
+        crate::store::OperationCohortTiming,
+    ),
+    StoreError,
+>;
+
+fn finish_precommitted_batch(
+    inner: &CoordinatorInner,
+    batch: Vec<PendingOperation>,
+    outcomes: CohortCommitResult,
+) {
+    let batch_credits = batch.iter().fold(0usize, |total, pending| {
+        total.saturating_add(pending.credit_bytes)
+    });
+    release_byte_credits(inner, batch_credits);
+    match outcomes {
+        Ok((outcomes, parallel_cooked, timing)) if outcomes.len() == batch.len() => {
+            inner
+                .counters
+                .cohort_total_ns
+                .fetch_add(timing.total_ns, Ordering::Relaxed);
+            inner
+                .counters
+                .cohort_prepare_ns
+                .fetch_add(timing.prepare_ns, Ordering::Relaxed);
+            inner
+                .counters
+                .cohort_cook_install_publish_ns
+                .fetch_add(timing.cook_install_publish_ns, Ordering::Relaxed);
+            inner
+                .counters
+                .cohort_media_boundary_ns
+                .fetch_add(timing.media_boundary_ns, Ordering::Relaxed);
+            inner
+                .counters
+                .cohort_rotation_ns
+                .fetch_add(timing.rotation_ns, Ordering::Relaxed);
+            inner
+                .counters
+                .cohort_outcome_journal_ns
+                .fetch_add(timing.outcome_journal_ns, Ordering::Relaxed);
+            if parallel_cooked > 0 {
+                inner
+                    .counters
+                    .parallel_cooked_cohorts
+                    .fetch_add(1, Ordering::Relaxed);
+                inner
+                    .counters
+                    .parallel_cooked_operations
+                    .fetch_add(parallel_cooked as u64, Ordering::Relaxed);
+            }
+            let committed = outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Ok(value) if !value.deduplicated))
+                .count() as u64;
+            if committed > 0 {
+                inner
+                    .counters
+                    .successful_media_sync_cohorts
+                    .fetch_add(1, Ordering::Relaxed);
+                inner
+                    .counters
+                    .successful_journal_append_cohorts
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            for (pending, outcome) in batch.into_iter().zip(outcomes) {
+                match &outcome {
+                    Ok(value) if value.deduplicated => {
+                        inner.counters.deduplicated.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Ok(_) => {
+                        inner.counters.committed.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        inner.counters.failed.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                pending
+                    .reply
+                    .complete(outcome.map(|value| (value.receipt, value.deduplicated)));
+            }
+        }
+        Ok(_) => {
+            inner
+                .counters
+                .failed
+                .fetch_add(batch.len() as u64, Ordering::Relaxed);
+            fail_batch(batch, "commit cohort returned the wrong outcome count");
+        }
+        Err(error) => {
+            inner
+                .counters
+                .failed
+                .fetch_add(batch.len() as u64, Ordering::Relaxed);
+            fail_batch(batch, &format!("commit cohort failed: {error}"));
+        }
+    }
+}
+
+fn owned_puts(batch: &[PendingOperation]) -> Option<Vec<OwnedOperationPut>> {
+    batch
+        .iter()
+        .map(|pending| match &pending.kind {
+            PendingOperationKind::Put(body) => Some(OwnedOperationPut {
+                subject: Arc::clone(&pending.subject),
+                body: Arc::clone(body),
+                condition: pending.condition,
+                operation_id: pending.operation_id,
+                content_hash: pending.content_hash,
+            }),
+            PendingOperationKind::Delete => None,
+        })
+        .collect()
+}
+
+fn submit_reserved_tasks(
+    inner: &CoordinatorInner,
+    reservation: &mut crate::store::OperationPutReservation,
+) -> Result<usize, StoreError> {
+    let tasks = std::mem::take(&mut reservation.cook_tasks);
+    let task_count = tasks.len();
+    for task in tasks {
+        if let Err(error) = inner.cooker.try_submit(task) {
+            inner.cooker_failed.store(true, Ordering::Release);
+            return Err(StoreError::Io(std::io::Error::other(format!(
+                "operation cooker admission failed: {error:?}"
+            ))));
+        }
+    }
+    Ok(task_count)
+}
+
+fn wait_cooked(
+    inner: &CoordinatorInner,
+    task_count: usize,
+) -> Result<Vec<crate::adaptive_write::CookedMutation>, StoreError> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut cooked = Vec::with_capacity(task_count);
+    let mut cook_error = None;
+    for _ in 0..task_count {
+        let Some((_ticket, outcome)) = inner.cooker.ready().pop_next_until(deadline) else {
+            inner.cooker_failed.store(true, Ordering::Release);
+            return Err(StoreError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "operation cooker timed out",
+            )));
+        };
+        match outcome {
+            CookOutcome::Ok(value) => cooked.push(value),
+            CookOutcome::Err { message, .. } => cook_error = Some(message),
+        }
+    }
+    if let Some(message) = cook_error {
+        return Err(StoreError::Io(std::io::Error::other(format!(
+            "operation cooker failed: {message}"
+        ))));
+    }
+    Ok(cooked)
+}
+
+fn install_reserved(
+    inner: &CoordinatorInner,
+    reservation: crate::store::OperationPutReservation,
+    cooked: Vec<crate::adaptive_write::CookedMutation>,
+) -> CohortCommitResult {
+    inner
+        .physical
+        .lock()
+        .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))
+        .and_then(|mut store| {
+            let outcomes = store.install_operation_put_reservation(reservation, cooked)?;
+            Ok((
+                outcomes,
+                store.last_operation_parallel_cooked(),
+                store.last_operation_cohort_timing(),
+            ))
+        })
+}
+
+fn commit_batch_pair(
+    inner: &CoordinatorInner,
+    first: &[PendingOperation],
+    second: &[PendingOperation],
+) -> (CohortCommitResult, CohortCommitResult) {
+    if inner.cooker_failed.load(Ordering::Acquire) {
+        return (commit_batch(inner, first), commit_batch(inner, second));
+    }
+    let (Some(first_owned), Some(second_owned)) = (owned_puts(first), owned_puts(second)) else {
+        return (commit_batch(inner, first), commit_batch(inner, second));
+    };
+
+    let first_ticket = inner.next_cook_ticket.load(Ordering::Relaxed);
+    let Some(next_ticket) = first_ticket.checked_add(first.len() as u64) else {
+        let error = StoreError::ConsistencyViolation("operation cooker ticket exhausted".into());
+        return (Err(error), commit_batch(inner, second));
+    };
+    let first_reservation = inner
+        .physical
+        .lock()
+        .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))
+        .and_then(|mut store| store.reserve_operation_put_cohort(&first_owned, first_ticket));
+    let mut first_reservation = match first_reservation {
+        Ok(Some(value)) => value,
+        Ok(None) => return (commit_batch(inner, first), commit_batch(inner, second)),
+        Err(error) => return (Err(error), commit_batch(inner, second)),
+    };
+    inner.next_cook_ticket.store(next_ticket, Ordering::Relaxed);
+    let first_count = match submit_reserved_tasks(inner, &mut first_reservation) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = inner
+                .physical
+                .lock()
+                .map(|mut store| store.abort_operation_put_reservation(first_reservation));
+            return (Err(error), commit_batch(inner, second));
+        }
+    };
+    let first_cooked = match wait_cooked(inner, first_count) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = inner
+                .physical
+                .lock()
+                .map(|mut store| store.abort_operation_put_reservation(first_reservation));
+            return (Err(error), commit_batch(inner, second));
+        }
+    };
+
+    let second_ticket = inner.next_cook_ticket.load(Ordering::Relaxed);
+    let Some(after_second_ticket) = second_ticket.checked_add(second.len() as u64) else {
+        let first_result = install_reserved(inner, first_reservation, first_cooked);
+        return (
+            first_result,
+            Err(StoreError::ConsistencyViolation(
+                "operation cooker ticket exhausted".into(),
+            )),
+        );
+    };
+    let second_reservation = inner
+        .physical
+        .lock()
+        .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))
+        .and_then(|mut store| {
+            store.reserve_following_operation_put_cohort(
+                &second_owned,
+                second_ticket,
+                &first_reservation,
+                &first_cooked,
+            )
+        });
+    let mut second_reservation = match second_reservation {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            let first_result = install_reserved(inner, first_reservation, first_cooked);
+            return (first_result, commit_batch(inner, second));
+        }
+        Err(error) => {
+            let _ = inner
+                .physical
+                .lock()
+                .map(|mut store| store.abort_operation_put_reservation(first_reservation));
+            return (Err(error), commit_batch(inner, second));
+        }
+    };
+    inner
+        .next_cook_ticket
+        .store(after_second_ticket, Ordering::Relaxed);
+    let second_count = match submit_reserved_tasks(inner, &mut second_reservation) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = inner.physical.lock().map(|mut store| {
+                let _ = store.abort_operation_put_reservation(second_reservation);
+                store.abort_operation_put_reservation(first_reservation)
+            });
+            return (Err(error), commit_batch(inner, second));
+        }
+    };
+
+    // This is the intended overlap: follower workers are already cooking while
+    // the sole writer performs the predecessor's gathered write + sync.
+    let first_result = install_reserved(inner, first_reservation, first_cooked);
+    let second_cooked = wait_cooked(inner, second_count);
+    if first_result.is_err() {
+        inner.cooker_failed.store(true, Ordering::Release);
+        return (
+            first_result,
+            Err(StoreError::ConsistencyViolation(
+                "operation follower invalidated by predecessor install failure".into(),
+            )),
+        );
+    }
+    inner
+        .counters
+        .reserved_cooked_cohorts
+        .fetch_add(1, Ordering::Relaxed);
+    inner
+        .counters
+        .reserved_cooked_operations
+        .fetch_add(first_count as u64, Ordering::Relaxed);
+    let second_result = match second_cooked {
+        Ok(cooked) => install_reserved(inner, second_reservation, cooked),
+        Err(error) => {
+            let _ = inner
+                .physical
+                .lock()
+                .map(|mut store| store.abort_operation_put_reservation(second_reservation));
+            Err(error)
+        }
+    };
+    if second_result.is_ok() {
+        inner
+            .counters
+            .reserved_cooked_cohorts
+            .fetch_add(1, Ordering::Relaxed);
+        inner
+            .counters
+            .reserved_cooked_operations
+            .fetch_add(second_count as u64, Ordering::Relaxed);
+        inner
+            .counters
+            .overlapped_cooked_cohorts
+            .fetch_add(1, Ordering::Relaxed);
+        inner
+            .counters
+            .overlapped_cooked_operations
+            .fetch_add(second_count as u64, Ordering::Relaxed);
+    }
+    (first_result, second_result)
 }
 
 fn commit_batch(
@@ -816,5 +1201,59 @@ mod tests {
         assert_eq!(complete.admitted_bytes, 0);
         assert!(complete.byte_admission_waits >= 1);
         assert!(complete.peak_admitted_bytes <= complete.admitted_byte_capacity);
+    }
+
+    #[test]
+    fn adjacent_full_cohorts_use_depth_two_overlap() {
+        let directory = tempfile::tempdir().unwrap();
+        let physical = Arc::new(Mutex::new(Store::create(directory.path()).unwrap()));
+        let coordinator = OperationCommitCoordinator::start(Arc::clone(&physical));
+        let physical_guard = physical.lock().unwrap();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let total = MAX_COHORT_ENTRIES * 2 + 1;
+
+        for index in 0..total {
+            let mut operation_id = [0u8; 16];
+            operation_id[..8].copy_from_slice(&(index as u64 + 1).to_le_bytes());
+            let mut content_hash = [0u8; 32];
+            content_hash[..8].copy_from_slice(&(index as u64 + 10_000).to_le_bytes());
+            let reply = completed_tx.clone();
+            coordinator
+                .try_submit_put(
+                    format!("pipeline/{index:05}").into_bytes(),
+                    vec![index as u8; 64],
+                    WriteCondition::Absent,
+                    operation_id,
+                    content_hash,
+                    Box::new(move |result| {
+                        reply.send(result).unwrap();
+                    }),
+                )
+                .unwrap();
+        }
+        drop(completed_tx);
+        drop(physical_guard);
+
+        for _ in 0..total {
+            completed_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("cohort completion")
+                .unwrap();
+        }
+        let stats = coordinator.stats();
+        assert!(stats.overlapped_cooked_cohorts >= 1, "stats={stats:?}");
+        assert!(stats.overlapped_cooked_operations > 0, "stats={stats:?}");
+        assert_eq!(stats.committed, total as u64);
+        drop(coordinator);
+
+        let store = physical.lock().unwrap();
+        assert_eq!(
+            store.get("pipeline/00000").unwrap().as_deref(),
+            Some([0u8; 64].as_slice())
+        );
+        assert_eq!(
+            store.get("pipeline/02048").unwrap().as_deref(),
+            Some([0u8; 64].as_slice())
+        );
     }
 }

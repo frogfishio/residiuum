@@ -32,7 +32,7 @@ use serde_json::Value;
 let connection = Client::open_embedded(
     EmbeddedOptions::new(database_path)
         .workers(4)
-        .queue_capacity(1024),
+        .queue_capacity(2048),
 ).await?;
 let tinker = connection.open_named_heap("tinker", tinker_capability).await?;
 let gremlin = connection.open_named_heap("gremlin", gremlin_capability).await?;

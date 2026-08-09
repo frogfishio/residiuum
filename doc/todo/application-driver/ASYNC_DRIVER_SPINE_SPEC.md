@@ -450,8 +450,13 @@ result.
 | Setting | v1 default |
 |---|---:|
 | workers | `min(4, available_parallelism)`, at least 1 |
-| queue | 1024 operations |
+| queue | 2048 operations (two maximum product commit cohorts) |
 | cursor prefetch | 1 page |
+
+The 2048-operation default is deliberate: callers that keep at least two
+maximum commit cohorts outstanding allow cohort B to cook while cohort A is at
+its durable media boundary. A smaller explicit window remains correct and
+bounded, but may disable that overlap under saturation.
 
 Queued read/query cancellation removes work. Once kernel work begins it
 completes to a safe boundary. An admitted mutation completes to its durability

@@ -26,6 +26,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const DEFAULT_QUEUE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
+/// Default count window holds two maximum product commit cohorts so the second
+/// can cook while the first crosses its durable media boundary.
+pub const DEFAULT_EMBEDDED_QUEUE_CAPACITY: usize = 2_048;
 
 /// Embedded driver defaults from `ASYNC_DRIVER_SPINE_SPEC.md` §9.
 #[derive(Debug, Clone)]
@@ -42,7 +45,7 @@ pub struct EmbeddedOptions {
 }
 
 impl EmbeddedOptions {
-    /// Options with product defaults: min(4, available parallelism), queue 1024.
+    /// Options with product defaults: min(4, available parallelism), queue 2048.
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let workers = thread::available_parallelism()
             .map(|n| n.get())
@@ -52,7 +55,7 @@ impl EmbeddedOptions {
         Self {
             path: path.into(),
             workers,
-            queue_capacity: 1024,
+            queue_capacity: DEFAULT_EMBEDDED_QUEUE_CAPACITY,
             queue_byte_capacity: DEFAULT_QUEUE_BYTE_CAPACITY,
         }
     }
