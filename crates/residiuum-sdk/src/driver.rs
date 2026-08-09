@@ -14,6 +14,7 @@ pub use residiuum_client::{OperationId, RequestId, RetryDisposition, TerminalOut
 pub use residiuum_heap::HeapCap;
 use residiuum_heap::{CollectionId, HeapId};
 use serde::{de::DeserializeOwned, Serialize};
+use std::any::Any;
 use std::fmt;
 use std::future::Future;
 use std::marker::PhantomData;
@@ -881,10 +882,7 @@ where
         options: PutOptions,
     ) -> Result<WriteReceipt, Error> {
         let key = key.into();
-        let json = serde_json::to_value(value)
-            .map_err(|e| Error::local(ErrorCode::Validation, ErrorClass::Request, e.to_string()))?;
-        let body = crate::value::encode_json(&json)
-            .map_err(|e| Error::local(ErrorCode::Validation, ErrorClass::Request, e.to_string()))?;
+        let body = encode_driver_json(value)?;
         let request_id = resolve_request_id(options.context.request_id)?;
         let operation_id = resolve_operation_id(options.context.operation_id)?;
         let deadline = options.context.deadline;
@@ -922,21 +920,28 @@ where
 
         let mut prepared = Vec::with_capacity(entries.len());
         let mut total_bytes = 0usize;
+        let missing_id_count = entries.iter().fold(0usize, |count, entry| {
+            count
+                .saturating_add(usize::from(entry.options.context.request_id.is_none()))
+                .saturating_add(usize::from(entry.options.context.operation_id.is_none()))
+        });
+        let mut minted_ids = MintedIds::new(missing_id_count)?;
         for entry in entries {
-            let json = serde_json::to_value(&entry.value).map_err(|error| {
-                Error::local(ErrorCode::Validation, ErrorClass::Request, error.to_string())
-            })?;
-            let body = crate::value::encode_json(&json).map_err(|error| {
-                Error::local(ErrorCode::Validation, ErrorClass::Request, error.to_string())
-            })?;
+            let body = encode_driver_json(&entry.value)?;
             total_bytes = total_bytes
                 .saturating_add(entry.key.len())
                 .saturating_add(body.len());
             prepared.push(Prepared {
                 key: entry.key,
                 body,
-                request_id: resolve_request_id(entry.options.context.request_id)?,
-                operation_id: resolve_operation_id(entry.options.context.operation_id)?,
+                request_id: match entry.options.context.request_id {
+                    Some(request_id) => resolve_request_id(Some(request_id))?,
+                    None => RequestId(minted_ids.take()?),
+                },
+                operation_id: match entry.options.context.operation_id {
+                    Some(operation_id) => resolve_operation_id(Some(operation_id))?,
+                    None => OperationId(minted_ids.take()?),
+                },
                 deadline: entry.options.context.deadline,
             });
         }
@@ -1060,10 +1065,7 @@ where
         condition: residiuum_store::WriteCondition,
         operation_domain: &'static [u8],
     ) -> Result<WriteReceipt, Error> {
-        let json = serde_json::to_value(value)
-            .map_err(|e| Error::local(ErrorCode::Validation, ErrorClass::Request, e.to_string()))?;
-        let body = crate::value::encode_json(&json)
-            .map_err(|e| Error::local(ErrorCode::Validation, ErrorClass::Request, e.to_string()))?;
+        let body = encode_driver_json(value)?;
         let request_id = resolve_request_id(context.request_id)?;
         let operation_id = resolve_operation_id(context.operation_id)?;
         let deadline = context.deadline;
@@ -1441,15 +1443,90 @@ fn canonical_mutation_hash(
     *hash.finalize().as_bytes()
 }
 
+fn encode_driver_json<T: Serialize + 'static>(value: &T) -> Result<Vec<u8>, Error> {
+    // `serde_json::to_value` remains the compatibility path for arbitrary
+    // Serialize implementations: it fixes the existing durable object-key
+    // ordering before encoding. A Value is already in that representation, so
+    // cloning its complete tree merely to serialize it is pure duplication.
+    let owned;
+    let json = match (value as &dyn Any).downcast_ref::<serde_json::Value>() {
+        Some(value) => value,
+        None => {
+            owned = serde_json::to_value(value).map_err(|error| {
+                Error::local(
+                    ErrorCode::Validation,
+                    ErrorClass::Request,
+                    error.to_string(),
+                )
+            })?;
+            &owned
+        }
+    };
+    crate::value::encode_json(json).map_err(|error| {
+        Error::local(
+            ErrorCode::Validation,
+            ErrorClass::Request,
+            error.to_string(),
+        )
+    })
+}
+
+struct MintedIds {
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+impl MintedIds {
+    fn new(count: usize) -> Result<Self, Error> {
+        let byte_count = count.checked_mul(16).ok_or_else(|| {
+            Error::local(
+                ErrorCode::ResourceLimit,
+                ErrorClass::Admission,
+                "identity batch exceeds addressable memory",
+            )
+        })?;
+        let mut bytes = vec![0u8; byte_count];
+        if !bytes.is_empty() {
+            getrandom::fill(&mut bytes).map_err(identity_generation_error)?;
+        }
+        Ok(Self { bytes, offset: 0 })
+    }
+
+    fn take(&mut self) -> Result<[u8; 16], Error> {
+        let end = self.offset.saturating_add(16);
+        let mut id: [u8; 16] = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or_else(|| {
+                Error::local(
+                    ErrorCode::Internal,
+                    ErrorClass::Internal,
+                    "identity batch exhausted",
+                )
+            })?
+            .try_into()
+            .expect("identity slice is exactly 16 bytes");
+        self.offset = end;
+        if id == [0u8; 16] {
+            // Preserve the existing fail-closed all-zero rule. This path is
+            // astronomically rare and therefore need not be batch-amortized.
+            id = mint_id()?;
+        }
+        Ok(id)
+    }
+}
+
+fn identity_generation_error(error: getrandom::Error) -> Error {
+    Error::local(
+        ErrorCode::Internal,
+        ErrorClass::Internal,
+        format!("secure identity generation failed: {error}"),
+    )
+}
+
 fn mint_id() -> Result<[u8; 16], Error> {
     let mut id = [0u8; 16];
-    getrandom::fill(&mut id).map_err(|e| {
-        Error::local(
-            ErrorCode::Internal,
-            ErrorClass::Internal,
-            format!("secure identity generation failed: {e}"),
-        )
-    })?;
+    getrandom::fill(&mut id).map_err(identity_generation_error)?;
     if id == [0u8; 16] {
         id[15] = 1;
     }
@@ -2540,6 +2617,40 @@ mod tests {
             &[b"a", b"bc"],
         );
         assert_ne!(left, right);
+    }
+
+    #[test]
+    fn driver_json_encoding_preserves_existing_durable_bytes() {
+        #[derive(Serialize)]
+        struct Document {
+            zeta: u64,
+            alpha: &'static str,
+        }
+
+        let value = serde_json::json!({"zeta": 7, "alpha": "same"});
+        let legacy_value =
+            crate::value::encode_json(&serde_json::to_value(&value).unwrap()).unwrap();
+        assert_eq!(encode_driver_json(&value).unwrap(), legacy_value);
+
+        let document = Document {
+            zeta: 7,
+            alpha: "same",
+        };
+        let legacy_document =
+            crate::value::encode_json(&serde_json::to_value(&document).unwrap()).unwrap();
+        assert_eq!(encode_driver_json(&document).unwrap(), legacy_document);
+    }
+
+    #[test]
+    fn batched_ids_are_nonzero_unique_and_exactly_bounded() {
+        let mut ids = MintedIds::new(128).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..128 {
+            let id = ids.take().unwrap();
+            assert_ne!(id, [0u8; 16]);
+            assert!(seen.insert(id));
+        }
+        assert!(ids.take().is_err());
     }
 
     #[test]
