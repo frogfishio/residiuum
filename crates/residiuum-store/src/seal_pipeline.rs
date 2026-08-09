@@ -38,7 +38,9 @@ use residiuum_format::{
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -49,7 +51,7 @@ fn elapsed_ns(t0: Instant) -> u64 {
 /// Per-segment derived enrichment stage timings (ETQ-0 measurement).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EnrichmentStageTiming {
-    /// Sleep for [`ENRICHMENT_MIN_GAP`] before this job (resource isolation).
+    /// Foreground-priority wait before this job (resource isolation).
     pub gap_wait_ns: u64,
     /// `fs::read` of the sealed segment.
     pub read_ns: u64,
@@ -199,10 +201,16 @@ fn thread_cpu_ns() -> u64 {
 /// normal 64 MiB rotations; derived enrichment never counts toward it.
 pub const DEFAULT_MAX_PENDING_SEALS: usize = 16;
 
-/// Minimum wall time between derived enrichment jobs (resource isolation).
+/// Required foreground-write quiet period before derived enrichment starts.
+pub const ENRICHMENT_QUIET_PERIOD: Duration = Duration::from_millis(250);
+
+/// Maximum time one derived job may defer under uninterrupted ingestion.
 ///
-/// Enrichment may lag; correctness does not require it to keep up with seals.
-pub const ENRICHMENT_MIN_GAP: Duration = Duration::from_millis(50);
+/// This permits bounded index progress for indefinitely busy deployments while
+/// ensuring enrichment cannot continuously compete with authoritative writes.
+pub const ENRICHMENT_MAX_DEFERRAL: Duration = Duration::from_secs(2);
+
+const ENRICHMENT_ACTIVITY_POLL: Duration = Duration::from_millis(10);
 
 /// Job submitted to the lifecycle worker.
 #[allow(private_interfaces)]
@@ -429,6 +437,10 @@ pub struct SealPipeline {
     pub max_pending_seals: usize,
     /// EnrichDerived jobs queued/running that have not posted EnrichDone yet.
     pub enrichment_backlog: usize,
+    /// Monotonic foreground durable-publication activity generation.
+    foreground_activity: Arc<AtomicU64>,
+    /// Lets enrichment drain without policy delays during shutdown.
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl SealPipeline {
@@ -438,13 +450,24 @@ impl SealPipeline {
         let (enrich_tx, enrich_rx) = mpsc::channel::<LifecycleJob>();
         let (result_tx, result_rx) = mpsc::channel::<LifecycleResult>();
         let result_tx_enrich = result_tx.clone();
+        let foreground_activity = Arc::new(AtomicU64::new(0));
+        let shutting_down = Arc::new(AtomicBool::new(false));
+        let enrich_activity = Arc::clone(&foreground_activity);
+        let enrich_shutdown = Arc::clone(&shutting_down);
         let join_seal = thread::Builder::new()
             .name("residiuum-seal-auth".into())
             .spawn(move || seal_worker_loop(job_rx, result_tx))
             .expect("spawn seal authoritative worker");
         let join_enrich = thread::Builder::new()
             .name("residiuum-seal-enrich".into())
-            .spawn(move || enrich_worker_loop(enrich_rx, result_tx_enrich))
+            .spawn(move || {
+                enrich_worker_loop(
+                    enrich_rx,
+                    result_tx_enrich,
+                    enrich_activity,
+                    enrich_shutdown,
+                )
+            })
             .expect("spawn seal enrichment worker");
         Self {
             job_tx,
@@ -455,7 +478,14 @@ impl SealPipeline {
             inflight_seals: 0,
             max_pending_seals: DEFAULT_MAX_PENDING_SEALS,
             enrichment_backlog: 0,
+            foreground_activity,
+            shutting_down,
         }
+    }
+
+    /// Note foreground durable publication so enrichment yields to ingestion.
+    pub fn note_foreground_activity(&self) {
+        self.foreground_activity.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Submit a seal finalize job. Caller tracks `inflight_seals`.
@@ -507,6 +537,7 @@ impl SealPipeline {
 
     /// Shut down workers and join. Best-effort; pending jobs may complete first.
     pub fn shutdown(mut self) {
+        self.shutting_down.store(true, Ordering::Release);
         let _ = self.job_tx.send(LifecycleJob::Shutdown);
         let _ = self.enrich_tx.send(LifecycleJob::Shutdown);
         if let Some(h) = self.join_seal.take() {
@@ -521,6 +552,7 @@ impl SealPipeline {
 
 impl Drop for SealPipeline {
     fn drop(&mut self) {
+        self.shutting_down.store(true, Ordering::Release);
         let _ = self.job_tx.send(LifecycleJob::Shutdown);
         let _ = self.enrich_tx.send(LifecycleJob::Shutdown);
         if let Some(h) = self.join_seal.take() {
@@ -867,10 +899,51 @@ fn seal_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<LifecycleR
     }
 }
 
-fn enrich_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<LifecycleResult>) {
-    let mut last_enrich = Instant::now()
-        .checked_sub(ENRICHMENT_MIN_GAP)
-        .unwrap_or_else(Instant::now);
+fn wait_for_enrichment_window(
+    foreground_activity: &AtomicU64,
+    shutting_down: &AtomicBool,
+) -> u64 {
+    wait_for_enrichment_window_with(
+        foreground_activity,
+        shutting_down,
+        ENRICHMENT_QUIET_PERIOD,
+        ENRICHMENT_MAX_DEFERRAL,
+        ENRICHMENT_ACTIVITY_POLL,
+    )
+}
+
+fn wait_for_enrichment_window_with(
+    foreground_activity: &AtomicU64,
+    shutting_down: &AtomicBool,
+    quiet_period: Duration,
+    max_deferral: Duration,
+    activity_poll: Duration,
+) -> u64 {
+    let started = Instant::now();
+    let mut quiet_since = Instant::now();
+    let mut observed = foreground_activity.load(Ordering::Acquire);
+    loop {
+        if shutting_down.load(Ordering::Acquire)
+            || quiet_since.elapsed() >= quiet_period
+            || started.elapsed() >= max_deferral
+        {
+            return elapsed_ns(started);
+        }
+        thread::sleep(activity_poll);
+        let current = foreground_activity.load(Ordering::Acquire);
+        if current != observed {
+            observed = current;
+            quiet_since = Instant::now();
+        }
+    }
+}
+
+fn enrich_worker_loop(
+    job_rx: Receiver<LifecycleJob>,
+    result_tx: Sender<LifecycleResult>,
+    foreground_activity: Arc<AtomicU64>,
+    shutting_down: Arc<AtomicBool>,
+) {
     while let Ok(job) = job_rx.recv() {
         match job {
             LifecycleJob::Shutdown => break,
@@ -882,15 +955,11 @@ fn enrich_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<Lifecycl
             } => {
                 let job_wall = Instant::now();
                 let cpu0 = thread_cpu_ns();
-                // Resource isolation: never run enrichment back-to-back without a gap.
-                let since = last_enrich.elapsed();
-                let gap_wait_ns = if since < ENRICHMENT_MIN_GAP {
-                    let t_gap = Instant::now();
-                    thread::sleep(ENRICHMENT_MIN_GAP - since);
-                    elapsed_ns(t_gap)
-                } else {
-                    0
-                };
+                // Foreground ingestion owns CPU and media. Under a permanently
+                // busy workload, allow only bounded sparse derived progress.
+                // Once writes go quiet (or shutdown begins), drain normally.
+                let gap_wait_ns =
+                    wait_for_enrichment_window(&foreground_activity, &shutting_down);
                 let sealed_path = paths.sealed_segment(&segment_id);
                 let mut stages = EnrichmentStageTiming {
                     gap_wait_ns,
@@ -935,7 +1004,6 @@ fn enrich_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<Lifecycl
                 stages.wall_ns = elapsed_ns(job_wall);
                 let cpu1 = thread_cpu_ns();
                 stages.cpu_ns = cpu1.saturating_sub(cpu0);
-                last_enrich = Instant::now();
                 let _ = crate::failpoint::hit("store.seal.after_derived_enrichment");
                 let _ = result_tx.send(LifecycleResult::EnrichDone {
                     segment_id,
@@ -1560,6 +1628,34 @@ mod tests {
     use super::*;
     use residiuum_format::{ActiveSegment, FrameKind, SegmentId};
     use tempfile::tempdir;
+
+    #[test]
+    fn enrichment_waits_for_a_quiet_window() {
+        let activity = AtomicU64::new(0);
+        let shutdown = AtomicBool::new(false);
+        let waited = wait_for_enrichment_window_with(
+            &activity,
+            &shutdown,
+            Duration::from_millis(20),
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        );
+        assert!(waited >= 20_000_000, "waited_ns={waited}");
+    }
+
+    #[test]
+    fn enrichment_shutdown_bypasses_policy_wait() {
+        let activity = AtomicU64::new(0);
+        let shutdown = AtomicBool::new(true);
+        let waited = wait_for_enrichment_window_with(
+            &activity,
+            &shutdown,
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_millis(10),
+        );
+        assert!(waited < 10_000_000, "waited_ns={waited}");
+    }
 
     #[test]
     fn seal_pending_preserves_prefix_bytes() {

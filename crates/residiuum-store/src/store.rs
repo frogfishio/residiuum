@@ -6036,6 +6036,9 @@ impl Store {
     /// an unclean open rebuilds from authoritative segments. A future mid-run
     /// checkpoint must be incremental; another periodic full clone is forbidden.
     fn note_durable_derived(&mut self) -> Result<(), StoreError> {
+        if let Some(pipeline) = self.seal_pipeline.as_ref() {
+            pipeline.note_foreground_activity();
+        }
         let _ = self.poll_lifecycle();
         self.derived_ops_since_checkpoint = self.derived_ops_since_checkpoint.saturating_add(1);
         Ok(())
