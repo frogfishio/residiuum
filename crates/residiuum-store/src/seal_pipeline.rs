@@ -347,6 +347,8 @@ pub enum LifecycleJob {
         require_fsync: bool,
         /// Sealed byte length (known after summary append).
         size: u64,
+        /// Compact catalog summary computed without rereading the segment.
+        summary: crate::segment_catalog::SegmentSummary,
     },
     /// Stop the worker after draining queued jobs.
     Shutdown,
@@ -402,6 +404,8 @@ pub enum LifecycleResult {
         segment_id: [u8; 16],
         /// Sealed byte length.
         size: u64,
+        /// Compact catalog summary computed before background publication.
+        summary: crate::segment_catalog::SegmentSummary,
         /// Auth publish nanoseconds (rename/sync).
         auth_publish_ns: u64,
         /// Shadow durable publish nanoseconds.
@@ -760,6 +764,7 @@ fn seal_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<LifecycleR
                 paths,
                 require_fsync,
                 size,
+                summary,
             } => {
                 let t_auth = Instant::now();
                 let auth_ok = (|| -> Result<(), StoreError> {
@@ -843,6 +848,7 @@ fn seal_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<LifecycleR
                 let _ = result_tx.send(LifecycleResult::ProtectedPairDone {
                     segment_id,
                     size,
+                    summary,
                     auth_publish_ns,
                     shadow_publish_ns,
                 });

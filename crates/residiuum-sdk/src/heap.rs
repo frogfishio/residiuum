@@ -94,6 +94,11 @@ impl ResidiuumDeployment {
     pub fn operation_commit_stats(&self) -> residiuum_store::OperationCommitStats {
         self.host.operation_commit_stats()
     }
+
+    /// Establish the deployment's durable clean-restart boundary.
+    pub(crate) fn prepare_orderly_close(&self) -> Result<(), Error> {
+        Ok(self.host.prepare_orderly_close()?)
+    }
 }
 
 /// Heap handle bound to exactly one [`HeapCap`].
@@ -180,8 +185,8 @@ impl Heap {
     pub fn stream(&self, name: &str) -> Result<HeapStream, Error> {
         let heap_id = *self.cap.heap_id().as_bytes();
         let (id, tip_name) = lookup_named(&self.layout, &heap_id, ObjectKind::Stream, name)?;
-        let id =
-            StreamId::from_bytes_unchecked_nonzero(id).map_err(|e| Error::Internal(e.to_string()))?;
+        let id = StreamId::from_bytes_unchecked_nonzero(id)
+            .map_err(|e| Error::Internal(e.to_string()))?;
         Ok(HeapStream {
             cap: self.cap.clone(),
             id,
@@ -192,9 +197,13 @@ impl Heap {
     /// Open a stream by immutable id.
     pub fn stream_by_id(&self, id: StreamId) -> Result<HeapStream, Error> {
         let heap_id = *self.cap.heap_id().as_bytes();
-        let entry =
-            rebuild_object_entry_from_chain(&self.layout, &heap_id, ObjectKind::Stream, id.as_bytes())?
-                .ok_or_else(|| Error::ValidationMsg("stream id unknown".into()))?;
+        let entry = rebuild_object_entry_from_chain(
+            &self.layout,
+            &heap_id,
+            ObjectKind::Stream,
+            id.as_bytes(),
+        )?
+        .ok_or_else(|| Error::ValidationMsg("stream id unknown".into()))?;
         Ok(HeapStream {
             cap: self.cap.clone(),
             id,
@@ -250,13 +259,12 @@ impl Heap {
         let op_id = match operation_id {
             Some(id) => id,
             None => {
-                let eid =
-                    CollectionId::new_random().map_err(|e| Error::Internal(e.to_string()))?;
+                let eid = CollectionId::new_random().map_err(|e| Error::Internal(e.to_string()))?;
                 *eid.as_bytes()
             }
         };
-        let admin =
-            create_collection_idempotent(&self.layout, &heap_id, op_id, name).map_err(map_create_object_err)?;
+        let admin = create_collection_idempotent(&self.layout, &heap_id, op_id, name)
+            .map_err(map_create_object_err)?;
         let collection_id = CollectionId::from_bytes_unchecked_nonzero(admin.object_id)
             .map_err(|e| Error::Internal(e.to_string()))?;
         let collection = HeapCollection {
@@ -483,12 +491,9 @@ impl HeapCollection {
         condition: residiuum_store::WriteCondition,
     ) -> Result<WriteReceipt, Error> {
         validate_key(key)?;
-        let receipt = self.store.put_collection_if(
-            self.id.as_bytes(),
-            key.as_bytes(),
-            body,
-            condition,
-        )?;
+        let receipt =
+            self.store
+                .put_collection_if(self.id.as_bytes(), key.as_bytes(), body, condition)?;
         Ok(WriteReceipt::from_store(key.to_string(), receipt))
     }
 
@@ -537,11 +542,9 @@ impl HeapCollection {
                 .get_collection(self.id.as_bytes(), key.as_bytes())?
                 .is_some(),
         };
-        let receipt = self.store.delete_collection_if(
-            self.id.as_bytes(),
-            key.as_bytes(),
-            condition,
-        )?;
+        let receipt =
+            self.store
+                .delete_collection_if(self.id.as_bytes(), key.as_bytes(), condition)?;
         Ok(DeleteReceipt::from_store(key.to_string(), removed, receipt))
     }
 
@@ -563,7 +566,9 @@ impl HeapCollection {
 
     fn get_raw_body(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
         validate_key(key)?;
-        Ok(self.store.get_collection(self.id.as_bytes(), key.as_bytes())?)
+        Ok(self
+            .store
+            .get_collection(self.id.as_bytes(), key.as_bytes())?)
     }
 
     pub(crate) fn get_versioned_raw_body(
@@ -614,11 +619,7 @@ impl HeapCollection {
     /// List application keys (SubjectV2), deterministic order.
     ///
     /// `limit` is clamped 1..=4096. `after_key` resumes after that key.
-    pub fn list_keys(
-        &self,
-        limit: usize,
-        after_key: Option<&str>,
-    ) -> Result<Vec<String>, Error> {
+    pub fn list_keys(&self, limit: usize, after_key: Option<&str>) -> Result<Vec<String>, Error> {
         if let Some(k) = after_key {
             validate_key(k)?;
         }
@@ -681,9 +682,7 @@ impl HeapCollection {
 
     /// Create a field index over JSON documents. Requires IndexAdmin + Read for build.
     pub fn create_index(&self, name: &str, fields: &[&str]) -> Result<IndexInfo, Error> {
-        let idx = self
-            .store
-            .create_index(self.id.as_bytes(), name, fields)?;
+        let idx = self.store.create_index(self.id.as_bytes(), name, fields)?;
         Ok(IndexInfo::from_store_with_collection(
             &idx,
             self.name_at_open.clone(),
@@ -908,9 +907,7 @@ impl HeapBatch {
     /// Add a collection handle; rejects foreign heap instances.
     pub fn add_collection(&mut self, collection: &HeapCollection) -> Result<(), Error> {
         if !self.cap.same_instance(&collection.cap) {
-            return Err(Error::PermissionDenied(
-                "batch member heap mismatch".into(),
-            ));
+            return Err(Error::PermissionDenied("batch member heap mismatch".into()));
         }
         self.members.push(collection.id);
         Ok(())

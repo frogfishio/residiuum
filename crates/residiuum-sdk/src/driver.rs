@@ -625,7 +625,9 @@ impl Client {
     /// Every Heap and collection binding created from this connection observes
     /// the same closed state.
     pub async fn close(&self) -> Result<(), Error> {
-        self.scheduler.close().await
+        self.scheduler.close().await?;
+        let deployment = Arc::clone(&self.deployment);
+        run_close(move || deployment.prepare_orderly_close()).await
     }
 }
 
@@ -2302,6 +2304,33 @@ where
             &future,
             Error::local(ErrorCode::Unavailable, ErrorClass::Service, e.to_string()),
         ),
+    }
+    future
+}
+
+fn run_close<F>(operation: F) -> ResponseFuture<()>
+where
+    F: FnOnce() -> Result<(), SdkError> + Send + 'static,
+{
+    let (future, responder) = response_pair();
+    let request_id = mint_request_id().unwrap_or(RequestId([0; 16]));
+    let shared = Arc::clone(&responder.shared);
+    match thread::Builder::new()
+        .name("residiuum-driver-close-store".into())
+        .spawn(move || {
+            responder
+                .complete(operation().map_err(|error| Error::from_sdk(error, request_id, None)));
+        }) {
+        Ok(_) => {}
+        Err(error) => Responder { shared }.complete(Err(Error::for_request(
+            ErrorCode::Unavailable,
+            ErrorClass::Service,
+            error.to_string(),
+            request_id,
+            None,
+            TerminalOutcome::Refused,
+            RetryDisposition::SafeSameRequest,
+        ))),
     }
     future
 }

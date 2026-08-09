@@ -74,10 +74,7 @@ impl StoreHost {
     }
 
     /// Attach or replace adaptive-write policy on this host.
-    pub fn attach_adaptive_write(
-        &mut self,
-        policy: AdaptiveWritePolicy,
-    ) -> Result<(), StoreError> {
+    pub fn attach_adaptive_write(&mut self, policy: AdaptiveWritePolicy) -> Result<(), StoreError> {
         // Detach prior handle if any.
         if let Some(prev) = self.adaptive.take() {
             {
@@ -173,6 +170,14 @@ impl StoreHost {
     /// Deployment-wide durable group-commit counters; performs no store scan.
     pub fn operation_commit_stats(&self) -> OperationCommitStats {
         self.commits.stats()
+    }
+
+    /// Drain authoritative lifecycle work and persist a clean restart boundary.
+    pub fn prepare_orderly_close(&self) -> Result<(), StoreError> {
+        self.physical
+            .lock()
+            .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))?
+            .prepare_orderly_close()
     }
 
     /// Adaptive-write handle if attached via `*_with_adaptive_write`.

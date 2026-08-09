@@ -47,10 +47,7 @@ fn csq_mut_catalog_mandatory_p0_owned() {
             .and_then(|v| v.as_bool())
             .or_else(|| m.get("mandatory").and_then(|v| v.as_bool()))
             == Some(true);
-        assert!(
-            is_p0,
-            "{id} must be forbidden/mandatory=true (got {m:?})"
-        );
+        assert!(is_p0, "{id} must be forbidden/mandatory=true (got {m:?})");
         let killers = m
             .get("must_be_killed_by")
             .and_then(|v| v.as_array())
@@ -81,20 +78,27 @@ fn csq_mut_catalog_mandatory_p0_owned() {
 fn csq_mut_kill_absence_from_damage() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
+    let early_segment;
     {
         let mut store = Store::create(&path).unwrap();
-        store.put("early", b"early-v1", DurabilityMode::Durable).unwrap();
+        early_segment = store
+            .put("early", b"early-v1", DurabilityMode::Durable)
+            .unwrap()
+            .segment_id;
         store.seal_active().unwrap();
-        store.put("late", b"late-v1", DurabilityMode::Durable).unwrap();
+        store
+            .put("late", b"late-v1", DurabilityMode::Durable)
+            .unwrap();
     }
-    // Corrupt sealed segment middle.
-    let segments = path.join("segments");
-    let seg = fs::read_dir(&segments)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| p.extension().and_then(|x| x.to_str()) == Some("residiuum"))
-        .expect("sealed segment");
+    // Corrupt the segment that established `early`. Orderly close now also
+    // seals `late`, so selecting an arbitrary sealed file is not deterministic.
+    let segment_hex: String = early_segment
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let seg = path
+        .join("segments")
+        .join(format!("{segment_hex}.residiuum"));
     let mut bytes = fs::read(&seg).unwrap();
     if bytes.len() > 100 {
         let mid = bytes.len() / 2;
@@ -107,14 +111,24 @@ fn csq_mut_kill_absence_from_damage() {
 
     let store = Store::open(&path).unwrap();
     // Surviving complete authority remains exact.
-    assert_eq!(store.get("late").unwrap().as_deref(), Some(b"late-v1".as_slice()));
+    assert_eq!(
+        store.get("late").unwrap().as_deref(),
+        Some(b"late-v1".as_slice())
+    );
     // If early is still readable, it must be exact — never corrupt garbage as Complete.
-    match store.get_payload("early").unwrap() {
-        None | Some(PayloadResult::Partial { .. }) | Some(PayloadResult::Unavailable { .. })
-        | Some(PayloadResult::Conflicting { .. }) => {}
-        Some(PayloadResult::Complete { body }) => {
-            assert_eq!(body, b"early-v1", "Complete must never carry corrupted body");
+    match store.get_payload("early") {
+        Ok(None)
+        | Ok(Some(PayloadResult::Partial { .. }))
+        | Ok(Some(PayloadResult::Unavailable { .. }))
+        | Ok(Some(PayloadResult::Conflicting { .. }))
+        | Err(StoreError::LocatorFault(_)) => {}
+        Ok(Some(PayloadResult::Complete { body })) => {
+            assert_eq!(
+                body, b"early-v1",
+                "Complete must never carry corrupted body"
+            );
         }
+        Err(error) => panic!("unexpected damage classification: {error}"),
     }
     let salvage = store.salvage().unwrap();
     // Damage leaves evidence (holes or reduced verified frames) rather than silent rewrite.
@@ -181,7 +195,10 @@ fn csq_mut_kill_fabricate_commit() {
         clear_failpoints();
     }
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.get("only").unwrap().as_deref(), Some(b"real".as_slice()));
+    assert_eq!(
+        store.get("only").unwrap().as_deref(),
+        Some(b"real".as_slice())
+    );
     // Fabricated subject must not appear unless put actually succeeded.
     // Count live subjects includes only real durable authority.
     let hist = store.history("ghost").unwrap();

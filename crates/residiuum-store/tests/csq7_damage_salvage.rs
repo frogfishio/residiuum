@@ -6,7 +6,7 @@
 
 use residiuum_format::{scan_forward, FrameKind, SafetyLimits};
 use residiuum_store::{
-    try_load_recovery_manifest, DurabilityMode, SalvageMode, Store, StorePaths,
+    try_load_recovery_manifest, DurabilityMode, SalvageMode, Store, StoreError, StorePaths,
 };
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -15,21 +15,31 @@ use tempfile::tempdir;
 
 fn seed_two_segment_store(path: &Path) {
     let mut store = Store::create(path).unwrap();
-    store.put("early", b"early-v1", DurabilityMode::Durable).unwrap();
-    store.put("keep", b"keep-v1", DurabilityMode::Durable).unwrap();
+    store
+        .put("early", b"early-v1", DurabilityMode::Durable)
+        .unwrap();
+    store
+        .put("keep", b"keep-v1", DurabilityMode::Durable)
+        .unwrap();
     store.seal_active().unwrap();
-    store.put("late", b"late-v1", DurabilityMode::Durable).unwrap();
-    store.put("keep", b"keep-v2", DurabilityMode::Durable).unwrap();
+    store
+        .put("late", b"late-v1", DurabilityMode::Durable)
+        .unwrap();
+    store
+        .put("keep", b"keep-v2", DurabilityMode::Durable)
+        .unwrap();
 }
 
 fn sealed_segment_file(root: &Path) -> PathBuf {
     let segments = root.join("segments");
-    fs::read_dir(&segments)
+    let mut sealed: Vec<_> = fs::read_dir(&segments)
         .unwrap()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .find(|p| p.extension().and_then(|x| x.to_str()) == Some("residiuum"))
-        .expect("sealed segment")
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("residiuum"))
+        .collect();
+    sealed.sort();
+    sealed.into_iter().next().expect("sealed segment")
 }
 
 fn corrupt_middle_bytes(path: &Path, xor: u8) {
@@ -87,20 +97,28 @@ fn csq_dmg_corrupt_bytes_never_verified_survivors_readable() {
 
     let store = Store::open(&path).unwrap();
     // Active-segment "late" and latest "keep" must remain exact.
-    assert_eq!(store.get("late").unwrap().as_deref(), Some(b"late-v1".as_slice()));
-    assert_eq!(store.get("keep").unwrap().as_deref(), Some(b"keep-v2".as_slice()));
+    assert_eq!(
+        store.get("late").unwrap().as_deref(),
+        Some(b"late-v1".as_slice())
+    );
+    assert_eq!(
+        store.get("keep").unwrap().as_deref(),
+        Some(b"keep-v2".as_slice())
+    );
 
     // Salvage must find verified islands and report holes without fabricating early.
     let report = store.salvage().unwrap();
     assert!(report.verified_frames >= 1);
     assert!(report.live_subjects >= 1);
     // Corrupted early may be lost; absence/damage is never "success with wrong body".
-    if let Some(body) = store.get("early").unwrap() {
-        assert_eq!(
+    match store.get("early") {
+        Ok(Some(body)) => assert_eq!(
             body.as_slice(),
             b"early-v1",
             "if early is readable it must be exact, not corrupted garbage"
-        );
+        ),
+        Ok(None) | Err(StoreError::LocatorFault(_)) => {}
+        Err(error) => panic!("unexpected damage classification: {error}"),
     }
 }
 
@@ -132,9 +150,19 @@ fn csq_dmg_multi_fault_holes_and_incomplete_tail() {
     );
     assert!(report.subjects_copied >= 1);
 
-    let dest = Store::open_with_options(&dst, residiuum_store::StoreOpenOptions::default().tolerate_unidentified_inventory()).unwrap();
-    assert_eq!(dest.get("late").unwrap().as_deref(), Some(b"late-v1".as_slice()));
-    assert_eq!(dest.get("keep").unwrap().as_deref(), Some(b"keep-v2".as_slice()));
+    let dest = Store::open_with_options(
+        &dst,
+        residiuum_store::StoreOpenOptions::default().tolerate_unidentified_inventory(),
+    )
+    .unwrap();
+    assert_eq!(
+        dest.get("late").unwrap().as_deref(),
+        Some(b"late-v1".as_slice())
+    );
+    assert_eq!(
+        dest.get("keep").unwrap().as_deref(),
+        Some(b"keep-v2".as_slice())
+    );
 
     let manifest = try_load_recovery_manifest(&StorePaths::new(&dst))
         .unwrap()
@@ -179,7 +207,11 @@ fn csq_rec_reopen_identical_and_resalvage_idempotent() {
         "re-salvage must be deterministic on verified item bodies"
     );
 
-    let dest = Store::open_with_options(&dst, residiuum_store::StoreOpenOptions::default().tolerate_unidentified_inventory()).unwrap();
+    let dest = Store::open_with_options(
+        &dst,
+        residiuum_store::StoreOpenOptions::default().tolerate_unidentified_inventory(),
+    )
+    .unwrap();
     assert_eq!(dest.get("a").unwrap().as_deref(), Some(b"3".as_slice()));
     assert_eq!(dest.get("b").unwrap().as_deref(), Some(b"2".as_slice()));
 }
@@ -279,7 +311,10 @@ fn csq_rec_healthy_work_continues_after_damage() {
         store.get("post-damage").unwrap().as_deref(),
         Some(b"new-work".as_slice())
     );
-    assert_eq!(store.get("late").unwrap().as_deref(), Some(b"late-v1".as_slice()));
+    assert_eq!(
+        store.get("late").unwrap().as_deref(),
+        Some(b"late-v1".as_slice())
+    );
 
     let report = store.salvage().unwrap();
     assert!(
@@ -295,7 +330,9 @@ fn csq_dmg_incomplete_tail_locality() {
     let path = dir.path().to_path_buf();
     {
         let mut store = Store::create(&path).unwrap();
-        store.put("keep", b"alive", DurabilityMode::Durable).unwrap();
+        store
+            .put("keep", b"alive", DurabilityMode::Durable)
+            .unwrap();
         store.put("also", b"ok", DurabilityMode::Durable).unwrap();
     }
     let active = path.join("active").join("active.residiuum");
@@ -305,8 +342,14 @@ fn csq_dmg_incomplete_tail_locality() {
     f.sync_all().unwrap();
 
     let store = Store::open(&path).unwrap();
-    assert_eq!(store.get("keep").unwrap().as_deref(), Some(b"alive".as_slice()));
-    assert_eq!(store.get("also").unwrap().as_deref(), Some(b"ok".as_slice()));
+    assert_eq!(
+        store.get("keep").unwrap().as_deref(),
+        Some(b"alive".as_slice())
+    );
+    assert_eq!(
+        store.get("also").unwrap().as_deref(),
+        Some(b"ok".as_slice())
+    );
     let report = store.salvage().unwrap();
     assert!(report.item_events >= 2);
     assert_eq!(report.live_subjects, 2);

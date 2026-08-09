@@ -173,3 +173,28 @@ fn duplicate_operation_inside_cohort_gets_the_owner_receipt() {
     assert!(duplicate.deduplicated);
     assert_eq!(owner.receipt.event_id, duplicate.receipt.event_id);
 }
+
+#[test]
+fn cohort_rotation_is_deferred_but_not_suppressed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::create(dir.path()).unwrap();
+    store.set_seal_threshold(32 * 1024);
+
+    let body = vec![0xacu8; 80 * 1024];
+    let operations = [OperationPut {
+        subject: b"cohort/rotation",
+        body: body.as_slice(),
+        condition: WriteCondition::Absent,
+        operation_id: [51u8; 16],
+        content_hash: [52u8; 32],
+    }];
+    let outcomes = store.put_operation_cohort_awo_owned(&operations).unwrap();
+    assert!(outcomes[0].is_ok());
+
+    store.wait_seals_applied().unwrap();
+    assert!(
+        store.list_segment_ids().len() >= 1,
+        "the cohort boundary must rotate an over-threshold active segment"
+    );
+    assert_eq!(store.get("cohort/rotation").unwrap().unwrap(), body);
+}

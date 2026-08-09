@@ -303,3 +303,129 @@ without growing the blocking-worker pool, reduces one stable boundary to every
 approximately 21–25k writes/s range. The remaining gap to a 500 MiB/s target is
 inside cohort/storage execution and payload amplification, not a reason to
 reintroduce synchronous mutation clients.
+
+## 10 GiB asynchronous smart-client result on Bonzo
+
+Bonzo completed the retained-media campaign at commit
+`8e1e0a93810d2a4ef8c2ca5bb632215c14388d1b`, using 256 concurrent mutations and
+four read/query workers:
+
+- 1,310,720 / 1,310,720 durable acknowledgements; zero failures or refusals;
+- exact 10 GiB payload recovered by a fresh reopen and complete scan;
+- 14,252.48 operations/s and 111.35 MiB/s acknowledged payload;
+- p50 / p95 / p99 acknowledgement latency 15.00 / 31.69 / 59.36 ms;
+- 5,141 cohorts and media syncs, averaging 254.96 operations (maximum 256);
+- 5,141 buffered derived-journal appends and zero derived-journal syncs;
+- 91.96 s write phase, 0.46 s close, 912.98 s reopen, and 110.47 s validation
+  scan; and
+- 11,549,663,232 allocated bytes after close for 10,737,418,240 payload bytes
+  (approximately 1.08x).
+
+Compared with the earlier 20-worker Bonzo baseline, acknowledged throughput is
+9.82x higher. Media-sync cohorts fell from 71,443 to 5,141 (13.89x fewer), and
+the former 71,443 journal syncs are absent. This is a material write-path gain,
+not a buffering change: every operation still receives its individual durable
+receipt and the complete retained store reopens successfully.
+
+The run also establishes a release-blocking startup defect. Reopen took 15.22
+minutes, while the subsequent scan of every decoded document took only 1.84
+minutes. Live stack samples placed normal reopen first in
+`resume_or_start_all_actives` / `scan_forward`, verifying active frames through
+small reads, and later in `attach_shadow_dual_to_actives` /
+`ShadowDualStream::append_image_chunk`, issuing positioned writes while
+reconstructing recovery-shadow state. With 1.31 million records, the behavior
+matches the previously observed burst of roughly 2,500 small reads/s: startup
+is dominated by per-frame syscall and recovery-shadow reconstruction work, not
+sequential device bandwidth.
+
+The retained final store is approximately 11 GiB (the 10.39 GiB active segment,
+203 MiB outcome journal, and 159 MiB primary index dominate). The long shadow
+attachment work is transient and did not leave a second 10 GiB artifact after
+orderly close. `/usr/bin/time -l` reported a maximum resident set of roughly
+7.41 GiB; sampled resident size during reopen was 2.5–2.9 GiB. Both startup time
+and peak memory require focused qualification before this path is handed to an
+application.
+
+## Bounded-active and orderly-close correction
+
+The 10 GiB active file was not an intentional segment size. Operation-cohort
+gathering suppressed per-item auto-seal, but the cohort completion path failed
+to perform the deferred rotation. Consequently the active recovery tail grew
+with the full database. Normal close then synced the outcome journal and wrote
+a clean-session certificate without first sealing that tail or checkpointing
+the resulting authoritative frontier.
+
+The corrected lifecycle now:
+
+- performs deferred threshold checks after each durable cohort;
+- uses 64 MiB as the normal active-segment target;
+- rotates CompactShadow protected pairs through the zero-scan asynchronous
+  publication path;
+- carries the already-known segment summary through publication rather than
+  rereading every newly sealed segment for catalog metadata;
+- drains authoritative seals, checkpoints the primary index and catalogs,
+  syncs the outcome journal, and only then publishes the clean certificate;
+- invokes that barrier explicitly from `driver::Client::close`; and
+- retains best-effort orderly close from direct `Store` drop, while panic,
+  poisoned-writer, and unresolved-outcome paths remain deliberately unclean.
+
+A 256 MiB release-mode smoke on the local development machine used the same
+8 KiB documents, 256 mutation callers and four read/query workers. It completed
+32,768 / 32,768 durable writes and recovered every record:
+
+- 12,636.19 operations/s and 98.72 MiB/s;
+- 128 cohorts/media syncs, exactly 256 operations per cohort;
+- zero journal syncs, failures, refusals, or admission waits;
+- 0.244 s orderly close;
+- **0.171 s clean reopen**; and
+- 0.734 s complete validation scan.
+
+Allocated bytes after close were 572,530,688 for 268,435,456 payload bytes
+(2.13x). Unlike the defective 10 GiB run, normal rotation now publishes and
+retains CompactShadow protection rather than reconstructing a transient shadow
+for the entire active file at startup. That recovery redundancy is real and
+must be reported separately from the eliminated startup rewrite.
+
+An upgraded legacy store with one giant active file still requires one bounded
+migration open because it has no trustworthy precomputed active summary. Its
+subsequent orderly close seals and checkpoints that tail. New stores and later
+crash recovery are bounded by the active-segment target rather than total
+database size.
+
+The crash campaign exposed one necessary fail-closed refinement: an injected
+error can occur after a durable media boundary but before index publication.
+Such an append-path error now poisons orderly close. The process therefore
+cannot checkpoint an older projection over newer authoritative media; reopen
+uses the existing old/new/unknown recovery contract instead.
+
+## 10 GiB bounded-active result on Bonzo
+
+Bonzo repeated the same retained-media campaign with 256 mutation callers and
+four read/query workers using the bounded-active/orderly-close working tree over
+commit `8e1e0a93810d2a4ef8c2ca5bb632215c14388d1b`:
+
+- 1,310,720 / 1,310,720 durable acknowledgements; zero failures, refusals or
+  admission waits;
+- exact 10 GiB payload recovered by fresh reopen and complete scan;
+- **19,978.73 operations/s and 156.08 MiB/s** acknowledged payload;
+- p50 / p95 / p99 acknowledgement latency 10.16 / 28.06 / 59.87 ms;
+- 5,136 cohorts/media syncs, averaging 255.20 operations (maximum 256);
+- 5,136 buffered journal append cohorts and zero journal syncs;
+- 65.61 s write phase and **0.94 s orderly close**;
+- **1.08 s clean reopen**, down from 912.98 s (approximately 844x faster);
+- 134.72 s complete validation scan; and
+- 22,917,095,424 allocated bytes after close for 10,737,418,240 payload bytes
+  (approximately 2.13x).
+
+The store retained 165 sealed authoritative segments, normally approximately
+64 MiB each, and a 181-byte active descriptor. Directory allocation was about
+10 GiB authoritative segments, 10 GiB recovery protection, 368 MiB indexes and
+209 MiB store metadata. The former 10.39 GiB active recovery tail and transient
+full-shadow reconstruction are absent. Maximum resident size was approximately
+2.23 GiB, down from roughly 7.41 GiB in the defective run.
+
+This result establishes the intended distinction: ordinary clean reopen loads
+bounded metadata and a tiny active descriptor; it does not verify and rewrite
+the full database. CompactShadow's retained recovery copy remains a separate
+space-amplification decision and is now reported honestly rather than paid as
+surprise startup work.

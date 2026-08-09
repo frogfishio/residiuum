@@ -79,7 +79,7 @@ type MutationIdentity = ([u8; 16], [u8; 32]);
 const META_VERSION: &str = "residiuum-store-9\n";
 
 /// Soft max size of the active segment before auto-seal (bytes).
-const DEFAULT_SEAL_THRESHOLD: u64 = 4 * 1024 * 1024;
+const DEFAULT_SEAL_THRESHOLD: u64 = 64 * 1024 * 1024;
 
 /// Default writer shard count (legacy single-active segment).
 const DEFAULT_WRITER_SHARDS: usize = 1;
@@ -679,6 +679,9 @@ pub struct Store {
     /// AWO-3: adaptive write lease owns mutation; direct put/delete refuse with
     /// [`StoreError::AdaptiveWriterActive`] until the lease is released.
     awo_lease_active: bool,
+    /// True after the orderly close barrier sealed written actives, checkpointed
+    /// derived state, and published the clean-session certificate.
+    orderly_close_prepared: bool,
 }
 
 /// Where `write_segment_tail` sends bytes (diagnostic bisection only).
@@ -906,6 +909,7 @@ impl Store {
             segment_growth: crate::segment_growth::SegmentGrowthPolicy::GrowOnAppend,
             awo_writer_poisoned: false,
             awo_lease_active: false,
+            orderly_close_prepared: false,
         };
         // Scale pending-seal backpressure with shard count (each shard may rotate).
         if let Some(pipe) = store.seal_pipeline.as_mut() {
@@ -1030,6 +1034,7 @@ impl Store {
             segment_growth: crate::segment_growth::SegmentGrowthPolicy::GrowOnAppend,
             awo_writer_poisoned: false,
             awo_lease_active: false,
+            orderly_close_prepared: false,
         };
         store.accept_foreign_store_id = matches!(
             options.inventory_policy,
@@ -1265,6 +1270,7 @@ impl Store {
             segment_growth: crate::segment_growth::SegmentGrowthPolicy::GrowOnAppend,
             awo_writer_poisoned: false,
             awo_lease_active: false,
+            orderly_close_prepared: false,
         };
         store.load_tier_state_readonly()?;
         // Memory-only index: prefer frontier/v1 cache, else rebuild without writing.
@@ -2097,12 +2103,22 @@ impl Store {
                 .write_event(subject, EventKind::Put, value, mode, identity)?
                 .with_layout(admit, &self.large_value_policy.profile_id));
         }
-        let receipt = if admit.layout == PayloadLayout::Chunked {
-            self.write_chunked_put(subject, value, mode, identity)?
+        let result = if admit.layout == PayloadLayout::Chunked {
+            self.write_chunked_put(subject, value, mode, identity)
         } else {
-            self.write_event(subject, EventKind::Put, value, mode, identity)?
+            self.write_event(subject, EventKind::Put, value, mode, identity)
         };
-        Ok(receipt.with_layout(admit, &self.large_value_policy.profile_id))
+        match result {
+            Ok(receipt) => Ok(receipt.with_layout(admit, &self.large_value_policy.profile_id)),
+            Err(error) => {
+                // Once frame construction has begun, an error may be after a
+                // partial write or a completed stable boundary. Refuse clean
+                // close so reopen reconciles authoritative media instead of
+                // checkpointing a projection that may be behind it.
+                self.awo_writer_poisoned = true;
+                Err(error)
+            }
+        }
     }
 
     /// Live establishing event id for `subject`, or `None` when absent/tombstoned.
@@ -3469,6 +3485,17 @@ impl Store {
                 writer.max_ack_durability =
                     stronger_durability(writer.max_ack_durability, DurabilityMode::Durable);
             }
+            // Cohort members suppress per-item rotation so the whole cohort can
+            // share one media boundary. Perform that deferred rotation exactly
+            // once per shard after the cohort is durable; otherwise the active
+            // log grows without bound and clean restart becomes a full-database
+            // scan/rewrite.
+            for shard in 0..self.writer_shards() {
+                if let Err(error) = self.maybe_auto_seal(shard) {
+                    self.awo_writer_poisoned = true;
+                    return Err(error);
+                }
+            }
         }
 
         for (index, outcome) in outcomes.iter_mut().enumerate() {
@@ -3702,7 +3729,11 @@ impl Store {
             return Err(StoreError::AdaptiveWriterPoisoned);
         }
         self.check_write_condition(subject, condition)?;
-        self.write_event(subject, EventKind::Delete, &[], mode, identity)
+        let result = self.write_event(subject, EventKind::Delete, &[], mode, identity);
+        if result.is_err() && mode != DurabilityMode::Memory {
+            self.awo_writer_poisoned = true;
+        }
+        result
     }
 
     #[inline]
@@ -4569,10 +4600,10 @@ impl Store {
         let miss = match self.try_load_index_from_cache()? {
             IndexLoadAttempt::Loaded(stats) => {
                 if stats.full_scan_bytes > 0 && !stats.chunk_locators_from_checkpoint {
-                // Writable compatibility migration: once a legacy/incomplete
-                // derived checkpoint has been repaired from authority, replace
-                // it immediately so the next clean open is metadata + tail only.
-                // Failure remains non-fatal because the cache is never authority.
+                    // Writable compatibility migration: once a legacy/incomplete
+                    // derived checkpoint has been repaired from authority, replace
+                    // it immediately so the next clean open is metadata + tail only.
+                    // Failure remains non-fatal because the cache is never authority.
                     let _ = self.persist_index_cache();
                 }
                 return Ok(stats);
@@ -4844,6 +4875,70 @@ impl Store {
         )?;
         self.derived_ops_since_checkpoint = 0;
         Ok(())
+    }
+
+    /// Establish the durable boundary required for a genuinely fast clean reopen.
+    ///
+    /// Written active segments are sealed before the index frontier is
+    /// checkpointed. Only after every authoritative seal is visible and the
+    /// operation journal is stable is the writer session certified clean.
+    /// Repeated calls are harmless, which lets the async driver close explicitly
+    /// while [`Drop`] remains a best-effort fallback for direct store users.
+    pub(crate) fn prepare_orderly_close(&mut self) -> Result<(), StoreError> {
+        if self.orderly_close_prepared || self.writer_lock.is_none() {
+            return Ok(());
+        }
+        if self.awo_writer_poisoned {
+            return Err(StoreError::AdaptiveWriterPoisoned);
+        }
+        if self.write_dedup_recovery_required {
+            return Err(StoreError::CorruptMeta(
+                "operation outcome journal requires recovery before clean close",
+            ));
+        }
+
+        // Derived enrichment is not authoritative and must not create new work
+        // while shutdown is establishing its stable boundary.
+        let enrichment_enabled = self.enrichment_enabled;
+        self.enrichment_enabled = false;
+        let result = (|| {
+            let written_shards: Vec<usize> = self
+                .actives
+                .iter()
+                .enumerate()
+                .filter_map(|(shard, writer)| {
+                    writer
+                        .as_ref()
+                        .filter(|writer| writer.item_events > 0)
+                        .map(|_| shard)
+                })
+                .collect();
+
+            for shard in written_shards {
+                if self.async_lifecycle_enabled() {
+                    self.rotate_active_async(shard)?;
+                } else {
+                    self.seal_active_shard(shard)?;
+                }
+            }
+            self.wait_seals_applied()?;
+
+            // These are rebuildable, but persisting them after the authoritative
+            // frontier change is what makes ordinary restart a load, not a scan.
+            self.persist_index_cache()?;
+            self.refresh_collection_catalog()?;
+            self.flush_derived_catalogs_best_effort();
+
+            let journal = write_dedup_journal_path(&self.paths);
+            sync_write_dedup_journal(&journal)?;
+            mark_write_dedup_session_clean(&self.paths)?;
+            Ok(())
+        })();
+        self.enrichment_enabled = enrichment_enabled;
+        if result.is_ok() {
+            self.orderly_close_prepared = true;
+        }
+        result
     }
 
     /// Sealed-set fingerprint + active covered length for the durable index.
@@ -5823,6 +5918,14 @@ impl Store {
                         paths: self.paths.clone(),
                         require_fsync: flush_mode == DurabilityMode::Durable,
                         size,
+                        summary: crate::segment_catalog::summarize_segment_bytes(
+                            sealed_id,
+                            TierClass::Hot,
+                            bytes,
+                            crate::incremental_seal::ContentHashState::Pending,
+                            size,
+                            self.limits,
+                        ),
                     })?;
                 }
                 // Catalog + enrichment applied on ProtectedPairDone (writer).
@@ -6290,6 +6393,7 @@ impl Store {
             LifecycleResult::ProtectedPairDone {
                 segment_id,
                 size,
+                summary,
                 auth_publish_ns,
                 shadow_publish_ns,
             } => {
@@ -6314,21 +6418,10 @@ impl Store {
                     content_hash,
                     size,
                 );
-                // Hierarchical catalog must see the sealed segment immediately
-                // (tiering / seal-cost / list_segment_summaries). Sync seal path
-                // calls note_sealed_segment; protected-pair finalize must match.
-                let sealed_path = self.paths.sealed_segment(&segment_id);
-                if sealed_path.is_file() {
-                    if let Ok(bytes) = fs::read(&sealed_path) {
-                        let _ = self.note_sealed_segment(
-                            segment_id,
-                            TierClass::Hot,
-                            &bytes,
-                            content_hash,
-                            size,
-                        );
-                    }
-                }
+                // The writer computed this from its exact active counters before
+                // detach. Do not reread the newly sealed segment just to derive
+                // metadata already known at publication time.
+                let _ = self.note_sealed_summary(summary);
                 self.note_derived_catalog_dirty();
                 self.maybe_schedule_derived_catalog_checkpoint(false);
                 if self.enrichment_enabled {
@@ -6395,6 +6488,32 @@ impl Store {
         // write-tail hashing stay off (measured regressions). See
         // doc/archive/performance-qualification/2026-08-04-defer-segment-blake3/.
         let zero_scan_meta = prefix_len > 0 && frame_count > 0;
+        let protected = if let Some(dual) = writer.shadow_dual.take() {
+            if dual.is_poisoned() || dual.image_len() != prefix_len {
+                return Err(StoreError::CorruptMeta(
+                    "dual-stream Shadow staging diverged from authoritative prefix; refuse P★",
+                ));
+            }
+            if !zero_scan_meta {
+                return Err(StoreError::CorruptMeta(
+                    "dual-stream active lacks summary metadata",
+                ));
+            }
+            let plan = crate::incremental_seal::meta_publish_plan(
+                ids,
+                prefix_len,
+                frame_count,
+                writer_sequence,
+                item_events,
+            )?;
+            let prepared = dual.prepare_async_publish(&plan.summary_frame, shard as u16)?;
+            prepared.persist_shard_meta(&self.paths)?;
+            crate::positioned_io::write_all_at(&mut writer.file, prefix_len, &plan.summary_frame)?;
+            writer.file.set_len(plan.sealed_len)?;
+            Some((prepared, plan))
+        } else {
+            None
+        };
         drop(writer);
 
         let n = self.writer_shards();
@@ -6446,7 +6565,20 @@ impl Store {
                 .max_pending_seals
                 .max(DEFAULT_MAX_PENDING_SEALS.saturating_mul(n.max(1)));
             pipe.max_pending_seals = max;
-            if zero_scan_meta {
+            if let Some((prepared_shadow, plan)) = protected {
+                pipe.submit_seal(LifecycleJob::FinalizeProtectedPair {
+                    store_id: self.store_id,
+                    segment_id,
+                    shard: shard as u16,
+                    pending_path: pending_path.clone(),
+                    sealed_path: self.paths.sealed_segment(&segment_id),
+                    prepared_shadow,
+                    paths: self.paths.clone(),
+                    require_fsync,
+                    size: plan.sealed_len,
+                    summary: plan.to_segment_summary(),
+                })?;
+            } else if zero_scan_meta {
                 pipe.submit_seal(LifecycleJob::FinalizeSealMeta {
                     ids,
                     segment_id,
@@ -6536,11 +6668,10 @@ impl Store {
             return Ok(());
         }
         let t0 = std::time::Instant::now();
-        let r = if self.async_lifecycle_enabled() && !self.shadow_dual_stream {
+        let r = if self.async_lifecycle_enabled() {
+            // The async rotation path handles both ordinary authoritative seals
+            // and CompactShadow protected pairs without rereading the segment.
             self.rotate_active_async(shard)
-        } else if self.shadow_dual_stream && self.seal_pipeline.is_some() {
-            // Dual-stream: protected pair via explicit seal detach (async P★).
-            self.seal_active_shard(shard)
         } else {
             self.seal_active_shard(shard)
         };
@@ -7200,12 +7331,8 @@ impl Store {
 
         // Collect (event_id, offset, piece meta) then record locators after the
         // writer borrow ends (DEF-098 generation-exact preads).
-        let mut new_chunk_locs: Vec<(
-            [u8; 16],
-            u64,
-            &residiuum_format::ChunkPiece,
-            [u8; 32],
-        )> = Vec::with_capacity(pieces.len());
+        let mut new_chunk_locs: Vec<([u8; 16], u64, &residiuum_format::ChunkPiece, [u8; 32])> =
+            Vec::with_capacity(pieces.len());
         let mut encoded_frame_len: u64 = 0;
         {
             let writer = self.active_mut(shard).expect("active segment");
@@ -8891,9 +9018,9 @@ fn primary_cache_bytes(paths: &StorePaths) -> u64 {
 }
 
 fn chunk_locator_count(locators: &ChunkLocatorMap) -> u64 {
-    locators
-        .values()
-        .fold(0u64, |total, entries| total.saturating_add(entries.len() as u64))
+    locators.values().fold(0u64, |total, entries| {
+        total.saturating_add(entries.len() as u64)
+    })
 }
 
 fn chunk_locator_coverage_complete(index: &PrimaryIndex, locators: &ChunkLocatorMap) -> bool {
@@ -9350,19 +9477,10 @@ fn sync_dir(path: &Path) -> Result<(), StoreError> {
 
 impl Drop for Store {
     fn drop(&mut self) {
-        // A clean marker is a performance assertion, not authority. Publish it
-        // only when this writer completed normally and no unresolved recovery
-        // or failed stable boundary can exist. Any doubt deliberately leaves
-        // the session dirty, making the next operation reconcile from media.
-        if self.writer_lock.is_some()
-            && !self.awo_writer_poisoned
-            && !self.write_dedup_recovery_required
-            && !std::thread::panicking()
-        {
-            let journal = write_dedup_journal_path(&self.paths);
-            if sync_write_dedup_journal(&journal).is_ok() {
-                let _ = mark_write_dedup_session_clean(&self.paths);
-            }
+        // Direct Store users do not have the driver's explicit close call. Keep
+        // a best-effort fallback, but never certify a panicking process clean.
+        if self.writer_lock.is_some() && !self.orderly_close_prepared && !std::thread::panicking() {
+            let _ = self.prepare_orderly_close();
         }
     }
 }
@@ -9400,6 +9518,41 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         assert_eq!(store.get("a").unwrap().as_deref(), Some(b"1".as_slice()));
         assert_eq!(store.get("b").unwrap().as_deref(), Some(b"2".as_slice()));
+    }
+
+    #[test]
+    fn orderly_drop_seals_written_tail_and_reopen_loads_checkpoint() {
+        let dir = tempdir().unwrap();
+        let active_path = dir.path().join("active/active.residiuum");
+        {
+            let mut store = Store::create(dir.path()).unwrap();
+            store.set_seal_threshold(64 * 1024 * 1024);
+            for i in 0..128 {
+                store
+                    .put(
+                        &format!("restart/{i:03}"),
+                        &[0x5au8; 4096],
+                        DurabilityMode::Durable,
+                    )
+                    .unwrap();
+            }
+            assert!(fs::metadata(&active_path).unwrap().len() > 512 * 1024);
+        }
+
+        // Orderly shutdown moved the written tail to sealed authority and left
+        // only the new descriptor active. Startup work is therefore independent
+        // of the amount written during the prior session.
+        assert!(fs::metadata(&active_path).unwrap().len() < 16 * 1024);
+        let reopened = Store::open(dir.path()).unwrap();
+        assert_eq!(
+            reopened.open_report().index_disposition,
+            IndexOpenDisposition::Loaded
+        );
+        assert!(reopened.open_report().index_active_replay_bytes < 16 * 1024);
+        assert_eq!(
+            reopened.get("restart/127").unwrap().as_deref(),
+            Some([0x5au8; 4096].as_slice())
+        );
     }
 
     #[test]
@@ -9473,6 +9626,9 @@ mod tests {
                 .unwrap();
             store.persist_index_cache().unwrap();
             store.put("after", &after, DurabilityMode::Durable).unwrap();
+            // Model termination without the orderly-close checkpoint. Ordinary
+            // Drop now deliberately seals and checkpoints the tail.
+            store.awo_writer_poisoned = true;
         }
 
         let store = Store::open(dir.path()).unwrap();
@@ -9480,7 +9636,10 @@ mod tests {
         assert_eq!(metrics.index_full_scan_bytes, 0);
         assert!(metrics.index_active_replay_bytes > 0);
         assert!(metrics.chunk_locators_from_checkpoint);
-        assert_eq!(metrics.index_disposition, IndexOpenDisposition::TailReplayed);
+        assert_eq!(
+            metrics.index_disposition,
+            IndexOpenDisposition::TailReplayed
+        );
         assert_eq!(metrics.index_cache_decision, IndexCacheDecision::AcceptedV4);
         assert_eq!(
             store.get("before").unwrap().as_deref(),
@@ -9500,9 +9659,7 @@ mod tests {
             let mut store = Store::create(dir.path()).unwrap();
             store.set_chunk_threshold(1024);
             store.set_chunk_size(4096);
-            store
-                .put("legacy", &body, DurabilityMode::Durable)
-                .unwrap();
+            store.put("legacy", &body, DurabilityMode::Durable).unwrap();
             let frontier = store.current_index_frontier().unwrap();
             crate::index_cache::write_primary_index_frontier_v3_for_test(
                 &primary_cache_path(&store.paths.indexes_dir()),
@@ -9511,14 +9668,22 @@ mod tests {
                 &store.durable_index,
             )
             .unwrap();
+            // Preserve the legacy checkpoint exactly as an unclean exit would.
+            store.awo_writer_poisoned = true;
         }
 
         let store = Store::open(dir.path()).unwrap();
         let metrics = store.open_metrics();
         assert!(metrics.index_full_scan_bytes > 0);
         assert!(!metrics.chunk_locators_from_checkpoint);
-        assert_eq!(metrics.index_disposition, IndexOpenDisposition::LegacyUpgraded);
-        assert_eq!(metrics.index_cache_decision, IndexCacheDecision::AcceptedLegacy);
+        assert_eq!(
+            metrics.index_disposition,
+            IndexOpenDisposition::LegacyUpgraded
+        );
+        assert_eq!(
+            metrics.index_cache_decision,
+            IndexCacheDecision::AcceptedLegacy
+        );
         let cache = fs::read(primary_cache_path(&store.paths.indexes_dir())).unwrap();
         assert_eq!(&cache[..8], b"RIDX0004");
         assert_eq!(
