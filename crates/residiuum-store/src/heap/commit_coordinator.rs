@@ -53,6 +53,22 @@ pub struct OperationCommitStats {
     pub max_cohort_entries: usize,
     /// Largest encoded subject/body payload admitted in one cohort.
     pub max_cohort_bytes: usize,
+    /// Cohorts that used concurrent full-frame cooking before ordered install.
+    pub parallel_cooked_cohorts: u64,
+    /// Individual records cooked concurrently by those cohorts.
+    pub parallel_cooked_operations: u64,
+    /// Aggregate store-lock wall time across completed cohorts.
+    pub cohort_total_ns: u64,
+    /// Aggregate deduplication/eligibility preparation wall time.
+    pub cohort_prepare_ns: u64,
+    /// Aggregate frame cook, install and visibility-publication wall time.
+    pub cohort_cook_install_publish_ns: u64,
+    /// Aggregate authoritative write and stable-boundary wall time.
+    pub cohort_media_boundary_ns: u64,
+    /// Aggregate deferred segment-rotation wall time.
+    pub cohort_rotation_ns: u64,
+    /// Aggregate derived outcome-journal/publication wall time.
+    pub cohort_outcome_journal_ns: u64,
 }
 
 #[derive(Default)]
@@ -72,6 +88,14 @@ struct CoordinatorCounters {
     successful_journal_append_cohorts: AtomicU64,
     max_cohort_entries: AtomicUsize,
     max_cohort_bytes: AtomicUsize,
+    parallel_cooked_cohorts: AtomicU64,
+    parallel_cooked_operations: AtomicU64,
+    cohort_total_ns: AtomicU64,
+    cohort_prepare_ns: AtomicU64,
+    cohort_cook_install_publish_ns: AtomicU64,
+    cohort_media_boundary_ns: AtomicU64,
+    cohort_rotation_ns: AtomicU64,
+    cohort_outcome_journal_ns: AtomicU64,
 }
 
 impl CoordinatorCounters {
@@ -99,6 +123,18 @@ impl CoordinatorCounters {
                 .load(Ordering::Relaxed),
             max_cohort_entries: self.max_cohort_entries.load(Ordering::Relaxed),
             max_cohort_bytes: self.max_cohort_bytes.load(Ordering::Relaxed),
+            parallel_cooked_cohorts: self.parallel_cooked_cohorts.load(Ordering::Relaxed),
+            parallel_cooked_operations: self
+                .parallel_cooked_operations
+                .load(Ordering::Relaxed),
+            cohort_total_ns: self.cohort_total_ns.load(Ordering::Relaxed),
+            cohort_prepare_ns: self.cohort_prepare_ns.load(Ordering::Relaxed),
+            cohort_cook_install_publish_ns: self
+                .cohort_cook_install_publish_ns
+                .load(Ordering::Relaxed),
+            cohort_media_boundary_ns: self.cohort_media_boundary_ns.load(Ordering::Relaxed),
+            cohort_rotation_ns: self.cohort_rotation_ns.load(Ordering::Relaxed),
+            cohort_outcome_journal_ns: self.cohort_outcome_journal_ns.load(Ordering::Relaxed),
         }
     }
 }
@@ -448,13 +484,54 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
         .physical
         .lock()
         .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))
-        .and_then(|mut store| store.operation_cohort_awo_owned(&requests));
+        .and_then(|mut store| {
+            let outcomes = store.operation_cohort_awo_owned(&requests)?;
+            Ok((
+                outcomes,
+                store.last_operation_parallel_cooked(),
+                store.last_operation_cohort_timing(),
+            ))
+        });
     // The byte window covers queued data plus physical installation. Outcome
     // delivery retains no subject/body ownership requirement for admission.
     release_byte_credits(inner, batch_credits);
 
     match outcomes {
-        Ok(outcomes) if outcomes.len() == batch.len() => {
+        Ok((outcomes, parallel_cooked, timing)) if outcomes.len() == batch.len() => {
+            inner
+                .counters
+                .cohort_total_ns
+                .fetch_add(timing.total_ns, Ordering::Relaxed);
+            inner
+                .counters
+                .cohort_prepare_ns
+                .fetch_add(timing.prepare_ns, Ordering::Relaxed);
+            inner
+                .counters
+                .cohort_cook_install_publish_ns
+                .fetch_add(timing.cook_install_publish_ns, Ordering::Relaxed);
+            inner
+                .counters
+                .cohort_media_boundary_ns
+                .fetch_add(timing.media_boundary_ns, Ordering::Relaxed);
+            inner
+                .counters
+                .cohort_rotation_ns
+                .fetch_add(timing.rotation_ns, Ordering::Relaxed);
+            inner
+                .counters
+                .cohort_outcome_journal_ns
+                .fetch_add(timing.outcome_journal_ns, Ordering::Relaxed);
+            if parallel_cooked > 0 {
+                inner
+                    .counters
+                    .parallel_cooked_cohorts
+                    .fetch_add(1, Ordering::Relaxed);
+                inner
+                    .counters
+                    .parallel_cooked_operations
+                    .fetch_add(parallel_cooked as u64, Ordering::Relaxed);
+            }
             let committed = outcomes
                 .iter()
                 .filter(|outcome| matches!(outcome, Ok(value) if !value.deduplicated))

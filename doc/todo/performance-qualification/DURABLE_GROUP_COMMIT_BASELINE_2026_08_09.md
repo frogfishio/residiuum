@@ -433,3 +433,65 @@ bounded metadata and a tiny active descriptor; it does not verify and rewrite
 the full database. CompactShadow's retained recovery copy remains a separate
 space-amplification decision and is now reported honestly rather than paid as
 surprise startup work.
+
+## Post-startup write-path bisection
+
+The bounded-active fix removed startup reconstruction but did not explain the
+remaining gap to 500 MiB/s. A release phase bisection on Bonzo established:
+
+- raw 8 KiB sequential writes: 1,626.72 MiB/s;
+- one-record full store path: 512.97 MiB/s; and
+- existing four-worker batch cook/install path: 1,090.02 MiB/s.
+
+The device and frame format therefore do not impose the observed 156 MiB/s
+ceiling. The product operation coordinator was serially cooking frames and the
+smart client had no bounded pipelined bulk surface.
+
+The next candidate connects up to four record cookers to eligible product
+cohorts. Eligibility is deliberately narrow: single-shard inline puts with
+unique subjects. Duplicate subjects, chunked values, deletes and mixed cohorts
+retain their exact serial semantics. CAS failures remain individual. Product
+inspection now reports the number of concurrently cooked records and aggregate
+cohort phase time.
+
+The client also exposes bounded async `Collection::put_many`. It admits all
+entries before awaiting receipts, but does **not** claim transaction atomicity:
+every entry retains its own operation identity, receipt and terminal result.
+Pre-admission validation failure is the outer error; after admission the caller
+must inspect every key-correlated outcome. This is the correct mechanism for an
+application or bulk loader to offer enough independent work for a larger stable
+boundary without creating thousands of threads.
+
+Bonzo retained-media 1 GiB measurements on the candidate were:
+
+| Client shape | Cohorts | Max entries | MiB/s |
+|---|---:|---:|---:|
+| 256 callers, one outstanding each | 515 | 256 | 202.51 |
+| 256 callers, async bulk of four | 132 | 1,024 | **305.13** |
+
+The bulk-of-four run recovered all 131,072 records after fresh reopen, with no
+failures, refusals or admission waits. The 3.3560 s client write interval
+contained 2.7177 s aggregate store-cohort time, split into:
+
+- 1.5266 s authoritative + Shadow staging write / stable boundary;
+- 0.7104 s parallel cook, ordered install and visibility publication;
+- 0.3531 s deferred rotation/lifecycle work;
+- 0.1017 s outcome journal/publication; and
+- 0.0259 s preparation.
+
+Two suspected optimisations were explicitly falsified. Syncing the unchanged
+active directory on every cohort was redundant and has been reduced to one
+directory-entry barrier per active-file creation, but macOS showed no material
+throughput change. `sync_data` is the correct WAL append boundary once that
+filename is durable, but APFS priced it approximately the same as `sync_all`.
+Submitting authoritative and Shadow writes concurrently from ad-hoc threads was
+rejected: throughput fell to 146.90 MiB/s and p99 latency rose sharply because
+CPU and lifecycle contention increased.
+
+The remaining delta to 500 MiB/s is now specific. CompactShadow writes a second
+independent physical stream, while frame cooking, stable I/O and the next cohort
+currently execute as serial stages. The next implementation push must use the
+already-designed persistent cooker/pipeline machinery so cooking and admission
+for cohort N+1 overlap stable I/O for cohort N, without changing the per-entry
+durable acknowledgement boundary. Another 10 GiB campaign is justified only
+after that pipeline changes the 1 GiB phase split.

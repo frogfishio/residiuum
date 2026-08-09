@@ -28,7 +28,9 @@ impl StoreHost {
     /// Open an existing store directory as a host.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
-        let physical = Arc::new(Mutex::new(PhysicalStore::open(path)?));
+        let mut store = PhysicalStore::open(path)?;
+        store.set_cook_parallelism(product_cook_parallelism());
+        let physical = Arc::new(Mutex::new(store));
         Ok(Self {
             commits: OperationCommitCoordinator::start(Arc::clone(&physical)),
             physical,
@@ -40,7 +42,9 @@ impl StoreHost {
     /// Create a new store directory as a host.
     pub fn create(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
-        let physical = Arc::new(Mutex::new(PhysicalStore::create(path)?));
+        let mut store = PhysicalStore::create(path)?;
+        store.set_cook_parallelism(product_cook_parallelism());
+        let physical = Arc::new(Mutex::new(store));
         Ok(Self {
             commits: OperationCommitCoordinator::start(Arc::clone(&physical)),
             physical,
@@ -222,6 +226,16 @@ impl StoreHost {
     pub fn root(&self) -> &Path {
         &self.root
     }
+}
+
+/// Leave one logical CPU available for the async scheduler and lifecycle work,
+/// while bounding per-cohort frame cooking to the measured useful range.
+fn product_cook_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .saturating_sub(1)
+        .clamp(1, 4)
 }
 
 impl Drop for StoreHost {

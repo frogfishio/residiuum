@@ -19,8 +19,8 @@ pub enum DurabilityMode {
 
     /// Acknowledgement only after authoritative bytes and required allocation
     /// metadata have crossed this implementation's stable-storage boundary
-    /// (`write` + `sync_all` on the active segment file and parent directory
-    /// where applicable).
+    /// (`write` + `sync_data` on an already-published active segment; segment
+    /// creation/publication uses `sync_all` + parent-directory sync).
     Durable,
 }
 

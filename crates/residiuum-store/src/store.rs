@@ -342,6 +342,22 @@ pub struct OperationPutOutcome {
     pub deduplicated: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct OperationCohortTiming {
+    /// Complete store-lock wall time for the cohort.
+    pub total_ns: u64,
+    /// Deduplication, identity and eligibility preparation.
+    pub prepare_ns: u64,
+    /// Frame cooking, ordered installation and visibility publication.
+    pub cook_install_publish_ns: u64,
+    /// Authoritative file write and stable boundary.
+    pub media_boundary_ns: u64,
+    /// Deferred active-segment rotation submission/backpressure.
+    pub rotation_ns: u64,
+    /// Derived outcome journal append and in-memory outcome publication.
+    pub outcome_journal_ns: u64,
+}
+
 impl WriteReceipt {
     fn base(
         store_id: [u8; 16],
@@ -602,6 +618,10 @@ pub struct Store {
     /// lock. Frames stay in the active-segment buffer until one gathered tail
     /// write crosses the cohort boundary.
     operation_cohort_gathering: bool,
+    /// Records cooked concurrently by the most recent operation cohort.
+    last_operation_parallel_cooked: usize,
+    /// Redacted phase timing for the most recent successful operation cohort.
+    last_operation_cohort_timing: OperationCohortTiming,
     /// Background seal/checkpoint worker (DEF-096 Axis A). Writer opens only.
     seal_pipeline: Option<SealPipeline>,
     /// When true, auto-seal on threshold uses O(1) rotate + background finalize.
@@ -745,6 +765,9 @@ struct ActiveWriter {
     file: File,
     /// Bytes known durable on disk for this file (complete frames only).
     durable_len: u64,
+    /// Whether the active file's directory entry has crossed a directory
+    /// durability barrier. Appending bytes does not invalidate this state.
+    directory_entry_durable: bool,
     /// Strongest durability **ack** applied to frames in this active segment.
     ///
     /// Seal/rotate flushes at least this strong so we never force `sync_all` on a
@@ -888,6 +911,8 @@ impl Store {
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
             operation_cohort_gathering: false,
+            last_operation_parallel_cooked: 0,
+            last_operation_cohort_timing: OperationCohortTiming::default(),
             seal_pipeline: Some(SealPipeline::start()),
             async_lifecycle: true,
             enrichment_enabled: true,
@@ -1015,6 +1040,8 @@ impl Store {
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
             operation_cohort_gathering: false,
+            last_operation_parallel_cooked: 0,
+            last_operation_cohort_timing: OperationCohortTiming::default(),
             seal_pipeline: Some(SealPipeline::start()),
             async_lifecycle: true,
             enrichment_enabled: true,
@@ -1253,6 +1280,8 @@ impl Store {
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
             operation_cohort_gathering: false,
+            last_operation_parallel_cooked: 0,
+            last_operation_cohort_timing: OperationCohortTiming::default(),
             seal_pipeline: None,
             async_lifecycle: false,
             enrichment_enabled: false,
@@ -3384,6 +3413,10 @@ impl Store {
         &mut self,
         items: &[OperationMutation<'_>],
     ) -> Result<Vec<Result<OperationPutOutcome, StoreError>>, StoreError> {
+        let cohort_started = Instant::now();
+        let mut timing = OperationCohortTiming::default();
+        self.last_operation_parallel_cooked = 0;
+        self.last_operation_cohort_timing = timing;
         if self.awo_writer_poisoned {
             return Err(StoreError::AdaptiveWriterPoisoned);
         }
@@ -3432,45 +3465,63 @@ impl Store {
             new_indexes.push(*owner);
         }
         new_indexes.sort_unstable();
+        timing.prepare_ns = elapsed_ns(cohort_started);
 
+        let install_started = Instant::now();
         self.operation_cohort_gathering = true;
-        for index in new_indexes {
-            let item = &items[index];
-            let result = match item.kind {
-                OperationMutationKind::Put(body) => self
-                    .put_subject_bytes_if_awo_owned_with_identity(
-                        item.subject,
-                        body,
-                        DurabilityMode::Buffered,
-                        item.condition,
-                        Some((item.operation_id, item.content_hash)),
-                    ),
-                OperationMutationKind::Delete => self
-                    .delete_subject_bytes_if_awo_owned_with_identity(
-                        item.subject,
-                        DurabilityMode::Buffered,
-                        item.condition,
-                        Some((item.operation_id, item.content_hash)),
-                    ),
-            };
-            match result {
-                Ok(receipt) => {
-                    outcomes[index] = Some(Ok(OperationPutOutcome {
-                        receipt,
-                        deduplicated: false,
-                    }));
-                }
-                Err(error) if operation_request_error(&error) => {
-                    outcomes[index] = Some(Err(error));
-                }
-                Err(error) => {
-                    self.operation_cohort_gathering = false;
-                    self.awo_writer_poisoned = true;
-                    return Err(error);
+        let parallel = self.try_parallel_operation_puts(
+            items,
+            &new_indexes,
+            &mut outcomes,
+        );
+        let used_parallel = match parallel {
+            Ok(used) => used,
+            Err(error) => {
+                self.operation_cohort_gathering = false;
+                self.awo_writer_poisoned = true;
+                return Err(error);
+            }
+        };
+        if !used_parallel {
+            for index in new_indexes {
+                let item = &items[index];
+                let result = match item.kind {
+                    OperationMutationKind::Put(body) => self
+                        .put_subject_bytes_if_awo_owned_with_identity(
+                            item.subject,
+                            body,
+                            DurabilityMode::Buffered,
+                            item.condition,
+                            Some((item.operation_id, item.content_hash)),
+                        ),
+                    OperationMutationKind::Delete => self
+                        .delete_subject_bytes_if_awo_owned_with_identity(
+                            item.subject,
+                            DurabilityMode::Buffered,
+                            item.condition,
+                            Some((item.operation_id, item.content_hash)),
+                        ),
+                };
+                match result {
+                    Ok(receipt) => {
+                        outcomes[index] = Some(Ok(OperationPutOutcome {
+                            receipt,
+                            deduplicated: false,
+                        }));
+                    }
+                    Err(error) if operation_request_error(&error) => {
+                        outcomes[index] = Some(Err(error));
+                    }
+                    Err(error) => {
+                        self.operation_cohort_gathering = false;
+                        self.awo_writer_poisoned = true;
+                        return Err(error);
+                    }
                 }
             }
         }
         self.operation_cohort_gathering = false;
+        timing.cook_install_publish_ns = elapsed_ns(install_started);
 
         let has_new = outcomes.iter().any(|outcome| {
             matches!(
@@ -3482,10 +3533,12 @@ impl Store {
             )
         });
         if has_new {
+            let media_started = Instant::now();
             if let Err(error) = self.persist_all_actives(DurabilityMode::Durable) {
                 self.awo_writer_poisoned = true;
                 return Err(error);
             }
+            timing.media_boundary_ns = elapsed_ns(media_started);
             for writer in self.actives.iter_mut().flatten() {
                 writer.max_ack_durability =
                     stronger_durability(writer.max_ack_durability, DurabilityMode::Durable);
@@ -3495,14 +3548,17 @@ impl Store {
             // once per shard after the cohort is durable; otherwise the active
             // log grows without bound and clean restart becomes a full-database
             // scan/rewrite.
+            let rotation_started = Instant::now();
             for shard in 0..self.writer_shards() {
                 if let Err(error) = self.maybe_auto_seal(shard) {
                     self.awo_writer_poisoned = true;
                     return Err(error);
                 }
             }
+            timing.rotation_ns = elapsed_ns(rotation_started);
         }
 
+        let outcome_started = Instant::now();
         for (index, outcome) in outcomes.iter_mut().enumerate() {
             if let Some(Ok(value)) = outcome {
                 if !value.deduplicated {
@@ -3549,6 +3605,9 @@ impl Store {
             });
         }
 
+        timing.outcome_journal_ns = elapsed_ns(outcome_started);
+        timing.total_ns = elapsed_ns(cohort_started);
+        self.last_operation_cohort_timing = timing;
         outcomes
             .into_iter()
             .map(|outcome| {
@@ -3559,6 +3618,304 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Cook independent, single-shard inline puts concurrently, then install
+    /// their complete frames in request order.
+    ///
+    /// Eligibility is deliberately strict. Mixed puts/deletes, chunked bodies,
+    /// multi-shard stores, repeated subjects and single-record cohorts retain
+    /// the serial path above. Unique subjects make all condition observations
+    /// independent, so their preflight results are identical to ordered serial
+    /// execution. No index entry is published until every cooked frame has
+    /// installed successfully; a pre-persist failure restores the active buffer.
+    fn try_parallel_operation_puts(
+        &mut self,
+        items: &[OperationMutation<'_>],
+        new_indexes: &[usize],
+        outcomes: &mut [Option<Result<OperationPutOutcome, StoreError>>],
+    ) -> Result<bool, StoreError> {
+        let workers = self.cook_parallelism();
+        if workers <= 1 || self.writer_shards() != 1 || new_indexes.len() < 2 {
+            return Ok(false);
+        }
+
+        let effective_max = self
+            .large_value_policy
+            .effective_with(self.limits.max_body_len);
+        let mut subjects = HashSet::<&[u8]>::with_capacity(new_indexes.len());
+        let mut condition_successes = 0usize;
+        for &index in new_indexes {
+            let item = &items[index];
+            let OperationMutationKind::Put(body) = item.kind else {
+                return Ok(false);
+            };
+            if !subjects.insert(item.subject)
+                || item.subject.len() > MAX_SUBJECT_LEN
+                || body.len() as u64 > effective_max
+                || !matches!(
+                    self.large_value_policy.admit(body.len()),
+                    Ok(AdmitDecision {
+                        layout: PayloadLayout::Inline,
+                        ..
+                    })
+                )
+            {
+                return Ok(false);
+            }
+            if self.check_write_condition(item.subject, item.condition).is_ok() {
+                condition_successes = condition_successes.saturating_add(1);
+            }
+        }
+        if condition_successes < 2 {
+            return Ok(false);
+        }
+
+        self.ensure_active(0)?;
+        let segment_id = self
+            .active_ref(0)
+            .map(|writer| writer.segment_id)
+            .expect("active segment");
+        let mut writer_sequence = self
+            .active_ref(0)
+            .map(|writer| writer.segment.writer_sequence())
+            .expect("active segment");
+
+        struct Prep<'a> {
+            outcome_index: usize,
+            subject: Vec<u8>,
+            body: &'a [u8],
+            item_id: [u8; 16],
+            event_id: [u8; 16],
+            writer_sequence: u64,
+            envelope: Vec<u8>,
+            admit: AdmitDecision,
+        }
+
+        let mut preps = Vec::with_capacity(condition_successes);
+        for &index in new_indexes {
+            let item = &items[index];
+            if let Err(error) = self.check_write_condition(item.subject, item.condition) {
+                outcomes[index] = Some(Err(error));
+                continue;
+            }
+            let OperationMutationKind::Put(body) = item.kind else {
+                unreachable!("parallel operation eligibility accepted a delete")
+            };
+            let admit = self.large_value_policy.admit(body.len())?;
+            let item_id = self
+                .index
+                .get(item.subject)
+                .map(IndexEntry::item_id)
+                .unwrap_or_else(|| subject_item_id(item.subject));
+            let event_id = self.next_event_id()?;
+            let created_ns = now_ns();
+            let envelope = encode_item_envelope(&ItemEnvelope {
+                store_id: self.store_id,
+                segment_id,
+                item_id,
+                event_kind: EventKind::Put,
+                created_ns,
+                subject: item.subject.to_vec(),
+                operation_id: Some(item.operation_id),
+                operation_content_hash: Some(item.content_hash),
+            })
+            .map_err(StoreError::BadEnvelope)?;
+            if !self
+                .limits
+                .accepts_lengths(envelope.len() as u32, body.len() as u64)
+            {
+                return Ok(false);
+            }
+            preps.push(Prep {
+                outcome_index: index,
+                subject: item.subject.to_vec(),
+                body,
+                item_id,
+                event_id,
+                writer_sequence,
+                envelope,
+                admit,
+            });
+            writer_sequence = writer_sequence.saturating_add(1);
+        }
+
+        struct Cooked {
+            prep_index: usize,
+            frame: Vec<u8>,
+        }
+
+        let cook_workers = workers.min(preps.len()).max(1);
+        let cooked = std::sync::Mutex::new(
+            (0..preps.len())
+                .map(|_| None)
+                .collect::<Vec<Option<Result<Cooked, String>>>>(),
+        );
+        std::thread::scope(|scope| {
+            let chunk = preps.len().div_ceil(cook_workers);
+            for worker in 0..cook_workers {
+                let start = worker.saturating_mul(chunk);
+                if start >= preps.len() {
+                    break;
+                }
+                let end = (start + chunk).min(preps.len());
+                let slice = &preps[start..end];
+                let cooked = &cooked;
+                scope.spawn(move || {
+                    for (local_index, prep) in slice.iter().enumerate() {
+                        let prep_index = start + local_index;
+                        let result = (|| {
+                            let header = FrameHeader {
+                                wire_major: WIRE_MAJOR,
+                                wire_minor: WIRE_MINOR,
+                                frame_kind: FrameKind::ItemEvent.as_u8(),
+                                flags: Default::default(),
+                                envelope_len: prep.envelope.len() as u32,
+                                body_len: prep.body.len() as u64,
+                                logical_len: prep.body.len() as u64,
+                                writer_sequence: prep.writer_sequence,
+                                event_id: prep.event_id,
+                            };
+                            let mut frame = Vec::with_capacity(
+                                (prep.body.len() + prep.envelope.len() + 128).max(256),
+                            );
+                            encode_frame_into(&mut frame, &header, &prep.envelope, prep.body)
+                                .map_err(|error| error.to_string())?;
+                            Ok(Cooked { prep_index, frame })
+                        })();
+                        if let Ok(mut slots) = cooked.lock() {
+                            slots[prep_index] = Some(result);
+                        }
+                    }
+                });
+            }
+        });
+        let cooked = cooked
+            .into_inner()
+            .map_err(|_| StoreError::CorruptMeta("operation cook pool lock poisoned"))?;
+        let cooked = cooked
+            .into_iter()
+            .enumerate()
+            .map(|(prep_index, result)| {
+                let cooked = result
+                    .ok_or(StoreError::CorruptMeta("operation cook slot empty"))?
+                    .map_err(|error| {
+                        StoreError::Io(std::io::Error::other(format!(
+                            "parallel operation cook: {error}"
+                        )))
+                    })?;
+                debug_assert_eq!(cooked.prep_index, prep_index);
+                Ok(cooked)
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+
+        let checkpoint = self
+            .active_ref(0)
+            .map(|writer| writer.segment.checkpoint())
+            .expect("active segment");
+        let original_item_events = self
+            .active_ref(0)
+            .map(|writer| writer.item_events)
+            .expect("active segment");
+        let mut installed = Vec::with_capacity(preps.len());
+        let install_result = (|| -> Result<(), StoreError> {
+            for (prep_index, cooked) in cooked.into_iter().enumerate() {
+                crate::failpoint::hit("awo.install.frame.before")?;
+                let append_started = Instant::now();
+                let offset = self
+                    .active_mut(0)
+                    .expect("active segment")
+                    .segment
+                    .append_preencoded_frame(&cooked.frame)?;
+                let append_ns = append_started
+                    .elapsed()
+                    .as_nanos()
+                    .min(u128::from(u64::MAX)) as u64;
+                let writer = self.active_mut(0).expect("active segment");
+                writer.item_events = writer.item_events.saturating_add(1);
+                crate::failpoint::hit("awo.install.frame.after")?;
+                let prep = &preps[prep_index];
+                self.boundary_probe.record_append(
+                    cooked.frame.len() as u64,
+                    prep.body.len() as u64,
+                    offset,
+                    DurabilityMode::Buffered,
+                    false,
+                    false,
+                    0,
+                    append_ns,
+                    0,
+                );
+                installed.push((offset, cooked.frame.len() as u64));
+            }
+            Ok(())
+        })();
+        if let Err(error) = install_result {
+            if let Some(writer) = self.active_mut(0) {
+                let _ = writer.segment.restore_checkpoint(&checkpoint);
+                writer.item_events = original_item_events;
+            }
+            return Err(error);
+        }
+
+        let parallel_cooked = preps.len();
+        for (prep, (offset, encoded_frame_len)) in preps.into_iter().zip(installed) {
+            let publish_started = Instant::now();
+            self.apply_durable_event(
+                prep.subject.clone(),
+                EventKind::Put,
+                Vec::new(),
+                prep.item_id,
+                prep.event_id,
+                segment_id,
+                0,
+                offset,
+            );
+            self.note_collection_for_subject(&prep.subject);
+            let _ = self.note_durable_derived();
+            self.boundary_probe.record_publish(
+                offset,
+                DurabilityMode::Buffered,
+                0,
+                publish_started
+                    .elapsed()
+                    .as_nanos()
+                    .min(u128::from(u64::MAX)) as u64,
+            );
+            let mut receipt = WriteReceipt::base(
+                self.store_id,
+                segment_id,
+                prep.item_id,
+                prep.event_id,
+                EventKind::Put,
+                DurabilityMode::Buffered,
+                offset,
+            )
+            .with_layout(prep.admit, &self.large_value_policy.profile_id);
+            receipt.encoded_frame_len = encoded_frame_len;
+            outcomes[prep.outcome_index] = Some(Ok(OperationPutOutcome {
+                receipt,
+                deduplicated: false,
+            }));
+        }
+        if let Some(writer) = self.active_mut(0) {
+            writer.max_ack_durability = stronger_durability(
+                writer.max_ack_durability,
+                DurabilityMode::Buffered,
+            );
+        }
+        self.last_operation_parallel_cooked = parallel_cooked;
+        Ok(true)
+    }
+
+    /// Records cooked concurrently by the immediately preceding operation cohort.
+    pub(crate) fn last_operation_parallel_cooked(&self) -> usize {
+        self.last_operation_parallel_cooked
+    }
+
+    /// Phase timing for the immediately preceding successful operation cohort.
+    pub(crate) fn last_operation_cohort_timing(&self) -> OperationCohortTiming {
+        self.last_operation_cohort_timing
     }
 
     /// Atomically resolve or execute an idempotent conditional delete.
@@ -8152,7 +8509,12 @@ impl Store {
                 Self::flush_writer_coalesce(writer)?;
             }
             let t0 = std::time::Instant::now();
-            writer.file.sync_all()?;
+            // The active filename was made durable at segment creation. For an
+            // append acknowledgement we need the bytes and metadata required to
+            // retrieve them (including file length), which is the sync_data /
+            // fdatasync contract. Full inode metadata and directory publication
+            // remain on the create/rotate paths.
+            writer.file.sync_data()?;
             stats.sync_duration_ns = t0.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
             stats.synced = true;
             stats.sync_outcome = crate::boundary_probe::BoundaryOutcome::Ok;
@@ -8252,19 +8614,25 @@ impl Store {
             let sink = self.diagnostic_io;
             let growth = self.segment_growth;
             let mut null = self.null_io_file.take();
-            let stats = {
+            let (stats, directory_entry_durable) = {
                 let writer = self.active_mut(shard).expect("active");
-                Self::write_segment_tail(writer, mode, sink, null.as_mut(), growth)?
+                (
+                    Self::write_segment_tail(writer, mode, sink, null.as_mut(), growth)?,
+                    writer.directory_entry_durable,
+                )
             };
             self.null_io_file = null;
             self.record_tail_probe(&stats, mode, shard as u32)?;
-            if mode == DurabilityMode::Durable {
+            if mode == DurabilityMode::Durable && !directory_entry_durable {
                 crate::failpoint::hit("store.active.dir_sync")?;
                 let t0 = std::time::Instant::now();
                 sync_dir(&self.paths.active_shard_dir(shard, self.writer_shards()))?;
                 let dir_ns = t0.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
                 self.boundary_probe
                     .record_directory_sync(dir_ns, shard as u32);
+                self.active_mut(shard)
+                    .expect("active")
+                    .directory_entry_durable = true;
             }
         }
         Ok(())
@@ -8303,6 +8671,7 @@ impl Store {
         // path that only ever saw Buffered acks may start the next active without
         // fsync via `start_active_segment_with_mode`.
         file.sync_all()?;
+        sync_dir(&dir)?;
         let shadow_dual = self.open_shadow_dual(segment_id, &initial)?;
         self.set_active(
             shard,
@@ -8311,6 +8680,7 @@ impl Store {
                 segment,
                 file,
                 durable_len,
+                directory_entry_durable: true,
                 max_ack_durability: DurabilityMode::Memory,
                 coalesce_buf: Vec::new(),
                 coalesce_off: 0,
@@ -8350,8 +8720,11 @@ impl Store {
         let initial = segment.as_bytes().to_vec();
         file.write_all(&initial)?;
         let durable_len = segment.len();
+        let mut directory_entry_durable = false;
         if mode == DurabilityMode::Durable {
             file.sync_all()?;
+            sync_dir(&dir)?;
+            directory_entry_durable = true;
         }
         let shadow_dual = self.open_shadow_dual(segment_id, &initial)?;
         crate::failpoint::hit("segalloc.after_active_media")?;
@@ -8362,6 +8735,7 @@ impl Store {
                 segment,
                 file,
                 durable_len,
+                directory_entry_durable,
                 max_ack_durability: DurabilityMode::Memory,
                 coalesce_buf: Vec::new(),
                 coalesce_off: 0,
@@ -8725,6 +9099,7 @@ impl Store {
                 segment: rebuilt,
                 file,
                 durable_len,
+                directory_entry_durable: true,
                 // Resumed bytes may include prior Durable frames; fail closed.
                 max_ack_durability: DurabilityMode::Durable,
                 coalesce_buf: Vec::new(),

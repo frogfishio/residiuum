@@ -23,7 +23,7 @@ pub enum BoundaryKind {
     AppendEncodedFrame,
     /// Bytes flushed from the active buffer to the segment file (write_all).
     FileWrite,
-    /// Full-file durability barrier (`sync_all`) on the segment file.
+    /// Data durability barrier (`sync_data`) on the active segment file.
     FileSync,
     /// Directory sync for active-shard durability.
     DirectorySync,

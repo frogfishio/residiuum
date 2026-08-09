@@ -57,6 +57,11 @@ fn operation_cohort_shares_segment_sync_and_replays_individual_receipts() {
         "cohort frames must cross the active tail in one gathered write"
     );
     assert_eq!(
+        probe.counters.count(BoundaryKind::DirectorySync),
+        0,
+        "appending to an already durable active filename must not resync its unchanged directory"
+    );
+    assert_eq!(
         store.get("cohort/a").unwrap().as_deref(),
         Some(b"alpha".as_slice())
     );
@@ -144,6 +149,110 @@ fn mixed_put_delete_cohort_keeps_individual_receipts_and_one_boundary() {
         receipt.event_id,
         outcomes[0].as_ref().unwrap().receipt.event_id
     );
+}
+
+#[test]
+fn parallel_cooked_cohort_preserves_conditions_receipts_and_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("store");
+    let mut store = Store::create(&root).unwrap();
+    store.set_cook_parallelism(4);
+    store.enable_boundary_probe();
+
+    let operations = [
+        OperationMutation {
+            subject: b"parallel/a",
+            kind: OperationMutationKind::Put(b"alpha"),
+            condition: WriteCondition::Absent,
+            operation_id: [61; 16],
+            content_hash: [71; 32],
+        },
+        OperationMutation {
+            subject: b"parallel/b",
+            kind: OperationMutationKind::Put(b"bravo"),
+            condition: WriteCondition::Unconditional,
+            operation_id: [62; 16],
+            content_hash: [72; 32],
+        },
+        OperationMutation {
+            subject: b"parallel/missing",
+            kind: OperationMutationKind::Put(b"must-not-appear"),
+            condition: WriteCondition::Present,
+            operation_id: [63; 16],
+            content_hash: [73; 32],
+        },
+    ];
+    let outcomes = store.operation_cohort_awo_owned(&operations).unwrap();
+    assert_eq!(outcomes.len(), operations.len());
+    assert_eq!(
+        outcomes[0].as_ref().unwrap().receipt.durability,
+        DurabilityMode::Durable
+    );
+    assert_eq!(
+        outcomes[1].as_ref().unwrap().receipt.durability,
+        DurabilityMode::Durable
+    );
+    assert!(matches!(
+        outcomes[2],
+        Err(StoreError::VersionConflict { observed: None, .. })
+    ));
+    assert_eq!(
+        store.get("parallel/a").unwrap().as_deref(),
+        Some(b"alpha".as_slice())
+    );
+    assert_eq!(
+        store.get("parallel/b").unwrap().as_deref(),
+        Some(b"bravo".as_slice())
+    );
+    assert_eq!(store.get("parallel/missing").unwrap(), None);
+
+    let probe = store.take_boundary_snapshot();
+    assert_eq!(probe.counters.count(BoundaryKind::FileWrite), 1);
+    assert_eq!(probe.counters.count(BoundaryKind::FileSync), 1);
+    let event_a = outcomes[0].as_ref().unwrap().receipt.event_id;
+    let event_b = outcomes[1].as_ref().unwrap().receipt.event_id;
+    drop(store);
+
+    let mut reopened = Store::open(&root).unwrap();
+    assert_eq!(
+        reopened.get("parallel/a").unwrap().as_deref(),
+        Some(b"alpha".as_slice())
+    );
+    assert_eq!(
+        reopened.get("parallel/b").unwrap().as_deref(),
+        Some(b"bravo".as_slice())
+    );
+    for (subject, body, condition, operation_id, content_hash, expected_event) in [
+        (
+            b"parallel/a".as_slice(),
+            b"alpha".as_slice(),
+            WriteCondition::Absent,
+            [61; 16],
+            [71; 32],
+            event_a,
+        ),
+        (
+            b"parallel/b".as_slice(),
+            b"bravo".as_slice(),
+            WriteCondition::Unconditional,
+            [62; 16],
+            [72; 32],
+            event_b,
+        ),
+    ] {
+        let (receipt, deduplicated) = reopened
+            .put_subject_bytes_with_operation(
+                subject,
+                body,
+                DurabilityMode::Durable,
+                condition,
+                operation_id,
+                content_hash,
+            )
+            .unwrap();
+        assert!(deduplicated);
+        assert_eq!(receipt.event_id, expected_event);
+    }
 }
 
 #[test]

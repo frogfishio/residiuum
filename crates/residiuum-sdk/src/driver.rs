@@ -103,6 +103,43 @@ pub struct PutOptions {
     pub context: OperationContext,
 }
 
+/// One independently identified entry in an async bulk put.
+#[derive(Debug, Clone)]
+pub struct PutManyEntry<T> {
+    /// Collection-local key.
+    pub key: String,
+    /// Typed value to encode and admit.
+    pub value: T,
+    /// Per-entry identity and deadline.
+    pub options: PutOptions,
+}
+
+impl<T> PutManyEntry<T> {
+    /// Construct an entry with freshly minted request and operation identities.
+    pub fn new(key: impl Into<String>, value: T) -> Self {
+        Self {
+            key: key.into(),
+            value,
+            options: PutOptions::default(),
+        }
+    }
+
+    /// Override this entry's request context.
+    pub fn options(mut self, options: PutOptions) -> Self {
+        self.options = options;
+        self
+    }
+}
+
+/// Key-correlated terminal result from [`Collection::put_many`].
+#[derive(Debug)]
+pub struct PutManyOutcome {
+    /// Collection-local key supplied by the caller.
+    pub key: String,
+    /// Independent durable receipt or explicit terminal error.
+    pub result: Result<WriteReceipt, Error>,
+}
+
 /// Options for create-if-absent.
 #[derive(Debug, Clone, Default)]
 pub struct CreateOptions {
@@ -832,6 +869,95 @@ where
         let request_id = resolve_request_id(options.context.request_id)?;
         let operation_id = resolve_operation_id(options.context.operation_id)?;
         let deadline = options.context.deadline;
+        self.dispatch_encoded_put(key, body, request_id, operation_id, deadline)
+            .await
+    }
+
+    /// Admit many independent durable puts before awaiting their receipts.
+    ///
+    /// This is the bounded pipelined write surface: every entry keeps its own
+    /// operation identity, condition, receipt and terminal error, while entries
+    /// available together may share a physical stable boundary. The outer error
+    /// is pre-admission only (validation/encoding or an oversized batch). After
+    /// admission, callers receive one ordered [`PutManyOutcome`] per input and
+    /// must inspect each result; there is no misleading all-or-nothing claim.
+    pub async fn put_many(
+        &self,
+        entries: Vec<PutManyEntry<T>>,
+    ) -> Result<Vec<PutManyOutcome>, Error> {
+        if entries.len() > self.heap_client.connection.scheduler.queue_capacity {
+            return Err(Error::local(
+                ErrorCode::ResourceLimit,
+                ErrorClass::Admission,
+                "bulk put entry count exceeds the embedded mutation bound",
+            ));
+        }
+
+        struct Prepared {
+            key: String,
+            body: Vec<u8>,
+            request_id: RequestId,
+            operation_id: OperationId,
+            deadline: Option<Instant>,
+        }
+
+        let mut prepared = Vec::with_capacity(entries.len());
+        let mut total_bytes = 0usize;
+        for entry in entries {
+            let json = serde_json::to_value(&entry.value).map_err(|error| {
+                Error::local(ErrorCode::Validation, ErrorClass::Request, error.to_string())
+            })?;
+            let body = crate::value::encode_json(&json).map_err(|error| {
+                Error::local(ErrorCode::Validation, ErrorClass::Request, error.to_string())
+            })?;
+            total_bytes = total_bytes
+                .saturating_add(entry.key.len())
+                .saturating_add(body.len());
+            prepared.push(Prepared {
+                key: entry.key,
+                body,
+                request_id: resolve_request_id(entry.options.context.request_id)?,
+                operation_id: resolve_operation_id(entry.options.context.operation_id)?,
+                deadline: entry.options.context.deadline,
+            });
+        }
+        if total_bytes > self.heap_client.connection.scheduler.queue_byte_capacity {
+            return Err(Error::local(
+                ErrorCode::ResourceLimit,
+                ErrorClass::Admission,
+                "bulk put bytes exceed the embedded mutation byte bound",
+            ));
+        }
+
+        let mut admitted = Vec::with_capacity(prepared.len());
+        for entry in prepared {
+            let future = self.dispatch_encoded_put(
+                entry.key.clone(),
+                entry.body,
+                entry.request_id,
+                entry.operation_id,
+                entry.deadline,
+            );
+            admitted.push((entry.key, future));
+        }
+        let mut outcomes = Vec::with_capacity(admitted.len());
+        for (key, future) in admitted {
+            outcomes.push(PutManyOutcome {
+                key,
+                result: future.await,
+            });
+        }
+        Ok(outcomes)
+    }
+
+    fn dispatch_encoded_put(
+        &self,
+        key: String,
+        body: Vec<u8>,
+        request_id: RequestId,
+        operation_id: OperationId,
+        deadline: Option<Instant>,
+    ) -> ResponseFuture<WriteReceipt> {
         let content_hash = canonical_mutation_hash(
             b"put-v1",
             self.heap_id(),
@@ -871,7 +997,6 @@ where
                     )
                 },
             )
-            .await
     }
 
     /// Insert only when the key is absent.

@@ -7,7 +7,7 @@ use residiuum_heap::{
 };
 use residiuum_sdk::driver::{
     Client, Collection, CreateCollectionOptions, DeleteOptions, EmbeddedOptions, ErrorCode,
-    HeapClient, OperationContext, OperationId, PutOptions, ReplaceOptions, ScanOptions,
+    HeapClient, OperationContext, OperationId, PutManyEntry, PutOptions, ReplaceOptions, ScanOptions,
     MAX_SCAN_PAGE_SIZE,
 };
 use residiuum_sdk::{Parameters, QueryRunOptions, ResidiuumDeployment, RqlFullExecuteOptions};
@@ -505,6 +505,72 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
     assert!(clone.inspect().closed);
     let closed = block_on(collection.get("stable")).unwrap_err();
     assert_eq!(closed.code, ErrorCode::Closed);
+}
+
+#[test]
+fn async_bulk_put_pipelines_independent_receipts_without_atomicity_claims() {
+    let (directory, capability) = prepared_deployment();
+    let connection = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path()).queue_capacity(64),
+    ))
+    .unwrap();
+    let heap = block_on(connection.open_named_heap("driver-test", capability)).unwrap();
+    let collection: Collection<Value> = block_on(heap.create_collection(
+        "bulk-records",
+        CreateCollectionOptions::default(),
+    ))
+    .unwrap();
+
+    let entries = (0..32u8)
+        .map(|index| {
+            PutManyEntry::new(format!("bulk-{index:03}"), json!({ "n": index })).options(
+                PutOptions {
+                    context: OperationContext {
+                        operation_id: Some(operation(index.saturating_add(100))),
+                        ..OperationContext::default()
+                    },
+                },
+            )
+        })
+        .collect();
+    let outcomes = block_on(collection.put_many(entries)).unwrap();
+    assert_eq!(outcomes.len(), 32);
+    assert!(outcomes.iter().all(|outcome| outcome.result.is_ok()));
+    assert_eq!(outcomes[0].key, "bulk-000");
+    assert_eq!(outcomes[31].key, "bulk-031");
+
+    let inspection = connection.inspect();
+    assert!(inspection.operation_commits.max_cohort_entries >= 2);
+    assert!(inspection.operation_commits.parallel_cooked_operations >= 2);
+
+    let retries = (0..32u8)
+        .map(|index| {
+            PutManyEntry::new(format!("bulk-{index:03}"), json!({ "n": index })).options(
+                PutOptions {
+                    context: OperationContext {
+                        operation_id: Some(operation(index.saturating_add(100))),
+                        ..OperationContext::default()
+                    },
+                },
+            )
+        })
+        .collect();
+    let retried = block_on(collection.put_many(retries)).unwrap();
+    assert!(retried.iter().all(|outcome| {
+        outcome
+            .result
+            .as_ref()
+            .map(|receipt| receipt.deduplicated)
+            .unwrap_or(false)
+    }));
+    for index in 0..32u8 {
+        assert_eq!(
+            block_on(collection.get(format!("bulk-{index:03}"))).unwrap(),
+            Some(json!({ "n": index }))
+        );
+    }
+
+    block_on(connection.close()).unwrap();
 }
 
 #[test]

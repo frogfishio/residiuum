@@ -3,12 +3,15 @@
 //! This is ignored by ordinary test runs. The caller must supply a dedicated,
 //! empty root and an explicit logical-byte target.
 
+#![recursion_limit = "256"]
+
 use residiuum_authority::{
     bootstrap_development_file_product, DevelopmentFileProductBootstrap, ProductHeapRequest,
 };
 use residiuum_heap::Rights;
 use residiuum_sdk::driver::{
-    Client, Collection, CreateCollectionOptions, EmbeddedOptions, ScanOptions, MAX_SCAN_PAGE_SIZE,
+    Client, Collection, CreateCollectionOptions, EmbeddedOptions, PutManyEntry, ScanOptions,
+    MAX_SCAN_PAGE_SIZE,
 };
 use residiuum_sdk::ResidiuumDeployment;
 use serde_json::{json, Value};
@@ -175,6 +178,10 @@ fn smart_client_durable_retained_media_campaign() {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(4);
+    let client_batch = std::env::var("RESIDIUUM_SMART_DURABLE_CLIENT_BATCH")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
     let minimum_free = std::env::var("RESIDIUUM_SMART_DURABLE_MIN_FREE_BYTES")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -183,6 +190,7 @@ fn smart_client_durable_retained_media_campaign() {
     assert!(payload_bytes > 0);
     assert!(concurrency > 0);
     assert!(read_workers > 0);
+    assert!(client_batch > 0);
     let free_at_start = available_bytes(&root);
     assert!(
         free_at_start >= minimum_free,
@@ -208,7 +216,7 @@ fn smart_client_durable_retained_media_campaign() {
     let client = block_on(Client::open_embedded(
         EmbeddedOptions::new(&store)
             .workers(read_workers)
-            .queue_capacity(concurrency.saturating_mul(4)),
+            .queue_capacity(concurrency.saturating_mul(client_batch.max(4))),
     ))
     .unwrap();
     let open_ns = open_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
@@ -233,17 +241,46 @@ fn smart_client_durable_retained_media_campaign() {
             barrier.wait();
             let mut operation = worker as u64;
             while operation < total_operations {
-                let document = &documents[(operation as usize) & (documents.len() - 1)];
                 let started = Instant::now();
-                block_on(records.put(format!("record-{operation:016}"), document.as_ref()))
-                    .map_err(|error| error.to_string())?;
-                latencies.push(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
-                let before = acknowledged_payload.fetch_add(payload_bytes as u64, Ordering::Relaxed);
-                let after = before.saturating_add(payload_bytes as u64);
-                if before / GIB != after / GIB {
-                    eprintln!("acknowledged_payload_gib={}", after / GIB);
+                let submitted = if client_batch == 1 {
+                    let document = &documents[(operation as usize) & (documents.len() - 1)];
+                    block_on(records.put(format!("record-{operation:016}"), document.as_ref()))
+                        .map_err(|error| error.to_string())?;
+                    operation = operation.saturating_add(concurrency as u64);
+                    1
+                } else {
+                    let mut entries = Vec::with_capacity(client_batch);
+                    while operation < total_operations && entries.len() < client_batch {
+                        let document = documents
+                            [(operation as usize) & (documents.len() - 1)]
+                            .as_ref()
+                            .clone();
+                        entries.push(PutManyEntry::new(
+                            format!("record-{operation:016}"),
+                            document,
+                        ));
+                        operation = operation.saturating_add(concurrency as u64);
+                    }
+                    let outcomes = block_on(records.put_many(entries))
+                        .map_err(|error| error.to_string())?;
+                    let submitted = outcomes.len();
+                    for outcome in outcomes {
+                        outcome.result.map_err(|error| {
+                            format!("bulk key {}: {error}", outcome.key)
+                        })?;
+                    }
+                    submitted
+                };
+                let latency = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+                latencies.extend(std::iter::repeat(latency).take(submitted));
+                for _ in 0..submitted {
+                    let before = acknowledged_payload
+                        .fetch_add(payload_bytes as u64, Ordering::Relaxed);
+                    let after = before.saturating_add(payload_bytes as u64);
+                    if before / GIB != after / GIB {
+                        eprintln!("acknowledged_payload_gib={}", after / GIB);
+                    }
                 }
-                operation = operation.saturating_add(concurrency as u64);
             }
             Ok(latencies)
         }));
@@ -281,7 +318,7 @@ fn smart_client_durable_retained_media_campaign() {
     let reopened = block_on(Client::open_embedded(
         EmbeddedOptions::new(&store)
             .workers(read_workers)
-            .queue_capacity(concurrency.saturating_mul(4)),
+            .queue_capacity(concurrency.saturating_mul(client_batch.max(4))),
     ))
     .unwrap();
     let reopened_heap = block_on(reopened.open_named_heap("campaign", capability)).unwrap();
@@ -331,6 +368,7 @@ fn smart_client_durable_retained_media_campaign() {
         "payload_bytes_per_operation": payload_bytes,
         "operations": total_operations,
         "concurrency": concurrency,
+        "client_batch": client_batch,
         "read_query_workers": read_workers,
         "free_bytes_at_start": free_at_start,
         "file_logical_bytes_after_close": file_logical_bytes_after_close,
@@ -378,6 +416,16 @@ fn smart_client_durable_retained_media_campaign() {
             "successful_journal_append_cohorts": inspection.operation_commits.successful_journal_append_cohorts,
             "max_cohort_entries": inspection.operation_commits.max_cohort_entries,
             "max_cohort_bytes": inspection.operation_commits.max_cohort_bytes,
+            "parallel_cooked_cohorts": inspection.operation_commits.parallel_cooked_cohorts,
+            "parallel_cooked_operations": inspection.operation_commits.parallel_cooked_operations,
+            "phase_ns": {
+                "total": inspection.operation_commits.cohort_total_ns,
+                "prepare": inspection.operation_commits.cohort_prepare_ns,
+                "cook_install_publish": inspection.operation_commits.cohort_cook_install_publish_ns,
+                "media_boundary": inspection.operation_commits.cohort_media_boundary_ns,
+                "rotation": inspection.operation_commits.cohort_rotation_ns,
+                "outcome_journal": inspection.operation_commits.cohort_outcome_journal_ns,
+            },
         },
         "reopen_validation": {
             "complete": true,
