@@ -1003,3 +1003,62 @@ Gathered physical cohorts are accepted as the product path. This still does not
 establish 500 MiB/s; the remaining delta is approximately 85.5 MiB/s, with one
 real stable barrier per approximately 16 MiB cohort plus frame/index/outcome
 publication and rotation costs.
+
+### Cohort hot-loop and smart-client CPU bisection (`696c6a2`–`2dca057`)
+
+Commit `696c6a2` removed two provably redundant operations from the gathered
+cohort hot loop: disabled boundary probes no longer take per-record clocks, and
+the lifecycle completion queue is polled once per physical cohort rather than
+once per record while the same writer lock prevents concurrent application.
+The checkpoint-lag counter still advances by the exact record count. Store unit
+tests (273/273), RSHD0004 (16/16), default-flip (3/3), and product campaign
+(6/6) passed.
+
+The matched 4 GiB run completed at **411.43 MiB/s**, versus 414.46 MiB/s for
+`d13f741`. Its `cook_install_publish` aggregate fell by only 16.47 ms across all
+524,288 records; two extra cohorts and media variance dominated the wall time.
+This is accepted as hot-loop cleanup, not as a throughput improvement. The
+report is `696c6a2-cohort-hot-loop-4g.report.json`.
+
+An 8-second macOS CPU sample of the same saturated shape then identified the
+smart-client preparation path as significant runnable CPU: `serde_json::Value`
+was cloned into another complete JSON tree before serialization, request and
+operation identities each entered the OS entropy path separately, and mutation
+admission serialized callers on scheduler/drain mutexes. BLAKE3 frame/content
+hashing and `pwrite` were the expected dominant storage-side runnable work;
+primary B-tree insertion was comparatively small. The sampling run is
+diagnostic and is not a throughput result. Its retained artifacts are
+`696c6a2-cpu-profile-4g.sample.txt` and
+`696c6a2-cpu-profile-4g.report.json`.
+
+Commit `3eef0b4` therefore preserves the established durable JSON bytes while
+avoiding the redundant tree clone when the typed collection already contains a
+`serde_json::Value`. Arbitrary `Serialize` implementations retain the old
+normalization path. `put_many` also obtains all absent request/operation IDs in
+one bounded OS-CSPRNG fill; every ID remains OS-CSPRNG material, non-zero and
+fail-closed. SDK unit tests (171/171) and embedded-driver integration tests
+(9/9) passed. The matched run sustained **418.24 MiB/s / 53,535 ops/s**, a real
+but modest **0.91%** improvement over `d13f741`, with interval rates 417.88,
+414.92, 424.50 and 416.47 MiB/s. It retained 261 writes/barriers, committed and
+revalidated every record, and had zero failures, waits, refusals or swaps. p95
+was 56.42 ms and p99 59.31 ms. The report is
+`3eef0b4-sdk-bulk-4g.report.json`.
+
+Commit `2dca057` removes the remaining unnecessary scheduler lock convoy for
+mutations. Mutation work never enters the read/query worker channel, so one
+atomic state now combines bounded admitted count with a closed bit. Close first
+closes that state, refuses late mutations, and waits until every earlier
+admission releases it. A close-race test proves both halves. The same SDK unit
+and embedded-driver suites passed. Its matched run sustained **415.85 MiB/s /
+53,229 ops/s**, with interval rates 415.60, 424.11, 415.10 and 409.51 MiB/s,
+again 261 writes/barriers and complete restart validation. This is classified
+as concurrency-quality cleanup, not an additional throughput gain. The report
+is `2dca057-atomic-admission-4g.report.json`.
+
+These experiments narrow the next target. Client-side waste mattered, but the
+accepted improvement remains only 3.78 MiB/s. At this shape the physical
+cohort phases still spend approximately 0.83–0.88 s/GiB on authoritative
+write+barrier and 0.34–0.37 s/GiB on rotation. Reaching 500 MiB/s now requires
+overlapping safe rotation/publication work with the next cohort or otherwise
+reducing those real physical costs. More per-record bookkeeping cleanup or a
+larger logical batch is not supported by the evidence.
