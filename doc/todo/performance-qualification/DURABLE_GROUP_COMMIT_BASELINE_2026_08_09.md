@@ -890,3 +890,23 @@ The explicit synchronous RSHD0004 path and its failpoint matrix remain available
 as a qualified reference. CompactShadow product mode selects the bounded
 off-thread stager. This replacement must repeat the clean 4 GiB comparison; no
 performance claim is made from the failed `81cc4e0` candidate.
+
+Commit `1d175f5` passed that clean matched comparison. Its four intervals were
+360.99, 363.30, 363.47 and 352.41 MiB/s, with 359.84 MiB/s overall (46,059
+durable operations/s). The exact-I/O baseline was 336.50 MiB/s, so the accepted
+gain is 6.94%. All 64 rotations observed during the four sampled intervals also
+published their Shadows; there was no protection backlog, byte-admission wait,
+operation failure or swap. Shadow staging submitted 1,066–1,073 exact 1 MiB
+writes per GiB on its worker. The last interval remained within 3% of the first,
+so the sustained-shape gate passes.
+
+Close took 0.267 s, clean reopen 0.460 s, and the exhaustive 4 GiB logical scan
+43.33 s. All 524,288 records and all 4,294,967,296 payload bytes validated after
+restart. Peak sampled ingestion RSS was approximately 750 MB. The report is
+archived as `1d175f5-async-shadow-4g.report.json` under the 2026-08-10 sustained
+bisection archive. Bonzo was returned to 88 GiB free.
+
+This accepts bounded asynchronous single-pass Shadow staging as the product
+path. It does not establish a 500 MB/s claim. The next performance step should
+target the roughly 159–163 authoritative durability barriers per GiB; Shadow
+scheduling is no longer the dominant foreground defect in this 4 GiB shape.
