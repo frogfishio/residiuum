@@ -203,6 +203,24 @@ pub fn append_write_dedup_batch(
     path: &Path,
     records: &[([u8; 16], &DedupRecord)],
 ) -> Result<(), StoreError> {
+    append_write_dedup_batch_inner(path, records, true)
+}
+
+/// Append a cohort to the derived lookup journal without claiming a stable
+/// boundary. The authoritative item-event frames are the recovery source and
+/// must already be durable before this is used.
+pub(crate) fn append_write_dedup_batch_buffered(
+    path: &Path,
+    records: &[([u8; 16], &DedupRecord)],
+) -> Result<(), StoreError> {
+    append_write_dedup_batch_inner(path, records, false)
+}
+
+fn append_write_dedup_batch_inner(
+    path: &Path,
+    records: &[([u8; 16], &DedupRecord)],
+    sync: bool,
+) -> Result<(), StoreError> {
     if records.is_empty() {
         return Ok(());
     }
@@ -210,18 +228,39 @@ pub fn append_write_dedup_batch(
     fs::create_dir_all(parent)?;
     let new_file = !path.is_file() || fs::metadata(path)?.len() == 0;
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    if new_file {
-        file.write_all(JOURNAL_MAGIC)?;
-        file.write_all(&JOURNAL_VERSION.to_le_bytes())?;
-    }
     crate::failpoint::hit("store.dedup.before_write")?;
-    for (operation_id, record) in records {
-        file.write_all(&encode_journal_record(*operation_id, record))?;
+    let mut cohort = Vec::with_capacity(
+        usize::from(new_file) * JOURNAL_HEADER_LEN
+            + records.len().saturating_mul(JOURNAL_RECORD_LEN),
+    );
+    if new_file {
+        cohort.extend_from_slice(JOURNAL_MAGIC);
+        cohort.extend_from_slice(&JOURNAL_VERSION.to_le_bytes());
     }
-    file.sync_data()?;
+    for (operation_id, record) in records {
+        cohort.extend_from_slice(&encode_journal_record(*operation_id, record));
+    }
+    file.write_all(&cohort)?;
+    if sync {
+        file.sync_data()?;
+    }
     // Historical crash-cell id retained even though the outcome ledger is now
     // append-only rather than an atomic-file rename.
     crate::failpoint::hit("store.dedup.after_rename")?;
+    Ok(())
+}
+
+/// Cross the stable boundary for all buffered derived outcomes before a clean
+/// shutdown certificate is published.
+pub(crate) fn sync_write_dedup_journal(path: &Path) -> Result<(), StoreError> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?
+        .sync_data()?;
     Ok(())
 }
 

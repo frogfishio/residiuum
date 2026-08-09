@@ -397,7 +397,8 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
     );
     assert!(commits.max_cohort_entries >= 2);
     assert_eq!(commits.successful_media_sync_cohorts, commits.cohorts);
-    assert_eq!(commits.successful_journal_sync_cohorts, commits.cohorts);
+    assert_eq!(commits.successful_journal_sync_cohorts, 0);
+    assert_eq!(commits.successful_journal_append_cohorts, commits.cohorts);
 
     let options = PutOptions {
         context: OperationContext {

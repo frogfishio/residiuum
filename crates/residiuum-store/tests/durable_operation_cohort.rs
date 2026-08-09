@@ -51,6 +51,11 @@ fn operation_cohort_shares_segment_sync_and_replays_individual_receipts() {
         "two successful logical mutations, including a chunked value, must share one segment sync"
     );
     assert_eq!(
+        probe.counters.count(BoundaryKind::FileWrite),
+        1,
+        "cohort frames must cross the active tail in one gathered write"
+    );
+    assert_eq!(
         store.get("cohort/a").unwrap().as_deref(),
         Some(b"alpha".as_slice())
     );

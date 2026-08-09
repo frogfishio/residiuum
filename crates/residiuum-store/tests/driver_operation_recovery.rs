@@ -2,8 +2,8 @@
 //! append succeeds but the derived dedup table update is interrupted.
 
 use residiuum_store::{
-    arm_failpoint_once, clear_failpoints, CompactOptions, DurabilityMode, FailpointAction, Store,
-    StoreError, WriteCondition,
+    arm_failpoint_once, clear_failpoints, CompactOptions, DurabilityMode, FailpointAction,
+    OperationPut, Store, StoreError, WriteCondition,
 };
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -62,6 +62,55 @@ fn retry_recovers_original_receipt_after_append_to_dedup_crash_window() {
     assert!(replayed);
     assert_eq!(receipt.event_id, original_event_id);
     assert_eq!(store.history("conversation/7").unwrap().events.len(), 1);
+}
+
+#[test]
+fn durable_cohort_ack_survives_derived_journal_failure() {
+    let _guard = suite_lock();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("store");
+    let operation_id = [0x43; 16];
+    let content_hash = [0x54; 32];
+
+    let original_event_id = {
+        let mut store = Store::create(&root).unwrap();
+        arm_failpoint_once("store.dedup.before_write", FailpointAction::Error);
+        let outcomes = store
+            .put_operation_cohort_awo_owned(&[OperationPut {
+                subject: b"conversation/cohort-journal",
+                body: b"durable-document",
+                condition: WriteCondition::Unconditional,
+                operation_id,
+                content_hash,
+            }])
+            .expect("derived journal failure must not revoke a durable media acknowledgement");
+        let accepted = outcomes[0].as_ref().unwrap();
+        assert!(!accepted.deduplicated);
+        accepted.receipt.event_id
+    };
+
+    clear_failpoints();
+    let mut reopened = Store::open(&root).unwrap();
+    let (receipt, replayed) = reopened
+        .put_subject_bytes_with_operation(
+            b"conversation/cohort-journal",
+            b"durable-document",
+            DurabilityMode::Durable,
+            WriteCondition::Unconditional,
+            operation_id,
+            content_hash,
+        )
+        .unwrap();
+    assert!(replayed);
+    assert_eq!(receipt.event_id, original_event_id);
+    assert_eq!(
+        reopened
+            .history("conversation/cohort-journal")
+            .unwrap()
+            .events
+            .len(),
+        1
+    );
 }
 
 #[test]

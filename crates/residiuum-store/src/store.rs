@@ -55,10 +55,10 @@ use crate::tier::{
 };
 use crate::token_keys::ContinuationKeyring;
 use crate::write_dedup::{
-    append_write_dedup, append_write_dedup_batch, load_write_dedup_checked,
+    append_write_dedup, append_write_dedup_batch_buffered, load_write_dedup_checked,
     mark_write_dedup_session_clean, mark_write_dedup_session_dirty, rewrite_write_dedup_journal,
-    save_write_dedup, write_dedup_journal_path, write_dedup_path, write_dedup_session_clean,
-    DedupRecord, WriteDedupTable,
+    save_write_dedup, sync_write_dedup_journal, write_dedup_journal_path, write_dedup_path,
+    write_dedup_session_clean, DedupRecord, WriteDedupTable,
 };
 use crate::writer_lock::{StoreOpenOptions, WriterLock, WriterLockObservation};
 use residiuum_format::{
@@ -573,6 +573,10 @@ pub struct Store {
     write_dedup: WriteDedupTable,
     /// Previous process ended before certifying its outcome journal complete.
     write_dedup_recovery_required: bool,
+    /// The operation coordinator is cooking a cohort under the exclusive store
+    /// lock. Frames stay in the active-segment buffer until one gathered tail
+    /// write crosses the cohort boundary.
+    operation_cohort_gathering: bool,
     /// Background seal/checkpoint worker (DEF-096 Axis A). Writer opens only.
     seal_pipeline: Option<SealPipeline>,
     /// When true, auto-seal on threshold uses O(1) rotate + background finalize.
@@ -854,6 +858,7 @@ impl Store {
             writer_lock: Some(writer_lock),
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
+            operation_cohort_gathering: false,
             seal_pipeline: Some(SealPipeline::start()),
             async_lifecycle: true,
             enrichment_enabled: true,
@@ -977,6 +982,7 @@ impl Store {
             writer_lock: Some(writer_lock),
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
+            operation_cohort_gathering: false,
             seal_pipeline: Some(SealPipeline::start()),
             async_lifecycle: true,
             enrichment_enabled: true,
@@ -1211,6 +1217,7 @@ impl Store {
             writer_lock: None,
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
+            operation_cohort_gathering: false,
             seal_pipeline: None,
             async_lifecycle: false,
             enrichment_enabled: false,
@@ -3306,8 +3313,9 @@ impl Store {
     /// Requests retain individual conditions, identities, receipts and errors.
     /// Successful new writes append in buffered mode while this exclusive store
     /// handle prevents outside visibility, then one active-media sync upgrades
-    /// every included receipt to Durable. Operation outcomes are appended and
-    /// synced as one journal cohort before success is returned.
+    /// every included receipt to Durable. Operation outcomes are then appended
+    /// to a derived lookup journal without a second stable boundary; the
+    /// authoritative item-event frames reconstruct that journal after a crash.
     pub fn put_operation_cohort_awo_owned(
         &mut self,
         items: &[OperationPut<'_>],
@@ -3361,6 +3369,7 @@ impl Store {
         }
         new_indexes.sort_unstable();
 
+        self.operation_cohort_gathering = true;
         for index in new_indexes {
             let item = &items[index];
             match self.put_subject_bytes_if_awo_owned_with_identity(
@@ -3380,11 +3389,13 @@ impl Store {
                     outcomes[index] = Some(Err(error));
                 }
                 Err(error) => {
+                    self.operation_cohort_gathering = false;
                     self.awo_writer_poisoned = true;
                     return Err(error);
                 }
             }
         }
+        self.operation_cohort_gathering = false;
 
         let has_new = outcomes.iter().any(|outcome| {
             matches!(
@@ -3399,6 +3410,10 @@ impl Store {
             if let Err(error) = self.persist_all_actives(DurabilityMode::Durable) {
                 self.awo_writer_poisoned = true;
                 return Err(error);
+            }
+            for writer in self.actives.iter_mut().flatten() {
+                writer.max_ack_durability =
+                    stronger_durability(writer.max_ack_durability, DurabilityMode::Durable);
             }
         }
 
@@ -3415,10 +3430,12 @@ impl Store {
         }
 
         let refs: Vec<_> = records.iter().map(|(id, record)| (*id, record)).collect();
-        if let Err(error) = append_write_dedup_batch(&write_dedup_journal_path(&self.paths), &refs)
+        if append_write_dedup_batch_buffered(&write_dedup_journal_path(&self.paths), &refs).is_err()
         {
+            // The authoritative frames already crossed their stable boundary.
+            // Keep exact-retry state in memory and deliberately withhold a
+            // clean-session certificate so restart reconciles from media.
             self.write_dedup_recovery_required = true;
-            return Err(error);
         }
         for (operation_id, record) in records {
             self.write_dedup.insert(operation_id, record);
@@ -7087,7 +7104,9 @@ impl Store {
         }
         let shard = self.subject_shard(subject_bytes);
         self.ensure_active(shard)?;
-        self.maybe_auto_seal(shard)?;
+        if !self.operation_cohort_gathering {
+            self.maybe_auto_seal(shard)?;
+        }
 
         let segment_id = self
             .active_ref(shard)
@@ -7194,6 +7213,7 @@ impl Store {
 
         let sink = self.diagnostic_io;
         let growth = self.segment_growth;
+        let gather_cohort = self.operation_cohort_gathering;
         let mut null = self.null_io_file.take();
         let (offset, append_ns, tail) = {
             let writer = self.active_mut(shard).expect("active segment");
@@ -7220,6 +7240,9 @@ impl Store {
                 encoded_frame_len.saturating_add(writer.segment.len().saturating_sub(offset));
             let tail = match mode {
                 DurabilityMode::Memory => TailIoStats::default(),
+                DurabilityMode::Buffered | DurabilityMode::Durable if gather_cohort => {
+                    TailIoStats::default()
+                }
                 DurabilityMode::Buffered | DurabilityMode::Durable => {
                     Self::write_segment_tail(writer, mode, sink, null.as_mut(), growth)?
                 }
@@ -7529,7 +7552,9 @@ impl Store {
         let probe = self.boundary_probe_enabled();
         self.ensure_active(shard)?;
         // Seal/rotate is rare and expensive — timed on segment_rotate, not put_prep.
-        self.maybe_auto_seal(shard)?;
+        if !self.operation_cohort_gathering {
+            self.maybe_auto_seal(shard)?;
+        }
 
         // put_prep: per-put hot path only (ids + env subject + wall clock).
         let t_prep = std::time::Instant::now();
@@ -7586,6 +7611,7 @@ impl Store {
         let sink = self.diagnostic_io;
         let growth = self.segment_growth;
         let skip_append = self.diagnostic_skip_append_frame;
+        let gather_cohort = self.operation_cohort_gathering;
         let mut null = self.null_io_file.take();
         let (offset, encoded_frame_len, append_ns, tail) = {
             let writer = self.active_mut(shard).expect("active segment");
@@ -7603,7 +7629,11 @@ impl Store {
                 let append_ns = t_append.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
                 // Exact encoded frame length at store boundary (not logical+estimate).
                 let encoded_frame_len = writer.segment.len().saturating_sub(offset);
-                let tail = Self::write_segment_tail(writer, mode, sink, null.as_mut(), growth)?;
+                let tail = if gather_cohort {
+                    TailIoStats::default()
+                } else {
+                    Self::write_segment_tail(writer, mode, sink, null.as_mut(), growth)?
+                };
                 (offset, encoded_frame_len, append_ns, tail)
             }
         };
@@ -9263,7 +9293,10 @@ impl Drop for Store {
             && !self.write_dedup_recovery_required
             && !std::thread::panicking()
         {
-            let _ = mark_write_dedup_session_clean(&self.paths);
+            let journal = write_dedup_journal_path(&self.paths);
+            if sync_write_dedup_journal(&journal).is_ok() {
+                let _ = mark_write_dedup_session_clean(&self.paths);
+            }
         }
     }
 }

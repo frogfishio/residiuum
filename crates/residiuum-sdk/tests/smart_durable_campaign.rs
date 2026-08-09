@@ -358,6 +358,7 @@ fn smart_client_durable_retained_media_campaign() {
             "failed": inspection.operation_commits.failed,
             "successful_media_sync_cohorts": inspection.operation_commits.successful_media_sync_cohorts,
             "successful_journal_sync_cohorts": inspection.operation_commits.successful_journal_sync_cohorts,
+            "successful_journal_append_cohorts": inspection.operation_commits.successful_journal_append_cohorts,
             "max_cohort_entries": inspection.operation_commits.max_cohort_entries,
             "max_cohort_bytes": inspection.operation_commits.max_cohort_bytes,
         },

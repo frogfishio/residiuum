@@ -1,6 +1,6 @@
 # Durable group commit baseline — 2026-08-09
 
-Status: **implemented correctness floor; performance qualification pending**
+Status: **10 GiB correctness PASS; single-boundary gathered-WAL correction implemented and locally verified**
 
 This note records the product write-path baseline created after the Bonzo run
 showed approximately 5,500 durable writes/s and an implausibly high stable
@@ -13,8 +13,8 @@ one deployment-wide commit coordinator. Concurrent logical writes retain their
 own operation identity, condition, error and receipt, but share:
 
 1. one physical-store ownership interval;
-2. one durable active-media boundary; and
-3. one durable operation-outcome journal boundary.
+2. one gathered active-media write per touched active shard; and
+3. one durable active-media boundary per touched active shard.
 
 The coordinator is shared across every capability-bound Heap on the physical
 connection. A connection therefore remains a connection, not a Heap/database.
@@ -35,7 +35,8 @@ For each new successful operation:
   hash;
 - all successful cohort frames cross the active-media durable boundary before
   any successful outcome is returned;
-- the fixed-size checksummed outcome records cross one shared journal boundary;
+- the fixed-size checksummed outcome records are a derived lookup and do not
+  create a second acknowledgement boundary;
 - each receipt is upgraded to `Durable` only after the media boundary succeeds;
 - request-level condition failures remain individual failures; and
 - an infrastructure failure fails the cohort and prevents a clean-session
@@ -85,16 +86,14 @@ The client exposes redacted `operation_commits` counters through `inspect()`:
 submitted, cohorts, committed, deduplicated, failed, maximum cohort entries and
 maximum cohort bytes.
 
-## Deliberate residuals
+## Superseded baseline residuals
 
-This is not yet the final write engine.
+The 10 GiB result below predates the gathered-WAL correction. At that baseline:
 
-1. A cohort still performs an individual frame append/write call per logical
-   document. Stable boundaries are consolidated; data syscalls are not yet
-   assembled into a WiredTiger-style reserved slot or one large gathered write.
-2. The authoritative media and outcome journal currently require two stable
-   boundaries per cohort. Folding retry evidence into a single authoritative
-   commit record is a separate format/recovery change.
+1. a cohort performed an individual active-tail and Shadow write call per
+   logical document; and
+2. the authoritative media and outcome journal required two stable boundaries
+   per cohort.
 3. Operation-bearing puts use the coordinator. Operation-bearing deletes still
    use the single-operation durable path.
 4. Secondary-index stale markers are updated after individual completions and
@@ -125,3 +124,86 @@ The release-mode campaign uses 8 KiB deterministic pre-generated JSON payloads,
 timings, group-commit boundary counters, retained physical-size measurement,
 then a fresh reopen and complete bounded-page scan of every record. It retains
 the store, `report.json`, and a sibling `.campaign.log` for review.
+
+## 10 GiB retained-media result
+
+Bonzo completed the campaign at commit
+`a1ce47c8c1af0b5a857b6939cb148909dc6d6d62`:
+
+- 1,310,720 / 1,310,720 durable acknowledgements; zero failures;
+- exact 10 GiB payload recovered by a fresh reopen and complete scan;
+- 1,451.63 operations/s and 11.34 MiB/s acknowledged payload;
+- p50 / p95 / p99 acknowledgement latency 9.90 / 38.86 / 60.97 ms;
+- 71,443 cohorts, averaging 18.35 operations (maximum 20);
+- 71,443 active-media syncs **and** 71,443 outcome-journal syncs;
+- 1.80 s reopen and 127.41 s complete validation scan; and
+- 22,945,603,584 allocated bytes for 10,737,418,240 payload bytes (2.14x).
+
+The retained-media breakdown was approximately 10 GiB authoritative segments,
+10 GiB Recovery Shadow, 381 MiB indexes and 208 MiB store metadata. Process
+monitoring observed about 5,500 filesystem write operations/s while the
+application acknowledged only 1,451.63 logical writes/s. This is physical-I/O
+amplification, not database throughput.
+
+## Corrected acknowledgement architecture
+
+The checksummed append-only active segment is the write-ahead record for an
+operation-bearing mutation. Its item-event envelope already contains the
+operation id and canonical content hash required to reconstruct the exact
+outcome after process loss. Consequently, durable acknowledgement requires one
+authoritative boundary, not a second stable boundary for a derived lookup file.
+
+The corrected contract is:
+
+1. reserve/cook cohort frames and append them to the active segment;
+2. write the gathered active tail and cross one active-media sync per touched
+   active shard;
+3. append outcome records to the derived dedup journal without another fsync;
+4. publish receipts and acknowledge the cohort;
+5. on orderly shutdown, sync that journal before publishing its clean-length
+   certificate; and
+6. after an unclean shutdown, reconstruct any missing/torn derived outcomes
+   from the authoritative item-event frames.
+
+Recovery Shadow remains a separate P★ salvage promise. The specification has
+always stated `ack != P★`, so it must not introduce a second stable boundary
+for acknowledgement. The current RSHD0004 stream receives the same gathered
+tail as the authoritative active segment: one Shadow write per cohort/touched
+shard, not one per record, and it becomes independently durable at protected
+seal publication. Moving Shadow construction entirely behind bounded seal
+backpressure remains a possible later experiment, not a prerequisite for this
+correction. Its protected frontier may advance only after the Shadow artifact
+is independently durable.
+
+This follows the relevant WiredTiger separation: synchronous commit forces the
+grouped WAL, not WAL plus data pages plus a second full-copy recovery image.
+The 50 ms WiredTiger timer drains a partially filled asynchronous log slot; it
+is not justification for adding acknowledgement delay. Residiuum already filled
+18.35 of 20 available cohort positions on average, so the defect is redundant
+physical work rather than insufficient waiting.
+
+## First corrected-path verification
+
+A 64 MiB retained-media SDK run after the correction completed 8,192 / 8,192
+durable writes and recovered every record after a fresh reopen. It recorded:
+
+- 472 cohorts for 8,192 operations (17.36 operations/cohort);
+- 472 authoritative media-sync cohorts;
+- 472 buffered derived-journal appends and **zero** derived-journal syncs;
+- maximum gathered cohort payload of 165,320 bytes; and
+- 3,419.23 operations/s / 26.71 MiB/s on the local development machine.
+
+The throughput number is a smoke result, not a Bonzo comparison. The important
+qualification fact is the boundary accounting: the former second stable
+journal boundary is absent, and the active tail is emitted as one gathered
+write per touched shard. CompactShadow still receives the same gathered tail;
+there is no longer a per-document primary, Shadow, or journal write call on the
+smart-client cohort path.
+
+For the original Bonzo cohort shape, the source-level write-call model therefore
+falls from approximately three calls per operation (authoritative tail, Shadow
+tail, outcome record), or 3.93 million calls, to three calls per cohort, or
+about 214 thousand calls. That is an estimated 18.35× reduction before any
+filesystem splitting. Stable boundaries fall from two per cohort to one per
+touched active shard. The repeat Bonzo campaign must verify the physical
+process-monitor counters rather than treating this model as measured evidence.

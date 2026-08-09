@@ -31,8 +31,11 @@ pub struct OperationCommitStats {
     pub failed: u64,
     /// Cohorts whose new writes crossed the authoritative-media boundary.
     pub successful_media_sync_cohorts: u64,
-    /// Cohorts whose new outcomes crossed the outcome-journal boundary.
+    /// Legacy compatibility counter for cohorts that forced the derived
+    /// outcome journal. The gathered-WAL path leaves this at zero.
     pub successful_journal_sync_cohorts: u64,
+    /// Cohorts appended to the derived outcome lookup without a stable barrier.
+    pub successful_journal_append_cohorts: u64,
     /// Largest cohort observed since deployment open.
     pub max_cohort_entries: usize,
     /// Largest encoded subject/body payload admitted in one cohort.
@@ -49,6 +52,7 @@ struct CoordinatorCounters {
     failed: AtomicU64,
     successful_media_sync_cohorts: AtomicU64,
     successful_journal_sync_cohorts: AtomicU64,
+    successful_journal_append_cohorts: AtomicU64,
     max_cohort_entries: AtomicUsize,
     max_cohort_bytes: AtomicUsize,
 }
@@ -67,6 +71,9 @@ impl CoordinatorCounters {
                 .load(Ordering::Relaxed),
             successful_journal_sync_cohorts: self
                 .successful_journal_sync_cohorts
+                .load(Ordering::Relaxed),
+            successful_journal_append_cohorts: self
+                .successful_journal_append_cohorts
                 .load(Ordering::Relaxed),
             max_cohort_entries: self.max_cohort_entries.load(Ordering::Relaxed),
             max_cohort_bytes: self.max_cohort_bytes.load(Ordering::Relaxed),
@@ -292,7 +299,7 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
                     .fetch_add(1, Ordering::Relaxed);
                 inner
                     .counters
-                    .successful_journal_sync_cohorts
+                    .successful_journal_append_cohorts
                     .fetch_add(1, Ordering::Relaxed);
             }
             for (pending, outcome) in batch.into_iter().zip(outcomes) {
