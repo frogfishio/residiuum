@@ -626,3 +626,52 @@ activity and media-boundary latency distribution. The current aggregate report
 cannot distinguish device-state degradation from growing segment lifecycle
 interference or reduced follower formation. No further CPU-side cooking
 optimisation is justified before that sustained-path bisection.
+
+## Per-GiB sustained bisection (2026-08-10)
+
+Commit `1c3ef60` added constant-time client inspection of authoritative
+rotation, Recovery Shadow and derived-enrichment state, plus per-GiB campaign
+samples. The instrumentation was first verified by a complete local retained
+write/reopen/scan cycle. Three matched 4 GiB runs were then executed on Bonzo;
+each committed and freshly recovered all 524,288 records.
+
+| Recovery / enrichment | GiB 1 | GiB 2 | GiB 3 | GiB 4 | Total |
+|---|---:|---:|---:|---:|---:|
+| CompactShadow / enabled | 299 | 280 | 174 | 163 | 213 MiB/s |
+| CompactShadow / disabled | 341 | 319 | 215 | 139 | 223 MiB/s |
+| Materialized / disabled | 400 | 331 | 161 | 147 | 216 MiB/s |
+
+Disabling enrichment removed approximately one GiB of derived segment reads
+per GiB of payload and improved the early intervals, but did not remove the
+cliff. It also increased the complete validation scan from 29 seconds to 73
+seconds, so removing enrichment is not a product answer. Materialized recovery
+halved the retained footprint (4.61 GB versus approximately 9.1 GB for 4 GiB
+payload) and raised the first interval to 400 MiB/s, proving that the second
+Shadow stream is material short-run amplification. It still did not remove the
+3–4 GiB cliff.
+
+The phase transition isolated the root defect. In the Materialized control,
+third-interval media-boundary time was only 1.415 s, while aggregate
+`cook_install_publish` rose to 2.937 s and preparation to 0.358 s. Source audit
+then found a fixed 65,536-operation trigger inside foreground durable
+publication. At every trigger it cloned the entire growing `durable_index`
+under the sole physical writer before delegating a full `primary.idx` rewrite
+to the lifecycle worker. At 524,288 records this produced eight successively
+larger full snapshots: an O(N²) ingestion curve disguised as asynchronous
+checkpointing.
+
+The fixed-count full checkpoint has therefore been removed from ingestion.
+The write path now records checkpoint lag only. Orderly close still seals the
+authoritative frontier and writes one complete primary checkpoint, preserving
+fast clean restart. Explicit operator checkpointing remains available. After
+an unclean stop, authority remains the segments and open may rebuild until an
+incremental mid-run checkpoint format is implemented. A regression crosses the
+former 65,536-operation boundary and proves `primary.idx` is byte-identical
+until an explicit checkpoint.
+
+This is a correctness-preserving removal of accidental quadratic work, not the
+final checkpoint design. The next qualification run must repeat the ordinary
+CompactShadow + enrichment 4 GiB shape with this fix. If the per-GiB curve is
+flat, the remaining work separates bounded enrichment scheduling and Shadow
+write amplification from the now-fixed retention-size cliff. A 10 GiB gate is
+not justified until that 4 GiB comparison passes.

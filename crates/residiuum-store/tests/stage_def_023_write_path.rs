@@ -153,7 +153,8 @@ fn frontier_checkpoint_plus_active_tail_matches_full_rebuild() {
         store.persist_index_cache().unwrap();
 
         // Writes beyond the checkpoint frontier stay only in the active segment
-        // until the next rate-limited checkpoint (ops < DERIVED_CHECKPOINT_EVERY_OPS).
+        // until explicit/orderly-close checkpointing; ingestion never clones the
+        // full primary index at a fixed operation interval.
         for i in 0..5 {
             store
                 .put(&format!("tail/{i}"), b"T", DurabilityMode::Durable)
@@ -189,13 +190,12 @@ fn frontier_checkpoint_plus_active_tail_matches_full_rebuild() {
 }
 
 #[test]
-fn rate_limited_checkpoint_still_allows_recovery() {
+fn absent_mid_run_checkpoint_still_allows_recovery() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("s");
     {
         let mut store = Store::create(&root).unwrap();
-        // Fewer ops than the rate-limit threshold so intermediate checkpoints
-        // may be skipped; recovery must still succeed from segments.
+        // Mid-run checkpoints are not required; recovery must succeed from segments.
         for i in 0..10 {
             store
                 .put(&format!("k{i}"), b"v", DurabilityMode::Durable)
@@ -214,6 +214,42 @@ fn rate_limited_checkpoint_still_allows_recovery() {
             Some(b"v".as_slice())
         );
     }
+}
+
+#[test]
+fn ingestion_never_rewrites_full_primary_checkpoint_at_fixed_operation_count() {
+    let dir = tempdir().unwrap();
+    let root = dir.path().join("s");
+    let mut store = Store::create(&root).unwrap();
+    let checkpoint = root.join("indexes").join(PRIMARY_CACHE_FILE);
+    let initial_checkpoint = fs::read(&checkpoint).unwrap();
+
+    // Cross the former 65,536-operation trigger in amortized buffered batches.
+    // The regression was not the worker's disk write: cloning the growing index
+    // happened synchronously in the publication loop before submission.
+    let mut ordinal = 0usize;
+    while ordinal < 65_537 {
+        let end = (ordinal + 1_024).min(65_537);
+        let keys: Vec<String> = (ordinal..end).map(|i| format!("bulk/{i:08}")).collect();
+        let items: Vec<(&str, &[u8])> = keys
+            .iter()
+            .map(|key| (key.as_str(), b"x".as_slice()))
+            .collect();
+        store.put_many(&items, DurabilityMode::Buffered).unwrap();
+        ordinal = end;
+    }
+
+    assert_eq!(
+        fs::read(&checkpoint).unwrap(),
+        initial_checkpoint,
+        "fixed-count ingestion must not clone/rewrite the full primary checkpoint"
+    );
+    assert_eq!(store.lifecycle_diag().unwrap().derived_ops_since_checkpoint, 65_537);
+
+    // Explicit checkpointing remains supported and clears the diagnostic lag.
+    store.persist_index_cache().unwrap();
+    assert_ne!(fs::read(&checkpoint).unwrap(), initial_checkpoint);
+    assert_eq!(store.lifecycle_diag().unwrap().derived_ops_since_checkpoint, 0);
 }
 
 /// Seal must stay O(segment), not O(retained volume).

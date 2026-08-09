@@ -88,20 +88,6 @@ const DEFAULT_WRITER_SHARDS: usize = 1;
 /// Upper bound on writer shards (DEF-096 Axis B) — keeps pending seal backpressure sane.
 pub const MAX_WRITER_SHARDS: usize = 64;
 
-/// How many buffered/durable writes may land before a derived-state checkpoint
-/// (index cache + collection catalog) is forced (DEF-023 rate limit).
-///
-/// Full index-cache rewrites are **O(live subjects × body size)**. Doing them
-/// every few hundred puts (or on every seal) produced an 87% write-throughput
-/// drop over a single gigabyte (classic O(N) scale curve). Recovery does not
-/// depend on a fresh checkpoint: open rebuilds from segments or applies the
-/// active tail past a stale frontier.
-///
-/// Checkpoints still run occasionally so long-running writers accelerate open
-/// without dominating the hot path. Seal no longer forces a full rewrite;
-/// explicit [`Store::persist_index_cache`] always does.
-const DERIVED_CHECKPOINT_EVERY_OPS: u64 = 65_536;
-
 /// Coalesce derived tier/segment-catalog disk writes (not authoritative).
 ///
 /// Full catalog rewrite is O(sealed segments). Persisting on every `SealDone`
@@ -6029,42 +6015,21 @@ impl Store {
         out
     }
 
-    /// After a buffered/durable append: touch derived state without segment rescan.
+    /// After a buffered/durable append: record derived checkpoint lag.
     ///
     /// In-memory collection membership is updated by the caller via
-    /// [`Self::note_collection_for_subject`]. Disk checkpoints (index cache +
-    /// collection catalog) are **rate-limited**: both use atomic fsync writes and
-    /// must not sit on every put acknowledgement path (DEF-023).
+    /// [`Self::note_collection_for_subject`]. A primary-index checkpoint clones
+    /// the full live index before its disk write can be delegated. Repeating that
+    /// O(N) snapshot at a fixed operation interval makes sustained ingestion
+    /// O(N²), even though the eventual fsync happens on a worker.
     ///
-    /// With async lifecycle (DEF-096 Axis A), the rate-limited index checkpoint is
-    /// submitted to the seal pipeline worker so fsync cost is off the put path.
+    /// Therefore the ingest path only accounts lag. Orderly close writes one
+    /// complete checkpoint, explicit operator checkpoints remain available, and
+    /// an unclean open rebuilds from authoritative segments. A future mid-run
+    /// checkpoint must be incremental; another periodic full clone is forbidden.
     fn note_durable_derived(&mut self) -> Result<(), StoreError> {
         let _ = self.poll_lifecycle();
         self.derived_ops_since_checkpoint = self.derived_ops_since_checkpoint.saturating_add(1);
-        if self.derived_ops_since_checkpoint >= DERIVED_CHECKPOINT_EVERY_OPS {
-            // Best-effort: a failed derived write must not fail the already-acked
-            // authoritative append. Recovery rebuilds from segments.
-            if self.async_lifecycle_enabled() {
-                self.derived_ops_since_checkpoint = 0;
-                if let Ok(frontier) = self.current_index_frontier() {
-                    let chunk_locators = self.checkpoint_chunk_locators(&frontier);
-                    let job = LifecycleJob::Checkpoint {
-                        cache_path: primary_cache_path(&self.paths.indexes_dir()),
-                        store_id: self.store_id,
-                        frontier,
-                        index: self.durable_index.clone(),
-                        chunk_locators,
-                    };
-                    if let Some(pipe) = self.seal_pipeline.as_ref() {
-                        let _ = pipe.submit_checkpoint(job);
-                    }
-                }
-                let _ = self.refresh_collection_catalog();
-            } else {
-                let _ = self.persist_index_cache();
-                let _ = self.refresh_collection_catalog();
-            }
-        }
         Ok(())
     }
 
