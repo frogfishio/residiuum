@@ -788,3 +788,52 @@ Accordingly, the current result is:
    primary and dedup projections, then reduce CompactShadow's physical write
    amplification;
 5. do not quote cache-assisted GiB 1–5 rates as sustained device throughput.
+
+### Exact I/O calibration (`c15cf1f`)
+
+Commit `c15cf1f` added constant-time counters for authoritative and Shadow
+exact-write submissions, bytes, write wall time, durability barriers and barrier
+wall time. It also exposes the retained operation-dedup `HashMap` capacity. The
+counters do not pretend to count kernel short-write retries; they describe the
+calls Residiuum submits to its exact-write helper. A matched clean 4 GiB
+CompactShadow/enrichment-off run recovered all 524,288 records and produced:
+
+| GiB | Logical MiB/s | Auth writes / bytes | Auth syncs / time | Shadow writes / bytes | Shadow syncs / time | Dedup entries / capacity |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 285 | 132 / 1.133 GB | 164 / 1.209 s | 146 / 1.115 GB | 16 / 12.3 ms | 133,108 / 229,376 |
+| 2 | 354 | 128 / 1.113 GB | 160 / 0.998 s | 144 / 1.113 GB | 16 / 0.04 ms | 263,900 / 458,752 |
+| 3 | 365 | 128 / 1.111 GB | 160 / 0.895 s | 145 / 1.119 GB | 16 / 15.4 ms | 394,388 / 458,752 |
+| 4 | 357 | 130 / 1.106 GB | 160 / 0.888 s | 137 / 1.055 GB | 15 / 10.9 ms | 524,288 / 917,504 |
+
+The production cohort shape therefore already submits approximately 8.3 MiB
+authoritative writes and 7.4 MiB Shadow staging writes on average. The nominal
+1 MiB Shadow buffer is a minimum flush threshold, not the observed production
+write size: an 8 MiB cohort is appended whole and then flushed once. Increasing
+that threshold to 10 MiB cannot be the primary fix.
+
+Bonzo `iostat -I` sampled the internal `disk0` once per second. During the
+ingestion window, cumulative device transfer grew by approximately 8.83 GB over
+14 seconds, about 630 MB/s including filesystem traffic, with one-second deltas
+peaking around 807 MB/s. The device is not continuously at its nominal 1 GB/s
+sequential ceiling, but it is materially busier than the logical payload rate
+suggests. Residiuum itself submits approximately 2.1 bytes of authoritative plus
+Shadow image data per logical payload byte, before filesystem metadata.
+
+The dominant directly timed barrier is the authoritative `sync_data`: roughly
+160 barriers per GiB consuming 0.89–1.21 seconds. Shadow performs only 15–16
+file barriers per GiB and their direct latency is small because staging writes
+have already entered the filesystem; Shadow still consumes a complete second
+copy of device bandwidth and makes the authoritative barrier flush under a
+heavier dirty-page workload.
+
+Dedup capacity doubled during both GiB 2 and GiB 4 without causing a sustained
+throughput collapse. The capacity evidence therefore weakens the earlier
+single-cause rehash theory. The later GiB-7 resize may explain an RSS step and a
+transient interval cost, but not the persistent terminal media slowdown by
+itself.
+
+The next optimization target is now narrower: reduce the approximately 160
+authoritative barriers per GiB (128 cohort acknowledgements plus rotation/start
+boundaries), and/or remove Shadow's full-byte duplicate from the foreground
+dirty-page set while preserving honest P★ lag. Changing the 1 MiB threshold
+alone is not justified by the measured write sizes.
