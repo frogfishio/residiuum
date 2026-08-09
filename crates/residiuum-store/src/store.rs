@@ -4135,6 +4135,7 @@ impl Store {
         }
 
         self.operation_cohort_gathering = true;
+        let probe = self.boundary_probe_enabled();
         let mut installed = Vec::with_capacity(cooked.len());
         for (frame, item) in cooked.iter().zip(&reservation.items) {
             if let Err(error) = crate::failpoint::hit("awo.install.frame.before") {
@@ -4146,7 +4147,7 @@ impl Store {
                 self.operation_reservation_chain.clear();
                 return Err(error);
             }
-            let append_started = Instant::now();
+            let append_started = probe.then(Instant::now);
             let offset = match self
                 .active_mut(0)
                 .expect("reserved active segment")
@@ -4167,18 +4168,19 @@ impl Store {
             self.active_mut(0)
                 .expect("reserved active segment")
                 .item_events += 1;
-            let append_ns = elapsed_ns(append_started);
-            self.boundary_probe.record_append(
-                frame.encoded_frame.len() as u64,
-                item.body.len() as u64,
-                offset,
-                DurabilityMode::Buffered,
-                false,
-                false,
-                0,
-                append_ns,
-                0,
-            );
+            if let Some(append_started) = append_started {
+                self.boundary_probe.record_append(
+                    frame.encoded_frame.len() as u64,
+                    item.body.len() as u64,
+                    offset,
+                    DurabilityMode::Buffered,
+                    false,
+                    false,
+                    0,
+                    elapsed_ns(append_started),
+                    0,
+                );
+            }
             installed.push((offset, frame.encoded_frame.len() as u64));
             if let Err(error) = crate::failpoint::hit("awo.install.frame.after") {
                 if let Some(writer) = self.active_mut(0) {
@@ -4232,7 +4234,7 @@ impl Store {
         for (item, (offset, encoded_frame_len)) in
             reservation.items.iter().zip(installed.into_iter())
         {
-            let publish_started = Instant::now();
+            let publish_started = probe.then(Instant::now);
             self.apply_durable_event(
                 item.subject.as_ref().to_vec(),
                 EventKind::Put,
@@ -4244,13 +4246,14 @@ impl Store {
                 offset,
             );
             self.note_collection_for_subject(item.subject.as_ref());
-            let _ = self.note_durable_derived();
-            self.boundary_probe.record_publish(
-                offset,
-                DurabilityMode::Durable,
-                0,
-                elapsed_ns(publish_started),
-            );
+            if let Some(publish_started) = publish_started {
+                self.boundary_probe.record_publish(
+                    offset,
+                    DurabilityMode::Durable,
+                    0,
+                    elapsed_ns(publish_started),
+                );
+            }
             let mut receipt = WriteReceipt::base(
                 self.store_id,
                 reservation.segment_id,
@@ -4268,6 +4271,11 @@ impl Store {
                 deduplicated: false,
             }));
         }
+        // Nothing can consume lifecycle results while this writer owns the
+        // store. Polling once per item only adds synchronization to the hot
+        // publication loop; one poll at the cohort boundary preserves both the
+        // exact checkpoint-lag count and the final foreground-activity time.
+        let _ = self.note_durable_derived_by(reservation.items.len() as u64);
         if let Err(error) = crate::failpoint::hit("awo.publish.after") {
             self.operation_reservation_chain.clear();
             self.awo_writer_poisoned = true;
@@ -6090,11 +6098,17 @@ impl Store {
     /// an unclean open rebuilds from authoritative segments. A future mid-run
     /// checkpoint must be incremental; another periodic full clone is forbidden.
     fn note_durable_derived(&mut self) -> Result<(), StoreError> {
+        self.note_durable_derived_by(1)
+    }
+
+    fn note_durable_derived_by(&mut self, operations: u64) -> Result<(), StoreError> {
         if let Some(pipeline) = self.seal_pipeline.as_ref() {
             pipeline.note_foreground_activity();
         }
         let _ = self.poll_lifecycle();
-        self.derived_ops_since_checkpoint = self.derived_ops_since_checkpoint.saturating_add(1);
+        self.derived_ops_since_checkpoint = self
+            .derived_ops_since_checkpoint
+            .saturating_add(operations);
         Ok(())
     }
 
@@ -10852,6 +10866,7 @@ mod tests {
         let probe = store.take_boundary_snapshot();
         assert_eq!(probe.counters.count(BoundaryKind::FileWrite), 1);
         assert_eq!(probe.counters.count(BoundaryKind::FileSync), 1);
+        assert_eq!(store.write_path_stats().derived_ops_since_checkpoint, 2);
         store
             .put("unblocked", b"after-install", DurabilityMode::Durable)
             .unwrap();
