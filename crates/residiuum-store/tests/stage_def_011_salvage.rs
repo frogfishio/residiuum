@@ -1,9 +1,7 @@
 //! DEF-011: evidence-preserving salvage vs live-state export.
 
 use residiuum_format::{scan_forward, SafetyLimits};
-use residiuum_store::{
-    try_load_recovery_manifest, DurabilityMode, SalvageMode, Store, StorePaths,
-};
+use residiuum_store::{try_load_recovery_manifest, DurabilityMode, SalvageMode, Store, StorePaths};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use tempfile::tempdir;
@@ -58,7 +56,9 @@ fn salvage_preserves_history_tombstones_and_event_ids() {
     );
 
     let paths = StorePaths::new(&dst);
-    let manifest = try_load_recovery_manifest(&paths).unwrap().expect("manifest");
+    let manifest = try_load_recovery_manifest(&paths)
+        .unwrap()
+        .expect("manifest");
     assert_eq!(manifest.mode, SalvageMode::Evidence);
     assert!(!manifest.content_hash_hex.is_empty());
     assert_eq!(manifest.frames_copied, report.frames_copied);
@@ -71,7 +71,9 @@ fn salvage_copies_verified_frames_byte_identical() {
     let dst = dir.path().join("dst");
     {
         let mut store = Store::create(&src).unwrap();
-        store.put("k", b"payload-bytes", DurabilityMode::Durable).unwrap();
+        store
+            .put("k", b"payload-bytes", DurabilityMode::Durable)
+            .unwrap();
     }
 
     let src_bytes = fs::read(src.join("active").join("active.residiuum")).unwrap();
@@ -84,10 +86,7 @@ fn salvage_copies_verified_frames_byte_identical() {
     }
     assert!(!src_frame_slices.is_empty());
 
-    Store::open_inspect(&src)
-        .unwrap()
-        .salvage_to(&dst)
-        .unwrap();
+    Store::open_inspect(&src).unwrap().salvage_to(&dst).unwrap();
 
     // Destination sealed segment(s) must contain each source verified frame verbatim.
     let segs = dst.join("segments");
@@ -100,7 +99,9 @@ fn salvage_copies_verified_frames_byte_identical() {
     }
     for frame in &src_frame_slices {
         assert!(
-            dest_pool.windows(frame.len()).any(|w| w == frame.as_slice()),
+            dest_pool
+                .windows(frame.len())
+                .any(|w| w == frame.as_slice()),
             "verified frame missing byte-identically in destination"
         );
     }
@@ -111,21 +112,26 @@ fn salvage_records_holes_and_still_recovers_survivors() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
     let dst = dir.path().join("dst");
+    let early_segment;
     {
         let mut store = Store::create(&path).unwrap();
-        store.put("early", b"1", DurabilityMode::Durable).unwrap();
+        early_segment = store
+            .put("early", b"1", DurabilityMode::Durable)
+            .unwrap()
+            .segment_id;
         store.seal_active().unwrap();
         store.put("late", b"2", DurabilityMode::Durable).unwrap();
     }
 
-    // Corrupt sealed segment middle.
-    let segments = path.join("segments");
-    let seg_file = fs::read_dir(&segments)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| p.extension().and_then(|x| x.to_str()) == Some("residiuum"))
-        .expect("sealed segment");
+    // Corrupt `early` specifically. Orderly close also seals `late`, so an
+    // arbitrary directory entry no longer identifies the damage target.
+    let segment_hex: String = early_segment
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let seg_file = path
+        .join("segments")
+        .join(format!("{segment_hex}.residiuum"));
     let mut bytes = fs::read(&seg_file).unwrap();
     if bytes.len() > 80 {
         for b in &mut bytes[40..80] {
@@ -140,8 +146,12 @@ fn salvage_records_holes_and_still_recovers_survivors() {
         .unwrap();
     assert!(report.holes_recorded > 0 || report.source.holes > 0);
 
-    let dest = Store::open_with_options(&dst, residiuum_store::StoreOpenOptions::default().tolerate_unidentified_inventory()).unwrap();
-    // At least the uncorrupted active "late" value must survive.
+    let dest = Store::open_with_options(
+        &dst,
+        residiuum_store::StoreOpenOptions::default().tolerate_unidentified_inventory(),
+    )
+    .unwrap();
+    // At least the uncorrupted orderly-sealed "late" value must survive.
     assert_eq!(dest.get("late").unwrap().as_deref(), Some(b"2".as_slice()));
 
     let manifest = try_load_recovery_manifest(&StorePaths::new(&dst))
@@ -255,7 +265,11 @@ fn incomplete_tail_does_not_poison_salvage_to() {
         .salvage_to(&dst)
         .unwrap();
     assert!(report.holes_recorded > 0 || report.source.holes > 0);
-    let dest = Store::open_with_options(&dst, residiuum_store::StoreOpenOptions::default().tolerate_unidentified_inventory()).unwrap();
+    let dest = Store::open_with_options(
+        &dst,
+        residiuum_store::StoreOpenOptions::default().tolerate_unidentified_inventory(),
+    )
+    .unwrap();
     assert_eq!(
         dest.get("keep").unwrap().as_deref(),
         Some(b"alive".as_slice())

@@ -108,10 +108,7 @@ fn io_fault_injection_suite() {
         let path = dir.path().join("s");
         seed_prior(&path);
         let mut store = Store::open(&path).unwrap();
-        arm_failpoint_once(
-            "store.active.write_tail.before",
-            FailpointAction::IoEnospc,
-        );
+        arm_failpoint_once("store.active.write_tail.before", FailpointAction::IoEnospc);
         let err = store
             .put("k", b"v-new", DurabilityMode::Durable)
             .unwrap_err();
@@ -122,7 +119,10 @@ fn io_fault_injection_suite() {
         drop(store);
         clear_failpoints();
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.get("prior").unwrap().as_deref(), Some(b"prior-v1".as_slice()));
+        assert_eq!(
+            store.get("prior").unwrap().as_deref(),
+            Some(b"prior-v1".as_slice())
+        );
         assert!(store.get("k").unwrap().is_none());
     }
 
@@ -146,7 +146,10 @@ fn io_fault_injection_suite() {
         drop(store);
         clear_failpoints();
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.get("prior").unwrap().as_deref(), Some(b"prior-v1".as_slice()));
+        assert_eq!(
+            store.get("prior").unwrap().as_deref(),
+            Some(b"prior-v1".as_slice())
+        );
         assert!(store.get("k").unwrap().is_none());
     }
 
@@ -161,7 +164,11 @@ fn io_fault_injection_suite() {
             FailpointAction::ShortWrite,
         );
         let err = store
-            .put("k", b"v-short-write-payload-xxxxxxxx", DurabilityMode::Durable)
+            .put(
+                "k",
+                b"v-short-write-payload-xxxxxxxx",
+                DurabilityMode::Durable,
+            )
             .unwrap_err();
         match err {
             StoreError::Io(e) => assert_eq!(e.kind(), ErrorKind::WriteZero),
@@ -170,7 +177,10 @@ fn io_fault_injection_suite() {
         drop(store);
         clear_failpoints();
         let store = Store::open(&path).unwrap();
-        assert_eq!(store.get("prior").unwrap().as_deref(), Some(b"prior-v1".as_slice()));
+        assert_eq!(
+            store.get("prior").unwrap().as_deref(),
+            Some(b"prior-v1".as_slice())
+        );
         assert!(
             store.get("k").unwrap().is_none(),
             "short-written put must not appear live"
@@ -372,7 +382,8 @@ fn run_crash_child(
     if let Some(fp) = failpoint {
         cmd.env("RESIDIUUM_CRASH_FP", fp);
     }
-    cmd.status().unwrap_or_else(|e| panic!("spawn {}: {e}", bin.display()))
+    cmd.status()
+        .unwrap_or_else(|e| panic!("spawn {}: {e}", bin.display()))
 }
 
 /// Drive one matrix cell for a known operation id + failpoint name.
@@ -629,12 +640,17 @@ fn run_chunked_put(path: &Path, failpoint: &str, expected: &residiuum_store::Exp
     clear_failpoints();
     let store = Store::open(path).unwrap();
     assert_prior_ok(&store, expected);
-    if expected.acknowledged_visible == Some(false) && !acknowledged && failpoint.ends_with(".before")
+    if expected.acknowledged_visible == Some(false)
+        && !acknowledged
+        && failpoint.ends_with(".before")
     {
         assert!(store.get("big").unwrap().is_none() || store.get("big").is_err());
     }
     if expected.acknowledged_visible == Some(true) {
-        assert_eq!(store.get("big").unwrap().as_deref(), Some(payload.as_slice()));
+        assert_eq!(
+            store.get("big").unwrap().as_deref(),
+            Some(payload.as_slice())
+        );
     }
 }
 
@@ -747,17 +763,12 @@ fn run_tier_move(path: &Path, failpoint: &str, expected: &residiuum_store::Expec
 fn run_compact(path: &Path, failpoint: &str, expected: &residiuum_store::ExpectedReopen) {
     seed_prior(path);
     let mut store = Store::open(path).unwrap();
-    store
-        .put("c1", b"one", DurabilityMode::Durable)
-        .unwrap();
+    store.put("c1", b"one", DurabilityMode::Durable).unwrap();
     arm_error(failpoint);
     let _ = store.compact_live();
     drop(store);
     clear_failpoints();
     let store = Store::open(path).unwrap();
     assert_prior_ok(&store, expected);
-    assert_eq!(
-        store.get("c1").unwrap().as_deref(),
-        Some(b"one".as_slice())
-    );
+    assert_eq!(store.get("c1").unwrap().as_deref(), Some(b"one".as_slice()));
 }

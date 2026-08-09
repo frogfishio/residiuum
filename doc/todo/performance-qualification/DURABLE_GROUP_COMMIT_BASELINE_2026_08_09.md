@@ -398,6 +398,10 @@ Such an append-path error now poisons orderly close. The process therefore
 cannot checkpoint an older projection over newer authoritative media; reopen
 uses the existing old/new/unknown recovery contract instead.
 
+Orderly close is also armed only after create/open returns successfully. A
+partially constructed handle from a failed open releases its resources without
+checkpointing partial derived state or publishing a clean certificate.
+
 ## 10 GiB bounded-active result on Bonzo
 
 Bonzo repeated the same retained-media campaign with 256 mutation callers and

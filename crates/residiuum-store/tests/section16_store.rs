@@ -6,7 +6,7 @@
 //! derived catalogs/indexes are not required.
 
 use residiuum_format::{FRAME_PREFIX_LEN, FRAME_SUFFIX_LEN, START_MAGIC};
-use residiuum_store::{StoreOpenOptions, DurabilityMode, Store};
+use residiuum_store::{DurabilityMode, Store};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -64,6 +64,21 @@ fn case01_truncate_active_frame_offsets() {
     }
 
     let active = active_path(root);
+    // Orderly Drop seals written tails. Recreate the crash fixture by moving
+    // the just-sealed authoritative prefix (without its summary footer) back to
+    // the active path; this test is specifically about an interrupted active.
+    let sealed = sealed_segments(root).pop().expect("sealed write tail");
+    let sealed_bytes = fs::read(&sealed).unwrap();
+    let mut sealed_magics = Vec::new();
+    for i in 0..=sealed_bytes.len().saturating_sub(START_MAGIC.len()) {
+        if &sealed_bytes[i..i + START_MAGIC.len()] == START_MAGIC.as_slice() {
+            sealed_magics.push(i);
+        }
+    }
+    let summary_start = *sealed_magics.last().expect("summary footer");
+    fs::write(&active, &sealed_bytes[..summary_start]).unwrap();
+    fs::remove_file(&sealed).unwrap();
+
     let bytes = fs::read(&active).unwrap();
     // Only truncate into the *last* frame so earlier complete frames remain a
     // contiguous verified prefix (OVERVIEW §16.1 / §7.3).
@@ -105,7 +120,12 @@ fn case01_truncate_active_frame_offsets() {
         let _ = store.get("victim");
         let report = store.salvage().unwrap();
         assert!(report.verified_frames >= 1);
-        // Restore full file for next cut (open may have rewritten active).
+        // Drop now orderly-seals the recovered prefix. Remove that per-iteration
+        // output and restore the original crash image for the next cut.
+        drop(store);
+        for segment in sealed_segments(root) {
+            fs::remove_file(segment).unwrap();
+        }
         fs::write(&active, &bytes).unwrap();
     }
 }
@@ -245,12 +265,10 @@ fn case05_destroy_segment_headers() {
         matches!(err, residiuum_store::StoreError::CorruptMeta(_)),
         "expected CorruptMeta on damaged descriptor, got {err:?}"
     );
-    // Survivors remain enumerable via inspect/salvage (no writable allocation).
+    // Survivors remain enumerable via salvage (no writable allocation). Before
+    // orderly close, `active-item` stayed in a separate active file and was
+    // directly gettable here; it is now another sealed survivor.
     let store = Store::open_inspect(root).unwrap();
-    assert_eq!(
-        store.get("active-item").unwrap().as_deref(),
-        Some(b"A".as_slice())
-    );
     let report = store.salvage().unwrap();
     assert!(report.verified_frames >= 1);
 }

@@ -679,8 +679,9 @@ pub struct Store {
     /// AWO-3: adaptive write lease owns mutation; direct put/delete refuse with
     /// [`StoreError::AdaptiveWriterActive`] until the lease is released.
     awo_lease_active: bool,
-    /// True after the orderly close barrier sealed written actives, checkpointed
-    /// derived state, and published the clean-session certificate.
+    /// True after the orderly close barrier completed, and provisionally true
+    /// while create/open is still fallible so a partially constructed handle
+    /// cannot publish derived state or a clean-session certificate from Drop.
     orderly_close_prepared: bool,
 }
 
@@ -909,7 +910,8 @@ impl Store {
             segment_growth: crate::segment_growth::SegmentGrowthPolicy::GrowOnAppend,
             awo_writer_poisoned: false,
             awo_lease_active: false,
-            orderly_close_prepared: false,
+            // Suppress Drop's close barrier until create is fully established.
+            orderly_close_prepared: true,
         };
         // Scale pending-seal backpressure with shard count (each shard may rotate).
         if let Some(pipe) = store.seal_pipeline.as_mut() {
@@ -929,6 +931,7 @@ impl Store {
         // interrupted. A brand-new store has no such history, but is marked
         // dirty before it can accept its first mutation.
         mark_write_dedup_session_dirty(&store.paths)?;
+        store.orderly_close_prepared = false;
         Ok(store)
     }
 
@@ -1034,7 +1037,8 @@ impl Store {
             segment_growth: crate::segment_growth::SegmentGrowthPolicy::GrowOnAppend,
             awo_writer_poisoned: false,
             awo_lease_active: false,
-            orderly_close_prepared: false,
+            // Suppress Drop's close barrier while open is still fallible.
+            orderly_close_prepared: true,
         };
         store.accept_foreign_store_id = matches!(
             options.inventory_policy,
@@ -1137,6 +1141,7 @@ impl Store {
         // application. It is changed back to clean only by an orderly drop
         // after any required reconciliation has completed.
         mark_write_dedup_session_dirty(&store.paths)?;
+        store.orderly_close_prepared = false;
         Ok(store)
     }
 

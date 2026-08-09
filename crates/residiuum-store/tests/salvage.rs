@@ -106,7 +106,11 @@ fn salvage_to_new_path_is_non_destructive() {
         .unwrap();
     assert_eq!(active_meta, after);
 
-    let recovered = Store::open_with_options(&dst, residiuum_store::StoreOpenOptions::default().tolerate_unidentified_inventory()).unwrap();
+    let recovered = Store::open_with_options(
+        &dst,
+        residiuum_store::StoreOpenOptions::default().tolerate_unidentified_inventory(),
+    )
+    .unwrap();
     assert_eq!(
         recovered.get("keep").unwrap().as_deref(),
         Some(b"alive".as_slice())
@@ -137,21 +141,26 @@ fn rebuild_index_matches_get() {
 fn middle_byte_corruption_still_finds_later_items_via_salvage() {
     let dir = tempdir().unwrap();
     let path = dir.path().to_path_buf();
+    let early_segment;
     {
         let mut store = Store::create(&path).unwrap();
-        store.put("early", b"1", DurabilityMode::Durable).unwrap();
+        early_segment = store
+            .put("early", b"1", DurabilityMode::Durable)
+            .unwrap()
+            .segment_id;
         store.seal_active().unwrap();
         store.put("late", b"2", DurabilityMode::Durable).unwrap();
     }
 
-    // Corrupt a sealed segment's middle bytes (OVERVIEW §16.2 style).
-    let segments = path.join("segments");
-    let seg_file = fs::read_dir(&segments)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .find(|p| p.extension().and_then(|x| x.to_str()) == Some("residiuum"))
-        .expect("sealed segment");
+    // Corrupt `early` specifically. Orderly close now also seals `late`, so an
+    // arbitrary directory entry is no longer a stable fixture target.
+    let segment_hex: String = early_segment
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let seg_file = path
+        .join("segments")
+        .join(format!("{segment_hex}.residiuum"));
     let mut bytes = fs::read(&seg_file).unwrap();
     if bytes.len() > 80 {
         // Flip a body-ish region without destroying every magic.
@@ -161,7 +170,7 @@ fn middle_byte_corruption_still_finds_later_items_via_salvage() {
     }
 
     let store = Store::open(&path).unwrap();
-    // Late item is on a different (active) segment and must survive.
+    // Late item is on a different orderly-sealed segment and must survive.
     assert_eq!(store.get("late").unwrap().as_deref(), Some(b"2".as_slice()));
 
     let report = store.salvage().unwrap();
