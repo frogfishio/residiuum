@@ -26,6 +26,7 @@ mod mirror;
 mod policy;
 mod recovery_mode;
 pub mod qualify;
+mod stager;
 mod wire;
 
 pub use crypto::{
@@ -68,6 +69,7 @@ pub use qualify::{
     publish_shadow_timed, range_f64, recovery_after_auth_compact_delete, stage_medians,
     QualifyOptions, ShadowStageSample, Step7CampaignReport, Step7Gates, HARNESS_ENVELOPE_KEY,
 };
+pub use stager::{ShadowStageHandle, ShadowStagePipeline};
 pub use wire::{
     decode_shadow, encode_shadow, encode_shadow_from_live_map, project_live, publish_shadow,
     shadow_dir, shadow_path, try_load_shadow, DecodedShadow, LiveMap, LiveState, ShadowLoad,

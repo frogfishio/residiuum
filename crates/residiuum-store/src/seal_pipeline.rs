@@ -347,9 +347,8 @@ pub enum LifecycleJob {
         pending_path: PathBuf,
         /// Destination sealed path.
         sealed_path: PathBuf,
-        /// Optional write-time staging. `None` means copy the now-sealed
-        /// authoritative image on this worker in bounded 1 MiB chunks.
-        prepared_shadow: Option<crate::recovery_shadow::PreparedShadowPublish>,
+        /// Complete off-thread or write-time staging; needs sync + rename.
+        prepared_shadow: crate::recovery_shadow::PreparedShadowPublish,
         /// Store paths for frontier / shadow dir.
         paths: StorePaths,
         /// When true, fsync auth sealed image + parent dirs.
@@ -868,33 +867,17 @@ fn seal_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<LifecycleR
                     continue;
                 }
                 let t_shadow = Instant::now();
-                let shadow_res = match prepared_shadow {
-                    Some(prepared) => crate::recovery_shadow::publish_prepared_shadow(
-                        prepared, &paths,
-                    )
-                    .map(|timing| {
-                        (
-                            timing.staging_write_operations,
-                            timing.staging_write_bytes,
-                            timing.staging_write_ns,
-                            timing.file_sync_ns,
-                        )
-                    }),
-                    None => crate::recovery_shadow::publish_mirror_shadow_from_path(
-                        &paths,
-                        store_id,
-                        &segment_id,
-                        &sealed_path,
-                    )
-                    .map(|timing| {
-                        (
-                            timing.copy_operations,
-                            timing.bytes_written,
-                            timing.copy_ns,
-                            timing.file_sync_ns,
-                        )
-                    }),
-                };
+                let shadow_res =
+                    crate::recovery_shadow::publish_prepared_shadow(prepared_shadow, &paths).map(
+                        |timing| {
+                            (
+                                timing.staging_write_operations,
+                                timing.staging_write_bytes,
+                                timing.staging_write_ns,
+                                timing.file_sync_ns,
+                            )
+                        },
+                    );
                 let shadow_publish_ns = elapsed_ns(t_shadow);
                 let (
                     shadow_staging_write_operations,

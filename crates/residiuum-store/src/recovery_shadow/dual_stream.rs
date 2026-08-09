@@ -424,12 +424,18 @@ impl ShadowDualStream {
         let base = self.image_len;
         let mut metas = metas_from_image_chunk(chunk, base)?;
         self.metas.append(&mut metas);
-        self.buf.extend_from_slice(chunk);
-        self.image_len = self.image_len.saturating_add(chunk.len() as u64);
-        if self.buf.len() >= SHADOW_BUF {
-            if let Err(e) = self.flush_buf() {
-                self.poisoned = true;
-                return Err(e);
+        let mut remaining = chunk;
+        while !remaining.is_empty() {
+            let space = SHADOW_BUF.saturating_sub(self.buf.len());
+            let take = space.min(remaining.len());
+            self.buf.extend_from_slice(&remaining[..take]);
+            self.image_len = self.image_len.saturating_add(take as u64);
+            remaining = &remaining[take..];
+            if self.buf.len() == SHADOW_BUF {
+                if let Err(e) = self.flush_buf() {
+                    self.poisoned = true;
+                    return Err(e);
+                }
             }
         }
         self.append_ns = self

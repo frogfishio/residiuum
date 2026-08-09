@@ -849,8 +849,8 @@ run noise. Product admission timing, not the old entry ceiling alone, closed
 most cohorts. The candidate is therefore reverted; it is not credited as a
 barrier optimization.
 
-The next candidate moves the complete duplicate Shadow image out of the
-foreground write window:
+Commit `81cc4e0` first moved the complete duplicate Shadow image to a post-seal
+worker:
 
 1. Durable acknowledgement continues to require authoritative `sync_data`.
 2. At rotation, a durable shard-tagged intent records the protection debt.
@@ -863,10 +863,30 @@ foreground write window:
    of protection lag); saturation backpressures writers rather than allowing a
    10 GiB benchmark to hide an unbounded Shadow debt.
 
-The explicit RSHD0004 write-time path and its failpoint matrix remain available
-as a qualified reference. CompactShadow product mode selects the deferred path.
-A local 64 MiB smart-client smoke observed zero Shadow writes and zero Shadow
-syncs during acknowledgement, then closed, reopened and validated all 8,192
-records after producing the durable duplicate. This proves separation of the
-foreground window; the matched Bonzo campaign must still determine sustained
-throughput once the bounded protection queue fills.
+The local 64 MiB smoke proved foreground separation, but the clean matched Bonzo
+run rejected this implementation. Its GiB intervals were 368, 397, 258 and
+194 MiB/s (280.45 MiB/s total), versus the 285, 354, 365 and 357 MiB/s baseline
+(336.50 MiB/s total). The worker kept pace and published 15–16 Shadows per GiB,
+so this was not hidden debt. Copying from sealed authority adds one full media
+read before the duplicate write: approximately 3× payload traffic rather than
+the write-time path's approximately 2×. The later authoritative `sync_data`
+time rose to 1.73 and 2.61 seconds/GiB. Post-seal reread is rejected.
+
+The replacement keeps single-pass write-time bytes but changes their scheduler:
+
+1. Foreground authority copies each already-encoded cohort into a store-wide
+   bounded memory queue; it performs no Shadow file I/O.
+2. One Shadow staging worker owns all staging files and emits exact 1 MiB writes.
+3. Four maximum-size 16 MiB cohorts may queue (64 MiB), plus the cohort being
+   copied. Queue saturation applies protection-first backpressure.
+4. At rotation, `Finish` is ordered behind every prior append for that segment.
+   Authoritative rename cannot occur until the worker returns a fully encoded
+   Shadow temp. This preserves the existing crash-recovery state machine: any
+   Shadow temp beside pending/sealed authority is complete and publishable.
+5. The protected-pair worker publishes authority, records visible P★ lag, syncs
+   and atomically publishes Shadow, then advances durable coverage.
+
+The explicit synchronous RSHD0004 path and its failpoint matrix remain available
+as a qualified reference. CompactShadow product mode selects the bounded
+off-thread stager. This replacement must repeat the clean 4 GiB comparison; no
+performance claim is made from the failed `81cc4e0` candidate.

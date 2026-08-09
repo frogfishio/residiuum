@@ -710,12 +710,14 @@ pub struct Store {
     enrichment_enabled: bool,
     /// Recovery Shadow publication is enabled for new segments.
     ///
-    /// CompactShadow uses deferred post-seal copying; explicit qualification
-    /// may select write-time RSHD0004. Neither path advances P★ before the
+    /// CompactShadow uses bounded off-thread staging; explicit qualification
+    /// may select synchronous RSHD0004. Neither path advances P★ before the
     /// independently allocated Shadow is durably published.
     shadow_dual_stream: bool,
-    /// Product path: build Shadow from sealed authority on the lifecycle worker.
-    deferred_shadow_copy: bool,
+    /// Product path: enqueue single-pass encoded bytes to the staging worker.
+    async_shadow_staging: bool,
+    /// Store-wide bounded worker for off-thread write-time Shadow staging.
+    shadow_stager: Option<crate::recovery_shadow::ShadowStagePipeline>,
     /// Cumulative Shadow protection-worker nanoseconds (measurement).
     shadow_dual_finalize_ns: u64,
     /// Shadows successfully published this process (measurement).
@@ -872,6 +874,8 @@ struct ActiveWriter {
     item_events: u64,
     /// Experimental dual-stream Shadow staging for this active segment.
     shadow_dual: Option<crate::recovery_shadow::ShadowDualStream>,
+    /// Product off-thread Shadow staging handle for this active segment.
+    shadow_stage: Option<crate::recovery_shadow::ShadowStageHandle>,
 }
 
 /// Measured segment-tail file I/O at the actual boundary (write/sync).
@@ -1000,7 +1004,8 @@ impl Store {
             async_lifecycle: true,
             enrichment_enabled: true,
             shadow_dual_stream: false,
-            deferred_shadow_copy: false,
+            async_shadow_staging: false,
+            shadow_stager: None,
             shadow_dual_finalize_ns: 0,
             shadow_dual_published: 0,
             authoritative_io_totals: WriteIoTotals::default(),
@@ -1036,7 +1041,7 @@ impl Store {
         store.refresh_tier_state()?;
         // Durable product mode marker — missing on legacy trees ⇒ Materialized.
         crate::recovery_shadow::persist_recovery_mode(&store.paths, store.store_id, recovery_mode)?;
-        store.apply_recovery_mode(recovery_mode);
+        store.apply_recovery_mode(recovery_mode)?;
         // A missing/dirty marker means the next writer must reconcile any
         // authoritative operation frame whose outcome journal append was
         // interrupted. A brand-new store has no such history, but is marked
@@ -1133,7 +1138,8 @@ impl Store {
             async_lifecycle: true,
             enrichment_enabled: true,
             shadow_dual_stream: false,
-            deferred_shadow_copy: false,
+            async_shadow_staging: false,
+            shadow_stager: None,
             shadow_dual_finalize_ns: 0,
             shadow_dual_published: 0,
             authoritative_io_totals: WriteIoTotals::default(),
@@ -1377,7 +1383,8 @@ impl Store {
             async_lifecycle: false,
             enrichment_enabled: false,
             shadow_dual_stream: false,
-            deferred_shadow_copy: false,
+            async_shadow_staging: false,
+            shadow_stager: None,
             shadow_dual_finalize_ns: 0,
             shadow_dual_published: 0,
             authoritative_io_totals: WriteIoTotals::default(),
@@ -6758,7 +6765,7 @@ impl Store {
         out.drain_lifecycle_ns = elapsed_ns(t_drain);
         let n = self.writer_shards();
         for shard in 0..n {
-            let deferred = self.deferred_shadow_copy
+            let deferred = self.async_shadow_staging
                 && self.async_lifecycle_enabled()
                 && self
                     .active_ref(shard)
@@ -6953,7 +6960,7 @@ impl Store {
                         shard: shard as u16,
                         pending_path,
                         sealed_path: dest,
-                        prepared_shadow: Some(prepared),
+                        prepared_shadow: prepared,
                         paths: self.paths.clone(),
                         require_fsync: flush_mode == DurabilityMode::Durable,
                         size,
@@ -7176,11 +7183,15 @@ impl Store {
 
     /// Enable the experimental write-time RSHD0004 path.
     ///
-    /// Product CompactShadow mode instead selects deferred, bounded post-seal
-    /// copying so duplicate bytes do not ride the foreground write path.
+    /// Product CompactShadow mode instead selects bounded off-thread staging so
+    /// duplicate file I/O does not ride the foreground write path.
     pub fn set_shadow_dual_stream(&mut self, enabled: bool) {
         self.shadow_dual_stream = enabled;
-        self.deferred_shadow_copy = false;
+        self.async_shadow_staging = false;
+        for writer in self.actives.iter_mut().flatten() {
+            writer.shadow_stage = None;
+        }
+        self.shadow_stager = None;
         // Dual-stream uses the Protected Seal-Pair Pipeline (async finalize).
         // Do **not** disable async_lifecycle — that serialized ~167ms/seal onto
         // the writer. Keep async so detach → next active overlaps protection.
@@ -7243,11 +7254,13 @@ impl Store {
     /// Reload recovery mode from disk and apply process policy.
     pub fn reload_recovery_mode(&mut self) -> Result<(), StoreError> {
         let mode = crate::recovery_shadow::load_recovery_mode(&self.paths)?;
-        self.apply_recovery_mode(mode);
-        Ok(())
+        self.apply_recovery_mode(mode)
     }
 
-    fn apply_recovery_mode(&mut self, mode: crate::recovery_shadow::RecoveryMode) {
+    fn apply_recovery_mode(
+        &mut self,
+        mode: crate::recovery_shadow::RecoveryMode,
+    ) -> Result<(), StoreError> {
         self.recovery_mode = mode;
         match mode {
             crate::recovery_shadow::RecoveryMode::Materialized => {
@@ -7256,52 +7269,71 @@ impl Store {
                 );
             }
             crate::recovery_shadow::RecoveryMode::Transitioning => {
-                self.enable_deferred_shadow_copy();
+                self.enable_async_shadow_staging()?;
             }
             crate::recovery_shadow::RecoveryMode::CompactShadow => {
-                self.enable_deferred_shadow_copy();
+                self.enable_async_shadow_staging()?;
                 crate::recovery_shadow::set_shadow_reclaim_policy(
                     crate::recovery_shadow::ShadowReclaimPolicy::RequireReplacementShadow,
                 );
             }
         }
+        Ok(())
     }
 
-    fn enable_deferred_shadow_copy(&mut self) {
+    fn enable_async_shadow_staging(&mut self) -> Result<(), StoreError> {
         self.shadow_dual_stream = true;
-        self.deferred_shadow_copy = true;
+        self.async_shadow_staging = true;
+        if self.shadow_stager.is_none() {
+            self.shadow_stager = Some(crate::recovery_shadow::ShadowStagePipeline::start());
+        }
         if let Some(pipe) = self.seal_pipeline.as_mut() {
             pipe.max_pending_seals = DEFAULT_MAX_PENDING_SEALS;
         }
         // A mode change may replace explicit experimental RSHD0004 staging.
         // Dropping it is safe: no protection was claimed for active segments.
+        let stager = self.shadow_stager.as_ref().expect("stager started");
+        let paths = self.paths.clone();
+        let store_id = self.store_id;
         for writer in self.actives.iter_mut().flatten() {
             writer.shadow_dual = None;
+            if writer.shadow_stage.is_none() {
+                writer.shadow_stage = Some(stager.begin(
+                    paths.clone(),
+                    store_id,
+                    writer.segment_id,
+                    writer.segment.as_bytes().to_vec(),
+                )?);
+            }
         }
+        Ok(())
     }
 
     /// Step 8 prepare: Transitioning marker + backfill Shadows + gap-free check.
     pub fn prepare_flip_to_compact_shadow(&mut self) -> Result<u64, StoreError> {
         let built =
             crate::recovery_shadow::prepare_flip_to_compact_shadow(&self.paths, self.store_id, 0)?;
-        self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::Transitioning);
+        self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::Transitioning)?;
         Ok(built)
     }
 
     /// Step 8 activate: durable CompactShadow marker, then stop new Materialized.
     pub fn activate_compact_shadow_mode(&mut self) -> Result<(), StoreError> {
         crate::recovery_shadow::activate_compact_shadow_mode(&self.paths, self.store_id)?;
-        self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::CompactShadow);
-        Ok(())
+        self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::CompactShadow)
     }
 
     /// Step 8 rollback: Materialized dual-run; keep Shadows and Materialized files.
     pub fn rollback_to_materialized_mode(&mut self) -> Result<(), StoreError> {
         crate::recovery_shadow::rollback_to_materialized_mode(&self.paths, self.store_id)?;
-        self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::Materialized);
+        self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::Materialized)?;
         // Dual-stream may stay attached for experimental use; product default off.
         self.shadow_dual_stream = false;
-        self.deferred_shadow_copy = false;
+        self.async_shadow_staging = false;
+        for writer in self.actives.iter_mut().flatten() {
+            writer.shadow_stage = None;
+        }
+        self.shadow_stager = None;
         Ok(())
     }
 
@@ -7621,11 +7653,11 @@ impl Store {
             prepared.persist_shard_meta(&self.paths)?;
             crate::positioned_io::write_all_at(&mut writer.file, prefix_len, &plan.summary_frame)?;
             writer.file.set_len(plan.sealed_len)?;
-            Some((Some(prepared), plan))
-        } else if self.deferred_shadow_copy {
+            Some((prepared, plan))
+        } else if let Some(stage) = writer.shadow_stage.take() {
             if !zero_scan_meta {
                 return Err(StoreError::CorruptMeta(
-                    "deferred Shadow active lacks summary metadata",
+                    "async Shadow active lacks summary metadata",
                 ));
             }
             let plan = crate::incremental_seal::meta_publish_plan(
@@ -7635,22 +7667,19 @@ impl Store {
                 writer_sequence,
                 item_events,
             )?;
+            let prepared = stage.finish(&plan.summary_frame, shard as u16)?;
+            prepared.persist_shard_meta(&self.paths)?;
             crate::positioned_io::write_all_at(&mut writer.file, prefix_len, &plan.summary_frame)?;
             writer.file.set_len(plan.sealed_len)?;
-            // A tiny persistent intent makes sealed-without-Shadow recovery
-            // deterministic if the process stops before the worker reaches it.
-            crate::recovery_shadow::PreparedShadowPublish::persist_shard_meta_for(
-                &self.paths,
-                &segment_id,
-                shard as u16,
-            )?;
-            Some((None, plan))
+            Some((prepared, plan))
+        } else if self.async_shadow_staging {
+            return Err(StoreError::CorruptMeta(
+                "async Shadow staging handle missing",
+            ));
         } else {
             None
         };
-        let deferred_protection = protected
-            .as_ref()
-            .is_some_and(|(prepared, _)| prepared.is_none());
+        let deferred_protection = self.async_shadow_staging;
         drop(writer);
 
         let n = self.writer_shards();
@@ -9182,6 +9211,12 @@ impl Store {
                         } else {
                             None
                         }
+                        .or_else(|| {
+                            writer
+                                .shadow_stage
+                                .as_ref()
+                                .and_then(|stage| stage.append(pending).err())
+                        })
                     };
                     stats.write_duration_ns =
                         t0.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
@@ -9217,6 +9252,9 @@ impl Store {
                         writer.file.write_all(pending)?;
                         if let Some(dual) = writer.shadow_dual.as_mut() {
                             dual.append_image_chunk(pending)?;
+                        }
+                        if let Some(stage) = writer.shadow_stage.as_ref() {
+                            stage.append(pending)?;
                         }
                     }
                     stats.write_duration_ns =
@@ -9318,6 +9356,9 @@ impl Store {
         )?;
         if let Some(dual) = writer.shadow_dual.as_mut() {
             dual.append_image_chunk(&writer.coalesce_buf)?;
+        }
+        if let Some(stage) = writer.shadow_stage.as_ref() {
+            stage.append(&writer.coalesce_buf)?;
         }
         writer.coalesce_buf.clear();
         writer.coalesce_since = None;
@@ -9473,6 +9514,7 @@ impl Store {
         file.sync_all()?;
         sync_dir(&dir)?;
         let shadow_dual = self.open_shadow_dual(segment_id, &initial)?;
+        let shadow_stage = self.open_shadow_stage(segment_id, &initial)?;
         self.set_active(
             shard,
             Some(ActiveWriter {
@@ -9489,6 +9531,7 @@ impl Store {
                 runway: None,
                 item_events: 0,
                 shadow_dual,
+                shadow_stage,
             }),
         );
         crate::failpoint::hit("segalloc.after_active_media")?;
@@ -9527,6 +9570,7 @@ impl Store {
             directory_entry_durable = true;
         }
         let shadow_dual = self.open_shadow_dual(segment_id, &initial)?;
+        let shadow_stage = self.open_shadow_stage(segment_id, &initial)?;
         crate::failpoint::hit("segalloc.after_active_media")?;
         self.set_active(
             shard,
@@ -9544,6 +9588,7 @@ impl Store {
                 runway: None,
                 item_events: 0,
                 shadow_dual,
+                shadow_stage,
             }),
         );
         self.maybe_attach_runway_preparer(shard)?;
@@ -9556,7 +9601,7 @@ impl Store {
         segment_id: [u8; 16],
         initial_image: &[u8],
     ) -> Result<Option<crate::recovery_shadow::ShadowDualStream>, StoreError> {
-        if !self.shadow_dual_stream || self.deferred_shadow_copy {
+        if !self.shadow_dual_stream || self.async_shadow_staging {
             return Ok(None);
         }
         let mut dual = crate::recovery_shadow::ShadowDualStream::begin(
@@ -9566,6 +9611,24 @@ impl Store {
         )?;
         dual.append_image_chunk(initial_image)?;
         Ok(Some(dual))
+    }
+
+    fn open_shadow_stage(
+        &self,
+        segment_id: [u8; 16],
+        initial_image: &[u8],
+    ) -> Result<Option<crate::recovery_shadow::ShadowStageHandle>, StoreError> {
+        let Some(stager) = self.shadow_stager.as_ref() else {
+            return Ok(None);
+        };
+        stager
+            .begin(
+                self.paths.clone(),
+                self.store_id,
+                segment_id,
+                initial_image.to_vec(),
+            )
+            .map(Some)
     }
 
     /// Diagnostic: pre-size (and optionally touch) the active file before first write.
@@ -9911,6 +9974,7 @@ impl Store {
                 // Dual-stream is re-attached by `reload_recovery_mode` /
                 // `attach_shadow_dual_to_actives` when CompactShadow is armed.
                 shadow_dual: None,
+                shadow_stage: None,
             }),
         );
         Ok(())
