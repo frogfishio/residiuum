@@ -100,6 +100,11 @@ impl ResidiuumDeployment {
         Ok(self.host.write_path_stats()?)
     }
 
+    /// Enable or disable rebuildable Hydra/Chimera enrichment for this open.
+    pub(crate) fn set_enrichment_enabled(&self, enabled: bool) -> Result<(), Error> {
+        Ok(self.host.set_enrichment_enabled(enabled)?)
+    }
+
     /// Establish the deployment's durable clean-restart boundary.
     pub(crate) fn prepare_orderly_close(&self) -> Result<(), Error> {
         Ok(self.host.prepare_orderly_close()?)

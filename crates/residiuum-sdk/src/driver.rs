@@ -42,6 +42,8 @@ pub struct EmbeddedOptions {
     pub queue_capacity: usize,
     /// Hard byte-credit bound across queued and running weighted operations.
     pub queue_byte_capacity: usize,
+    /// Build rebuildable Hydra/Chimera sidecars after segment seals.
+    pub enrichment_enabled: bool,
 }
 
 impl EmbeddedOptions {
@@ -57,6 +59,7 @@ impl EmbeddedOptions {
             workers,
             queue_capacity: DEFAULT_EMBEDDED_QUEUE_CAPACITY,
             queue_byte_capacity: DEFAULT_QUEUE_BYTE_CAPACITY,
+            enrichment_enabled: true,
         }
     }
 
@@ -75,6 +78,13 @@ impl EmbeddedOptions {
     /// Override the queued/running mutation byte-credit bound. Zero is rejected.
     pub fn queue_byte_capacity(mut self, queue_byte_capacity: usize) -> Self {
         self.queue_byte_capacity = queue_byte_capacity;
+        self
+    }
+
+    /// Enable or disable rebuildable background Hydra/Chimera enrichment.
+    /// Authoritative storage and recovery semantics are unchanged.
+    pub fn enrichment_enabled(mut self, enabled: bool) -> Self {
+        self.enrichment_enabled = enabled;
         self
     }
 }
@@ -583,8 +593,10 @@ impl Client {
         let workers = options.workers;
         let queue_capacity = options.queue_capacity;
         let queue_byte_capacity = options.queue_byte_capacity;
+        let enrichment_enabled = options.enrichment_enabled;
         let opened = run_open(move || {
             let deployment = ResidiuumDeployment::open(&options.path)?;
+            deployment.set_enrichment_enabled(enrichment_enabled)?;
             let report = deployment.open_report()?;
             Ok((deployment, report))
         })

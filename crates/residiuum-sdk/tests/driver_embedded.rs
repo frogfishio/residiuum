@@ -159,6 +159,8 @@ fn compile_contract_handles_are_clone_send_sync() {
     assert_handle_contract::<Client>();
     assert_handle_contract::<HeapClient>();
     assert_handle_contract::<Collection<Value>>();
+    assert!(EmbeddedOptions::new("unused").enrichment_enabled);
+    assert!(!EmbeddedOptions::new("unused").enrichment_enabled(false).enrichment_enabled);
 }
 
 #[test]

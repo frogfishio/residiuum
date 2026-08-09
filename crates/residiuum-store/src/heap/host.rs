@@ -184,6 +184,15 @@ impl StoreHost {
             .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))
     }
 
+    /// Enable or disable rebuildable Hydra/Chimera enrichment.
+    pub fn set_enrichment_enabled(&self, enabled: bool) -> Result<(), StoreError> {
+        self.physical
+            .lock()
+            .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))?
+            .set_enrichment_enabled(enabled);
+        Ok(())
+    }
+
     /// Drain authoritative lifecycle work and persist a clean restart boundary.
     pub fn prepare_orderly_close(&self) -> Result<(), StoreError> {
         self.physical

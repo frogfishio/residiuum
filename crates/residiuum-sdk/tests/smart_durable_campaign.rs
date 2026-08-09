@@ -56,6 +56,15 @@ fn required_u64(name: &str) -> u64 {
         .unwrap_or_else(|_| panic!("{name} must be an unsigned integer"))
 }
 
+fn optional_bool(name: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) if value == "1" || value.eq_ignore_ascii_case("true") => true,
+        Ok(value) if value == "0" || value.eq_ignore_ascii_case("false") => false,
+        Ok(_) => panic!("{name} must be true, false, 1, or 0"),
+        Err(_) => default,
+    }
+}
+
 fn campaign_root() -> PathBuf {
     let root = PathBuf::from(
         std::env::var("RESIDIUUM_SMART_DURABLE_ROOT")
@@ -356,6 +365,8 @@ fn smart_client_durable_retained_media_campaign() {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1);
+    let enrichment_enabled =
+        optional_bool("RESIDIUUM_SMART_DURABLE_ENRICHMENT_ENABLED", true);
     let minimum_free = std::env::var("RESIDIUUM_SMART_DURABLE_MIN_FREE_BYTES")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -398,7 +409,8 @@ fn smart_client_durable_retained_media_campaign() {
     let client = block_on(Client::open_embedded(
         EmbeddedOptions::new(&store)
             .workers(read_workers)
-            .queue_capacity(scheduler_queue_capacity),
+            .queue_capacity(scheduler_queue_capacity)
+            .enrichment_enabled(enrichment_enabled),
     ))
     .unwrap();
     let open_ns = open_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
@@ -618,6 +630,7 @@ fn smart_client_durable_retained_media_campaign() {
         "operations": total_operations,
         "concurrency": concurrency,
         "client_batch": client_batch,
+        "enrichment_enabled": enrichment_enabled,
         "read_query_workers": read_workers,
         "scheduler_queue_capacity": scheduler_queue_capacity,
         "free_bytes_at_start": free_at_start,
