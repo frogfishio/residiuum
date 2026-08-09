@@ -244,6 +244,8 @@ pub enum ErrorCode {
     Validation,
     /// Bounded admission queue was full.
     Overloaded,
+    /// One request exceeds a configured resource bound and cannot fit by waiting.
+    ResourceLimit,
     /// Shared client was already closed.
     Closed,
     /// Deadline expired before a result was available.
@@ -366,6 +368,11 @@ impl Error {
             _ => match source.code() {
                 crate::ErrorCode::ValidationFailed | crate::ErrorCode::QueryInvalid => (
                     ErrorCode::Validation,
+                    ErrorClass::Request,
+                    RetryDisposition::Never,
+                ),
+                crate::ErrorCode::ResourceLimit | crate::ErrorCode::QueryBudgetRequired => (
+                    ErrorCode::ResourceLimit,
                     ErrorClass::Request,
                     RetryDisposition::Never,
                 ),
@@ -512,10 +519,7 @@ pub struct Client {
 impl Client {
     /// Open an embedded deployment off the caller's async executor thread.
     pub async fn open_embedded(options: EmbeddedOptions) -> Result<Self, Error> {
-        if options.workers == 0
-            || options.queue_capacity == 0
-            || options.queue_byte_capacity == 0
-        {
+        if options.workers == 0 || options.queue_capacity == 0 || options.queue_byte_capacity == 0 {
             return Err(Error::local(
                 ErrorCode::Validation,
                 ErrorClass::Request,
@@ -835,21 +839,21 @@ where
                 deadline,
                 admission_bytes,
                 move || {
-                let (storage, deduplicated) = collection.put_raw_body_with_operation(
-                    &key,
-                    &body,
-                    residiuum_store::WriteCondition::Unconditional,
-                    operation_id.0,
-                    content_hash,
-                )?;
-                Ok(WriteReceipt {
-                    request_id,
-                    operation_id,
-                    heap_id,
-                    collection_id,
-                    deduplicated,
-                    storage,
-                })
+                    let (storage, deduplicated) = collection.put_raw_body_with_operation(
+                        &key,
+                        &body,
+                        residiuum_store::WriteCondition::Unconditional,
+                        operation_id.0,
+                        content_hash,
+                    )?;
+                    Ok(WriteReceipt {
+                        request_id,
+                        operation_id,
+                        heap_id,
+                        collection_id,
+                        deduplicated,
+                        storage,
+                    })
                 },
             )
             .await
@@ -925,21 +929,21 @@ where
                 deadline,
                 admission_bytes,
                 move || {
-                let (storage, deduplicated) = collection.put_raw_body_with_operation(
-                    &key,
-                    &body,
-                    condition,
-                    operation_id.0,
-                    content_hash,
-                )?;
-                Ok(WriteReceipt {
-                    request_id,
-                    operation_id,
-                    heap_id,
-                    collection_id,
-                    deduplicated,
-                    storage,
-                })
+                    let (storage, deduplicated) = collection.put_raw_body_with_operation(
+                        &key,
+                        &body,
+                        condition,
+                        operation_id.0,
+                        content_hash,
+                    )?;
+                    Ok(WriteReceipt {
+                        request_id,
+                        operation_id,
+                        heap_id,
+                        collection_id,
+                        deduplicated,
+                        storage,
+                    })
                 },
             )
             .await
@@ -1140,20 +1144,20 @@ where
                 deadline,
                 admission_bytes,
                 move || {
-                let (storage, deduplicated) = collection.delete_with_operation(
-                    &key,
-                    condition,
-                    operation_id.0,
-                    content_hash,
-                )?;
-                Ok(DeleteReceipt {
-                    request_id,
-                    operation_id,
-                    heap_id,
-                    collection_id,
-                    deduplicated,
-                    storage,
-                })
+                    let (storage, deduplicated) = collection.delete_with_operation(
+                        &key,
+                        condition,
+                        operation_id.0,
+                        content_hash,
+                    )?;
+                    Ok(DeleteReceipt {
+                        request_id,
+                        operation_id,
+                        heap_id,
+                        collection_id,
+                        deduplicated,
+                        storage,
+                    })
                 },
             )
             .await
@@ -1685,13 +1689,29 @@ impl Scheduler {
             );
             return future;
         }
-        if admission_bytes > self.queue_byte_capacity
-            || !reserve_bounded_by(
-                &self.counters.admitted_bytes,
-                self.queue_byte_capacity,
-                admission_bytes,
-            )
-        {
+        if admission_bytes > self.queue_byte_capacity {
+            self.counters.queued.fetch_sub(1, Ordering::AcqRel);
+            self.counters.refused.fetch_add(1, Ordering::Relaxed);
+            self.counters.byte_refused.fetch_add(1, Ordering::Relaxed);
+            responder_error(
+                &future,
+                Error::for_request(
+                    ErrorCode::ResourceLimit,
+                    ErrorClass::Admission,
+                    "mutation exceeds embedded driver byte capacity",
+                    request_id,
+                    operation_id,
+                    TerminalOutcome::Refused,
+                    RetryDisposition::Never,
+                ),
+            );
+            return future;
+        }
+        if !reserve_bounded_by(
+            &self.counters.admitted_bytes,
+            self.queue_byte_capacity,
+            admission_bytes,
+        ) {
             self.counters.queued.fetch_sub(1, Ordering::AcqRel);
             self.counters.refused.fetch_add(1, Ordering::Relaxed);
             self.counters.byte_refused.fetch_add(1, Ordering::Relaxed);
@@ -2124,6 +2144,76 @@ mod tests {
         let (lock, cv) = &*gate;
         *lock.lock().unwrap() = true;
         cv.notify_all();
+        drop(first);
+    }
+
+    #[test]
+    fn scheduler_byte_credits_cover_queued_and_running_mutations() {
+        let scheduler = Scheduler::new(1, 8, 8).unwrap();
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let first_gate = Arc::clone(&gate);
+        let first = scheduler.dispatch_weighted(
+            RequestId([1; 16]),
+            Some(OperationId([1; 16])),
+            None,
+            6,
+            move || {
+                let (lock, cv) = &*first_gate;
+                let mut open = lock.lock().unwrap();
+                while !*open {
+                    open = cv.wait(open).unwrap();
+                }
+                Ok(())
+            },
+        );
+        while scheduler.inspect().running == 0 {
+            thread::yield_now();
+        }
+        let refused = scheduler.dispatch_weighted(
+            RequestId([2; 16]),
+            Some(OperationId([2; 16])),
+            None,
+            3,
+            || Ok(()),
+        );
+        let state = refused.shared.state.lock().unwrap();
+        assert!(matches!(
+            state
+                .result
+                .as_ref()
+                .map(|result| result.as_ref().err().map(|error| error.code)),
+            Some(Some(ErrorCode::Overloaded))
+        ));
+        drop(state);
+        let blocked = scheduler.inspect();
+        assert_eq!(blocked.admitted_bytes, 6);
+        assert_eq!(blocked.peak_admitted_bytes, 6);
+        assert_eq!(blocked.byte_refused, 1);
+
+        let oversized = scheduler.dispatch_weighted(
+            RequestId([3; 16]),
+            Some(OperationId([3; 16])),
+            None,
+            9,
+            || Ok(()),
+        );
+        let state = oversized.shared.state.lock().unwrap();
+        let error = state
+            .result
+            .as_ref()
+            .and_then(|result| result.as_ref().err())
+            .expect("oversized mutation must be refused");
+        assert_eq!(error.code, ErrorCode::ResourceLimit);
+        assert_eq!(error.retry, RetryDisposition::Never);
+        drop(state);
+        assert_eq!(scheduler.inspect().byte_refused, 2);
+
+        let (lock, cv) = &*gate;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+        while scheduler.inspect().admitted_bytes != 0 {
+            thread::yield_now();
+        }
         drop(first);
     }
 

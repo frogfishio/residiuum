@@ -207,3 +207,53 @@ about 214 thousand calls. That is an estimated 18.35× reduction before any
 filesystem splitting. Stable boundaries fall from two per cohort to one per
 touched active shard. The repeat Bonzo campaign must verify the physical
 process-monitor counters rather than treating this model as measured evidence.
+
+## Positioned I/O and byte admission follow-up
+
+The next native I/O slice applies the useful Seastar mechanics without adding
+a framework or changing Residiuum's file format:
+
+- authoritative active tails use explicit-offset writes rather than mutable
+  `seek` + `write_all` cursor state;
+- RSHD0004 staging, envelope patching and commitment publication use the same
+  positioned-write primitive;
+- the SDK scheduler retains its operation-count bound and additionally holds
+  byte credits across queued **and running** mutations (64 MiB product default,
+  configurable on `EmbeddedOptions`);
+- temporary byte-window exhaustion is explicit retryable `Overloaded`
+  admission, while a mutation larger than the configured window is a
+  non-retryable `ResourceLimit`;
+- the deployment commit coordinator independently bounds queued + installing
+  payload credits to two maximum cohorts (32 MiB), applying backpressure to
+  callers that do not enter through the SDK; and
+- inspection reports current/peak byte credits, byte refusals, coordinator
+  waits and oversized exclusive admissions.
+
+This slice deliberately does **not** add `O_DIRECT`, alignment padding or
+`io_uring`. Those are optional backend experiments after the grouped portable
+path has a same-machine baseline. The durability boundary remains unchanged:
+all positioned authoritative bytes are complete before the existing sync, and
+the receipt is published only after that sync succeeds.
+
+### Local 64 MiB retained-media smoke after the follow-up
+
+Release-mode run on the same development machine, 8 KiB payloads and
+concurrency 20:
+
+| Result | Measurement |
+|---|---:|
+| acknowledged operations | 8,192 |
+| acknowledged payload | 64 MiB |
+| throughput | 3,711.4 ops/s; 29.00 MiB/s |
+| operation latency | p50 4.14 ms; p95 9.27 ms; p99 27.55 ms |
+| gathered cohorts / media syncs | 443 / 443 |
+| maximum cohort | 20 entries; 165,320 bytes |
+| journal append / sync cohorts | 443 / 0 |
+| SDK peak admitted bytes / refusals | 172,830 / 0 |
+| coordinator peak admitted bytes / waits | 165,320 / 0 |
+| reopen | 1.352 s; all 8,192 payloads validated complete |
+
+The preceding local gathered-write smoke was 3,419 ops/s and 26.71 MiB/s, so
+this observation is about 8.6% higher. It is a small, non-isolated local run:
+it proves the path remains healthy and the new bounds are not constraining this
+workload, but does not attribute the difference solely to positioned I/O.

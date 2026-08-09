@@ -73,9 +73,9 @@ fn project_outputs(items: &[ProjectItemV1]) -> Vec<String> {
     items
         .iter()
         .map(|i| match i {
-            ProjectItemV1::Leaf { output, .. } | ProjectItemV1::Nested { output, .. } => {
-                output.clone()
-            }
+            ProjectItemV1::Leaf { output, .. }
+            | ProjectItemV1::Nested { output, .. }
+            | ProjectItemV1::Computed { output, .. } => output.clone(),
         })
         .collect()
 }

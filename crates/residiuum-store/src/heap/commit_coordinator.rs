@@ -198,9 +198,7 @@ impl OperationCommitCoordinator {
                     .oversized_admissions
                     .fetch_add(1, Ordering::Relaxed);
             }
-            state.admitted_credit_bytes = state
-                .admitted_credit_bytes
-                .saturating_add(credit_bytes);
+            state.admitted_credit_bytes = state.admitted_credit_bytes.saturating_add(credit_bytes);
             self.inner
                 .counters
                 .admitted_bytes
@@ -452,7 +450,10 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(5);
         while coordinator.stats().admitted_bytes < body_bytes {
-            assert!(Instant::now() < deadline, "first operation was not admitted");
+            assert!(
+                Instant::now() < deadline,
+                "first operation was not admitted"
+            );
             thread::yield_now();
         }
 
@@ -470,7 +471,10 @@ mod tests {
         };
 
         while coordinator.stats().byte_admission_waits == 0 {
-            assert!(Instant::now() < deadline, "second operation did not wait for credits");
+            assert!(
+                Instant::now() < deadline,
+                "second operation did not wait for credits"
+            );
             thread::yield_now();
         }
         let blocked = coordinator.stats();

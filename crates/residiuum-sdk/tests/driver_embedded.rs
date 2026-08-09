@@ -385,9 +385,14 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
     for thread in threads {
         thread.join().unwrap();
     }
-    assert_eq!(client.inspect().workers, 2);
-    assert_eq!(client.inspect().queue_capacity, 8);
-    let commits = client.inspect().operation_commits;
+    let inspection = client.inspect();
+    assert_eq!(inspection.workers, 2);
+    assert_eq!(inspection.queue_capacity, 8);
+    assert!(inspection.queue_byte_capacity > 0);
+    assert_eq!(inspection.admitted_bytes, 0);
+    assert!(inspection.peak_admitted_bytes > 0);
+    assert_eq!(inspection.byte_refused, 0);
+    let commits = inspection.operation_commits;
     assert_eq!(commits.submitted, 8);
     assert_eq!(commits.committed, 8);
     assert_eq!(commits.failed, 0);

@@ -346,6 +346,10 @@ fn smart_client_durable_retained_media_campaign() {
         "scheduler": {
             "workers": inspection.workers,
             "queue_capacity": inspection.queue_capacity,
+            "queue_byte_capacity": inspection.queue_byte_capacity,
+            "admitted_bytes": inspection.admitted_bytes,
+            "peak_admitted_bytes": inspection.peak_admitted_bytes,
+            "byte_refused": inspection.byte_refused,
             "peak_running": inspection.peak_running,
             "refused": inspection.refused,
         },

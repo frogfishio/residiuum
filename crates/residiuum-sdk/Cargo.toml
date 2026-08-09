@@ -98,6 +98,14 @@ name = "stage_def_029_resource_governance"
 required-features = ["legacy-flat-sdk"]
 
 [[test]]
+name = "stage_def_099_historical_get"
+required-features = ["legacy-flat-sdk"]
+
+[[test]]
+name = "stage_def_100_coverage_scans"
+required-features = ["legacy-flat-sdk"]
+
+[[test]]
 name = "dialects_query"
 required-features = ["legacy-flat-sdk"]
 
