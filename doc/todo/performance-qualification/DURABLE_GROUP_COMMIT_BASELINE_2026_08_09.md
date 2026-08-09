@@ -540,3 +540,89 @@ The next admissible implementation is the actual AWO reservation boundary:
 
 Pre-hashing alone must not be reintroduced as a production optimisation without
 new evidence.
+
+## Full-frame reservation and depth-two overlap (2026-08-10)
+
+The product coordinator now reserves an eligible cohort's conditions,
+operation identities, segment/event/item identities, writer sequences and
+exact active checkpoint under the sole writer. It then releases the physical
+store lock and cooks complete operation-bearing frames in the persistent cooker
+pool. Ordered install verifies the ticket sequence and exact checkpoint before
+one gathered write and durability barrier; visibility and individual receipts
+remain strictly post-durable.
+
+Depth two is deliberately narrower than depth one. A follower may reserve only
+when it is subject- and operation-id-disjoint from its predecessor and the
+predecessor's already-cooked byte length proves that automatic rotation cannot
+occur. The follower receives the deterministic post-predecessor checkpoint and
+cooks while the predecessor crosses its media boundary. A third unresolved
+reservation is impossible. Any dependency, rotation risk, mixed mutation,
+chunked value, retry or failed condition retains the established serial path.
+
+The smart-client default count window is 2,048 operations so two maximum
+1,024-entry cohorts can be outstanding. This is a capacity limit, not a promise
+that an application will create that concurrency: the original 256 callers ×
+bulk four shape has only 1,024 outstanding operations and correctly reports no
+overlap.
+
+Bonzo retained-media 1 GiB results were:
+
+| Commit / shape | Cohorts | Overlap ops | MiB/s | p99 |
+|---|---:|---:|---:|---:|
+| `61b3329`, 256 × bulk 4 historical baseline | 132 | — | 305.13 | — |
+| `e8196e9`, 256 × bulk 4 depth-one comparison | 135 | 0 | 307.24 | 51.1 ms |
+| `2655408`, 512 × bulk 4 depth-one control | 128 | 0 | 322.28 | 90.3 ms |
+| `e8196e9`, 512 × bulk 4 premature follower take | 144 | 52,409 | 303.17 | 385.3 ms |
+| `8d92c77`, 512 × bulk 4 bounded follower fill | 133 | 55,198 | 329.64 | 84.9 ms |
+| `a738761`, 512 × bulk 4 credit-aware follower fill | 130 | 64,329 | **339.02** | **83.2 ms** |
+
+Every cell committed and recovered all 131,072 records after a fresh reopen,
+with zero mutation failures, refusals or byte-admission waits. The first
+depth-two attempt is important negative evidence: taking whatever follower work
+was immediately visible fragmented cohorts and paid 16 extra stable boundaries.
+Giving followers the same bounded 250 µs fill opportunity removed that
+regression. Using the admission-credit ledger to wait only when follower work
+already exists reduced the accepted candidate to 130 cohorts without adding a
+blind delay to the one-cohort workload.
+
+The accepted comparison is the same 512 × bulk-four shape: 339.02 MiB/s versus
+322.28 MiB/s, a 5.2% throughput improvement, while p99 improved from 90.3 ms to
+83.2 ms. Relative to the original production bulk baseline it is an 11.1%
+increase. Aggregate cohort phase values are no longer additive wall time when
+overlap is active; reports mark this explicitly. The final 1 GiB run recorded
+1.378 s aggregate media-boundary time and 0.368 s rotation time across 130
+cohorts. Stable media and CompactShadow staging therefore remain the principal
+delta to 500 MiB/s; additional CPU-side frame cooking work is not the next
+priority.
+
+### 10 GiB sustained gate: failed performance, passed correctness
+
+The accepted 1 GiB candidate was advanced to the previously agreed retained
+10 GiB gate on Bonzo with the same 512 callers × bulk-four shape. It did **not**
+sustain the short-run rate:
+
+| Metric | 1 GiB | 10 GiB |
+|---|---:|---:|
+| Payload throughput | 339.02 MiB/s | **168.28 MiB/s** |
+| Durable 8 KiB writes/s | 43,395 | **21,540** |
+| p99 | 83.2 ms | **275.4 ms** |
+| Cohorts | 130 | 1,297 |
+| Overlapped operations | 64,329 | 550,451 |
+| Media-boundary time | 1.378 s | 31.540 s |
+| Rotation time | 0.368 s | 5.995 s |
+
+Correctness remained intact: all 1,310,720 operations committed, fresh reopen
+recovered and exhaustively scanned all 10,737,418,240 payload bytes, and there
+were zero mutation failures, refusals or byte-admission waits. The retained
+deployment occupied 22.90 GB allocated. Orderly close took 3.313 s, reopen took
+1.071 s, and full validation scan took 223.764 s.
+
+This is not authority to proceed to 100 GiB and it is not evidence for a
+sustained 339 MiB/s claim. The depth-two mechanism remains a valid bounded
+short-run improvement, but the sustained qualification objective is unmet.
+The next diagnostic campaign must record per-GiB throughput and phase deltas,
+free-space samples, lifecycle queue/backpressure, Shadow finalize/enrichment
+activity and media-boundary latency distribution. The current aggregate report
+cannot distinguish device-state degradation from growing segment lifecycle
+interference or reduced follower formation. No further CPU-side cooking
+optimisation is justified before that sustained-path bisection.
