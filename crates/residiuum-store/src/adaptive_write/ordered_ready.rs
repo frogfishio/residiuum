@@ -6,6 +6,7 @@
 use super::persist::LaneTicket;
 use std::collections::BTreeMap;
 use std::sync::{Condvar, Mutex};
+use std::time::Instant;
 
 /// Ready-ring error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +105,29 @@ impl<T> OrderedReadyRing<T> {
         }
     }
 
+    /// Wait until the next expected ticket is ready or `deadline` expires.
+    pub fn pop_next_until(&self, deadline: Instant) -> Option<(LaneTicket, T)> {
+        let mut g = self.inner.lock().expect("ready lock");
+        loop {
+            let key = g.next_expected;
+            if let Some((outcome, bytes)) = g.ready.remove(&key) {
+                g.bytes_held = g.bytes_held.saturating_sub(bytes);
+                g.next_expected = g.next_expected.saturating_add(1);
+                self.progress.notify_all();
+                return Some((LaneTicket { ticket: key }, outcome));
+            }
+            let remaining = deadline.checked_duration_since(Instant::now())?;
+            let (next, timeout) = self
+                .progress
+                .wait_timeout(g, remaining)
+                .expect("ready wait");
+            g = next;
+            if timeout.timed_out() {
+                return None;
+            }
+        }
+    }
+
     /// Next ticket the coordinator will install.
     pub fn next_expected(&self) -> u64 {
         self.inner.lock().expect("ready lock").next_expected
@@ -129,6 +153,7 @@ impl<T> OrderedReadyRing<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn ordered_pop_despite_out_of_order_push() {
@@ -151,5 +176,16 @@ mod tests {
         let err = ring.push(LaneTicket { ticket: 0 }, 2u8, 1).unwrap_err();
         assert_eq!(err.0, ReadyError::DuplicateTicket);
         assert_eq!(err.1, 2u8);
+    }
+
+    #[test]
+    fn deadline_returns_without_advancing_expected_ticket() {
+        let ring = OrderedReadyRing::<u8>::new(7, 100);
+        assert!(ring
+            .pop_next_until(Instant::now() + Duration::from_millis(1))
+            .is_none());
+        assert_eq!(ring.next_expected(), 7);
+        ring.push(LaneTicket { ticket: 7 }, 9, 1).unwrap();
+        assert_eq!(ring.try_pop_next().unwrap().1, 9);
     }
 }

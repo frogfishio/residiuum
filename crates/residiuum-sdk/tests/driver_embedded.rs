@@ -7,8 +7,8 @@ use residiuum_heap::{
 };
 use residiuum_sdk::driver::{
     Client, Collection, CreateCollectionOptions, DeleteOptions, EmbeddedOptions, ErrorCode,
-    HeapClient, OperationContext, OperationId, PutManyEntry, PutOptions, ReplaceOptions, ScanOptions,
-    MAX_SCAN_PAGE_SIZE,
+    HeapClient, OperationContext, OperationId, PutManyEntry, PutOptions, ReplaceOptions,
+    ScanOptions, MAX_SCAN_PAGE_SIZE,
 };
 use residiuum_sdk::{Parameters, QueryRunOptions, ResidiuumDeployment, RqlFullExecuteOptions};
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
@@ -515,11 +515,9 @@ fn async_bulk_put_pipelines_independent_receipts_without_atomicity_claims() {
     ))
     .unwrap();
     let heap = block_on(connection.open_named_heap("driver-test", capability)).unwrap();
-    let collection: Collection<Value> = block_on(heap.create_collection(
-        "bulk-records",
-        CreateCollectionOptions::default(),
-    ))
-    .unwrap();
+    let collection: Collection<Value> =
+        block_on(heap.create_collection("bulk-records", CreateCollectionOptions::default()))
+            .unwrap();
 
     let entries = (0..32u8)
         .map(|index| {
@@ -542,6 +540,8 @@ fn async_bulk_put_pipelines_independent_receipts_without_atomicity_claims() {
     let inspection = connection.inspect();
     assert!(inspection.operation_commits.max_cohort_entries >= 2);
     assert!(inspection.operation_commits.parallel_cooked_operations >= 2);
+    assert!(inspection.operation_commits.reserved_cooked_cohorts >= 1);
+    assert_eq!(inspection.operation_commits.reserved_cooked_operations, 32);
 
     let retries = (0..32u8)
         .map(|index| {

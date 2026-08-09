@@ -1,9 +1,11 @@
 //! Product commit coordinator for operation-bearing collection mutations.
 
+use crate::adaptive_write::{CookOutcome, PersistentCookerPool};
 use crate::error::StoreError;
 use crate::kernel::PhysicalStore;
 use crate::store::{
-    OperationMutation, OperationMutationKind, OperationPutOutcome, WriteCondition, WriteReceipt,
+    OperationMutation, OperationMutationKind, OperationPutOutcome, OwnedOperationPut,
+    WriteCondition, WriteReceipt,
 };
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -57,6 +59,10 @@ pub struct OperationCommitStats {
     pub parallel_cooked_cohorts: u64,
     /// Individual records cooked concurrently by those cohorts.
     pub parallel_cooked_operations: u64,
+    /// Cohorts cooked by the persistent pool from an exact store reservation.
+    pub reserved_cooked_cohorts: u64,
+    /// Operations installed through exact out-of-lock reservations.
+    pub reserved_cooked_operations: u64,
     /// Aggregate store-lock wall time across completed cohorts.
     pub cohort_total_ns: u64,
     /// Aggregate deduplication/eligibility preparation wall time.
@@ -90,6 +96,8 @@ struct CoordinatorCounters {
     max_cohort_bytes: AtomicUsize,
     parallel_cooked_cohorts: AtomicU64,
     parallel_cooked_operations: AtomicU64,
+    reserved_cooked_cohorts: AtomicU64,
+    reserved_cooked_operations: AtomicU64,
     cohort_total_ns: AtomicU64,
     cohort_prepare_ns: AtomicU64,
     cohort_cook_install_publish_ns: AtomicU64,
@@ -124,9 +132,9 @@ impl CoordinatorCounters {
             max_cohort_entries: self.max_cohort_entries.load(Ordering::Relaxed),
             max_cohort_bytes: self.max_cohort_bytes.load(Ordering::Relaxed),
             parallel_cooked_cohorts: self.parallel_cooked_cohorts.load(Ordering::Relaxed),
-            parallel_cooked_operations: self
-                .parallel_cooked_operations
-                .load(Ordering::Relaxed),
+            parallel_cooked_operations: self.parallel_cooked_operations.load(Ordering::Relaxed),
+            reserved_cooked_cohorts: self.reserved_cooked_cohorts.load(Ordering::Relaxed),
+            reserved_cooked_operations: self.reserved_cooked_operations.load(Ordering::Relaxed),
             cohort_total_ns: self.cohort_total_ns.load(Ordering::Relaxed),
             cohort_prepare_ns: self.cohort_prepare_ns.load(Ordering::Relaxed),
             cohort_cook_install_publish_ns: self
@@ -140,7 +148,7 @@ impl CoordinatorCounters {
 }
 
 struct PendingOperation {
-    subject: Vec<u8>,
+    subject: Arc<[u8]>,
     kind: PendingOperationKind,
     condition: WriteCondition,
     operation_id: [u8; 16],
@@ -150,7 +158,7 @@ struct PendingOperation {
 }
 
 enum PendingOperationKind {
-    Put(Vec<u8>),
+    Put(Arc<[u8]>),
     Delete,
 }
 
@@ -182,6 +190,9 @@ struct CoordinatorState {
 
 struct CoordinatorInner {
     physical: Arc<Mutex<PhysicalStore>>,
+    cooker: PersistentCookerPool,
+    next_cook_ticket: AtomicU64,
+    cooker_failed: std::sync::atomic::AtomicBool,
     counters: CoordinatorCounters,
     state: Mutex<CoordinatorState>,
     wake: Condvar,
@@ -195,8 +206,20 @@ pub(super) struct OperationCommitCoordinator {
 
 impl OperationCommitCoordinator {
     pub(super) fn start(physical: Arc<Mutex<PhysicalStore>>) -> Arc<Self> {
+        let cookers = thread::available_parallelism()
+            .map(|value| value.get().saturating_sub(1).clamp(1, 4))
+            .unwrap_or(1);
         let inner = Arc::new(CoordinatorInner {
             physical,
+            cooker: PersistentCookerPool::start(
+                cookers,
+                cookers,
+                MAX_COHORT_ENTRIES,
+                MAX_ADMITTED_BYTES,
+                0,
+            ),
+            next_cook_ticket: AtomicU64::new(0),
+            cooker_failed: std::sync::atomic::AtomicBool::new(false),
             counters: CoordinatorCounters::default(),
             state: Mutex::new(CoordinatorState {
                 queue: VecDeque::new(),
@@ -228,7 +251,7 @@ impl OperationCommitCoordinator {
         let (reply, result) = mpsc::sync_channel(1);
         self.admit(
             subject,
-            PendingOperationKind::Put(body),
+            PendingOperationKind::Put(body.into()),
             condition,
             operation_id,
             content_hash,
@@ -253,7 +276,7 @@ impl OperationCommitCoordinator {
     ) -> Result<(), StoreError> {
         self.admit(
             subject,
-            PendingOperationKind::Put(body),
+            PendingOperationKind::Put(body.into()),
             condition,
             operation_id,
             content_hash,
@@ -344,8 +367,11 @@ impl OperationCommitCoordinator {
                 .fetch_max(state.admitted_credit_bytes, Ordering::Relaxed);
             state.queued_bytes = state.queued_bytes.saturating_add(bytes);
             state.queue.push_back(PendingOperation {
-                subject,
-                kind,
+                subject: subject.into(),
+                kind: match kind {
+                    PendingOperationKind::Put(body) => PendingOperationKind::Put(body.into()),
+                    PendingOperationKind::Delete => PendingOperationKind::Delete,
+                },
                 condition,
                 operation_id,
                 content_hash,
@@ -467,31 +493,7 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
         .counters
         .max_cohort_bytes
         .fetch_max(batch_bytes, Ordering::Relaxed);
-    let requests: Vec<_> = batch
-        .iter()
-        .map(|pending| OperationMutation {
-            subject: pending.subject.as_slice(),
-            kind: match &pending.kind {
-                PendingOperationKind::Put(body) => OperationMutationKind::Put(body.as_slice()),
-                PendingOperationKind::Delete => OperationMutationKind::Delete,
-            },
-            condition: pending.condition,
-            operation_id: pending.operation_id,
-            content_hash: pending.content_hash,
-        })
-        .collect();
-    let outcomes = inner
-        .physical
-        .lock()
-        .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))
-        .and_then(|mut store| {
-            let outcomes = store.operation_cohort_awo_owned(&requests)?;
-            Ok((
-                outcomes,
-                store.last_operation_parallel_cooked(),
-                store.last_operation_cohort_timing(),
-            ))
-        });
+    let outcomes = commit_batch(inner, &batch);
     // The byte window covers queued data plus physical installation. Outcome
     // delivery retains no subject/body ownership requirement for admission.
     release_byte_credits(inner, batch_credits);
@@ -582,6 +584,149 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
             fail_batch(batch, &format!("commit cohort failed: {error}"));
         }
     }
+}
+
+fn commit_batch(
+    inner: &CoordinatorInner,
+    batch: &[PendingOperation],
+) -> Result<
+    (
+        Vec<Result<OperationPutOutcome, StoreError>>,
+        usize,
+        crate::store::OperationCohortTiming,
+    ),
+    StoreError,
+> {
+    if !inner.cooker_failed.load(Ordering::Acquire) {
+        let owned = batch
+            .iter()
+            .map(|pending| match &pending.kind {
+                PendingOperationKind::Put(body) => Some(OwnedOperationPut {
+                    subject: Arc::clone(&pending.subject),
+                    body: Arc::clone(body),
+                    condition: pending.condition,
+                    operation_id: pending.operation_id,
+                    content_hash: pending.content_hash,
+                }),
+                PendingOperationKind::Delete => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(owned) = owned {
+            let first_ticket = inner.next_cook_ticket.load(Ordering::Relaxed);
+            let next_ticket = first_ticket
+                .checked_add(batch.len() as u64)
+                .ok_or_else(|| {
+                    StoreError::ConsistencyViolation("operation cooker ticket exhausted".into())
+                })?;
+            let reservation = inner
+                .physical
+                .lock()
+                .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))?
+                .reserve_operation_put_cohort(&owned, first_ticket)?;
+            if let Some(mut reservation) = reservation {
+                let tasks = std::mem::take(&mut reservation.cook_tasks);
+                let task_count = tasks.len();
+                debug_assert_eq!(task_count, batch.len());
+                inner.next_cook_ticket.store(next_ticket, Ordering::Relaxed);
+                for task in tasks {
+                    if let Err(error) = inner.cooker.try_submit(task) {
+                        inner.cooker_failed.store(true, Ordering::Release);
+                        let _ = inner
+                            .physical
+                            .lock()
+                            .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))?
+                            .abort_operation_put_reservation(reservation);
+                        return Err(StoreError::Io(std::io::Error::other(format!(
+                            "operation cooker admission failed: {error:?}"
+                        ))));
+                    }
+                }
+
+                let deadline = Instant::now() + Duration::from_secs(30);
+                let mut cooked = Vec::with_capacity(task_count);
+                let mut cook_error = None;
+                for _ in 0..task_count {
+                    let Some((_ticket, outcome)) = inner.cooker.ready().pop_next_until(deadline)
+                    else {
+                        inner.cooker_failed.store(true, Ordering::Release);
+                        let _ = inner
+                            .physical
+                            .lock()
+                            .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))?
+                            .abort_operation_put_reservation(reservation);
+                        return Err(StoreError::Io(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "operation cooker timed out",
+                        )));
+                    };
+                    match outcome {
+                        CookOutcome::Ok(value) => cooked.push(value),
+                        CookOutcome::Err { message, .. } => cook_error = Some(message),
+                    }
+                }
+                if let Some(message) = cook_error {
+                    inner
+                        .physical
+                        .lock()
+                        .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))?
+                        .abort_operation_put_reservation(reservation)?;
+                    return Err(StoreError::Io(std::io::Error::other(format!(
+                        "operation cooker failed: {message}"
+                    ))));
+                }
+                let result = inner
+                    .physical
+                    .lock()
+                    .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))
+                    .and_then(|mut store| {
+                        let outcomes =
+                            store.install_operation_put_reservation(reservation, cooked)?;
+                        Ok((
+                            outcomes,
+                            store.last_operation_parallel_cooked(),
+                            store.last_operation_cohort_timing(),
+                        ))
+                    });
+                if result.is_ok() {
+                    inner
+                        .counters
+                        .reserved_cooked_cohorts
+                        .fetch_add(1, Ordering::Relaxed);
+                    inner
+                        .counters
+                        .reserved_cooked_operations
+                        .fetch_add(task_count as u64, Ordering::Relaxed);
+                }
+                return result;
+            }
+        }
+    }
+
+    let requests: Vec<_> = batch
+        .iter()
+        .map(|pending| OperationMutation {
+            subject: pending.subject.as_ref(),
+            kind: match &pending.kind {
+                PendingOperationKind::Put(body) => OperationMutationKind::Put(body.as_ref()),
+                PendingOperationKind::Delete => OperationMutationKind::Delete,
+            },
+            condition: pending.condition,
+            operation_id: pending.operation_id,
+            content_hash: pending.content_hash,
+        })
+        .collect();
+    inner
+        .physical
+        .lock()
+        .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))
+        .and_then(|mut store| {
+            let outcomes = store.operation_cohort_awo_owned(&requests)?;
+            Ok((
+                outcomes,
+                store.last_operation_parallel_cooked(),
+                store.last_operation_cohort_timing(),
+            ))
+        })
 }
 
 fn release_byte_credits(inner: &CoordinatorInner, credits: usize) {

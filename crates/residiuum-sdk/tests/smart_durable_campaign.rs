@@ -251,8 +251,7 @@ fn smart_client_durable_retained_media_campaign() {
                 } else {
                     let mut entries = Vec::with_capacity(client_batch);
                     while operation < total_operations && entries.len() < client_batch {
-                        let document = documents
-                            [(operation as usize) & (documents.len() - 1)]
+                        let document = documents[(operation as usize) & (documents.len() - 1)]
                             .as_ref()
                             .clone();
                         entries.push(PutManyEntry::new(
@@ -261,21 +260,21 @@ fn smart_client_durable_retained_media_campaign() {
                         ));
                         operation = operation.saturating_add(concurrency as u64);
                     }
-                    let outcomes = block_on(records.put_many(entries))
-                        .map_err(|error| error.to_string())?;
+                    let outcomes =
+                        block_on(records.put_many(entries)).map_err(|error| error.to_string())?;
                     let submitted = outcomes.len();
                     for outcome in outcomes {
-                        outcome.result.map_err(|error| {
-                            format!("bulk key {}: {error}", outcome.key)
-                        })?;
+                        outcome
+                            .result
+                            .map_err(|error| format!("bulk key {}: {error}", outcome.key))?;
                     }
                     submitted
                 };
                 let latency = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
                 latencies.extend(std::iter::repeat(latency).take(submitted));
                 for _ in 0..submitted {
-                    let before = acknowledged_payload
-                        .fetch_add(payload_bytes as u64, Ordering::Relaxed);
+                    let before =
+                        acknowledged_payload.fetch_add(payload_bytes as u64, Ordering::Relaxed);
                     let after = before.saturating_add(payload_bytes as u64);
                     if before / GIB != after / GIB {
                         eprintln!("acknowledged_payload_gib={}", after / GIB);
@@ -290,7 +289,12 @@ fn smart_client_durable_retained_media_campaign() {
     barrier.wait();
     let mut latencies = Vec::with_capacity(total_operations.min(usize::MAX as u64) as usize);
     for handle in handles {
-        latencies.extend(handle.join().expect("writer thread panicked").expect("write failed"));
+        latencies.extend(
+            handle
+                .join()
+                .expect("writer thread panicked")
+                .expect("write failed"),
+        );
     }
     let acknowledgement_ns = acknowledgement_started
         .elapsed()
@@ -418,6 +422,8 @@ fn smart_client_durable_retained_media_campaign() {
             "max_cohort_bytes": inspection.operation_commits.max_cohort_bytes,
             "parallel_cooked_cohorts": inspection.operation_commits.parallel_cooked_cohorts,
             "parallel_cooked_operations": inspection.operation_commits.parallel_cooked_operations,
+            "reserved_cooked_cohorts": inspection.operation_commits.reserved_cooked_cohorts,
+            "reserved_cooked_operations": inspection.operation_commits.reserved_cooked_operations,
             "phase_ns": {
                 "total": inspection.operation_commits.cohort_total_ns,
                 "prepare": inspection.operation_commits.cohort_prepare_ns,

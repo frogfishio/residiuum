@@ -71,6 +71,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 type MutationIdentity = ([u8; 16], [u8; 32]);
@@ -340,6 +341,38 @@ pub struct OperationPutOutcome {
     pub receipt: WriteReceipt,
     /// True when an earlier authoritative acceptance supplied the receipt.
     pub deduplicated: bool,
+}
+
+/// Owned product put input used while the store lock is released for cooking.
+pub(crate) struct OwnedOperationPut {
+    pub(crate) subject: Arc<[u8]>,
+    pub(crate) body: Arc<[u8]>,
+    pub(crate) condition: WriteCondition,
+    pub(crate) operation_id: [u8; 16],
+    pub(crate) content_hash: [u8; 32],
+}
+
+struct ReservedOperationPut {
+    ticket: crate::adaptive_write::LaneTicket,
+    subject: Arc<[u8]>,
+    body: Arc<[u8]>,
+    item_id: [u8; 16],
+    event_id: [u8; 16],
+    admit: AdmitDecision,
+    operation_id: [u8; 16],
+    content_hash: [u8; 32],
+}
+
+/// Exact depth-one reservation whose frames may be cooked without the store lock.
+pub(crate) struct OperationPutReservation {
+    reservation_id: [u8; 16],
+    segment_id: [u8; 16],
+    checkpoint: residiuum_format::ActiveSegmentCheckpoint,
+    item_events_before: u64,
+    items: Vec<ReservedOperationPut>,
+    pub(crate) cook_tasks: Vec<crate::adaptive_write::CookTask>,
+    reserved_at: Instant,
+    prepare_ns: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -618,6 +651,9 @@ pub struct Store {
     /// lock. Frames stay in the active-segment buffer until one gathered tail
     /// write crosses the cohort boundary.
     operation_cohort_gathering: bool,
+    /// Exact product reservation currently cooking outside the store lock.
+    /// Direct mutation refuses while set; reads remain available.
+    operation_reservation_active: Option<[u8; 16]>,
     /// Records cooked concurrently by the most recent operation cohort.
     last_operation_parallel_cooked: usize,
     /// Redacted phase timing for the most recent successful operation cohort.
@@ -911,6 +947,7 @@ impl Store {
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
             operation_cohort_gathering: false,
+            operation_reservation_active: None,
             last_operation_parallel_cooked: 0,
             last_operation_cohort_timing: OperationCohortTiming::default(),
             seal_pipeline: Some(SealPipeline::start()),
@@ -1040,6 +1077,7 @@ impl Store {
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
             operation_cohort_gathering: false,
+            operation_reservation_active: None,
             last_operation_parallel_cooked: 0,
             last_operation_cohort_timing: OperationCohortTiming::default(),
             seal_pipeline: Some(SealPipeline::start()),
@@ -1280,6 +1318,7 @@ impl Store {
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
             operation_cohort_gathering: false,
+            operation_reservation_active: None,
             last_operation_parallel_cooked: 0,
             last_operation_cohort_timing: OperationCohortTiming::default(),
             seal_pipeline: None,
@@ -3413,6 +3452,9 @@ impl Store {
         &mut self,
         items: &[OperationMutation<'_>],
     ) -> Result<Vec<Result<OperationPutOutcome, StoreError>>, StoreError> {
+        if self.operation_reservation_active.is_some() {
+            return Err(StoreError::AdaptiveWriterActive);
+        }
         let cohort_started = Instant::now();
         let mut timing = OperationCohortTiming::default();
         self.last_operation_parallel_cooked = 0;
@@ -3469,11 +3511,7 @@ impl Store {
 
         let install_started = Instant::now();
         self.operation_cohort_gathering = true;
-        let parallel = self.try_parallel_operation_puts(
-            items,
-            &new_indexes,
-            &mut outcomes,
-        );
+        let parallel = self.try_parallel_operation_puts(items, &new_indexes, &mut outcomes);
         let used_parallel = match parallel {
             Ok(used) => used,
             Err(error) => {
@@ -3620,6 +3658,375 @@ impl Store {
             .collect()
     }
 
+    /// Reserve a strict all-new inline-put cohort for out-of-lock full-frame cooking.
+    ///
+    /// `Ok(None)` means the caller must use [`Self::operation_cohort_awo_owned`]
+    /// so deduplication, request errors, deletes, chunking, repeated subjects or
+    /// multi-shard semantics remain unchanged. A successful reservation fences
+    /// every other mutation until install or abort.
+    pub(crate) fn reserve_operation_put_cohort(
+        &mut self,
+        items: &[OwnedOperationPut],
+        first_ticket: u64,
+    ) -> Result<Option<OperationPutReservation>, StoreError> {
+        let started = Instant::now();
+        if self.awo_writer_poisoned {
+            return Err(StoreError::AdaptiveWriterPoisoned);
+        }
+        if self.operation_reservation_active.is_some()
+            || items.len() < 2
+            || self.writer_shards() != 1
+        {
+            return Ok(None);
+        }
+        self.ensure_write_dedup_reconciled()?;
+
+        let effective_max = self
+            .large_value_policy
+            .effective_with(self.limits.max_body_len);
+        let mut subjects = HashSet::<&[u8]>::with_capacity(items.len());
+        let mut operation_ids = HashSet::<[u8; 16]>::with_capacity(items.len());
+        for item in items {
+            if !subjects.insert(item.subject.as_ref())
+                || !operation_ids.insert(item.operation_id)
+                || item.subject.len() > MAX_SUBJECT_LEN
+                || item.body.len() as u64 > effective_max
+                || !matches!(
+                    self.large_value_policy.admit(item.body.len()),
+                    Ok(AdmitDecision {
+                        layout: PayloadLayout::Inline,
+                        ..
+                    })
+                )
+                || self
+                    .resolve_write_dedup(&item.operation_id, &item.content_hash)
+                    .map_or(true, |outcome| outcome.is_some())
+                || self
+                    .check_write_condition(item.subject.as_ref(), item.condition)
+                    .is_err()
+            {
+                return Ok(None);
+            }
+        }
+
+        let last_ticket = first_ticket
+            .checked_add(items.len().saturating_sub(1) as u64)
+            .ok_or_else(|| {
+                StoreError::ConsistencyViolation("operation cooker ticket exhausted".into())
+            })?;
+        let _ = last_ticket;
+        self.ensure_active(0)?;
+        let writer = self.active_ref(0).expect("active segment");
+        let segment_id = writer.segment_id;
+        let checkpoint = writer.segment.checkpoint();
+        let item_events_before = writer.item_events;
+        item_events_before
+            .checked_add(items.len() as u64)
+            .ok_or_else(|| {
+                StoreError::ConsistencyViolation("operation item-event counter exhausted".into())
+            })?;
+        writer
+            .segment
+            .writer_sequence()
+            .checked_add(items.len() as u64)
+            .ok_or_else(|| {
+                StoreError::ConsistencyViolation("operation writer sequence exhausted".into())
+            })?;
+        let mut writer_sequence = writer.segment.writer_sequence();
+        let reservation_id = random_id()?;
+        let mut reserved = Vec::with_capacity(items.len());
+        let mut cook_tasks = Vec::with_capacity(items.len());
+
+        for (index, item) in items.iter().enumerate() {
+            let admit = self.large_value_policy.admit(item.body.len())?;
+            let item_id = self
+                .index
+                .get(item.subject.as_ref())
+                .map(IndexEntry::item_id)
+                .unwrap_or_else(|| subject_item_id(item.subject.as_ref()));
+            let event_id = self.next_event_id()?;
+            let ticket = crate::adaptive_write::LaneTicket {
+                ticket: first_ticket + index as u64,
+            };
+            let created_ns = now_ns();
+            cook_tasks.push(crate::adaptive_write::CookTask {
+                ticket,
+                subject: Arc::clone(&item.subject),
+                body: Arc::clone(&item.body),
+                store_id: self.store_id,
+                segment_id,
+                item_id,
+                event_id,
+                writer_sequence,
+                created_ns,
+                event_kind: EventKind::Put,
+                operation_id: Some(item.operation_id),
+                operation_content_hash: Some(item.content_hash),
+            });
+            reserved.push(ReservedOperationPut {
+                ticket,
+                subject: Arc::clone(&item.subject),
+                body: Arc::clone(&item.body),
+                item_id,
+                event_id,
+                admit,
+                operation_id: item.operation_id,
+                content_hash: item.content_hash,
+            });
+            writer_sequence += 1;
+        }
+
+        self.operation_reservation_active = Some(reservation_id);
+        if let Err(error) = crate::failpoint::hit("awo.reserve.after") {
+            self.operation_reservation_active = None;
+            return Err(error);
+        }
+        Ok(Some(OperationPutReservation {
+            reservation_id,
+            segment_id,
+            checkpoint,
+            item_events_before,
+            items: reserved,
+            cook_tasks,
+            reserved_at: started,
+            prepare_ns: elapsed_ns(started),
+        }))
+    }
+
+    /// Abort a reservation before any physical installation.
+    pub(crate) fn abort_operation_put_reservation(
+        &mut self,
+        reservation: OperationPutReservation,
+    ) -> Result<(), StoreError> {
+        if self.operation_reservation_active != Some(reservation.reservation_id) {
+            return Err(StoreError::ConsistencyViolation(
+                "operation reservation abort identity mismatch".into(),
+            ));
+        }
+        self.operation_reservation_active = None;
+        Ok(())
+    }
+
+    /// Verify, install, persist and publish an out-of-lock cooked reservation.
+    pub(crate) fn install_operation_put_reservation(
+        &mut self,
+        reservation: OperationPutReservation,
+        cooked: Vec<crate::adaptive_write::CookedMutation>,
+    ) -> Result<Vec<Result<OperationPutOutcome, StoreError>>, StoreError> {
+        let cohort_started = reservation.reserved_at;
+        self.last_operation_parallel_cooked = 0;
+        self.last_operation_cohort_timing = OperationCohortTiming::default();
+        if self.operation_reservation_active != Some(reservation.reservation_id) {
+            return Err(StoreError::ConsistencyViolation(
+                "operation reservation install identity mismatch".into(),
+            ));
+        }
+        if cooked.len() != reservation.items.len()
+            || cooked
+                .iter()
+                .zip(&reservation.items)
+                .any(|(cooked, item)| cooked.ticket != item.ticket)
+        {
+            self.operation_reservation_active = None;
+            return Err(StoreError::ConsistencyViolation(
+                "operation reservation cooked outcome mismatch".into(),
+            ));
+        }
+        let active_matches = self
+            .active_ref(0)
+            .map(|writer| {
+                writer.segment_id == reservation.segment_id
+                    && writer.segment.checkpoint() == reservation.checkpoint
+                    && writer.item_events == reservation.item_events_before
+            })
+            .unwrap_or(false);
+        if !active_matches {
+            self.operation_reservation_active = None;
+            return Err(StoreError::ConsistencyViolation(
+                "operation reservation active checkpoint changed".into(),
+            ));
+        }
+
+        self.operation_cohort_gathering = true;
+        let mut installed = Vec::with_capacity(cooked.len());
+        for (frame, item) in cooked.iter().zip(&reservation.items) {
+            if let Err(error) = crate::failpoint::hit("awo.install.frame.before") {
+                if let Some(writer) = self.active_mut(0) {
+                    let _ = writer.segment.restore_checkpoint(&reservation.checkpoint);
+                    writer.item_events = reservation.item_events_before;
+                }
+                self.operation_cohort_gathering = false;
+                self.operation_reservation_active = None;
+                return Err(error);
+            }
+            let append_started = Instant::now();
+            let offset = match self
+                .active_mut(0)
+                .expect("reserved active segment")
+                .segment
+                .append_preencoded_frame(&frame.encoded_frame)
+            {
+                Ok(offset) => offset,
+                Err(error) => {
+                    if let Some(writer) = self.active_mut(0) {
+                        let _ = writer.segment.restore_checkpoint(&reservation.checkpoint);
+                        writer.item_events = reservation.item_events_before;
+                    }
+                    self.operation_cohort_gathering = false;
+                    self.operation_reservation_active = None;
+                    return Err(error.into());
+                }
+            };
+            self.active_mut(0)
+                .expect("reserved active segment")
+                .item_events += 1;
+            let append_ns = elapsed_ns(append_started);
+            self.boundary_probe.record_append(
+                frame.encoded_frame.len() as u64,
+                item.body.len() as u64,
+                offset,
+                DurabilityMode::Buffered,
+                false,
+                false,
+                0,
+                append_ns,
+                0,
+            );
+            installed.push((offset, frame.encoded_frame.len() as u64));
+            if let Err(error) = crate::failpoint::hit("awo.install.frame.after") {
+                if let Some(writer) = self.active_mut(0) {
+                    let _ = writer.segment.restore_checkpoint(&reservation.checkpoint);
+                    writer.item_events = reservation.item_events_before;
+                }
+                self.operation_cohort_gathering = false;
+                self.operation_reservation_active = None;
+                return Err(error);
+            }
+        }
+        self.operation_cohort_gathering = false;
+
+        if let Err(error) = crate::failpoint::hit("awo.persist.before") {
+            if let Some(writer) = self.active_mut(0) {
+                let _ = writer.segment.restore_checkpoint(&reservation.checkpoint);
+                writer.item_events = reservation.item_events_before;
+            }
+            self.operation_reservation_active = None;
+            return Err(error);
+        }
+        let media_started = Instant::now();
+        if let Err(error) = self.persist_all_actives(DurabilityMode::Durable) {
+            self.operation_reservation_active = None;
+            self.awo_writer_poisoned = true;
+            return Err(error);
+        }
+        let media_ns = elapsed_ns(media_started);
+        if let Err(error) = crate::failpoint::hit("awo.persist.after_write") {
+            self.operation_reservation_active = None;
+            self.awo_writer_poisoned = true;
+            return Err(error);
+        }
+        if let Err(error) = crate::failpoint::hit("awo.persist.after_sync") {
+            self.operation_reservation_active = None;
+            self.awo_writer_poisoned = true;
+            return Err(error);
+        }
+        if let Some(writer) = self.active_mut(0) {
+            writer.max_ack_durability =
+                stronger_durability(writer.max_ack_durability, DurabilityMode::Durable);
+        }
+
+        if let Err(error) = crate::failpoint::hit("awo.publish.before") {
+            self.operation_reservation_active = None;
+            self.awo_writer_poisoned = true;
+            return Err(error);
+        }
+        let mut outcomes = Vec::with_capacity(reservation.items.len());
+        let mut records = Vec::with_capacity(reservation.items.len());
+        for (item, (offset, encoded_frame_len)) in
+            reservation.items.iter().zip(installed.into_iter())
+        {
+            let publish_started = Instant::now();
+            self.apply_durable_event(
+                item.subject.as_ref().to_vec(),
+                EventKind::Put,
+                Vec::new(),
+                item.item_id,
+                item.event_id,
+                reservation.segment_id,
+                0,
+                offset,
+            );
+            self.note_collection_for_subject(item.subject.as_ref());
+            let _ = self.note_durable_derived();
+            self.boundary_probe.record_publish(
+                offset,
+                DurabilityMode::Durable,
+                0,
+                elapsed_ns(publish_started),
+            );
+            let mut receipt = WriteReceipt::base(
+                self.store_id,
+                reservation.segment_id,
+                item.item_id,
+                item.event_id,
+                EventKind::Put,
+                DurabilityMode::Durable,
+                offset,
+            )
+            .with_layout(item.admit, &self.large_value_policy.profile_id);
+            receipt.encoded_frame_len = encoded_frame_len;
+            records.push((item.operation_id, dedup_record(item.content_hash, &receipt)));
+            outcomes.push(Ok(OperationPutOutcome {
+                receipt,
+                deduplicated: false,
+            }));
+        }
+        if let Err(error) = crate::failpoint::hit("awo.publish.after") {
+            self.operation_reservation_active = None;
+            self.awo_writer_poisoned = true;
+            return Err(error);
+        }
+
+        let rotation_started = Instant::now();
+        if let Err(error) = self.maybe_auto_seal(0) {
+            self.operation_reservation_active = None;
+            self.awo_writer_poisoned = true;
+            return Err(error);
+        }
+        let rotation_ns = elapsed_ns(rotation_started);
+        let outcome_started = Instant::now();
+        let refs: Vec<_> = records.iter().map(|(id, record)| (*id, record)).collect();
+        if append_write_dedup_batch_buffered(&write_dedup_journal_path(&self.paths), &refs).is_err()
+        {
+            self.write_dedup_recovery_required = true;
+        }
+        for (operation_id, record) in records {
+            self.write_dedup.insert(operation_id, record);
+        }
+        if let Err(error) = crate::failpoint::hit("awo.complete.before") {
+            self.operation_reservation_active = None;
+            self.awo_writer_poisoned = true;
+            return Err(error);
+        }
+        self.operation_reservation_active = None;
+        self.last_operation_parallel_cooked = reservation.items.len();
+        let total_ns = elapsed_ns(cohort_started);
+        let outcome_journal_ns = elapsed_ns(outcome_started);
+        self.last_operation_cohort_timing = OperationCohortTiming {
+            total_ns,
+            prepare_ns: reservation.prepare_ns,
+            cook_install_publish_ns: total_ns
+                .saturating_sub(reservation.prepare_ns)
+                .saturating_sub(media_ns)
+                .saturating_sub(rotation_ns)
+                .saturating_sub(outcome_journal_ns),
+            media_boundary_ns: media_ns,
+            rotation_ns,
+            outcome_journal_ns,
+        };
+        Ok(outcomes)
+    }
+
     /// Cook independent, single-shard inline puts concurrently, then install
     /// their complete frames in request order.
     ///
@@ -3663,7 +4070,10 @@ impl Store {
             {
                 return Ok(false);
             }
-            if self.check_write_condition(item.subject, item.condition).is_ok() {
+            if self
+                .check_write_condition(item.subject, item.condition)
+                .is_ok()
+            {
                 condition_successes = condition_successes.saturating_add(1);
             }
         }
@@ -3899,10 +4309,8 @@ impl Store {
             }));
         }
         if let Some(writer) = self.active_mut(0) {
-            writer.max_ack_durability = stronger_durability(
-                writer.max_ack_durability,
-                DurabilityMode::Buffered,
-            );
+            writer.max_ack_durability =
+                stronger_durability(writer.max_ack_durability, DurabilityMode::Buffered);
         }
         self.last_operation_parallel_cooked = parallel_cooked;
         Ok(true)
@@ -4104,6 +4512,9 @@ impl Store {
             return Err(StoreError::AdaptiveWriterPoisoned);
         }
         if self.awo_lease_active {
+            return Err(StoreError::AdaptiveWriterActive);
+        }
+        if self.operation_reservation_active.is_some() {
             return Err(StoreError::AdaptiveWriterActive);
         }
         Ok(())
@@ -9868,6 +10279,7 @@ impl Drop for Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::BoundaryKind;
     use tempfile::tempdir;
 
     #[test]
@@ -9885,6 +10297,138 @@ mod tests {
         );
         store.delete("user-42", DurabilityMode::Durable).unwrap();
         assert!(store.get("user-42").unwrap().is_none());
+    }
+
+    #[test]
+    fn operation_reservation_fences_mutation_and_installs_cooked_frames() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::create(dir.path()).unwrap();
+        store.enable_boundary_probe();
+        let items = vec![
+            OwnedOperationPut {
+                subject: Arc::from(b"reserved/a".as_slice()),
+                body: Arc::from(b"alpha".as_slice()),
+                condition: WriteCondition::Absent,
+                operation_id: [0x11; 16],
+                content_hash: [0x21; 32],
+            },
+            OwnedOperationPut {
+                subject: Arc::from(b"reserved/b".as_slice()),
+                body: Arc::from(b"bravo".as_slice()),
+                condition: WriteCondition::Absent,
+                operation_id: [0x12; 16],
+                content_hash: [0x22; 32],
+            },
+        ];
+        let reservation = store
+            .reserve_operation_put_cohort(&items, 0)
+            .unwrap()
+            .expect("eligible reservation");
+        assert!(matches!(
+            store.put("blocked", b"until-install", DurabilityMode::Durable),
+            Err(StoreError::AdaptiveWriterActive)
+        ));
+        let cooked = reservation
+            .cook_tasks
+            .iter()
+            .map(|task| crate::adaptive_write::CookedMutation {
+                ticket: task.ticket,
+                encoded_frame: crate::adaptive_write::cook_item_frame(task).unwrap(),
+            })
+            .collect();
+        let outcomes = store
+            .install_operation_put_reservation(reservation, cooked)
+            .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes.iter().all(Result::is_ok));
+        assert_eq!(
+            store.get("reserved/a").unwrap().as_deref(),
+            Some(b"alpha".as_slice())
+        );
+        assert_eq!(
+            store.get("reserved/b").unwrap().as_deref(),
+            Some(b"bravo".as_slice())
+        );
+        let probe = store.take_boundary_snapshot();
+        assert_eq!(probe.counters.count(BoundaryKind::FileWrite), 1);
+        assert_eq!(probe.counters.count(BoundaryKind::FileSync), 1);
+        store
+            .put("unblocked", b"after-install", DurabilityMode::Durable)
+            .unwrap();
+    }
+
+    #[test]
+    fn operation_reservation_abort_clears_fence_without_touching_media() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::create(dir.path()).unwrap();
+        store.enable_boundary_probe();
+        let items = vec![
+            OwnedOperationPut {
+                subject: Arc::from(b"reserved/abort/a".as_slice()),
+                body: Arc::from(b"alpha".as_slice()),
+                condition: WriteCondition::Absent,
+                operation_id: [0x31; 16],
+                content_hash: [0x41; 32],
+            },
+            OwnedOperationPut {
+                subject: Arc::from(b"reserved/abort/b".as_slice()),
+                body: Arc::from(b"bravo".as_slice()),
+                condition: WriteCondition::Absent,
+                operation_id: [0x32; 16],
+                content_hash: [0x42; 32],
+            },
+        ];
+        let reservation = store
+            .reserve_operation_put_cohort(&items, 10)
+            .unwrap()
+            .expect("eligible reservation");
+        store.abort_operation_put_reservation(reservation).unwrap();
+
+        let probe = store.take_boundary_snapshot();
+        assert_eq!(probe.counters.count(BoundaryKind::FileWrite), 0);
+        assert_eq!(probe.counters.count(BoundaryKind::FileSync), 0);
+        assert!(store.get("reserved/abort/a").unwrap().is_none());
+        store
+            .put("unblocked", b"after-abort", DurabilityMode::Durable)
+            .unwrap();
+    }
+
+    #[test]
+    fn operation_reservation_rejects_incomplete_cook_and_clears_fence() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::create(dir.path()).unwrap();
+        store.enable_boundary_probe();
+        let items = vec![
+            OwnedOperationPut {
+                subject: Arc::from(b"reserved/mismatch/a".as_slice()),
+                body: Arc::from(b"alpha".as_slice()),
+                condition: WriteCondition::Absent,
+                operation_id: [0x51; 16],
+                content_hash: [0x61; 32],
+            },
+            OwnedOperationPut {
+                subject: Arc::from(b"reserved/mismatch/b".as_slice()),
+                body: Arc::from(b"bravo".as_slice()),
+                condition: WriteCondition::Absent,
+                operation_id: [0x52; 16],
+                content_hash: [0x62; 32],
+            },
+        ];
+        let reservation = store
+            .reserve_operation_put_cohort(&items, 20)
+            .unwrap()
+            .expect("eligible reservation");
+        let error = store
+            .install_operation_put_reservation(reservation, Vec::new())
+            .unwrap_err();
+        assert!(matches!(error, StoreError::ConsistencyViolation(_)));
+
+        let probe = store.take_boundary_snapshot();
+        assert_eq!(probe.counters.count(BoundaryKind::FileWrite), 0);
+        assert_eq!(probe.counters.count(BoundaryKind::FileSync), 0);
+        store
+            .put("unblocked", b"after-mismatch", DurabilityMode::Durable)
+            .unwrap();
     }
 
     #[test]
