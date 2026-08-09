@@ -439,7 +439,7 @@ pub struct SealPipeline {
     pub enrichment_backlog: usize,
     /// Monotonic foreground durable-publication activity generation.
     foreground_activity: Arc<AtomicU64>,
-    /// Lets enrichment drain without policy delays during shutdown.
+    /// Lets shutdown stop queued rebuildable enrichment without delaying authority.
     shutting_down: Arc<AtomicBool>,
 }
 
@@ -535,7 +535,8 @@ impl SealPipeline {
         }
     }
 
-    /// Shut down workers and join. Best-effort; pending jobs may complete first.
+    /// Shut down workers and join. Authoritative jobs drain; queued derived jobs
+    /// are rebuildable and are abandoned after any currently running job exits.
     pub fn shutdown(mut self) {
         self.shutting_down.store(true, Ordering::Release);
         let _ = self.job_tx.send(LifecycleJob::Shutdown);
@@ -945,6 +946,13 @@ fn enrich_worker_loop(
     shutting_down: Arc<AtomicBool>,
 ) {
     while let Ok(job) = job_rx.recv() {
+        // Derived sidecars are rebuildable. Once shutdown begins, do not turn a
+        // durable close into a synchronous drain of an arbitrarily large
+        // enrichment backlog. A job already executing is allowed to finish;
+        // this check abandons the next queued job and closes the worker.
+        if shutting_down.load(Ordering::Acquire) {
+            break;
+        }
         match job {
             LifecycleJob::Shutdown => break,
             LifecycleJob::EnrichDerived {
@@ -957,7 +965,8 @@ fn enrich_worker_loop(
                 let cpu0 = thread_cpu_ns();
                 // Foreground ingestion owns CPU and media. Under a permanently
                 // busy workload, allow only bounded sparse derived progress.
-                // Once writes go quiet (or shutdown begins), drain normally.
+                // Once writes go quiet, drain normally. Shutdown abandons the
+                // queue after any job already past the worker-loop check.
                 let gap_wait_ns =
                     wait_for_enrichment_window(&foreground_activity, &shutting_down);
                 let sealed_path = paths.sealed_segment(&segment_id);
