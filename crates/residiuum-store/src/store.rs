@@ -847,8 +847,17 @@ struct ActiveWriter {
     segment_id: [u8; 16],
     segment: ActiveSegment,
     file: File,
-    /// Bytes known durable on disk for this file (complete frames only).
+    /// Bytes submitted to the file for this active (complete frames only).
+    ///
+    /// Despite the historical name, this is the write-through prefix, not
+    /// necessarily the crash-stable prefix; Buffered writes advance it too.
     durable_len: u64,
+    /// Prefix known to have crossed a file durability barrier.
+    ///
+    /// This lets rotate/start avoid repeating `sync_data` when the exact same
+    /// prefix was already stabilized by a Durable cohort or `sync_all` during
+    /// active creation. It must never advance before a successful barrier.
+    stable_len: u64,
     /// Whether the active file's directory entry has crossed a directory
     /// durability barrier. Appending bytes does not invalidate this state.
     directory_entry_durable: bool,
@@ -9306,6 +9315,7 @@ impl Store {
         crate::failpoint::hit("store.active.write_tail.after_write")?;
         // Durable sync only applies to the real active file (not Discard/DevNull).
         if mode == DurabilityMode::Durable
+            && writer.stable_len < writer.durable_len
             && matches!(
                 sink,
                 DiagnosticIoSink::Real
@@ -9329,6 +9339,7 @@ impl Store {
             // fdatasync contract. Full inode metadata and directory publication
             // remain on the create/rotate paths.
             writer.file.sync_data()?;
+            writer.stable_len = writer.durable_len;
             stats.sync_duration_ns = t0.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
             stats.synced = true;
             stats.sync_outcome = crate::boundary_probe::BoundaryOutcome::Ok;
@@ -9522,6 +9533,7 @@ impl Store {
                 segment,
                 file,
                 durable_len,
+                stable_len: durable_len,
                 directory_entry_durable: true,
                 max_ack_durability: DurabilityMode::Memory,
                 coalesce_buf: Vec::new(),
@@ -9579,6 +9591,11 @@ impl Store {
                 segment,
                 file,
                 durable_len,
+                stable_len: if mode == DurabilityMode::Durable {
+                    durable_len
+                } else {
+                    0
+                },
                 directory_entry_durable,
                 max_ack_durability: DurabilityMode::Memory,
                 coalesce_buf: Vec::new(),
@@ -9962,6 +9979,7 @@ impl Store {
                 segment: rebuilt,
                 file,
                 durable_len,
+                stable_len: durable_len,
                 directory_entry_durable: true,
                 // Resumed bytes may include prior Durable frames; fail closed.
                 max_ack_durability: DurabilityMode::Durable,
@@ -10750,6 +10768,35 @@ mod tests {
         );
         store.delete("user-42", DurabilityMode::Durable).unwrap();
         assert!(store.get("user-42").unwrap().is_none());
+    }
+
+    #[test]
+    fn seal_does_not_resync_an_already_stable_active_prefix() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::create(dir.path()).unwrap();
+        store
+            .put("stable", b"durable", DurabilityMode::Durable)
+            .unwrap();
+        assert_eq!(store.write_path_stats().authoritative_io.sync_operations, 1);
+
+        store.seal_active().unwrap();
+        assert_eq!(store.write_path_stats().authoritative_io.sync_operations, 1);
+    }
+
+    #[test]
+    fn seal_still_syncs_buffered_bytes_after_a_durable_prefix() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::create(dir.path()).unwrap();
+        store
+            .put("stable", b"durable", DurabilityMode::Durable)
+            .unwrap();
+        store
+            .put("newer", b"buffered", DurabilityMode::Buffered)
+            .unwrap();
+        assert_eq!(store.write_path_stats().authoritative_io.sync_operations, 1);
+
+        store.seal_active().unwrap();
+        assert_eq!(store.write_path_stats().authoritative_io.sync_operations, 2);
     }
 
     #[test]
