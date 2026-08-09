@@ -112,3 +112,16 @@ operations, cohorts, media syncs, journal syncs, maximum/mean cohort size,
 payload bytes, acknowledgement latency, drain/close time and reopen validation.
 Only then should the next engineering slice choose between gathered frame I/O,
 outcome-boundary folding, delete integration or adaptive cohort tuning.
+
+The first retained-media gate is intentionally 10 GiB, not 100 GiB. On a
+dedicated empty Bonzo path it is launched with:
+
+```bash
+scripts/run-smart-durable-10g.sh /Users/rumpel/residiuum-campaigns/smart-durable-10g-20260809
+```
+
+The release-mode campaign uses 8 KiB deterministic pre-generated JSON payloads,
+20 smart-client workers, a 30 GiB free-space floor, separate open/ack/close
+timings, group-commit boundary counters, retained physical-size measurement,
+then a fresh reopen and complete bounded-page scan of every record. It retains
+the store, `report.json`, and a sibling `.campaign.log` for review.

@@ -19,6 +19,8 @@ const MAX_COLLECTION_DELAY: Duration = Duration::from_micros(250);
 pub struct OperationCommitStats {
     /// Logical operations admitted to the coordinator.
     pub submitted: u64,
+    /// Encoded subject/body bytes admitted to the coordinator.
+    pub submitted_bytes: u64,
     /// Physical stable-boundary cohorts attempted.
     pub cohorts: u64,
     /// Individual operations that returned a successful new commit.
@@ -27,6 +29,10 @@ pub struct OperationCommitStats {
     pub deduplicated: u64,
     /// Individual operations that returned an error.
     pub failed: u64,
+    /// Cohorts whose new writes crossed the authoritative-media boundary.
+    pub successful_media_sync_cohorts: u64,
+    /// Cohorts whose new outcomes crossed the outcome-journal boundary.
+    pub successful_journal_sync_cohorts: u64,
     /// Largest cohort observed since deployment open.
     pub max_cohort_entries: usize,
     /// Largest encoded subject/body payload admitted in one cohort.
@@ -36,10 +42,13 @@ pub struct OperationCommitStats {
 #[derive(Default)]
 struct CoordinatorCounters {
     submitted: AtomicU64,
+    submitted_bytes: AtomicU64,
     cohorts: AtomicU64,
     committed: AtomicU64,
     deduplicated: AtomicU64,
     failed: AtomicU64,
+    successful_media_sync_cohorts: AtomicU64,
+    successful_journal_sync_cohorts: AtomicU64,
     max_cohort_entries: AtomicUsize,
     max_cohort_bytes: AtomicUsize,
 }
@@ -48,10 +57,17 @@ impl CoordinatorCounters {
     fn snapshot(&self) -> OperationCommitStats {
         OperationCommitStats {
             submitted: self.submitted.load(Ordering::Relaxed),
+            submitted_bytes: self.submitted_bytes.load(Ordering::Relaxed),
             cohorts: self.cohorts.load(Ordering::Relaxed),
             committed: self.committed.load(Ordering::Relaxed),
             deduplicated: self.deduplicated.load(Ordering::Relaxed),
             failed: self.failed.load(Ordering::Relaxed),
+            successful_media_sync_cohorts: self
+                .successful_media_sync_cohorts
+                .load(Ordering::Relaxed),
+            successful_journal_sync_cohorts: self
+                .successful_journal_sync_cohorts
+                .load(Ordering::Relaxed),
             max_cohort_entries: self.max_cohort_entries.load(Ordering::Relaxed),
             max_cohort_bytes: self.max_cohort_bytes.load(Ordering::Relaxed),
         }
@@ -141,6 +157,10 @@ impl OperationCommitCoordinator {
                 .counters
                 .submitted
                 .fetch_add(1, Ordering::Relaxed);
+            self.inner
+                .counters
+                .submitted_bytes
+                .fetch_add(bytes.min(u64::MAX as usize) as u64, Ordering::Relaxed);
         }
         self.inner.wake.notify_one();
         result.recv().unwrap_or_else(|_| {
@@ -261,6 +281,20 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
 
     match outcomes {
         Ok(outcomes) if outcomes.len() == batch.len() => {
+            let committed = outcomes
+                .iter()
+                .filter(|outcome| matches!(outcome, Ok(value) if !value.deduplicated))
+                .count() as u64;
+            if committed > 0 {
+                inner
+                    .counters
+                    .successful_media_sync_cohorts
+                    .fetch_add(1, Ordering::Relaxed);
+                inner
+                    .counters
+                    .successful_journal_sync_cohorts
+                    .fetch_add(1, Ordering::Relaxed);
+            }
             for (pending, outcome) in batch.into_iter().zip(outcomes) {
                 match &outcome {
                     Ok(value) if value.deduplicated => {

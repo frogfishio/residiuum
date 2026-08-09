@@ -396,6 +396,8 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
         "concurrent durable acknowledgements must share physical cohorts: {commits:?}"
     );
     assert!(commits.max_cohort_entries >= 2);
+    assert_eq!(commits.successful_media_sync_cohorts, commits.cohorts);
+    assert_eq!(commits.successful_journal_sync_cohorts, commits.cohorts);
 
     let options = PutOptions {
         context: OperationContext {
