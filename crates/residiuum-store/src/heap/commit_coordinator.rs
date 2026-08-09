@@ -14,12 +14,14 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-// Bound both per-cohort object count and encoded bytes. Qualification showed
-// that raising the entry cap to 2,048 only reduced barriers by ~3% at the
-// product scheduler depth and did not materially improve throughput.
+// Two logical batches may be gathered into one physical durability cohort.
+// Each half stays bounded so the existing 2,048-request client window can fill
+// both before any acknowledgement; the gathered write remains at most 16 MiB.
 const MAX_COHORT_ENTRIES: usize = 1_024;
-const MAX_COHORT_BYTES: usize = 16 * 1024 * 1024;
-const MAX_ADMITTED_BYTES: usize = 2 * MAX_COHORT_BYTES;
+const MAX_COHORT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_GATHERED_COHORT_ENTRIES: usize = 2 * MAX_COHORT_ENTRIES;
+const MAX_GATHERED_COHORT_BYTES: usize = 2 * MAX_COHORT_BYTES;
+const MAX_ADMITTED_BYTES: usize = 2 * MAX_GATHERED_COHORT_BYTES;
 const MAX_COLLECTION_DELAY: Duration = Duration::from_micros(250);
 
 /// Redacted deployment-wide durable cohort counters.
@@ -227,7 +229,7 @@ impl OperationCommitCoordinator {
             cooker: PersistentCookerPool::start(
                 cookers,
                 cookers,
-                MAX_COHORT_ENTRIES,
+                MAX_GATHERED_COHORT_ENTRIES,
                 MAX_ADMITTED_BYTES,
                 0,
             ),
@@ -645,9 +647,32 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
 
 fn install_batch_pair(
     inner: &CoordinatorInner,
-    first: Vec<PendingOperation>,
+    mut first: Vec<PendingOperation>,
     second: Vec<PendingOperation>,
 ) {
+    let gathered_entries = first.len().saturating_add(second.len());
+    let gathered_bytes = first.iter().chain(&second).fold(0usize, |total, pending| {
+        total
+            .saturating_add(pending.subject.len())
+            .saturating_add(match &pending.kind {
+                PendingOperationKind::Put(body) => body.len(),
+                PendingOperationKind::Delete => 0,
+            })
+    });
+    if gathered_entries <= MAX_GATHERED_COHORT_ENTRIES
+        && gathered_bytes <= MAX_GATHERED_COHORT_BYTES
+    {
+        // Both halves are already inside the bounded admission window. Treat
+        // them as one physical cohort: cook/install all frames, submit one
+        // gathered authoritative write, cross one stable boundary, then reply
+        // to every member. No acknowledgement moves ahead of the barrier.
+        first.extend(second);
+        install_batch(inner, first);
+        return;
+    }
+
+    // Oversized singleton/edge shapes retain the qualified depth-two path;
+    // never exceed the physical 16 MiB gathered-cohort bound merely to merge.
     note_batch_attempt(inner, &first);
     note_batch_attempt(inner, &second);
     let (first_result, second_result) = commit_batch_pair(inner, &first, &second);
@@ -1241,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn adjacent_full_cohorts_use_depth_two_overlap() {
+    fn adjacent_half_cohorts_share_one_physical_barrier() {
         let directory = tempfile::tempdir().unwrap();
         let physical = Arc::new(Mutex::new(Store::create(directory.path()).unwrap()));
         let coordinator = OperationCommitCoordinator::start(Arc::clone(&physical));
@@ -1278,8 +1303,13 @@ mod tests {
                 .unwrap();
         }
         let stats = coordinator.stats();
-        assert!(stats.overlapped_cooked_cohorts >= 1, "stats={stats:?}");
-        assert!(stats.overlapped_cooked_operations > 0, "stats={stats:?}");
+        assert_eq!(stats.cohorts, 2, "stats={stats:?}");
+        assert_eq!(stats.successful_media_sync_cohorts, 2, "stats={stats:?}");
+        assert!(
+            stats.max_cohort_entries > MAX_COHORT_ENTRIES
+                && stats.max_cohort_entries <= MAX_GATHERED_COHORT_ENTRIES,
+            "stats={stats:?}"
+        );
         assert_eq!(stats.committed, total as u64);
         drop(coordinator);
 
@@ -1288,8 +1318,9 @@ mod tests {
             store.get("pipeline/00000").unwrap().as_deref(),
             Some([0u8; 64].as_slice())
         );
+        let last = format!("pipeline/{:05}", total - 1);
         assert_eq!(
-            store.get("pipeline/02048").unwrap().as_deref(),
+            store.get(&last).unwrap().as_deref(),
             Some([0u8; 64].as_slice())
         );
     }
