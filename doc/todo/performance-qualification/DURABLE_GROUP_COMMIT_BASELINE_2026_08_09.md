@@ -910,3 +910,48 @@ This accepts bounded asynchronous single-pass Shadow staging as the product
 path. It does not establish a 500 MB/s claim. The next performance step should
 target the roughly 159–163 authoritative durability barriers per GiB; Shadow
 scheduling is no longer the dominant foreground defect in this 4 GiB shape.
+
+### Stable-prefix barrier elision (`81b4c47`)
+
+The remaining 159–163 authoritative barriers per GiB separated cleanly into
+roughly 127–132 cohort acknowledgement barriers and two redundant barriers per
+64 MiB rotation. The old path called `sync_data` on the retiring active even
+when its complete prefix had just crossed the cohort barrier, then called it
+again on the replacement active immediately after creation had already
+completed `sync_all` and the active-directory barrier.
+
+Commit `81b4c47` records two distinct active-file watermarks:
+
+- `durable_len` remains the historical write-through prefix (Buffered writes
+  advance it, so its old name must not be interpreted as crash stability);
+- `stable_len` advances only after a successful file durability barrier.
+
+A Durable tail flush now skips `sync_data` only when `stable_len ==
+durable_len`. This does not move the acknowledgement boundary. If Buffered
+bytes follow a Durable prefix, `stable_len < durable_len` and rotate/seal still
+performs the barrier. New tests prove both the already-stable skip and the
+Buffered-tail negative case. Store unit tests (273 total), RSHD0004 (16/16),
+default-flip (3/3), and product campaign (6/6) passed.
+
+Two clean matched Bonzo runs recovered every one of 524,288 records and all
+4,294,967,296 payload bytes. The first produced 344.96 MiB/s; the immediate
+repeat produced 362.21 MiB/s (46,363 durable operations/s), with interval rates
+361.23, 364.78, 362.68 and 360.57 MiB/s. The repeat's 515 cohorts produced
+exactly 515 authoritative writes and 515 authoritative barriers. Against the
+accepted `1d175f5` run (516 cohorts and approximately 644 barriers), this
+removes about 129 barriers, or 20%, without weakening a single cohort ACK.
+Rotation flush time fell from roughly 39–49 ms/GiB to 4–6 microseconds/GiB.
+
+The throughput result is deliberately classified as neutral-to-small-positive,
+not as a new large performance claim: 362.21 MiB/s is only 0.66% above the
+accepted 359.84 MiB/s run, and the first replicate demonstrates device-latency
+variance. The I/O cleanup itself is accepted because the eliminated calls were
+provably redundant, the crash contract is unchanged, and the measured barrier
+count matches the intended one-per-cohort model exactly.
+
+The repeat closed in 0.268 s, reopened in 0.448 s, and completed its exhaustive
+logical validation in 44.24 s. Its report is archived as
+`81b4c47-stable-prefix-repeat-4g.report.json` beside the first replicate
+`81b4c47-stable-prefix-4g.report.json`. The next throughput target is therefore
+the 515 real cohort acknowledgement barriers and the work surrounding them,
+not rotation/start re-syncs and not a larger entry ceiling.
