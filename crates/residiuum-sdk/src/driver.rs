@@ -1720,6 +1720,79 @@ fn deadline_loop(shared: Arc<(Mutex<DeadlineState>, Condvar)>) {
     }
 }
 
+const MUTATION_DRAIN_CLOSED: usize = 1usize << (usize::BITS - 1);
+const MUTATION_DRAIN_COUNT_MASK: usize = MUTATION_DRAIN_CLOSED - 1;
+
+struct MutationDrain {
+    /// High bit closes admission; remaining bits count admitted mutations.
+    state: AtomicUsize,
+    wait_lock: Mutex<()>,
+    wake: Condvar,
+}
+
+impl MutationDrain {
+    fn new() -> Self {
+        Self {
+            state: AtomicUsize::new(0),
+            wait_lock: Mutex::new(()),
+            wake: Condvar::new(),
+        }
+    }
+
+    fn admit(&self) -> bool {
+        let mut observed = self.state.load(Ordering::Acquire);
+        loop {
+            if observed & MUTATION_DRAIN_CLOSED != 0
+                || observed & MUTATION_DRAIN_COUNT_MASK == MUTATION_DRAIN_COUNT_MASK
+            {
+                return false;
+            }
+            match self.state.compare_exchange_weak(
+                observed,
+                observed + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => observed = actual,
+            }
+        }
+    }
+
+    fn release(&self) {
+        // Take the wait lock before publishing zero so close cannot miss the
+        // final notification between its state check and condvar wait.
+        let _guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let previous = self.state.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous & MUTATION_DRAIN_COUNT_MASK > 0);
+        if previous & MUTATION_DRAIN_COUNT_MASK == 1 {
+            self.wake.notify_all();
+        }
+    }
+
+    fn close_admission(&self) {
+        self.state
+            .fetch_or(MUTATION_DRAIN_CLOSED, Ordering::AcqRel);
+    }
+
+    fn wait_empty(&self) {
+        let mut guard = self
+            .wait_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.close_admission();
+        while self.state.load(Ordering::Acquire) & MUTATION_DRAIN_COUNT_MASK != 0 {
+            guard = self
+                .wake
+                .wait(guard)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+}
+
 struct Scheduler {
     sender: Mutex<Option<mpsc::SyncSender<Message>>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
@@ -1728,7 +1801,7 @@ struct Scheduler {
     worker_count: usize,
     queue_capacity: usize,
     queue_byte_capacity: usize,
-    mutation_drain: Arc<(Mutex<usize>, Condvar)>,
+    mutation_drain: Arc<MutationDrain>,
     closed: AtomicBool,
 }
 
@@ -1738,7 +1811,7 @@ struct MutationCompletion<T> {
     deadlines: Arc<DeadlineService>,
     deadline_registration: Arc<AtomicU64>,
     stage: Arc<AtomicU8>,
-    drain: Arc<(Mutex<usize>, Condvar)>,
+    drain: Arc<MutationDrain>,
     request_id: RequestId,
     operation_id: OperationId,
     admission_bytes: usize,
@@ -1755,7 +1828,7 @@ impl Scheduler {
         let receiver = Arc::new(Mutex::new(receiver));
         let counters = Arc::new(Counters::default());
         let deadlines = Arc::new(DeadlineService::new()?);
-        let mutation_drain = Arc::new((Mutex::new(0), Condvar::new()));
+        let mutation_drain = Arc::new(MutationDrain::new());
         let mut workers = Vec::with_capacity(worker_count);
         for index in 0..worker_count {
             let receiver = Arc::clone(&receiver);
@@ -2058,25 +2131,11 @@ impl Scheduler {
             return future;
         }
 
-        let guard = match self.sender.lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                responder_error(
-                    &future,
-                    Error::for_request(
-                        ErrorCode::Internal,
-                        ErrorClass::Internal,
-                        "driver admission lock poisoned",
-                        request_id,
-                        Some(operation_id),
-                        TerminalOutcome::Refused,
-                        RetryDisposition::Never,
-                    ),
-                );
-                return future;
-            }
-        };
-        if self.closed.load(Ordering::Acquire) {
+        // Mutation execution is asynchronous in the storage coordinator and
+        // never enters the read/query worker channel. Admit through one atomic
+        // close+count state instead of serializing every caller on the sender
+        // mutex and a second drain mutex.
+        if !self.mutation_drain.admit() {
             responder_error(
                 &future,
                 Error::for_request(
@@ -2105,6 +2164,7 @@ impl Scheduler {
                     RetryDisposition::After(Duration::from_millis(1)),
                 ),
             );
+            self.mutation_drain.release();
             return future;
         }
         if admission_bytes > self.queue_byte_capacity {
@@ -2125,6 +2185,7 @@ impl Scheduler {
                     RetryDisposition::Never,
                 ),
             );
+            self.mutation_drain.release();
             return future;
         }
         if !reserve_bounded_by(
@@ -2149,6 +2210,7 @@ impl Scheduler {
                     RetryDisposition::After(Duration::from_millis(1)),
                 ),
             );
+            self.mutation_drain.release();
             return future;
         }
         self.counters.peak_admitted_bytes.fetch_max(
@@ -2159,34 +2221,6 @@ impl Scheduler {
             self.counters.inflight_mutations.load(Ordering::Acquire),
             Ordering::Relaxed,
         );
-        let (drain_lock, _) = &*self.mutation_drain;
-        let mut drain_count = match drain_lock.lock() {
-            Ok(count) => count,
-            Err(_) => {
-                self.counters
-                    .admitted_bytes
-                    .fetch_sub(admission_bytes, Ordering::AcqRel);
-                self.counters
-                    .inflight_mutations
-                    .fetch_sub(1, Ordering::AcqRel);
-                responder_error(
-                    &future,
-                    Error::for_request(
-                        ErrorCode::Internal,
-                        ErrorClass::Internal,
-                        "driver mutation drain lock poisoned",
-                        request_id,
-                        Some(operation_id),
-                        TerminalOutcome::Refused,
-                        RetryDisposition::Never,
-                    ),
-                );
-                return future;
-            }
-        };
-        *drain_count = drain_count.saturating_add(1);
-        drop(drain_count);
-        drop(guard);
 
         let stage = Arc::new(AtomicU8::new(1));
         let deadline_registration = Arc::new(AtomicU64::new(0));
@@ -2272,6 +2306,7 @@ impl Scheduler {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        self.mutation_drain.close_admission();
         let sender = self.sender.lock().ok().and_then(|mut sender| sender.take());
         let handles = self
             .workers
@@ -2290,15 +2325,7 @@ impl Scheduler {
             for handle in handles {
                 let _ = handle.join();
             }
-            let (lock, wake) = &*mutation_drain;
-            if let Ok(mut count) = lock.lock() {
-                while *count != 0 {
-                    count = match wake.wait(count) {
-                        Ok(count) => count,
-                        Err(_) => break,
-                    };
-                }
-            }
+            mutation_drain.wait_empty();
             deadlines.stop();
         })
         .await
@@ -2347,6 +2374,7 @@ fn reserve_bounded_by(counter: &AtomicUsize, bound: usize, amount: usize) -> boo
 impl Drop for Scheduler {
     fn drop(&mut self) {
         self.closed.store(true, Ordering::Release);
+        self.mutation_drain.close_admission();
         let sender = self.sender.get_mut().ok().and_then(Option::take);
         drop(sender);
         if let Ok(workers) = self.workers.get_mut() {
@@ -2354,15 +2382,7 @@ impl Drop for Scheduler {
                 let _ = worker.join();
             }
         }
-        let (lock, wake) = &*self.mutation_drain;
-        if let Ok(mut count) = lock.lock() {
-            while *count != 0 {
-                count = match wake.wait(count) {
-                    Ok(count) => count,
-                    Err(_) => break,
-                };
-            }
-        }
+        self.mutation_drain.wait_empty();
         self.deadlines.stop();
     }
 }
@@ -2413,11 +2433,7 @@ impl<T> MutationCompletion<T> {
             .inflight_mutations
             .fetch_sub(1, Ordering::AcqRel);
         self.counters.completed.fetch_add(1, Ordering::Release);
-        let (lock, wake) = &*self.drain;
-        if let Ok(mut count) = lock.lock() {
-            *count = count.saturating_sub(1);
-            wake.notify_all();
-        }
+        self.drain.release();
         complete_response_shared(
             &self.shared,
             result
@@ -2948,6 +2964,21 @@ mod tests {
         while !scheduler.inspect().closed {
             thread::yield_now();
         }
+        let late_started = Arc::new(AtomicBool::new(false));
+        let late_flag = Arc::clone(&late_started);
+        let late = scheduler.dispatch_mutation::<(), _>(
+            RequestId([3; 16]),
+            OperationId([4; 16]),
+            None,
+            8,
+            move |_callback| {
+                late_flag.store(true, Ordering::Release);
+                Ok(())
+            },
+        );
+        let late_error = test_block_on(late).unwrap_err();
+        assert_eq!(late_error.code, ErrorCode::Closed);
+        assert!(!late_started.load(Ordering::Acquire));
         thread::sleep(Duration::from_millis(20));
         assert!(
             !closing.is_finished(),
