@@ -455,17 +455,23 @@ fn coordinator_loop(inner: Arc<CoordinatorInner>) {
             }
 
             let first = take_batch(&mut state);
+            let first_credits = first.iter().fold(0usize, |total, pending| {
+                total.saturating_add(pending.credit_bytes)
+            });
+            let follower_admitted = state.admitted_credit_bytes > first_credits;
             // A follower gets the same bounded fill opportunity as a leading
             // cohort. Taking it immediately fragmented the second half of a
-            // two-cohort window and added avoidable durability boundaries.
-            if !state.queue.is_empty()
+            // two-cohort window and added avoidable durability boundaries. The
+            // credit ledger tells us when a follower exists even if the SDK has
+            // not transferred it into this queue yet, avoiding a blind delay
+            // for genuine single-cohort workloads.
+            if follower_admitted
                 && state.queue.len() < MAX_COHORT_ENTRIES
                 && state.queued_bytes < MAX_COHORT_BYTES
                 && !state.shutdown
             {
                 let follower_deadline = Instant::now() + MAX_COLLECTION_DELAY;
-                while !state.queue.is_empty()
-                    && state.queue.len() < MAX_COHORT_ENTRIES
+                while state.queue.len() < MAX_COHORT_ENTRIES
                     && state.queued_bytes < MAX_COHORT_BYTES
                     && !state.shutdown
                 {
