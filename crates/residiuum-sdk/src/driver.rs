@@ -24,6 +24,8 @@ use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+const DEFAULT_QUEUE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
+
 /// Embedded driver defaults from `ASYNC_DRIVER_SPINE_SPEC.md` §9.
 #[derive(Debug, Clone)]
 pub struct EmbeddedOptions {
@@ -33,6 +35,8 @@ pub struct EmbeddedOptions {
     pub workers: usize,
     /// Hard bound on queued operations, in addition to running workers.
     pub queue_capacity: usize,
+    /// Hard byte-credit bound across queued and running weighted operations.
+    pub queue_byte_capacity: usize,
 }
 
 impl EmbeddedOptions {
@@ -47,6 +51,7 @@ impl EmbeddedOptions {
             path: path.into(),
             workers,
             queue_capacity: 1024,
+            queue_byte_capacity: DEFAULT_QUEUE_BYTE_CAPACITY,
         }
     }
 
@@ -59,6 +64,12 @@ impl EmbeddedOptions {
     /// Override the queue bound. Zero is rejected by [`Client::open_embedded`].
     pub fn queue_capacity(mut self, queue_capacity: usize) -> Self {
         self.queue_capacity = queue_capacity;
+        self
+    }
+
+    /// Override the queued/running mutation byte-credit bound. Zero is rejected.
+    pub fn queue_byte_capacity(mut self, queue_byte_capacity: usize) -> Self {
+        self.queue_byte_capacity = queue_byte_capacity;
         self
     }
 }
@@ -460,6 +471,14 @@ pub struct ClientInspection {
     pub workers: usize,
     /// Admission queue bound.
     pub queue_capacity: usize,
+    /// Admission byte-credit bound across queued and running weighted jobs.
+    pub queue_byte_capacity: usize,
+    /// Byte credits currently held by queued and running weighted jobs.
+    pub admitted_bytes: usize,
+    /// Highest observed admitted byte-credit usage.
+    pub peak_admitted_bytes: usize,
+    /// Jobs refused specifically by the byte-credit bound.
+    pub byte_refused: u64,
     /// Currently queued jobs.
     pub queued: usize,
     /// Currently executing jobs.
@@ -493,15 +512,19 @@ pub struct Client {
 impl Client {
     /// Open an embedded deployment off the caller's async executor thread.
     pub async fn open_embedded(options: EmbeddedOptions) -> Result<Self, Error> {
-        if options.workers == 0 || options.queue_capacity == 0 {
+        if options.workers == 0
+            || options.queue_capacity == 0
+            || options.queue_byte_capacity == 0
+        {
             return Err(Error::local(
                 ErrorCode::Validation,
                 ErrorClass::Request,
-                "embedded workers and queue capacity must be non-zero",
+                "embedded workers, queue capacity, and byte capacity must be non-zero",
             ));
         }
         let workers = options.workers;
         let queue_capacity = options.queue_capacity;
+        let queue_byte_capacity = options.queue_byte_capacity;
         let opened = run_open(move || {
             let deployment = ResidiuumDeployment::open(&options.path)?;
             let report = deployment.open_report()?;
@@ -510,7 +533,11 @@ impl Client {
         .await?;
         Ok(Self {
             deployment: Arc::new(opened.0),
-            scheduler: Arc::new(Scheduler::new(workers, queue_capacity)?),
+            scheduler: Arc::new(Scheduler::new(
+                workers,
+                queue_capacity,
+                queue_byte_capacity,
+            )?),
             open_report: opened.1,
             capabilities: Capabilities {
                 embedded: true,
@@ -798,10 +825,16 @@ where
         let collection = self.inner.clone();
         let heap_id = self.heap_id();
         let collection_id = self.id();
+        let admission_bytes = key.len().saturating_add(body.len());
         self.heap_client
             .connection
             .scheduler
-            .dispatch(request_id, Some(operation_id), deadline, move || {
+            .dispatch_weighted(
+                request_id,
+                Some(operation_id),
+                deadline,
+                admission_bytes,
+                move || {
                 let (storage, deduplicated) = collection.put_raw_body_with_operation(
                     &key,
                     &body,
@@ -817,7 +850,8 @@ where
                     deduplicated,
                     storage,
                 })
-            })
+                },
+            )
             .await
     }
 
@@ -881,10 +915,16 @@ where
         let collection = self.inner.clone();
         let heap_id = self.heap_id();
         let collection_id = self.id();
+        let admission_bytes = key.len().saturating_add(body.len());
         self.heap_client
             .connection
             .scheduler
-            .dispatch(request_id, Some(operation_id), deadline, move || {
+            .dispatch_weighted(
+                request_id,
+                Some(operation_id),
+                deadline,
+                admission_bytes,
+                move || {
                 let (storage, deduplicated) = collection.put_raw_body_with_operation(
                     &key,
                     &body,
@@ -900,7 +940,8 @@ where
                     deduplicated,
                     storage,
                 })
-            })
+                },
+            )
             .await
     }
 
@@ -1089,10 +1130,16 @@ where
         let collection = self.inner.clone();
         let heap_id = self.heap_id();
         let collection_id = self.id();
+        let admission_bytes = key.len();
         self.heap_client
             .connection
             .scheduler
-            .dispatch(request_id, Some(operation_id), deadline, move || {
+            .dispatch_weighted(
+                request_id,
+                Some(operation_id),
+                deadline,
+                admission_bytes,
+                move || {
                 let (storage, deduplicated) = collection.delete_with_operation(
                     &key,
                     condition,
@@ -1107,7 +1154,8 @@ where
                     deduplicated,
                     storage,
                 })
-            })
+                },
+            )
             .await
     }
 }
@@ -1283,10 +1331,13 @@ enum Message {
 #[derive(Default)]
 struct Counters {
     queued: AtomicUsize,
+    admitted_bytes: AtomicUsize,
+    peak_admitted_bytes: AtomicUsize,
     running: AtomicUsize,
     peak_running: AtomicUsize,
     completed: AtomicU64,
     refused: AtomicU64,
+    byte_refused: AtomicU64,
     cancelled_before_dispatch: AtomicU64,
 }
 
@@ -1430,11 +1481,29 @@ struct Scheduler {
     deadlines: Arc<DeadlineService>,
     worker_count: usize,
     queue_capacity: usize,
+    queue_byte_capacity: usize,
     closed: AtomicBool,
 }
 
+struct AdmissionByteRelease {
+    counters: Arc<Counters>,
+    bytes: usize,
+}
+
+impl Drop for AdmissionByteRelease {
+    fn drop(&mut self) {
+        self.counters
+            .admitted_bytes
+            .fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
 impl Scheduler {
-    fn new(worker_count: usize, queue_capacity: usize) -> Result<Self, Error> {
+    fn new(
+        worker_count: usize,
+        queue_capacity: usize,
+        queue_byte_capacity: usize,
+    ) -> Result<Self, Error> {
         let (sender, receiver) = mpsc::sync_channel(queue_capacity);
         let receiver = Arc::new(Mutex::new(receiver));
         let counters = Arc::new(Counters::default());
@@ -1466,6 +1535,7 @@ impl Scheduler {
             deadlines,
             worker_count,
             queue_capacity,
+            queue_byte_capacity,
             closed: AtomicBool::new(false),
         })
     }
@@ -1475,6 +1545,21 @@ impl Scheduler {
         request_id: RequestId,
         operation_id: Option<OperationId>,
         deadline: Option<Instant>,
+        operation: F,
+    ) -> ResponseFuture<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, SdkError> + Send + 'static,
+    {
+        self.dispatch_weighted(request_id, operation_id, deadline, 0, operation)
+    }
+
+    fn dispatch_weighted<T, F>(
+        &self,
+        request_id: RequestId,
+        operation_id: Option<OperationId>,
+        deadline: Option<Instant>,
+        admission_bytes: usize,
         operation: F,
     ) -> ResponseFuture<T>
     where
@@ -1502,6 +1587,10 @@ impl Scheduler {
         let task_registration = Arc::clone(&deadline_registration);
         let deadlines = Arc::clone(&self.deadlines);
         let task = Box::new(move || {
+            let _byte_release = AdmissionByteRelease {
+                counters: Arc::clone(&counters),
+                bytes: admission_bytes,
+            };
             counters.queued.fetch_sub(1, Ordering::AcqRel);
             if deadline.map(|at| Instant::now() >= at).unwrap_or(false) {
                 task_stage.store(2, Ordering::Release);
@@ -1596,6 +1685,34 @@ impl Scheduler {
             );
             return future;
         }
+        if admission_bytes > self.queue_byte_capacity
+            || !reserve_bounded_by(
+                &self.counters.admitted_bytes,
+                self.queue_byte_capacity,
+                admission_bytes,
+            )
+        {
+            self.counters.queued.fetch_sub(1, Ordering::AcqRel);
+            self.counters.refused.fetch_add(1, Ordering::Relaxed);
+            self.counters.byte_refused.fetch_add(1, Ordering::Relaxed);
+            responder_error(
+                &future,
+                Error::for_request(
+                    ErrorCode::Overloaded,
+                    ErrorClass::Admission,
+                    "embedded driver byte capacity is full",
+                    request_id,
+                    operation_id,
+                    TerminalOutcome::Refused,
+                    RetryDisposition::After(Duration::from_millis(1)),
+                ),
+            );
+            return future;
+        }
+        self.counters.peak_admitted_bytes.fetch_max(
+            self.counters.admitted_bytes.load(Ordering::Acquire),
+            Ordering::Relaxed,
+        );
         // Register before enqueue. Otherwise a fast worker can complete, load
         // registration id 0, and race with a late callback registration.
         let registration = deadline.map(|at| {
@@ -1660,6 +1777,9 @@ impl Scheduler {
                     self.deadlines.cancel(registration);
                 }
                 self.counters.queued.fetch_sub(1, Ordering::AcqRel);
+                self.counters
+                    .admitted_bytes
+                    .fetch_sub(admission_bytes, Ordering::AcqRel);
                 self.counters.refused.fetch_add(1, Ordering::Relaxed);
                 responder_error(
                     &future,
@@ -1679,6 +1799,9 @@ impl Scheduler {
                     self.deadlines.cancel(registration);
                 }
                 self.counters.queued.fetch_sub(1, Ordering::AcqRel);
+                self.counters
+                    .admitted_bytes
+                    .fetch_sub(admission_bytes, Ordering::AcqRel);
                 responder_error(
                     &future,
                     Error::for_request(
@@ -1700,6 +1823,10 @@ impl Scheduler {
         ClientInspection {
             workers: self.worker_count,
             queue_capacity: self.queue_capacity,
+            queue_byte_capacity: self.queue_byte_capacity,
+            admitted_bytes: self.counters.admitted_bytes.load(Ordering::Acquire),
+            peak_admitted_bytes: self.counters.peak_admitted_bytes.load(Ordering::Relaxed),
+            byte_refused: self.counters.byte_refused.load(Ordering::Relaxed),
             queued: self.counters.queued.load(Ordering::Acquire),
             running: self.counters.running.load(Ordering::Acquire),
             peak_running: self.counters.peak_running.load(Ordering::Acquire),
@@ -1750,6 +1877,27 @@ fn reserve_bounded(counter: &AtomicUsize, bound: usize) -> bool {
         match counter.compare_exchange_weak(
             observed,
             observed + 1,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => observed = actual,
+        }
+    }
+}
+
+fn reserve_bounded_by(counter: &AtomicUsize, bound: usize, amount: usize) -> bool {
+    if amount == 0 {
+        return true;
+    }
+    let mut observed = counter.load(Ordering::Acquire);
+    loop {
+        if amount > bound.saturating_sub(observed) {
+            return false;
+        }
+        match counter.compare_exchange_weak(
+            observed,
+            observed + amount,
             Ordering::AcqRel,
             Ordering::Acquire,
         ) {
@@ -1948,7 +2096,7 @@ mod tests {
 
     #[test]
     fn scheduler_refuses_beyond_hard_bound() {
-        let scheduler = Scheduler::new(1, 1).unwrap();
+        let scheduler = Scheduler::new(1, 1, DEFAULT_QUEUE_BYTE_CAPACITY).unwrap();
         let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let first_gate = Arc::clone(&gate);
         let first = scheduler.dispatch(RequestId([1; 16]), None, None, move || {
@@ -1981,7 +2129,7 @@ mod tests {
 
     #[test]
     fn queued_drop_cancels_before_dispatch_and_deadline_refuses_execution() {
-        let scheduler = Scheduler::new(1, 2).unwrap();
+        let scheduler = Scheduler::new(1, 2, DEFAULT_QUEUE_BYTE_CAPACITY).unwrap();
         let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let first_gate = Arc::clone(&gate);
         let blocker = scheduler.dispatch(RequestId([1; 16]), None, None, move || {
@@ -2037,7 +2185,7 @@ mod tests {
 
     #[test]
     fn queued_deadline_wakes_without_waiting_for_a_worker() {
-        let scheduler = Scheduler::new(1, 2).unwrap();
+        let scheduler = Scheduler::new(1, 2, DEFAULT_QUEUE_BYTE_CAPACITY).unwrap();
         let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let blocker_gate = Arc::clone(&gate);
         let blocker = scheduler.dispatch(RequestId([1; 16]), None, None, move || {
@@ -2077,7 +2225,7 @@ mod tests {
 
     #[test]
     fn dispatched_mutation_deadline_reports_unknown_outcome() {
-        let scheduler = Scheduler::new(1, 1).unwrap();
+        let scheduler = Scheduler::new(1, 1, DEFAULT_QUEUE_BYTE_CAPACITY).unwrap();
         let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let mutation_gate = Arc::clone(&gate);
         let mutation = scheduler.dispatch(
@@ -2122,7 +2270,7 @@ mod tests {
 
     #[test]
     fn completed_requests_release_long_deadline_registrations() {
-        let scheduler = Scheduler::new(2, 64).unwrap();
+        let scheduler = Scheduler::new(2, 64, DEFAULT_QUEUE_BYTE_CAPACITY).unwrap();
         let mut requests = Vec::new();
         for byte in 1..=32u8 {
             requests.push(scheduler.dispatch(

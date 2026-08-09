@@ -20,7 +20,6 @@ use crate::layout::StorePaths;
 use blake3::Hasher;
 use residiuum_format::{FRAME_PREFIX_LEN, FRAME_SUFFIX_LEN, START_MAGIC};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -359,7 +358,7 @@ impl ShadowDualStream {
         env[8..24].copy_from_slice(&store_id);
         env[24..40].copy_from_slice(&segment_id);
         // encoded_len left 0 until finalize
-        file.write_all(&env)?;
+        crate::positioned_io::write_all_at(&mut file, 0, &env)?;
         Ok(Self {
             store_id,
             segment_id,
@@ -424,8 +423,7 @@ impl ShadowDualStream {
         crate::failpoint::hit("rshd4.shadow.flush")?;
         // Image follows the envelope placeholder.
         let pos = DUAL_ENVELOPE_LEN as u64 + self.image_len - self.buf.len() as u64;
-        self.file.seek(SeekFrom::Start(pos))?;
-        self.file.write_all(&self.buf)?;
+        crate::positioned_io::write_all_at(&mut self.file, pos, &self.buf)?;
         self.buf.clear();
         Ok(())
     }
@@ -464,11 +462,9 @@ impl ShadowDualStream {
         env[8..24].copy_from_slice(&self.store_id);
         env[24..40].copy_from_slice(&self.segment_id);
         env[40..48].copy_from_slice(&encoded_len.to_le_bytes());
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&env)?;
+        crate::positioned_io::write_all_at(&mut self.file, 0, &env)?;
         let commit_off = DUAL_ENVELOPE_LEN as u64 + encoded_len;
-        self.file.seek(SeekFrom::Start(commit_off))?;
-        self.file.write_all(&commit)?;
+        crate::positioned_io::write_all_at(&mut self.file, commit_off, &commit)?;
         self.file.set_len(commit_off + HASH_LEN as u64)?;
 
         let out = PreparedShadowPublish {
@@ -534,12 +530,10 @@ impl ShadowDualStream {
         env[8..24].copy_from_slice(&self.store_id);
         env[24..40].copy_from_slice(&self.segment_id);
         env[40..48].copy_from_slice(&encoded_len.to_le_bytes());
-        self.file.seek(SeekFrom::Start(0))?;
-        self.file.write_all(&env)?;
+        crate::positioned_io::write_all_at(&mut self.file, 0, &env)?;
         // Commitment after image.
         let commit_off = DUAL_ENVELOPE_LEN as u64 + encoded_len;
-        self.file.seek(SeekFrom::Start(commit_off))?;
-        self.file.write_all(&commit)?;
+        crate::positioned_io::write_all_at(&mut self.file, commit_off, &commit)?;
         self.file.set_len(commit_off + HASH_LEN as u64)?;
         timing.encode_ns = t_enc.elapsed().as_nanos() as u64;
         timing.bytes_written = DUAL_ENVELOPE_LEN as u64 + encoded_len + HASH_LEN as u64;

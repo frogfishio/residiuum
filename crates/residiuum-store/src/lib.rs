@@ -63,6 +63,7 @@ mod lifecycle;
 mod media;
 mod media_inventory;
 mod migrate;
+mod positioned_io;
 mod protected_pair;
 
 pub use protected_pair::recover_protected_pairs;

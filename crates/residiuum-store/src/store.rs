@@ -7815,7 +7815,6 @@ impl Store {
                             writer.zeroed_thru = ready;
                         }
                     }
-                    writer.file.seek(SeekFrom::Start(writer.durable_len))?;
                     // DEF-022: optional short-write injection mid-append.
                     if crate::failpoint::consume_short_write("store.active.write_tail.short_write")
                     {
@@ -7823,7 +7822,12 @@ impl Store {
                         let t0 = std::time::Instant::now();
                         if n > 0 {
                             let pending = &writer.segment.as_bytes()[start..start + n];
-                            writer.file.write_all(pending)?;
+                            let write_offset = writer.durable_len;
+                            crate::positioned_io::write_all_at(
+                                &mut writer.file,
+                                write_offset,
+                                pending,
+                            )?;
                             // Do not advance durable_len past the short write so a
                             // later retry could rewrite; crash/drop leaves torn bytes.
                             writer.durable_len += n as u64;
@@ -7840,7 +7844,12 @@ impl Store {
                     let t0 = std::time::Instant::now();
                     let dual_err = {
                         let pending = &writer.segment.as_bytes()[start..];
-                        writer.file.write_all(pending)?;
+                        let write_offset = writer.durable_len;
+                        crate::positioned_io::write_all_at(
+                            &mut writer.file,
+                            write_offset,
+                            pending,
+                        )?;
                         // Paired Shadow staging write (no sync; independent alloc).
                         if let Some(dual) = writer.shadow_dual.as_mut() {
                             if let Err(e) = dual.append_image_chunk(pending) {
@@ -7978,8 +7987,11 @@ impl Store {
         if writer.coalesce_buf.is_empty() {
             return Ok(());
         }
-        writer.file.seek(SeekFrom::Start(writer.coalesce_off))?;
-        writer.file.write_all(&writer.coalesce_buf)?;
+        crate::positioned_io::write_all_at(
+            &mut writer.file,
+            writer.coalesce_off,
+            &writer.coalesce_buf,
+        )?;
         if let Some(dual) = writer.shadow_dual.as_mut() {
             dual.append_image_chunk(&writer.coalesce_buf)?;
         }

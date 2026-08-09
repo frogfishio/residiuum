@@ -352,6 +352,11 @@ fn smart_client_durable_retained_media_campaign() {
         "group_commit": {
             "submitted": inspection.operation_commits.submitted,
             "submitted_bytes": inspection.operation_commits.submitted_bytes,
+            "admitted_byte_capacity": inspection.operation_commits.admitted_byte_capacity,
+            "admitted_bytes": inspection.operation_commits.admitted_bytes,
+            "peak_admitted_bytes": inspection.operation_commits.peak_admitted_bytes,
+            "byte_admission_waits": inspection.operation_commits.byte_admission_waits,
+            "oversized_admissions": inspection.operation_commits.oversized_admissions,
             "cohorts": inspection.operation_commits.cohorts,
             "committed": inspection.operation_commits.committed,
             "deduplicated": inspection.operation_commits.deduplicated,

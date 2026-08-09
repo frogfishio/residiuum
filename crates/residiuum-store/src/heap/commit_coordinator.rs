@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 const MAX_COHORT_ENTRIES: usize = 1_024;
 const MAX_COHORT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ADMITTED_BYTES: usize = 2 * MAX_COHORT_BYTES;
 const MAX_COLLECTION_DELAY: Duration = Duration::from_micros(250);
 
 /// Redacted deployment-wide durable cohort counters.
@@ -21,6 +22,16 @@ pub struct OperationCommitStats {
     pub submitted: u64,
     /// Encoded subject/body bytes admitted to the coordinator.
     pub submitted_bytes: u64,
+    /// Byte-credit capacity shared by queued and currently installing work.
+    pub admitted_byte_capacity: usize,
+    /// Byte credits held by queued and currently installing work.
+    pub admitted_bytes: usize,
+    /// Highest observed admitted-byte credit usage.
+    pub peak_admitted_bytes: usize,
+    /// Submissions that waited for byte credits.
+    pub byte_admission_waits: u64,
+    /// Operations larger than the byte-credit window, admitted exclusively.
+    pub oversized_admissions: u64,
     /// Physical stable-boundary cohorts attempted.
     pub cohorts: u64,
     /// Individual operations that returned a successful new commit.
@@ -46,6 +57,10 @@ pub struct OperationCommitStats {
 struct CoordinatorCounters {
     submitted: AtomicU64,
     submitted_bytes: AtomicU64,
+    admitted_bytes: AtomicUsize,
+    peak_admitted_bytes: AtomicUsize,
+    byte_admission_waits: AtomicU64,
+    oversized_admissions: AtomicU64,
     cohorts: AtomicU64,
     committed: AtomicU64,
     deduplicated: AtomicU64,
@@ -62,6 +77,11 @@ impl CoordinatorCounters {
         OperationCommitStats {
             submitted: self.submitted.load(Ordering::Relaxed),
             submitted_bytes: self.submitted_bytes.load(Ordering::Relaxed),
+            admitted_byte_capacity: MAX_ADMITTED_BYTES,
+            admitted_bytes: self.admitted_bytes.load(Ordering::Acquire),
+            peak_admitted_bytes: self.peak_admitted_bytes.load(Ordering::Relaxed),
+            byte_admission_waits: self.byte_admission_waits.load(Ordering::Relaxed),
+            oversized_admissions: self.oversized_admissions.load(Ordering::Relaxed),
             cohorts: self.cohorts.load(Ordering::Relaxed),
             committed: self.committed.load(Ordering::Relaxed),
             deduplicated: self.deduplicated.load(Ordering::Relaxed),
@@ -87,12 +107,14 @@ struct PendingOperation {
     condition: WriteCondition,
     operation_id: [u8; 16],
     content_hash: [u8; 32],
+    credit_bytes: usize,
     reply: SyncSender<Result<(WriteReceipt, bool), StoreError>>,
 }
 
 struct CoordinatorState {
     queue: VecDeque<PendingOperation>,
     queued_bytes: usize,
+    admitted_credit_bytes: usize,
     shutdown: bool,
 }
 
@@ -117,6 +139,7 @@ impl OperationCommitCoordinator {
             state: Mutex::new(CoordinatorState {
                 queue: VecDeque::new(),
                 queued_bytes: 0,
+                admitted_credit_bytes: 0,
                 shutdown: false,
             }),
             wake: Condvar::new(),
@@ -142,15 +165,50 @@ impl OperationCommitCoordinator {
     ) -> Result<(WriteReceipt, bool), StoreError> {
         let (reply, result) = mpsc::sync_channel(1);
         let bytes = subject.len().saturating_add(body.len());
+        let credit_bytes = bytes.min(MAX_ADMITTED_BYTES);
         {
             let mut state = self
                 .inner
                 .state
                 .lock()
                 .map_err(|_| StoreError::CorruptMeta("commit coordinator lock poisoned"))?;
+            let mut waited = false;
+            while !state.shutdown
+                && state.admitted_credit_bytes > MAX_ADMITTED_BYTES.saturating_sub(credit_bytes)
+            {
+                if !waited {
+                    waited = true;
+                    self.inner
+                        .counters
+                        .byte_admission_waits
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                state = self
+                    .inner
+                    .wake
+                    .wait(state)
+                    .map_err(|_| StoreError::CorruptMeta("commit coordinator lock poisoned"))?;
+            }
             if state.shutdown {
                 return Err(StoreError::CorruptMeta("commit coordinator stopped"));
             }
+            if bytes > MAX_ADMITTED_BYTES {
+                self.inner
+                    .counters
+                    .oversized_admissions
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            state.admitted_credit_bytes = state
+                .admitted_credit_bytes
+                .saturating_add(credit_bytes);
+            self.inner
+                .counters
+                .admitted_bytes
+                .store(state.admitted_credit_bytes, Ordering::Release);
+            self.inner
+                .counters
+                .peak_admitted_bytes
+                .fetch_max(state.admitted_credit_bytes, Ordering::Relaxed);
             state.queued_bytes = state.queued_bytes.saturating_add(bytes);
             state.queue.push_back(PendingOperation {
                 subject,
@@ -158,6 +216,7 @@ impl OperationCommitCoordinator {
                 condition,
                 operation_id,
                 content_hash,
+                credit_bytes,
                 reply,
             });
             self.inner
@@ -261,6 +320,9 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
             .saturating_add(pending.subject.len())
             .saturating_add(pending.body.len())
     });
+    let batch_credits = batch.iter().fold(0usize, |total, pending| {
+        total.saturating_add(pending.credit_bytes)
+    });
     inner.counters.cohorts.fetch_add(1, Ordering::Relaxed);
     inner
         .counters
@@ -285,6 +347,9 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
         .lock()
         .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))
         .and_then(|mut store| store.put_operation_cohort_awo_owned(&requests));
+    // The byte window covers queued data plus physical installation. Outcome
+    // delivery retains no subject/body ownership requirement for admission.
+    release_byte_credits(inner, batch_credits);
 
     match outcomes {
         Ok(outcomes) if outcomes.len() == batch.len() => {
@@ -340,10 +405,84 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
     }
 }
 
+fn release_byte_credits(inner: &CoordinatorInner, credits: usize) {
+    if let Ok(mut state) = inner.state.lock() {
+        state.admitted_credit_bytes = state.admitted_credit_bytes.saturating_sub(credits);
+        inner
+            .counters
+            .admitted_bytes
+            .store(state.admitted_credit_bytes, Ordering::Release);
+        inner.wake.notify_all();
+    }
+}
+
 fn fail_batch(batch: Vec<PendingOperation>, detail: &str) {
     for pending in batch {
         let _ = pending.reply.send(Err(StoreError::Io(std::io::Error::other(
             detail.to_string(),
         ))));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Store;
+
+    #[test]
+    fn byte_credits_bound_queue_plus_install_and_release_after_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let physical = Arc::new(Mutex::new(Store::create(directory.path()).unwrap()));
+        let coordinator = OperationCommitCoordinator::start(Arc::clone(&physical));
+        let physical_guard = physical.lock().unwrap();
+        let body_bytes = 16 * 1024 * 1024;
+
+        let first = {
+            let coordinator = Arc::clone(&coordinator);
+            thread::spawn(move || {
+                coordinator.submit(
+                    b"credit/first".to_vec(),
+                    vec![0x41; body_bytes],
+                    WriteCondition::Unconditional,
+                    [0x11; 16],
+                    [0x21; 32],
+                )
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while coordinator.stats().admitted_bytes < body_bytes {
+            assert!(Instant::now() < deadline, "first operation was not admitted");
+            thread::yield_now();
+        }
+
+        let second = {
+            let coordinator = Arc::clone(&coordinator);
+            thread::spawn(move || {
+                coordinator.submit(
+                    b"credit/second".to_vec(),
+                    vec![0x42; body_bytes],
+                    WriteCondition::Unconditional,
+                    [0x12; 16],
+                    [0x22; 32],
+                )
+            })
+        };
+
+        while coordinator.stats().byte_admission_waits == 0 {
+            assert!(Instant::now() < deadline, "second operation did not wait for credits");
+            thread::yield_now();
+        }
+        let blocked = coordinator.stats();
+        assert!(blocked.admitted_bytes <= blocked.admitted_byte_capacity);
+        assert!(blocked.peak_admitted_bytes <= blocked.admitted_byte_capacity);
+
+        drop(physical_guard);
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        let complete = coordinator.stats();
+        assert_eq!(complete.admitted_bytes, 0);
+        assert!(complete.byte_admission_waits >= 1);
+        assert!(complete.peak_admitted_bytes <= complete.admitted_byte_capacity);
     }
 }
