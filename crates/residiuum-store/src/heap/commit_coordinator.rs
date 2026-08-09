@@ -14,7 +14,11 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-const MAX_COHORT_ENTRIES: usize = 1_024;
+// 8 KiB product records previously hit the 1,024-entry ceiling at ~8 MiB,
+// leaving the already-qualified 16 MiB byte bound unused and doubling stable
+// boundaries. Keep bytes authoritative; this entry cap only prevents tiny-row
+// cohorts from growing without bound.
+const MAX_COHORT_ENTRIES: usize = 2_048;
 const MAX_COHORT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_ADMITTED_BYTES: usize = 2 * MAX_COHORT_BYTES;
 const MAX_COLLECTION_DELAY: Duration = Duration::from_micros(250);
