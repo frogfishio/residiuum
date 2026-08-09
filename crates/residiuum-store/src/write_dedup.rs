@@ -20,6 +20,8 @@ pub const WRITE_DEDUP_FILE: &str = "write_dedup.v1";
 /// Append-only derived outcome journal. The authoritative item-event envelope
 /// remains the recovery source; this file is the bounded fast-lookup path.
 pub const WRITE_DEDUP_JOURNAL_FILE: &str = "write_dedup.journal.v1";
+/// Clean/dirty marker for detecting an unjournaled outcome after process loss.
+pub const WRITE_DEDUP_SESSION_FILE: &str = "write_dedup.session.v1";
 
 const MAGIC: &[u8; 8] = b"RDED0001";
 const VERSION: u32 = 1;
@@ -94,6 +96,47 @@ pub fn write_dedup_journal_path(paths: &StorePaths) -> PathBuf {
     paths.store_info().join(WRITE_DEDUP_JOURNAL_FILE)
 }
 
+/// Whether the preceding writer closed after every accepted operation outcome
+/// had crossed the journal boundary.
+pub fn write_dedup_session_clean(paths: &StorePaths) -> bool {
+    let Ok(marker) = fs::read_to_string(paths.store_info().join(WRITE_DEDUP_SESSION_FILE)) else {
+        return false;
+    };
+    let mut lines = marker.lines();
+    if lines.next() != Some("clean") {
+        return false;
+    }
+    let Some(expected_len) = lines.next().and_then(|value| value.parse::<u64>().ok()) else {
+        return false;
+    };
+    if lines.next().is_some() {
+        return false;
+    }
+    let journal = write_dedup_journal_path(paths);
+    let observed_len = fs::metadata(journal).map(|meta| meta.len()).unwrap_or(0);
+    observed_len == expected_len
+}
+
+/// Mark the current writer session dirty before accepting mutations.
+pub fn mark_write_dedup_session_dirty(paths: &StorePaths) -> Result<(), StoreError> {
+    crate::atomic_file::write_atomic(
+        &paths.store_info().join(WRITE_DEDUP_SESSION_FILE),
+        b"dirty\n",
+    )
+}
+
+/// Mark a fully reconciled writer session clean during orderly close.
+pub fn mark_write_dedup_session_clean(paths: &StorePaths) -> Result<(), StoreError> {
+    let journal_len = fs::metadata(write_dedup_journal_path(paths))
+        .map(|meta| meta.len())
+        .unwrap_or(0);
+    let marker = format!("clean\n{journal_len}\n");
+    crate::atomic_file::write_atomic(
+        &paths.store_info().join(WRITE_DEDUP_SESSION_FILE),
+        marker.as_bytes(),
+    )
+}
+
 /// Content identity over mutation fields (DEF-010).
 ///
 /// Covers operation name, collection, key, and payload bytes. Durability is
@@ -111,18 +154,16 @@ pub fn content_identity(op: &str, collection: &str, key: &str, payload: &[u8]) -
     *h.finalize().as_bytes()
 }
 
-/// Load dedup table when present and valid; otherwise empty.
-///
-/// Tries the previous known-good generation when the primary fails validation
-/// (DEF-021). Loss of the table affects fast lookup only; new-profile segment
-/// envelopes retain authoritative retry evidence for on-demand reconstruction.
-pub fn load_write_dedup(path: &Path) -> Result<WriteDedupTable, StoreError> {
+/// Load the fast outcome ledger and report whether every journal byte formed a
+/// valid checksummed record. An invalid suffix requires media reconciliation.
+pub(crate) fn load_write_dedup_checked(path: &Path) -> Result<(WriteDedupTable, bool), StoreError> {
     let mut table = load_write_dedup_checkpoint(path);
     let journal = path.with_file_name(WRITE_DEDUP_JOURNAL_FILE);
     if let Ok(bytes) = fs::read(journal) {
-        replay_journal(&bytes, &mut table);
+        let complete = replay_journal(&bytes, &mut table);
+        return Ok((table, complete));
     }
-    Ok(table)
+    Ok((table, true))
 }
 
 fn load_write_dedup_checkpoint(path: &Path) -> WriteDedupTable {
@@ -178,7 +219,9 @@ pub fn append_write_dedup_batch(
         file.write_all(&encode_journal_record(*operation_id, record))?;
     }
     file.sync_data()?;
-    crate::failpoint::hit("store.dedup.after_append")?;
+    // Historical crash-cell id retained even though the outcome ledger is now
+    // append-only rather than an atomic-file rename.
+    crate::failpoint::hit("store.dedup.after_rename")?;
     Ok(())
 }
 
@@ -189,6 +232,23 @@ pub fn save_write_dedup(path: &Path, table: &WriteDedupTable) -> Result<(), Stor
     crate::atomic_file::write_atomic_keep_previous(path, &bytes)?;
     crate::failpoint::hit("store.dedup.after_rename")?;
     Ok(())
+}
+
+/// Replace a damaged journal with a complete checksummed image of the current
+/// ledger. This is used only after authoritative media reconciliation.
+pub(crate) fn rewrite_write_dedup_journal(
+    path: &Path,
+    table: &WriteDedupTable,
+) -> Result<(), StoreError> {
+    let mut bytes = Vec::with_capacity(
+        JOURNAL_HEADER_LEN.saturating_add(table.map.len().saturating_mul(JOURNAL_RECORD_LEN)),
+    );
+    bytes.extend_from_slice(JOURNAL_MAGIC);
+    bytes.extend_from_slice(&JOURNAL_VERSION.to_le_bytes());
+    for (operation_id, record) in &table.map {
+        bytes.extend_from_slice(&encode_journal_record(*operation_id, record));
+    }
+    crate::atomic_file::write_atomic(path, &bytes)
 }
 
 fn encode_table(table: &WriteDedupTable) -> Vec<u8> {
@@ -237,12 +297,12 @@ fn encode_record_payload(out: &mut Vec<u8>, rec: &DedupRecord) {
     out.extend_from_slice(&rec.offset.to_le_bytes());
 }
 
-fn replay_journal(bytes: &[u8], table: &mut WriteDedupTable) {
+fn replay_journal(bytes: &[u8], table: &mut WriteDedupTable) -> bool {
     if bytes.len() < JOURNAL_HEADER_LEN
         || &bytes[..8] != JOURNAL_MAGIC
         || u32::from_le_bytes(bytes[8..12].try_into().unwrap()) != JOURNAL_VERSION
     {
-        return;
+        return false;
     }
     let mut cursor = JOURNAL_HEADER_LEN;
     while cursor + JOURNAL_RECORD_LEN <= bytes.len() {
@@ -260,6 +320,7 @@ fn replay_journal(bytes: &[u8], table: &mut WriteDedupTable) {
         table.insert(operation_id, decoded);
         cursor += JOURNAL_RECORD_LEN;
     }
+    cursor == bytes.len()
 }
 
 fn decode_record_payload(bytes: &[u8]) -> Option<DedupRecord> {

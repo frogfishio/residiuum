@@ -474,6 +474,8 @@ pub struct ClientInspection {
     pub cancelled_before_dispatch: u64,
     /// Whether shared shutdown began.
     pub closed: bool,
+    /// Deployment-wide durable group-commit counters.
+    pub operation_commits: residiuum_store::OperationCommitStats,
 }
 
 /// Async connection to one physical Residiuum deployment.
@@ -571,7 +573,9 @@ impl Client {
 
     /// Redacted bounded scheduler state; performs no store scan.
     pub fn inspect(&self) -> ClientInspection {
-        self.scheduler.inspect()
+        let mut inspection = self.scheduler.inspect();
+        inspection.operation_commits = self.deployment.operation_commit_stats();
+        inspection
     }
 
     /// Close the physical connection's shared scheduler.
@@ -1706,6 +1710,7 @@ impl Scheduler {
                 .cancelled_before_dispatch
                 .load(Ordering::Relaxed),
             closed: self.closed.load(Ordering::Acquire),
+            operation_commits: residiuum_store::OperationCommitStats::default(),
         }
     }
 

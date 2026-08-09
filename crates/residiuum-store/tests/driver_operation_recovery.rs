@@ -150,6 +150,62 @@ fn delete_retry_recovers_tombstone_without_writing_another_delete() {
 }
 
 #[test]
+fn clean_marker_does_not_hide_a_corrupt_outcome_journal() {
+    let _guard = suite_lock();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("store");
+    let operation_id = [0xa1; 16];
+    let content_hash = [0xb2; 32];
+    let original_event_id;
+
+    {
+        let mut store = Store::create(&root).unwrap();
+        let (receipt, replayed) = store
+            .put_subject_bytes_with_operation(
+                b"conversation/journal-corruption",
+                b"document-v1",
+                DurabilityMode::Durable,
+                WriteCondition::Unconditional,
+                operation_id,
+                content_hash,
+            )
+            .unwrap();
+        assert!(!replayed);
+        original_event_id = receipt.event_id;
+    }
+
+    let journal = root
+        .join("store-info")
+        .join(residiuum_store::WRITE_DEDUP_JOURNAL_FILE);
+    let mut bytes = std::fs::read(&journal).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    std::fs::write(&journal, bytes).unwrap();
+
+    let mut store = Store::open(&root).unwrap();
+    let (receipt, replayed) = store
+        .put_subject_bytes_with_operation(
+            b"conversation/journal-corruption",
+            b"document-v1",
+            DurabilityMode::Durable,
+            WriteCondition::Unconditional,
+            operation_id,
+            content_hash,
+        )
+        .unwrap();
+    assert!(replayed);
+    assert_eq!(receipt.event_id, original_event_id);
+    assert_eq!(
+        store
+            .history("conversation/journal-corruption")
+            .unwrap()
+            .events
+            .len(),
+        1
+    );
+}
+
+#[test]
 fn compaction_reconciles_operation_ledger_before_reclaiming_source_evidence() {
     let _guard = suite_lock();
     let directory = tempfile::tempdir().unwrap();

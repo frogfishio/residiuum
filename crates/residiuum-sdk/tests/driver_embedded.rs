@@ -387,6 +387,15 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
     }
     assert_eq!(client.inspect().workers, 2);
     assert_eq!(client.inspect().queue_capacity, 8);
+    let commits = client.inspect().operation_commits;
+    assert_eq!(commits.submitted, 8);
+    assert_eq!(commits.committed, 8);
+    assert_eq!(commits.failed, 0);
+    assert!(
+        commits.cohorts < commits.submitted,
+        "concurrent durable acknowledgements must share physical cohorts: {commits:?}"
+    );
+    assert!(commits.max_cohort_entries >= 2);
 
     let options = PutOptions {
         context: OperationContext {

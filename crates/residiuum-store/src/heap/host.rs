@@ -12,11 +12,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use super::commit_coordinator::{OperationCommitCoordinator, OperationCommitStats};
 use super::HeapStore;
 
 /// Deployment-level host. Exposes no get/put/scan of application data.
 pub struct StoreHost {
     physical: Arc<Mutex<PhysicalStore>>,
+    commits: Arc<OperationCommitCoordinator>,
     root: PathBuf,
     /// Optional AWO handle (None for ordinary create/open).
     adaptive: Option<AdaptiveWriteHandle>,
@@ -26,8 +28,10 @@ impl StoreHost {
     /// Open an existing store directory as a host.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
+        let physical = Arc::new(Mutex::new(PhysicalStore::open(path)?));
         Ok(Self {
-            physical: Arc::new(Mutex::new(PhysicalStore::open(path)?)),
+            commits: OperationCommitCoordinator::start(Arc::clone(&physical)),
+            physical,
             root: path.to_path_buf(),
             adaptive: None,
         })
@@ -36,8 +40,10 @@ impl StoreHost {
     /// Create a new store directory as a host.
     pub fn create(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         let path = path.as_ref();
+        let physical = Arc::new(Mutex::new(PhysicalStore::create(path)?));
         Ok(Self {
-            physical: Arc::new(Mutex::new(PhysicalStore::create(path)?)),
+            commits: OperationCommitCoordinator::start(Arc::clone(&physical)),
+            physical,
             root: path.to_path_buf(),
             adaptive: None,
         })
@@ -123,6 +129,7 @@ impl StoreHost {
     /// paths do not double-open the writer lock.
     pub fn from_shared(physical: Arc<Mutex<PhysicalStore>>, root: impl Into<PathBuf>) -> Self {
         Self {
+            commits: OperationCommitCoordinator::start(Arc::clone(&physical)),
             physical,
             root: root.into(),
             adaptive: None,
@@ -136,6 +143,7 @@ impl StoreHost {
     pub fn open_heap(&self, cap: HeapCap) -> HeapStore {
         HeapStore::from_host_with_adaptive(
             Arc::clone(&self.physical),
+            Arc::clone(&self.commits),
             cap,
             self.adaptive.clone(),
         )
@@ -160,6 +168,11 @@ impl StoreHost {
             .lock()
             .map(|store| store.open_report())
             .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))
+    }
+
+    /// Deployment-wide durable group-commit counters; performs no store scan.
+    pub fn operation_commit_stats(&self) -> OperationCommitStats {
+        self.commits.stats()
     }
 
     /// Adaptive-write handle if attached via `*_with_adaptive_write`.

@@ -201,7 +201,8 @@ pub use heap::{
     HsmBackendKind, HsmCapabilities, HsmDataKeyConfig, HsmDataKeyProvider, IdentityTombstone,
     IncompletePurgeResult, InProcessDataKeyProvider, InventoryFrame, InventorySegment,
     MaintenanceStore, MediaDomain, MigrationPhase, MigrationStateV1, MixedHeapSalvageClass,
-    ObjectCatalogEntry, ObjectKind, PayloadOnlyRestore, PurgeCoverageUnit, PurgePlan, PurgeReceipt,
+    ObjectCatalogEntry, ObjectKind, OperationCommitStats, PayloadOnlyRestore, PurgeCoverageUnit,
+    PurgePlan, PurgeReceipt,
     RecoveryStore, ReplicaStore, RetentionScheduler, SourceInventory, StagedGenesis, StoreHost,
     VersionedCollectionScanPage, VersionedCollectionValue,
     TombstoneKind, ADMIN_OP_DEDUP_FILE, COLLECTION_CREATE_OP,
@@ -317,9 +318,9 @@ pub use segment_growth::{
 pub use incremental_seal::ContentHashState;
 pub use store::{
     subject_writer_shard, IncompleteReason, IndexBuildPage, IndexCacheDecision,
-    IndexOpenDisposition, LiveIncomplete, LiveLogicalScan, RotationStageTotals, SalvageCopyReport,
-    SalvageReport, SealStageBreakdown, StoreOpenMetrics, StoreOpenReport, WriteReceipt,
-    MAX_WRITER_SHARDS,
+    IndexOpenDisposition, LiveIncomplete, LiveLogicalScan, OperationPut, OperationPutOutcome,
+    RotationStageTotals, SalvageCopyReport, SalvageReport, SealStageBreakdown, StoreOpenMetrics,
+    StoreOpenReport, WriteReceipt, MAX_WRITER_SHARDS,
 };
 /// Legacy unscoped store API. Prefer [`StoreHost`] / [`HeapStore`] on the
 /// qualified heap path (`--no-default-features` hides this export).

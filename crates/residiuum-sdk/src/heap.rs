@@ -89,6 +89,11 @@ impl ResidiuumDeployment {
     pub fn open_report(&self) -> Result<residiuum_store::StoreOpenReport, Error> {
         Ok(self.host.open_report()?)
     }
+
+    /// Durable group-commit counters from the shared physical deployment.
+    pub fn operation_commit_stats(&self) -> residiuum_store::OperationCommitStats {
+        self.host.operation_commit_stats()
+    }
 }
 
 /// Heap handle bound to exactly one [`HeapCap`].

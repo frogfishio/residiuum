@@ -14,6 +14,8 @@ use residiuum_heap::{refresh_capability_or_terminate, HeapCap, Rights};
 use serde_json::Value as JsonValue;
 use std::sync::{Arc, Mutex};
 
+use super::commit_coordinator::OperationCommitCoordinator;
+
 /// Why a collection key could not contribute a complete body during heap scan.
 ///
 /// Distinct failure modes (DEF-SCAN-001) — do not collapse into one bucket.
@@ -233,6 +235,7 @@ impl CollectionScanPage {
 /// Capability-gated heap store. All methods re-check capability liveness.
 pub struct HeapStore {
     physical: Arc<Mutex<PhysicalStore>>,
+    commits: Arc<OperationCommitCoordinator>,
     cap: HeapCap,
     /// When present and lease-active, puts/deletes admit through AWO (AWO-3).
     adaptive: Option<AdaptiveWriteHandle>,
@@ -241,11 +244,13 @@ pub struct HeapStore {
 impl HeapStore {
     pub(super) fn from_host_with_adaptive(
         physical: Arc<Mutex<PhysicalStore>>,
+        commits: Arc<OperationCommitCoordinator>,
         cap: HeapCap,
         adaptive: Option<AdaptiveWriteHandle>,
     ) -> Self {
         Self {
             physical,
+            commits,
             cap,
             adaptive,
         }
@@ -491,18 +496,15 @@ impl HeapStore {
             key,
         )
         .map_err(|e| StoreError::HeapAdmit(format!("subject v2 encode: {e}")))?;
-        let result = self
-            .physical
-            .lock()
-            .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))?
-            .put_subject_bytes_with_operation(
-                &subject,
-                value,
-                DurabilityMode::Durable,
-                condition,
-                operation_id,
-                content_hash,
-            )?;
+        // Validation remains capability-local; the deployment coordinator owns
+        // the lock so concurrent independent puts can share stable boundaries.
+        let result = self.commits.submit(
+            subject,
+            value.to_vec(),
+            condition,
+            operation_id,
+            content_hash,
+        )?;
         self.mark_indexes_stale(collection_id)?;
         Ok(result)
     }

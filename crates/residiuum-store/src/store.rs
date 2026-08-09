@@ -55,8 +55,10 @@ use crate::tier::{
 };
 use crate::token_keys::ContinuationKeyring;
 use crate::write_dedup::{
-    append_write_dedup, load_write_dedup, save_write_dedup, write_dedup_journal_path,
-    write_dedup_path, DedupRecord, WriteDedupTable,
+    append_write_dedup, append_write_dedup_batch, load_write_dedup_checked,
+    mark_write_dedup_session_clean, mark_write_dedup_session_dirty, rewrite_write_dedup_journal,
+    save_write_dedup, write_dedup_journal_path, write_dedup_path, write_dedup_session_clean,
+    DedupRecord, WriteDedupTable,
 };
 use crate::writer_lock::{StoreOpenOptions, WriterLock, WriterLockObservation};
 use residiuum_format::{
@@ -289,6 +291,30 @@ pub struct WriteReceipt {
     pub chunk_count: u32,
     /// Effective large-value profile id at write time (DEF-103).
     pub profile_id: String,
+}
+
+/// One operation-bearing put admitted to a shared durable commit cohort.
+#[derive(Debug, Clone, Copy)]
+pub struct OperationPut<'a> {
+    /// Fully encoded storage subject.
+    pub subject: &'a [u8],
+    /// Encoded application body.
+    pub body: &'a [u8],
+    /// Key-atomic condition evaluated in cohort order.
+    pub condition: WriteCondition,
+    /// Stable client mutation identity.
+    pub operation_id: [u8; 16],
+    /// Canonical identity of the complete logical mutation.
+    pub content_hash: [u8; 32],
+}
+
+/// Individual result from a durable operation cohort.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationPutOutcome {
+    /// Durable storage receipt.
+    pub receipt: WriteReceipt,
+    /// True when an earlier authoritative acceptance supplied the receipt.
+    pub deduplicated: bool,
 }
 
 impl WriteReceipt {
@@ -545,6 +571,8 @@ pub struct Store {
     writer_lock: Option<WriterLock>,
     /// Client operation dedup table (DEF-010); empty when unused.
     write_dedup: WriteDedupTable,
+    /// Previous process ended before certifying its outcome journal complete.
+    write_dedup_recovery_required: bool,
     /// Background seal/checkpoint worker (DEF-096 Axis A). Writer opens only.
     seal_pipeline: Option<SealPipeline>,
     /// When true, auto-seal on threshold uses O(1) rotate + background finalize.
@@ -825,6 +853,7 @@ impl Store {
             last_catalog_checkpoint_at: Instant::now(),
             writer_lock: Some(writer_lock),
             write_dedup: WriteDedupTable::new(),
+            write_dedup_recovery_required: false,
             seal_pipeline: Some(SealPipeline::start()),
             async_lifecycle: true,
             enrichment_enabled: true,
@@ -861,6 +890,11 @@ impl Store {
         // Durable product mode marker — missing on legacy trees ⇒ Materialized.
         crate::recovery_shadow::persist_recovery_mode(&store.paths, store.store_id, recovery_mode)?;
         store.apply_recovery_mode(recovery_mode);
+        // A missing/dirty marker means the next writer must reconcile any
+        // authoritative operation frame whose outcome journal append was
+        // interrupted. A brand-new store has no such history, but is marked
+        // dirty before it can accept its first mutation.
+        mark_write_dedup_session_dirty(&store.paths)?;
         Ok(store)
     }
 
@@ -917,6 +951,7 @@ impl Store {
             ..StoreOpenMetrics::default()
         };
 
+        let preceding_writer_was_clean = write_dedup_session_clean(&paths);
         let mut store = Self {
             paths,
             store_id,
@@ -941,6 +976,7 @@ impl Store {
             last_catalog_checkpoint_at: Instant::now(),
             writer_lock: Some(writer_lock),
             write_dedup: WriteDedupTable::new(),
+            write_dedup_recovery_required: false,
             seal_pipeline: Some(SealPipeline::start()),
             async_lifecycle: true,
             enrichment_enabled: true,
@@ -1041,7 +1077,9 @@ impl Store {
         };
         open_metrics.allocator_ns = elapsed_ns(phase);
         let phase = Instant::now();
-        store.write_dedup = load_write_dedup(&write_dedup_path(&store.paths))?;
+        let (write_dedup, write_dedup_journal_complete) =
+            load_write_dedup_checked(&write_dedup_path(&store.paths))?;
+        store.write_dedup = write_dedup;
         open_metrics.dedup_ns = elapsed_ns(phase);
         let phase = Instant::now();
         store.resume_or_start_all_actives()?;
@@ -1057,6 +1095,12 @@ impl Store {
         open_metrics.recovery_mode_ns = elapsed_ns(phase);
         open_metrics.total_ns = elapsed_ns(open_started);
         store.open_metrics = open_metrics;
+        store.write_dedup_recovery_required =
+            !preceding_writer_was_clean || !write_dedup_journal_complete;
+        // Establish the crash sentinel before this writer is returned to an
+        // application. It is changed back to clean only by an orderly drop
+        // after any required reconciliation has completed.
+        mark_write_dedup_session_dirty(&store.paths)?;
         Ok(store)
     }
 
@@ -1166,6 +1210,7 @@ impl Store {
             last_catalog_checkpoint_at: Instant::now(),
             writer_lock: None,
             write_dedup: WriteDedupTable::new(),
+            write_dedup_recovery_required: false,
             seal_pipeline: None,
             async_lifecycle: false,
             enrichment_enabled: false,
@@ -3126,54 +3171,6 @@ impl Store {
         }
     }
 
-    /// Recover an idempotent mutation outcome from authoritative item-event
-    /// envelopes when the derived dedup table missed the post-append update.
-    fn recover_write_dedup_from_media(
-        &self,
-        operation_id: &[u8; 16],
-        content_hash: &[u8; 32],
-        durability: DurabilityMode,
-    ) -> Result<Option<WriteReceipt>, StoreError> {
-        for path in all_segment_paths(
-            &self.paths,
-            Some(&self.tier_placement),
-            self.writer_shards(),
-        )? {
-            let bytes = fs::read(path)?;
-            let report = scan_forward(&bytes, self.limits);
-            for (offset, frame) in report.verified_frames() {
-                if frame.header.known_kind() != Some(FrameKind::ItemEvent) {
-                    continue;
-                }
-                let Some(envelope) = decode_item_envelope(&frame.envelope) else {
-                    continue;
-                };
-                // An identity-reassigned restore is a new operation namespace.
-                // Its byte-identical source segments still carry the former
-                // store id and must not replay commands accepted by that store.
-                if envelope.store_id != self.store_id {
-                    continue;
-                }
-                if envelope.operation_id.as_ref() != Some(operation_id) {
-                    continue;
-                }
-                if envelope.operation_content_hash.as_ref() != Some(content_hash) {
-                    return Err(StoreError::OperationIdentityConflict);
-                }
-                return Ok(Some(WriteReceipt::base(
-                    envelope.store_id,
-                    envelope.segment_id,
-                    envelope.item_id,
-                    frame.header.event_id,
-                    envelope.event_kind,
-                    durability,
-                    offset,
-                )));
-            }
-        }
-        Ok(None)
-    }
-
     /// Materialize every on-media operation decision into the durable ledger.
     ///
     /// Live-projection compaction may intentionally reclaim historical item
@@ -3227,7 +3224,18 @@ impl Store {
         }
         // Persist even when every frame was already represented in memory: a
         // prior atomic-file failure can leave the in-memory table ahead of disk.
-        save_write_dedup(&write_dedup_path(&self.paths), &self.write_dedup)
+        save_write_dedup(&write_dedup_path(&self.paths), &self.write_dedup)?;
+        rewrite_write_dedup_journal(&write_dedup_journal_path(&self.paths), &self.write_dedup)
+    }
+
+    /// Pay the authoritative-media reconciliation cost at most once after an
+    /// unclean writer session, never once per new operation.
+    fn ensure_write_dedup_reconciled(&mut self) -> Result<(), StoreError> {
+        if self.write_dedup_recovery_required {
+            self.reconcile_write_dedup_from_media()?;
+            self.write_dedup_recovery_required = false;
+        }
+        Ok(())
     }
 
     /// Persist a successful mutation under `operation_id` (DEF-010).
@@ -3249,11 +3257,16 @@ impl Store {
             durability: receipt.durability,
             offset: receipt.offset,
         };
-        append_write_dedup(
+        if let Err(error) = append_write_dedup(
             &write_dedup_journal_path(&self.paths),
             operation_id,
             &record,
-        )?;
+        ) {
+            // The authoritative frame may already be durable. Do not publish a
+            // clean session marker until its outcome has been reconstructed.
+            self.write_dedup_recovery_required = true;
+            return Err(error);
+        }
         self.write_dedup.insert(operation_id, record);
         Ok(())
     }
@@ -3272,13 +3285,8 @@ impl Store {
         operation_id: [u8; 16],
         content_hash: [u8; 32],
     ) -> Result<(WriteReceipt, bool), StoreError> {
+        self.ensure_write_dedup_reconciled()?;
         if let Some(receipt) = self.resolve_write_dedup(&operation_id, &content_hash)? {
-            return Ok((receipt, true));
-        }
-        if let Some(receipt) =
-            self.recover_write_dedup_from_media(&operation_id, &content_hash, mode)?
-        {
-            self.record_write_dedup(operation_id, content_hash, &receipt)?;
             return Ok((receipt, true));
         }
         self.refuse_direct_mutation_if_awo()?;
@@ -3293,6 +3301,163 @@ impl Store {
         Ok((receipt, false))
     }
 
+    /// Commit independent operation-bearing puts behind shared stable boundaries.
+    ///
+    /// Requests retain individual conditions, identities, receipts and errors.
+    /// Successful new writes append in buffered mode while this exclusive store
+    /// handle prevents outside visibility, then one active-media sync upgrades
+    /// every included receipt to Durable. Operation outcomes are appended and
+    /// synced as one journal cohort before success is returned.
+    pub fn put_operation_cohort_awo_owned(
+        &mut self,
+        items: &[OperationPut<'_>],
+    ) -> Result<Vec<Result<OperationPutOutcome, StoreError>>, StoreError> {
+        if self.awo_writer_poisoned {
+            return Err(StoreError::AdaptiveWriterPoisoned);
+        }
+        if items.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.ensure_write_dedup_reconciled()?;
+
+        let mut outcomes: Vec<Option<Result<OperationPutOutcome, StoreError>>> =
+            (0..items.len()).map(|_| None).collect();
+        let mut owners = HashMap::<[u8; 16], usize>::new();
+        let mut expected = HashMap::<[u8; 16], [u8; 32]>::new();
+        let mut duplicates = Vec::<(usize, usize)>::new();
+
+        for (index, item) in items.iter().enumerate() {
+            match self.resolve_write_dedup(&item.operation_id, &item.content_hash) {
+                Ok(Some(receipt)) => {
+                    outcomes[index] = Some(Ok(OperationPutOutcome {
+                        receipt,
+                        deduplicated: true,
+                    }));
+                }
+                Err(error) => outcomes[index] = Some(Err(error)),
+                Ok(None) => {
+                    if let Some(owner) = owners.get(&item.operation_id).copied() {
+                        if expected[&item.operation_id] == item.content_hash {
+                            duplicates.push((index, owner));
+                        } else {
+                            outcomes[index] = Some(Err(StoreError::OperationIdentityConflict));
+                        }
+                    } else {
+                        owners.insert(item.operation_id, index);
+                        expected.insert(item.operation_id, item.content_hash);
+                    }
+                }
+            }
+        }
+
+        let mut records = Vec::<([u8; 16], DedupRecord)>::new();
+        let mut new_indexes = Vec::<usize>::new();
+
+        for owner in owners.values() {
+            if outcomes[*owner].is_some() {
+                continue;
+            }
+            new_indexes.push(*owner);
+        }
+        new_indexes.sort_unstable();
+
+        for index in new_indexes {
+            let item = &items[index];
+            match self.put_subject_bytes_if_awo_owned_with_identity(
+                item.subject,
+                item.body,
+                DurabilityMode::Buffered,
+                item.condition,
+                Some((item.operation_id, item.content_hash)),
+            ) {
+                Ok(receipt) => {
+                    outcomes[index] = Some(Ok(OperationPutOutcome {
+                        receipt,
+                        deduplicated: false,
+                    }));
+                }
+                Err(error) if operation_request_error(&error) => {
+                    outcomes[index] = Some(Err(error));
+                }
+                Err(error) => {
+                    self.awo_writer_poisoned = true;
+                    return Err(error);
+                }
+            }
+        }
+
+        let has_new = outcomes.iter().any(|outcome| {
+            matches!(
+                outcome,
+                Some(Ok(OperationPutOutcome {
+                    deduplicated: false,
+                    ..
+                }))
+            )
+        });
+        if has_new {
+            if let Err(error) = self.persist_all_actives(DurabilityMode::Durable) {
+                self.awo_writer_poisoned = true;
+                return Err(error);
+            }
+        }
+
+        for (index, outcome) in outcomes.iter_mut().enumerate() {
+            if let Some(Ok(value)) = outcome {
+                if !value.deduplicated {
+                    value.receipt.durability = DurabilityMode::Durable;
+                    records.push((
+                        items[index].operation_id,
+                        dedup_record(items[index].content_hash, &value.receipt),
+                    ));
+                }
+            }
+        }
+
+        let refs: Vec<_> = records.iter().map(|(id, record)| (*id, record)).collect();
+        if let Err(error) = append_write_dedup_batch(&write_dedup_journal_path(&self.paths), &refs)
+        {
+            self.write_dedup_recovery_required = true;
+            return Err(error);
+        }
+        for (operation_id, record) in records {
+            self.write_dedup.insert(operation_id, record);
+        }
+
+        for (index, owner) in duplicates {
+            outcomes[index] = Some(match outcomes[owner].as_ref() {
+                Some(Ok(value)) => Ok(OperationPutOutcome {
+                    receipt: value.receipt.clone(),
+                    deduplicated: true,
+                }),
+                Some(Err(StoreError::KeyExists)) => Err(StoreError::KeyExists),
+                Some(Err(StoreError::VersionConflict { expected, observed })) => {
+                    Err(StoreError::VersionConflict {
+                        expected: *expected,
+                        observed: *observed,
+                    })
+                }
+                Some(Err(StoreError::OperationIdentityConflict)) => {
+                    Err(StoreError::OperationIdentityConflict)
+                }
+                _ => Err(StoreError::ConsistencyViolation(
+                    "operation cohort duplicate owner failed without replayable outcome".into(),
+                )),
+            });
+        }
+
+        outcomes
+            .into_iter()
+            .map(|outcome| {
+                outcome.ok_or_else(|| {
+                    StoreError::ConsistencyViolation(
+                        "operation cohort omitted an individual outcome".into(),
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Atomically resolve or execute an idempotent conditional delete.
     pub fn delete_subject_bytes_with_operation(
         &mut self,
@@ -3302,13 +3467,8 @@ impl Store {
         operation_id: [u8; 16],
         content_hash: [u8; 32],
     ) -> Result<(WriteReceipt, bool), StoreError> {
+        self.ensure_write_dedup_reconciled()?;
         if let Some(receipt) = self.resolve_write_dedup(&operation_id, &content_hash)? {
-            return Ok((receipt, true));
-        }
-        if let Some(receipt) =
-            self.recover_write_dedup_from_media(&operation_id, &content_hash, mode)?
-        {
-            self.record_write_dedup(operation_id, content_hash, &receipt)?;
             return Ok((receipt, true));
         }
         self.refuse_direct_mutation_if_awo()?;
@@ -4153,6 +4313,7 @@ impl Store {
         // but the post-append ledger write was interrupted. Persist that
         // evidence before history-loss compaction is allowed to remove it.
         self.reconcile_write_dedup_from_media()?;
+        self.write_dedup_recovery_required = false;
         let (reclaimed, retained, deleted_ids) = reclaim_source_segments(&self.paths, job)?;
         for id in &deleted_ids {
             self.tier_placement.remove(id);
@@ -8978,6 +9139,30 @@ fn stronger_durability(a: DurabilityMode, b: DurabilityMode) -> DurabilityMode {
     }
 }
 
+fn dedup_record(content_hash: [u8; 32], receipt: &WriteReceipt) -> DedupRecord {
+    DedupRecord {
+        content_hash,
+        store_id: receipt.store_id,
+        segment_id: receipt.segment_id,
+        item_id: receipt.item_id,
+        event_id: receipt.event_id,
+        event_kind: receipt.event_kind,
+        durability: receipt.durability,
+        offset: receipt.offset,
+    }
+}
+
+fn operation_request_error(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::KeyExists
+            | StoreError::VersionConflict { .. }
+            | StoreError::OperationIdentityConflict
+            | StoreError::SubjectTooLong { .. }
+            | StoreError::PayloadTooLarge
+    )
+}
+
 /// Seal/rotate flush strength for an active segment given its max put ack.
 ///
 /// On-disk frames always need at least `Buffered` (bytes handed to the OS).
@@ -9065,6 +9250,22 @@ fn sync_dir(path: &Path) -> Result<(), StoreError> {
         let _ = path;
     }
     Ok(())
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        // A clean marker is a performance assertion, not authority. Publish it
+        // only when this writer completed normally and no unresolved recovery
+        // or failed stable boundary can exist. Any doubt deliberately leaves
+        // the session dirty, making the next operation reconcile from media.
+        if self.writer_lock.is_some()
+            && !self.awo_writer_poisoned
+            && !self.write_dedup_recovery_required
+            && !std::thread::panicking()
+        {
+            let _ = mark_write_dedup_session_clean(&self.paths);
+        }
+    }
 }
 
 #[cfg(test)]

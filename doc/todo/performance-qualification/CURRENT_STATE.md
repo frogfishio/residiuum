@@ -1,7 +1,13 @@
 # Performance qualification — current state
 
-Date: 2026-08-04  
+Date: 2026-08-04 (durable smart-client update: 2026-08-09)
 Status: **authoritative rebaseline**
+
+> The durable smart-client write path has since gained deployment-wide group
+> commit and crash-safe outcome reconciliation. Current implementation truth,
+> residuals and the next measurement gate are recorded in
+> [DURABLE_GROUP_COMMIT_BASELINE_2026_08_09.md](DURABLE_GROUP_COMMIT_BASELINE_2026_08_09.md).
+> The historical rates below do not measure that path.
 
 ## Bottom line
 

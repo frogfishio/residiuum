@@ -433,7 +433,7 @@
           }
         },
         {
-          "name": "store.dedup.after_append",
+          "name": "store.dedup.after_rename",
           "ci_subset": false,
           "expected_on_reopen": {
             "acknowledged_visible": true,

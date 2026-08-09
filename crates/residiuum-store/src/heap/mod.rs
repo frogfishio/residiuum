@@ -2,6 +2,7 @@
 
 mod admin_op_dedup;
 mod catalog;
+mod commit_coordinator;
 mod heap_store;
 mod host;
 #[cfg(feature = "aws-kms")]
@@ -27,6 +28,7 @@ pub use catalog::{
     try_load_streams_catalog, AdminReceipt, HeapCatalogEntry, HeapMetaLayout, ObjectCatalogEntry,
     ObjectKind, StagedGenesis, COLLECTIONS_CATALOG_FILE, HEAP_CATALOG_FILE, STREAMS_CATALOG_FILE,
 };
+pub use commit_coordinator::OperationCommitStats;
 pub use heap_store::{
     CollectionScanHole, CollectionScanHoleReason, CollectionScanPage, HeapStore,
     VersionedCollectionScanPage, VersionedCollectionValue,
