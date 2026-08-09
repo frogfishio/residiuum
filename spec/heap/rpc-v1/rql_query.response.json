@@ -1,8 +1,12 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "description": "Result for op 118 rql_query (CORE plan §10).",
+  "description": "Result for op 118 rql_query. Core returns rows directly; Full also returns the pre-attach base_rows and enrich load evidence.",
   "properties": {
+    "profile": {
+      "type": "string",
+      "enum": ["rql-app-core-v1", "rql-full-v1"]
+    },
     "query_id": {
       "type": "string",
       "minLength": 32,
@@ -25,6 +29,19 @@
     },
     "rows": {
       "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key": { "type": "string" },
+          "value": {}
+        },
+        "required": ["key", "value"]
+      }
+    },
+    "base_rows": {
+      "type": "array",
+      "description": "Full profile only: underlying Application Core page before enrich/within/project attachment.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -67,6 +84,11 @@
       "type": ["integer", "null"],
       "minimum": 0
     },
+    "logical_bytes_examined": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Serialized logical JSON payload bytes successfully loaded by the QVM across Core and Full sources."
+    },
     "known_holes": {
       "type": "array",
       "items": { "type": "object" }
@@ -77,6 +99,23 @@
     },
     "stats": {
       "type": "object"
+    },
+    "enrich_loads": {
+      "type": "array",
+      "description": "Full profile only: actual foreign-load mode for each root enrich step.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "using": { "type": "string" },
+          "output": { "type": "string" },
+          "mode": {
+            "type": "string",
+            "enum": ["scan_list_keys_get", "equality_index"]
+          }
+        },
+        "required": ["using", "output", "mode"]
+      }
     }
   },
   "required": [
@@ -87,6 +126,7 @@
     "rows",
     "exhausted",
     "coverage",
-    "consistency"
+    "consistency",
+    "logical_bytes_examined"
   ]
 }

@@ -15,6 +15,8 @@ use crate::app_v1::{ConsistencyMode, CoveragePolicy, QueryBudget, QueryPage, Que
 use crate::error::Error;
 use crate::plan_v1::{OrderTerm, RqlPlanV1};
 use crate::predicate::{Path, Predicate};
+use crate::resource::{check_result_bytes, estimate_row_bytes, host_limits};
+use crate::rql_app_core::merge_budgets;
 use residiuum_heap::{CollectionId, HeapId};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -27,7 +29,77 @@ use super::full_attach::{
     EnrichLoadEvidence, EnrichStepV1, FullPipelineStepV1, ProjectItemV1, WithinStepV1,
 };
 use super::vm::{OpCode, VM_PROFILE};
-use super::HostCapabilities;
+use super::{HostCapabilities, HostDocument};
+
+/// Accounts logical JSON payload bytes at the one host boundary shared by
+/// Core and Full execution. This deliberately counts every successful load,
+/// including repeated reads and foreign/nested attach sources.
+struct CountingHost<'a, H: HostCapabilities> {
+    inner: &'a mut H,
+    logical_bytes_examined: u64,
+}
+
+impl<'a, H: HostCapabilities> CountingHost<'a, H> {
+    fn new(inner: &'a mut H) -> Self {
+        Self {
+            inner,
+            logical_bytes_examined: 0,
+        }
+    }
+
+    fn account(&mut self, value: &JsonValue) -> Result<(), Error> {
+        let bytes = serde_json::to_vec(value).map_err(|error| {
+            Error::Internal(format!("logical JSON byte accounting failed: {error}"))
+        })?;
+        self.logical_bytes_examined = self
+            .logical_bytes_examined
+            .saturating_add(bytes.len() as u64);
+        Ok(())
+    }
+}
+
+impl<H: HostCapabilities> HostCapabilities for CountingHost<'_, H> {
+    fn list_keys(
+        &mut self,
+        collection_id: CollectionId,
+        limit: Option<usize>,
+        after_key: Option<&str>,
+    ) -> Result<Vec<String>, Error> {
+        self.inner.list_keys(collection_id, limit, after_key)
+    }
+
+    fn get_json(
+        &mut self,
+        collection_id: CollectionId,
+        key: &str,
+    ) -> Result<Option<JsonValue>, Error> {
+        let value = self.inner.get_json(collection_id, key)?;
+        if let Some(value) = value.as_ref() {
+            self.account(value)?;
+        }
+        Ok(value)
+    }
+
+    fn get_json_covered(
+        &mut self,
+        collection_id: CollectionId,
+        key: &str,
+    ) -> Result<HostDocument, Error> {
+        let document = self.inner.get_json_covered(collection_id, key)?;
+        if let HostDocument::Present(value) = &document {
+            self.account(value)?;
+        }
+        Ok(document)
+    }
+
+    fn lookup_index_keys(
+        &mut self,
+        collection_id: CollectionId,
+        equalities: &[(String, JsonValue)],
+    ) -> Result<Option<Vec<String>>, Error> {
+        self.inner.lookup_index_keys(collection_id, equalities)
+    }
+}
 
 /// Bound-collection [`DocScan`] over [`HostCapabilities`] for Core opcodes.
 struct HostScan<'a, H: HostCapabilities> {
@@ -46,6 +118,10 @@ impl<H: HostCapabilities> DocScan for HostScan<'_, H> {
 
     fn get_json(&mut self, key: &str) -> Result<Option<JsonValue>, Error> {
         self.host.get_json(self.collection_id, key)
+    }
+
+    fn get_json_covered(&mut self, key: &str) -> Result<HostDocument, Error> {
+        self.host.get_json_covered(self.collection_id, key)
     }
 
     fn try_equality_index_keys(
@@ -546,6 +622,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
         )));
     }
     verify_vm_program(prog)?;
+    let mut host = CountingHost::new(host);
     let mut pc = 0usize;
     let mut frame: Option<CoreFrame<'_>> = None;
     let mut page: Option<QueryPage> = None;
@@ -553,6 +630,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
     let mut enrich_loads: Vec<EnrichLoadEvidence> = Vec::new();
     let mut foreign_cache: BTreeMap<CollectionId, Vec<(String, JsonValue)>> = BTreeMap::new();
     let mut within_stack: Vec<WithinScope> = Vec::new();
+    let budget = merge_budgets(prog.budget, options.budget);
 
     while pc < prog.ops.len() {
         let instr = &prog.ops[pc];
@@ -610,7 +688,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                     }
                 };
                 let mut scan = HostScan {
-                    host,
+                    host: &mut host,
                     collection_id,
                 };
                 f.index_eq(&mut scan, where_pred, *force_scan)?;
@@ -621,7 +699,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                     Error::QueryInvalid("run_vm: Scan before BindCollection".into())
                 })?;
                 let mut scan = HostScan {
-                    host,
+                    host: &mut host,
                     collection_id,
                 };
                 f.scan(&mut scan)?;
@@ -637,7 +715,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                     ));
                 }
                 let mut scan = HostScan {
-                    host,
+                    host: &mut host,
                     collection_id,
                 };
                 f.filter(&mut scan)?;
@@ -677,7 +755,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                     ));
                 }
                 let mut scan = HostScan {
-                    host,
+                    host: &mut host,
                     collection_id,
                 };
                 let p = f.project_paths(&mut scan)?;
@@ -687,6 +765,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                     .map(|r| (r.key.clone(), r.value.clone()))
                     .collect();
                 page = Some(p);
+                check_full_materialization(&rows, &foreign_cache, budget)?;
                 // CoreFrame no longer needed; free borrow of pool/params.
                 frame = None;
                 pc += 1;
@@ -704,7 +783,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                 };
                 if within_stack.is_empty() {
                     let (foreign, mode) =
-                        load_foreign_docs_for_root_enrich(host, e, &rows, force_enrich_scan)?;
+                        load_foreign_docs_for_root_enrich(&mut host, e, &rows, force_enrich_scan)?;
                     enrich_loads.push(EnrichLoadEvidence {
                         using: e.using_name.clone(),
                         output: e.output.clone(),
@@ -717,7 +796,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                     }
                     rows = attach_enrich_rows(&rows, &foreign, e, params)?;
                 } else {
-                    ensure_foreign_docs(host, e.using_id, &mut foreign_cache)?;
+                    ensure_foreign_docs(&mut host, e.using_id, &mut foreign_cache)?;
                     let foreign = foreign_cache.get(&e.using_id).ok_or_else(|| {
                         Error::QueryInvalid(format!(
                             "within attach missing foreign docs for id {} (`{}`)",
@@ -726,6 +805,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                     })?;
                     rows = attach_enrich_rows(&rows, foreign, e, params)?;
                 }
+                check_full_materialization(&rows, &foreign_cache, budget)?;
                 pc += 1;
             }
             OpCode::Within => {
@@ -751,6 +831,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                     carrier: w.carrier.clone(),
                     parents,
                 });
+                check_full_materialization(&rows, &foreign_cache, budget)?;
                 pc += 1;
             }
             OpCode::WithinEnd => {
@@ -758,6 +839,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                     Error::QueryInvalid("run_vm: WithinEnd without matching Within".into())
                 })?;
                 rows = within_leave(&scope.parents, &scope.carrier, &rows)?;
+                check_full_materialization(&rows, &foreign_cache, budget)?;
                 pc += 1;
             }
             OpCode::FilterAttach => {
@@ -772,6 +854,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                     ));
                 };
                 rows = filter_rows(&rows, pred, params)?;
+                check_full_materialization(&rows, &foreign_cache, budget)?;
                 pc += 1;
             }
             OpCode::ProjectBrace => {
@@ -790,7 +873,8 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                         "run_vm: ProjectBrace inside Within is not supported".into(),
                     ));
                 }
-                rows = apply_project_rows(&rows, fields)?;
+                rows = apply_project_rows(&rows, fields, params)?;
+                check_full_materialization(&rows, &foreign_cache, budget)?;
                 pc += 1;
             }
             OpCode::Halt => {
@@ -812,13 +896,36 @@ pub(crate) fn run_vm<H: HostCapabilities>(
         }
     }
 
-    let page =
+    let mut page =
         page.ok_or_else(|| Error::QueryInvalid("run_vm: finished without Core page".into()))?;
+    page.logical_bytes_examined = host.logical_bytes_examined;
     Ok(VmOutcome {
         page,
         rows,
         enrich_loads,
     })
+}
+
+/// Bound both the public attached result and the VM's total retained
+/// materialisation (result rows + foreign caches). Core checks its own page;
+/// Full opcodes can expand that page and therefore must re-check here.
+fn check_full_materialization(
+    rows: &[(String, JsonValue)],
+    foreign_cache: &BTreeMap<CollectionId, Vec<(String, JsonValue)>>,
+    budget: Option<QueryBudget>,
+) -> Result<(), Error> {
+    let row_bytes = rows.iter().fold(0u64, |used, (key, value)| {
+        used.saturating_add(estimate_row_bytes(key, value))
+    });
+    let limits = host_limits();
+    check_result_bytes(row_bytes, budget.and_then(|b| b.max_result_bytes), &limits)?;
+    let retained_bytes = foreign_cache
+        .values()
+        .flatten()
+        .fold(row_bytes, |used, (key, value)| {
+            used.saturating_add(estimate_row_bytes(key, value))
+        });
+    check_result_bytes(retained_bytes, None, &limits)
 }
 
 #[cfg(test)]
@@ -842,6 +949,46 @@ mod tests {
         PlanBuilder::from_source("items")
             .compile(&bindings)
             .expect("plan")
+    }
+
+    struct ByteHost {
+        value: JsonValue,
+    }
+
+    impl HostCapabilities for ByteHost {
+        fn list_keys(
+            &mut self,
+            _collection_id: CollectionId,
+            _limit: Option<usize>,
+            _after_key: Option<&str>,
+        ) -> Result<Vec<String>, Error> {
+            Ok(vec!["present".into(), "absent".into()])
+        }
+
+        fn get_json(
+            &mut self,
+            _collection_id: CollectionId,
+            key: &str,
+        ) -> Result<Option<JsonValue>, Error> {
+            Ok((key == "present").then(|| self.value.clone()))
+        }
+    }
+
+    #[test]
+    fn counting_host_counts_each_successful_json_load_only() {
+        let id = CollectionId::from_bytes(uuidish(9)).expect("id");
+        let value = serde_json::json!({"a": [1, 2], "s": "x"});
+        let expected = serde_json::to_vec(&value).unwrap().len() as u64;
+        let mut inner = ByteHost { value };
+        let mut host = CountingHost::new(&mut inner);
+
+        assert!(host.get_json(id, "present").unwrap().is_some());
+        assert!(matches!(
+            host.get_json_covered(id, "present").unwrap(),
+            HostDocument::Present(_)
+        ));
+        assert!(host.get_json(id, "absent").unwrap().is_none());
+        assert_eq!(host.logical_bytes_examined, expected * 2);
     }
 
     #[test]

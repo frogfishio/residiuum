@@ -8,8 +8,9 @@ use residiuum_heap::{
     TrustedInstant, VerifiedCertificate,
 };
 use residiuum_sdk::{
-    compile_app_core, compile_rql_full, execute_rql_full, CollectionBindings, HeapClient,
-    Parameters, QueryRunOptions, ResidiuumDeployment, DIAG_RQL_FEATURE_UNAVAILABLE,
+    compile_app_core, compile_rql_full, execute_rql_full, AppQueryBudget, CollectionBindings,
+    ErrorCode, HeapClient, Parameters, QueryRunOptions, ResidiuumDeployment,
+    DIAG_RQL_FEATURE_UNAVAILABLE,
 };
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
 use std::sync::Arc;
@@ -47,7 +48,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -118,11 +126,26 @@ fn enrich_exactly_one_attach_oracle() {
     )
     .expect("execute_rql_full");
     assert_eq!(page.rows.len(), 2);
-    let by_key: std::collections::BTreeMap<_, _> = page
-        .rows
-        .into_iter()
-        .map(|(k, v)| (k, v))
-        .collect();
+    let by_key: std::collections::BTreeMap<_, _> =
+        page.rows.into_iter().map(|(k, v)| (k, v)).collect();
     assert_eq!(by_key.get("o1").unwrap()["customer"]["name"], "Ada");
     assert_eq!(by_key.get("o2").unwrap()["customer"]["name"], "Bob");
+
+    // Core rows fit comfortably, but Full attachment must re-check the final
+    // expanded result rather than bypassing max_result_bytes.
+    customers
+        .put(
+            "c1",
+            &serde_json::json!({"id": "c1", "name": "x".repeat(16 * 1024)}),
+        )
+        .unwrap();
+    let mut bounded = QueryRunOptions::default();
+    bounded.budget = Some(AppQueryBudget {
+        max_documents: None,
+        max_bytes: None,
+        max_result_bytes: Some(2 * 1024),
+    });
+    let err = execute_rql_full(&mut client, &src, &Parameters::default(), bounded)
+        .expect_err("Full attachment must enforce result budget");
+    assert_eq!(err.code(), ErrorCode::QueryBudgetRequired);
 }

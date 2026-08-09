@@ -1,6 +1,10 @@
 //! §7.4 metric envelopes + collectors (Q4.3).
 
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 /// Latency quantiles in nanoseconds.
@@ -24,10 +28,94 @@ pub struct ResourceSnapshot {
     pub read_amplification: Option<f64>,
 }
 
+/// Monotonic process counters used to derive one measured workload interval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessResourceCounters {
+    pub cpu_time_ns: u64,
+    pub rss_bytes: u64,
+    pub physical_bytes_read: u64,
+    pub physical_bytes_written: u64,
+}
+
+/// In-process sampler for one measured workload interval.
+///
+/// Sampling is deliberately independent of `ps` and unsafe application code.
+/// RSS/I/O come from the safe process view; accumulated CPU comes from the
+/// POSIX process CPU clock through Rustix's safe interface.
+pub struct ProcessResourceSampler {
+    start: ProcessResourceCounters,
+    peak_rss: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ProcessResourceSampler {
+    /// Start a 1 ms RSS sampler after workload warm-up.
+    pub fn start() -> Option<Self> {
+        let start = try_process_resource_counters()?;
+        let peak_rss = Arc::new(AtomicU64::new(start.rss_bytes));
+        let stop = Arc::new(AtomicBool::new(false));
+        let sample_peak = Arc::clone(&peak_rss);
+        let sample_stop = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name("rql-q4-resource-sampler".into())
+            .spawn(move || {
+                while !sample_stop.load(Ordering::Relaxed) {
+                    if let Some(sample) = try_process_resource_counters() {
+                        sample_peak.fetch_max(sample.rss_bytes, Ordering::Relaxed);
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            })
+            .ok()?;
+        Some(Self {
+            start,
+            peak_rss,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    /// Stop sampling and return interval deltas plus the sampled RSS peak.
+    pub fn finish(mut self) -> Option<ResourceSnapshot> {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+        let end = try_process_resource_counters()?;
+        self.peak_rss.fetch_max(end.rss_bytes, Ordering::Relaxed);
+        Some(ResourceSnapshot {
+            cpu_time_ns: Some(end.cpu_time_ns.saturating_sub(self.start.cpu_time_ns)),
+            rss_bytes: Some(end.rss_bytes),
+            peak_rss_bytes: Some(self.peak_rss.load(Ordering::Relaxed)),
+            physical_bytes_read: Some(
+                end.physical_bytes_read
+                    .saturating_sub(self.start.physical_bytes_read),
+            ),
+            physical_bytes_written: Some(
+                end.physical_bytes_written
+                    .saturating_sub(self.start.physical_bytes_written),
+            ),
+            read_amplification: None,
+        })
+    }
+}
+
+impl Drop for ProcessResourceSampler {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 /// Query-path accounting.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct QueryPathMetrics {
     pub documents_examined: Option<u64>,
+    /// Serialized JSON payload bytes loaded by the QVM for this interval.
+    pub logical_bytes_examined: Option<u64>,
     pub index_entries_examined: Option<u64>,
     pub index_size_bytes: Option<u64>,
     pub index_build_ns: Option<u64>,
@@ -166,33 +254,43 @@ impl QueryTimer {
     }
 }
 
-/// Best-effort RSS (macOS/Linux); `None` when unavailable.
+/// Best-effort safe in-process resource counters.
+pub fn try_process_resource_counters() -> Option<ProcessResourceCounters> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
+
+    let pid = sysinfo::get_current_pid().ok()?;
+    let mut system = System::new();
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::new().with_memory().with_disk_usage(),
+    );
+    let process = system.process(pid)?;
+    let disk = process.disk_usage();
+    Some(ProcessResourceCounters {
+        cpu_time_ns: process_cpu_time_ns()?,
+        rss_bytes: process.memory(),
+        physical_bytes_read: disk.total_read_bytes,
+        physical_bytes_written: disk.total_written_bytes,
+    })
+}
+
+#[cfg(unix)]
+fn process_cpu_time_ns() -> Option<u64> {
+    let value = rustix::time::clock_gettime(rustix::time::ClockId::ProcessCPUTime);
+    let seconds = u64::try_from(value.tv_sec).ok()?;
+    let nanos = u64::try_from(value.tv_nsec).ok()?;
+    Some(seconds.saturating_mul(1_000_000_000).saturating_add(nanos))
+}
+
+#[cfg(not(unix))]
+fn process_cpu_time_ns() -> Option<u64> {
+    None
+}
+
+/// Best-effort current RSS; retained for non-campaign metric envelopes.
 pub fn try_rss_bytes() -> Option<u64> {
-    #[cfg(target_os = "macos")]
-    {
-        // Avoid hard dependency on libc APIs; use `ps` only in tests if needed.
-        // Return None for portability in pure unit tests.
-        None
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("VmRSS:") {
-                let kb: u64 = rest
-                    .split_whitespace()
-                    .next()?
-                    .parse()
-                    .ok()?;
-                return Some(kb.saturating_mul(1024));
-            }
-        }
-        None
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        None
-    }
+    try_process_resource_counters().map(|sample| sample.rss_bytes)
 }
 
 /// Build cell metrics from latency samples + optional path/resource fields.
@@ -221,7 +319,8 @@ pub fn assemble_metrics(
         resource: ResourceSnapshot {
             cpu_time_ns: None, // wall latency is primary; CPU residual host-specific
             rss_bytes: rss,
-            peak_rss_bytes: rss,
+            // A single resident snapshot is not a sampled peak.
+            peak_rss_bytes: None,
             physical_bytes_read: None,
             physical_bytes_written: None,
             read_amplification: None,
@@ -266,10 +365,7 @@ impl MetricPresenceState {
 
     /// Scaffold publication may include residual / not-supported flags.
     pub fn scaffold_ok(self) -> bool {
-        matches!(
-            self,
-            Self::Present | Self::Residual | Self::NotSupported
-        )
+        matches!(self, Self::Present | Self::Residual | Self::NotSupported)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -294,11 +390,11 @@ pub const RESIDUAL_UNTIL_PROBES_KEYS: &[&str] = &[
 pub const RESIDUAL_METRIC_NOTES: &[(&str, &str)] = &[
     (
         "cpu_rss",
-        "CPU time not collected yet; RSS best-effort (Linux /proc; macOS residual None)",
+        "RSS and 1 ms sampled peak RSS are collected in-process; accumulated short-interval CPU time remains residual",
     ),
     (
         "physical_bytes_rw_amplification",
-        "Physical bytes R/W + amplification residual until store probes",
+        "Physical read/write interval deltas are collected in-process; logical-byte read amplification remains residual",
     ),
     (
         "index_size_build_write_penalty",
@@ -350,22 +446,23 @@ pub fn metric_key_presence(m: &CellMetrics) -> Vec<(String, MetricPresenceState)
         (
             "cpu_rss".into(),
             present_or_residual(
-                m.resource.rss_bytes.is_some() || m.resource.cpu_time_ns.is_some(),
+                m.resource.cpu_time_ns.is_some()
+                    && m.resource.rss_bytes.is_some()
+                    && m.resource.peak_rss_bytes.is_some(),
             ),
         ),
         (
             "physical_bytes_rw_amplification".into(),
             present_or_residual(
                 m.resource.physical_bytes_read.is_some()
-                    || m.resource.physical_bytes_written.is_some()
-                    || m.resource.read_amplification.is_some(),
+                    && m.resource.physical_bytes_written.is_some()
+                    && m.resource.read_amplification.is_some(),
             ),
         ),
         (
             "docs_index_examined".into(),
             present_or_absent_core(
-                m.path.documents_examined.is_some()
-                    || m.path.index_entries_examined.is_some(),
+                m.path.documents_examined.is_some() || m.path.index_entries_examined.is_some(),
             ),
         ),
         (
@@ -440,6 +537,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn in_process_resource_sampler_reports_rss_and_io_counters() {
+        let sampler = ProcessResourceSampler::start().expect("self process probe");
+        let allocation = vec![0x5au8; 256 * 1024];
+        std::hint::black_box(&allocation);
+        std::thread::sleep(Duration::from_millis(3));
+        let snapshot = sampler.finish().expect("finish self process probe");
+        assert!(snapshot.rss_bytes.unwrap_or(0) > 0);
+        assert!(snapshot.peak_rss_bytes.unwrap_or(0) >= snapshot.rss_bytes.unwrap_or(0));
+        assert!(snapshot.physical_bytes_read.is_some());
+        assert!(snapshot.physical_bytes_written.is_some());
+        assert!(
+            snapshot.cpu_time_ns.is_some(),
+            "CPU interval must be sampled"
+        );
+    }
+
+    #[test]
     fn required_keys_cover_programme_list() {
         assert!(REQUIRED_METRIC_KEYS.len() >= 10);
         assert!(REQUIRED_METRIC_KEYS.contains(&"result_digest"));
@@ -484,9 +598,9 @@ mod tests {
         assert!(m.queries_per_s.unwrap() > 0.0);
         assert_eq!(m.validity_ok, Some(true));
         let presence = metric_key_presence(&m);
-        assert!(presence.iter().any(|(k, s)| {
-            k == "result_digest" && *s == MetricPresenceState::Present
-        }));
+        assert!(presence
+            .iter()
+            .any(|(k, s)| { k == "result_digest" && *s == MetricPresenceState::Present }));
     }
 
     #[test]
@@ -550,7 +664,11 @@ mod tests {
             MetricPresenceState::Residual
         );
         assert_eq!(
-            presence.iter().find(|(k, _)| k == "explain_plan").unwrap().1,
+            presence
+                .iter()
+                .find(|(k, _)| k == "explain_plan")
+                .unwrap()
+                .1,
             MetricPresenceState::Residual
         );
         assert!(metrics_scaffold_publishable(&m));
@@ -561,6 +679,7 @@ mod tests {
 
         // Fill residual-class fields → competitive complete.
         m.resource.rss_bytes = Some(1_048_576);
+        m.resource.peak_rss_bytes = Some(1_048_576);
         m.resource.cpu_time_ns = Some(100);
         m.resource.physical_bytes_read = Some(4096);
         m.resource.physical_bytes_written = Some(0);

@@ -35,11 +35,12 @@ pub use core_page::{explain_rql_source, EXEC_PROFILE};
 // `CollectionClient` (residual) and the VM's internal `HostScan` (product).
 pub(crate) use core_page::DocScan;
 pub use full_attach::{
-    compile_rql_full, execute_full_qvm_with, execute_rql_full, execute_rql_full_with,
-    explain_rql_full, explain_rql_full_on_heap, refuse_full_language_on_core_wire,
-    source_uses_rql_full_constructs, CompiledRqlFull, EnrichAttachMode, EnrichCardinality,
-    EnrichLoadEvidence, EnrichStepV1, FullPipelineStepV1, ProjectItemV1, RqlFullExecuteOptions,
-    RqlFullPage, WithinStepV1, DIAG_RQL_ENRICH_CARDINALITY, DIAG_RQL_FULL_RESIDUAL,
+    compile_rql_full, execute_full_qvm_on_host_with, execute_full_qvm_with, execute_rql_full,
+    execute_rql_full_on_host_with, execute_rql_full_with, explain_rql_full,
+    explain_rql_full_on_heap, refuse_full_language_on_core_wire, source_uses_rql_full_constructs,
+    CompiledRqlFull, EnrichAttachMode, EnrichCardinality, EnrichLoadEvidence, EnrichStepV1,
+    FullPipelineStepV1, ProjectExprV1, ProjectItemV1, RqlFullExecuteOptions, RqlFullPage,
+    WithinStepV1, DIAG_RQL_ENRICH_CARDINALITY, DIAG_RQL_FULL_RESIDUAL,
     DIAG_RQL_PROJECTION_CONFLICT, DIAG_RQL_PROJECT_TYPE, DIAG_RQL_WITHIN_TYPE,
     FULL_EXPLAIN_HASH_DOMAIN, MAX_PROJECT_DEPTH, MAX_WITHIN_DEPTH, RQL_FULL_PROFILE,
 };
@@ -66,6 +67,25 @@ use std::collections::BTreeMap;
 /// Architecture freeze profile id.
 pub const BYTECODE_PROFILE: &str = "residiuum-query-bytecode-v1";
 
+/// Coverage-aware result of a host document read.
+///
+/// `Hole` means the key is known to the host but its value cannot be supplied
+/// honestly (for example because an on-disk frame failed verification).  Query
+/// execution may retain healthy rows only when its coverage policy explicitly
+/// allows incomplete results; complete coverage still fails closed.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostDocument {
+    /// A verified, decodable JSON document.
+    Present(JsonValue),
+    /// The key is absent at the requested consistency point.
+    Absent,
+    /// The key exists, but its value is an explicit coverage hole.
+    Hole {
+        /// Stable machine-readable reason.
+        code: String,
+    },
+}
+
 /// Host data-access capabilities only (Decision 0 / RQL-X1 / **RQL-P1b**).
 ///
 /// Every data op is **collection-qualified** by immutable [`CollectionId`].
@@ -86,6 +106,22 @@ pub trait HostCapabilities {
         collection_id: CollectionId,
         key: &str,
     ) -> Result<Option<JsonValue>, Error>;
+
+    /// Coverage-aware document get.
+    ///
+    /// The default preserves compatibility for hosts that cannot distinguish a
+    /// damaged value from an ordinary read error. Coverage-aware storage hosts
+    /// should override this method and return [`HostDocument::Hole`].
+    fn get_json_covered(
+        &mut self,
+        collection_id: CollectionId,
+        key: &str,
+    ) -> Result<HostDocument, Error> {
+        Ok(match self.get_json(collection_id, key)? {
+            Some(value) => HostDocument::Present(value),
+            None => HostDocument::Absent,
+        })
+    }
 
     /// Optional equality-index candidate keys on `collection_id` (not a semantic filter).
     fn lookup_index_keys(
@@ -163,6 +199,12 @@ impl QueryBytecodeV1 {
 
     /// Lower compiled Application Core artefact.
     pub fn from_compiled_core(compiled: CompiledAppCore) -> Result<Self, Error> {
+        if compiled.after.is_some() {
+            return Err(Error::QueryInvalid(
+                "compiled textual `after` must be bound by execute_core_rql before QVM lowering"
+                    .into(),
+            ));
+        }
         Self::from_core_plan(compiled.plan, compiled.budget)
     }
 
@@ -187,6 +229,12 @@ pub fn lower_core_source(
     };
     bindings.bind(collection_name, collection_id);
     let mut compiled = compile_app_core(source, &bindings)?;
+    if compiled.after.is_some() {
+        return Err(Error::QueryInvalid(
+            "textual `after` requires execute_core_rql so the cursor binding cannot be ignored"
+                .into(),
+        ));
+    }
     if compiled.plan.from.collection_id != collection_id {
         compiled.plan.from.collection_id = collection_id;
     }
@@ -256,12 +304,27 @@ pub fn execute_core_rql<H: HostCapabilities>(
             "use explain_rql for explain; rql executes rows".into(),
         ));
     }
-    let bytecode = lower_core_source(source, collection_id, collection_name)?;
+    let mut bindings = CollectionBindings {
+        by_name: BTreeMap::new(),
+    };
+    bindings.bind(collection_name, collection_id);
+    let mut compiled = compile_app_core(source, &bindings)?;
+    if compiled.plan.from.collection_id != collection_id {
+        compiled.plan.from.collection_id = collection_id;
+    }
+    let mut effective_options = options.clone();
+    let semantic_parameters = crate::rql_app_core::bind_textual_after(
+        compiled.after.as_ref(),
+        parameters,
+        &mut effective_options,
+    )?;
+    compiled.after = None;
+    let bytecode = QueryBytecodeV1::from_compiled_core(compiled)?;
     execute_bytecode(
         host,
         &bytecode,
-        &parameters.values,
-        options,
+        &semantic_parameters.values,
+        &effective_options,
         heap_id,
         collection_id,
     )

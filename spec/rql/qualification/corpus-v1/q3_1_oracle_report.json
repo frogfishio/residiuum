@@ -172,6 +172,16 @@
       "status": "oracle_ok"
     },
     {
+      "case_id": "commerce.orders.project_computed_amount_band",
+      "coverage_complete": true,
+      "digest": "fnv1a64:5bb02e3eb5ad7ca3:len:2155",
+      "domain": "commerce",
+      "ordered": false,
+      "row_count": 32,
+      "source": "from orders project _key, amount_band = if amount < 100 then \"low\" else if amount < 500 then \"mid\" else \"high\"",
+      "status": "oracle_ok"
+    },
+    {
       "case_id": "commerce.orders.order_created_desc",
       "coverage_complete": true,
       "digest": "fnv1a64:60d32f00e1e374dc:len:6720",
@@ -203,10 +213,13 @@
     },
     {
       "case_id": "commerce.orders.page_resume",
+      "coverage_complete": true,
+      "digest": "fnv1a64:1561d01ac3e182d9:len:1750",
       "domain": "commerce",
-      "reason": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
+      "ordered": true,
+      "row_count": 8,
       "source": "from orders order by created_at desc, _key asc page size 8 after $cursor",
-      "status": "oracle_unsupported"
+      "status": "oracle_ok"
     },
     {
       "case_id": "commerce.products.order_price_asc",
@@ -216,6 +229,76 @@
       "ordered": true,
       "row_count": 38,
       "source": "from products where active = true order by price_cents asc, sku asc",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "commerce.orders.enrich_customer_exactly_one",
+      "coverage_complete": true,
+      "digest": "fnv1a64:1ff2430ddabc0d5f:len:7025",
+      "domain": "commerce",
+      "ordered": false,
+      "row_count": 27,
+      "source": "from orders where present(customer.id) enrich customer using customers matching customer.id = _key expect exactly_one",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "commerce.orders.enrich_line_items_many",
+      "coverage_complete": true,
+      "digest": "fnv1a64:43659433eafd07ea:len:11767",
+      "domain": "commerce",
+      "ordered": false,
+      "row_count": 32,
+      "source": "from orders enrich items using line_items matching _key = order_id expect many",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "commerce.line_items.enrich_product_optional",
+      "coverage_complete": true,
+      "digest": "fnv1a64:b8e07efbd52406eb:len:14118",
+      "domain": "commerce",
+      "ordered": false,
+      "row_count": 63,
+      "source": "from line_items enrich product using products matching product_id = _key expect optional",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "commerce.orders.group_region_count",
+      "coverage_complete": true,
+      "digest": "fnv1a64:ea7a8ce8e77dc4e0:len:305",
+      "domain": "commerce",
+      "ordered": false,
+      "row_count": 3,
+      "source": "from orders group by region project region, count() as order_count",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "commerce.orders.group_status_sum_amount",
+      "coverage_complete": true,
+      "digest": "fnv1a64:6329e5f16ef2cdac:len:392",
+      "domain": "commerce",
+      "ordered": false,
+      "row_count": 4,
+      "source": "from orders group by status project status, sum(amount) as total_amount",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "commerce.orders.agg_min_max_amount",
+      "coverage_complete": true,
+      "digest": "fnv1a64:596fe6b6c2366642:len:183",
+      "domain": "commerce",
+      "ordered": false,
+      "row_count": 1,
+      "source": "from orders project min(amount) as min_amount, max(amount) as max_amount",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "commerce.orders.agg_avg_amount_paid",
+      "coverage_complete": true,
+      "digest": "fnv1a64:03a8adf8bb29ce1c:len:182",
+      "domain": "commerce",
+      "ordered": false,
+      "row_count": 1,
+      "source": "from orders where status = \"paid\" project avg(amount) as avg_amount",
       "status": "oracle_ok"
     },
     {
@@ -237,6 +320,12 @@
       "row_count": 32,
       "source": "from orders coverage incomplete",
       "status": "oracle_ok"
+    },
+    {
+      "case_id": "commerce.orders.refuse_offset_discard",
+      "refusal_code": "rql_offset_discard_unsupported",
+      "source": "from orders order by created_at desc offset 8 limit 8",
+      "status": "stable_refusal_ok"
     },
     {
       "case_id": "commerce.customers.eq_tier_gold",
@@ -310,10 +399,13 @@
     },
     {
       "case_id": "messaging.messages.conversation_history_resume",
+      "coverage_complete": true,
+      "digest": "fnv1a64:1f43b8323e576d55:len:881",
       "domain": "messaging",
-      "reason": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
+      "ordered": true,
+      "row_count": 4,
       "source": "from messages where conversation_id = \"cv-0001\" order by sent_at asc, _key asc page size 16 after $cursor",
-      "status": "oracle_unsupported"
+      "status": "oracle_ok"
     },
     {
       "case_id": "messaging.messages.project_snippet",
@@ -373,6 +465,46 @@
       "ordered": false,
       "row_count": 12,
       "source": "from participants where muted = true",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "messaging.messages.enrich_conversation_exactly_one",
+      "coverage_complete": true,
+      "digest": "fnv1a64:17838ffa308938e4:len:23611",
+      "domain": "messaging",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from messages enrich conversation using conversations matching conversation_id = _key expect exactly_one",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "messaging.conversations.enrich_participants_many",
+      "coverage_complete": true,
+      "digest": "fnv1a64:5d8bfa974786e40c:len:13524",
+      "domain": "messaging",
+      "ordered": false,
+      "row_count": 24,
+      "source": "from conversations enrich members using participants matching _key = conversation_id expect many",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "messaging.messages.group_unread_by_conversation",
+      "coverage_complete": true,
+      "digest": "fnv1a64:34f614f1e417815e:len:1327",
+      "domain": "messaging",
+      "ordered": false,
+      "row_count": 16,
+      "source": "from messages where read_at is null or missing(read_at) group by conversation_id project conversation_id, count() as unread_count",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "messaging.messages.group_sender_count",
+      "coverage_complete": true,
+      "digest": "fnv1a64:f07606857cf5952d:len:951",
+      "domain": "messaging",
+      "ordered": false,
+      "row_count": 12,
+      "source": "from messages group by sender_id project sender_id, count() as message_count",
       "status": "oracle_ok"
     },
     {
@@ -556,6 +688,16 @@
       "status": "oracle_ok"
     },
     {
+      "case_id": "directory.entries.project_computed_kind_label",
+      "coverage_complete": true,
+      "digest": "fnv1a64:d6e8523175a87862:len:2661",
+      "domain": "directory",
+      "ordered": false,
+      "row_count": 40,
+      "source": "from entries project _key, kind_label = if kind = \"person\" then \"Person\" else \"Org\"",
+      "status": "oracle_ok"
+    },
+    {
       "case_id": "directory.entries.order_name_asc",
       "coverage_complete": true,
       "digest": "fnv1a64:88347f536d906524:len:10371",
@@ -587,10 +729,53 @@
     },
     {
       "case_id": "directory.entries.page_resume",
+      "coverage_complete": true,
+      "digest": "fnv1a64:bc0525f751e3b1b2:len:2096",
       "domain": "directory",
-      "reason": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
+      "ordered": true,
+      "row_count": 8,
       "source": "from entries order by name asc, _key asc page size 8 after $cursor",
-      "status": "oracle_unsupported"
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "directory.entries.enrich_category_exactly_one",
+      "coverage_complete": true,
+      "digest": "fnv1a64:eea9cc4970d4e48e:len:13422",
+      "domain": "directory",
+      "ordered": false,
+      "row_count": 40,
+      "source": "from entries enrich cat using categories matching category_id = _key expect exactly_one",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "directory.entries.enrich_location_optional",
+      "coverage_complete": true,
+      "digest": "fnv1a64:e17ecd2305697946:len:12828",
+      "domain": "directory",
+      "ordered": false,
+      "row_count": 40,
+      "source": "from entries enrich loc using locations matching location_id = _key expect optional",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "directory.entries.group_by_category_count",
+      "coverage_complete": true,
+      "digest": "fnv1a64:7e2f662a0adda9e2:len:688",
+      "domain": "directory",
+      "ordered": false,
+      "row_count": 8,
+      "source": "from entries group by category_id project category_id, count() as entry_count",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "directory.entries.group_by_kind_count",
+      "coverage_complete": true,
+      "digest": "fnv1a64:34f5e00129f354f6:len:223",
+      "domain": "directory",
+      "ordered": false,
+      "row_count": 2,
+      "source": "from entries group by kind project kind, count() as n",
+      "status": "oracle_ok"
     },
     {
       "case_id": "directory.entries.budget_documents",
@@ -763,6 +948,26 @@
       "status": "oracle_ok"
     },
     {
+      "case_id": "telemetry.events.project_computed_sev_band",
+      "coverage_complete": true,
+      "digest": "fnv1a64:bdff64b7e6f8cbd8:len:4121",
+      "domain": "telemetry",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from events project _key, sev_band = if severity in [\"error\",\"critical\"] then \"high\" else \"low\"",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "telemetry.metrics.project_value_rounded_band",
+      "coverage_complete": true,
+      "digest": "fnv1a64:552a8d1e34443034:len:4217",
+      "domain": "telemetry",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from metrics project _key, value_band = if value < 33 then \"low\" else if value < 66 then \"mid\" else \"high\"",
+      "status": "oracle_ok"
+    },
+    {
       "case_id": "telemetry.events.recent_topk",
       "coverage_complete": true,
       "digest": "fnv1a64:6a516e060fb0cdcb:len:3113",
@@ -784,10 +989,83 @@
     },
     {
       "case_id": "telemetry.events.device_history_resume",
+      "coverage_complete": true,
+      "digest": "fnv1a64:032147a6c60a688f:len:1349",
       "domain": "telemetry",
-      "reason": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
+      "ordered": true,
+      "row_count": 6,
       "source": "from events where device_id = \"d-0001\" order by ts desc, _key asc page size 8 after $cursor",
-      "status": "oracle_unsupported"
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "telemetry.events.enrich_device_exactly_one",
+      "coverage_complete": true,
+      "digest": "fnv1a64:e32e0176684581e1:len:22191",
+      "domain": "telemetry",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from events enrich dev using devices matching device_id = _key expect exactly_one",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "telemetry.devices.enrich_events_many",
+      "coverage_complete": true,
+      "digest": "fnv1a64:29ae90c3987b8caf:len:24717",
+      "domain": "telemetry",
+      "ordered": false,
+      "row_count": 24,
+      "source": "from devices enrich evs using events matching _key = device_id expect many",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "telemetry.metrics.enrich_device_optional",
+      "coverage_complete": true,
+      "digest": "fnv1a64:074d27bd681a04e8:len:18714",
+      "domain": "telemetry",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from metrics enrich dev using devices matching device_id = _key expect optional",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "telemetry.events.group_by_device_count",
+      "coverage_complete": true,
+      "digest": "fnv1a64:826b1922f39cde54:len:1743",
+      "domain": "telemetry",
+      "ordered": false,
+      "row_count": 24,
+      "source": "from events group by device_id project device_id, count() as event_count",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "telemetry.events.group_severity_count",
+      "coverage_complete": true,
+      "digest": "fnv1a64:e8793ea711e8f939:len:345",
+      "domain": "telemetry",
+      "ordered": false,
+      "row_count": 4,
+      "source": "from events group by severity project severity, count() as n",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "telemetry.metrics.agg_avg_by_name",
+      "coverage_complete": true,
+      "digest": "fnv1a64:a3d92cb33e66ecfd:len:329",
+      "domain": "telemetry",
+      "ordered": false,
+      "row_count": 3,
+      "source": "from metrics group by metric_name project metric_name, avg(value) as avg_value",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "telemetry.metrics.agg_min_max_value",
+      "coverage_complete": true,
+      "digest": "fnv1a64:9a6a0d05992be9f8:len:171",
+      "domain": "telemetry",
+      "ordered": false,
+      "row_count": 1,
+      "source": "from metrics project min(value) as min_v, max(value) as max_v",
+      "status": "oracle_ok"
     },
     {
       "case_id": "telemetry.events.budget_result_bytes",
@@ -970,6 +1248,16 @@
       "status": "oracle_ok"
     },
     {
+      "case_id": "project_management.tasks.project_computed_overdue_flag",
+      "coverage_complete": true,
+      "digest": "fnv1a64:2c7d0005000242c5:len:4152",
+      "domain": "project_management",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from tasks project _key, overdue = if due_at < \"2024-03-01T00:00:00Z+100m\" then true else false",
+      "status": "oracle_ok"
+    },
+    {
       "case_id": "project_management.revisions.order_committed_desc",
       "coverage_complete": true,
       "digest": "fnv1a64:b063becb3f73626c:len:8855",
@@ -1001,10 +1289,93 @@
     },
     {
       "case_id": "project_management.tasks.page_resume_by_updated",
+      "coverage_complete": true,
+      "digest": "fnv1a64:b7706805b4bec43a:len:2512",
       "domain": "project_management",
-      "reason": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
+      "ordered": true,
+      "row_count": 10,
       "source": "from tasks order by updated_at desc, _key asc page size 10 after $cursor",
-      "status": "oracle_unsupported"
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "project_management.tasks.enrich_project_exactly_one",
+      "coverage_complete": true,
+      "digest": "fnv1a64:e9886ccdfc47aabe:len:25976",
+      "domain": "project_management",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from tasks enrich prj using projects matching project_id = _key expect exactly_one",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "project_management.projects.enrich_tasks_many",
+      "coverage_complete": true,
+      "digest": "fnv1a64:45c57b4dd2523a1e:len:20007",
+      "domain": "project_management",
+      "ordered": false,
+      "row_count": 20,
+      "source": "from projects enrich tsks using tasks matching _key = project_id expect many",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "project_management.projects.enrich_memberships_many",
+      "coverage_complete": true,
+      "digest": "fnv1a64:e90356da4f57be0b:len:10279",
+      "domain": "project_management",
+      "ordered": false,
+      "row_count": 20,
+      "source": "from projects enrich mbs using memberships matching _key = project_id expect many",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "project_management.memberships.enrich_project_optional",
+      "coverage_complete": true,
+      "digest": "fnv1a64:adc46fc92ee68eb2:len:19554",
+      "domain": "project_management",
+      "ordered": false,
+      "row_count": 59,
+      "source": "from memberships enrich prj using projects matching project_id = _key expect optional",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "project_management.tasks.group_status_count",
+      "coverage_complete": true,
+      "digest": "fnv1a64:f0be5f3987a04d21:len:338",
+      "domain": "project_management",
+      "ordered": false,
+      "row_count": 4,
+      "source": "from tasks group by status project status, count() as n",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "project_management.tasks.group_by_assignee_count",
+      "coverage_complete": true,
+      "digest": "fnv1a64:c6d836603ea1590a:len:672",
+      "domain": "project_management",
+      "ordered": false,
+      "row_count": 8,
+      "source": "from tasks group by assignee_id project assignee_id, count() as task_count",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "project_management.tasks.group_by_project_sum_points",
+      "coverage_complete": true,
+      "digest": "fnv1a64:2482d716f3920cf8:len:1571",
+      "domain": "project_management",
+      "ordered": false,
+      "row_count": 20,
+      "source": "from tasks group by project_id project project_id, sum(estimate_points) as total_points",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "project_management.projects.group_by_owner_count",
+      "coverage_complete": true,
+      "digest": "fnv1a64:30e61c34665da21e:len:664",
+      "domain": "project_management",
+      "ordered": false,
+      "row_count": 8,
+      "source": "from projects group by owner_id project owner_id, count() as project_count",
+      "status": "oracle_ok"
     },
     {
       "case_id": "project_management.memberships.eq_role_owner",
@@ -1037,6 +1408,12 @@
       "status": "oracle_ok"
     },
     {
+      "case_id": "project_management.projects.refuse_offset_discard",
+      "refusal_code": "rql_offset_discard_unsupported",
+      "source": "from projects order by created_at desc offset 5 limit 5",
+      "status": "stable_refusal_ok"
+    },
+    {
       "case_id": "directory.locations.project_city_region",
       "coverage_complete": true,
       "digest": "fnv1a64:4286d1111fbe31f3:len:485",
@@ -1044,6 +1421,43 @@
       "ordered": false,
       "row_count": 4,
       "source": "from locations where region = \"eu\" project _key, city, region, country",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "project_management.revisions.enrich_project_optional",
+      "coverage_complete": true,
+      "digest": "fnv1a64:3a25e7f8c7ef952a:len:16698",
+      "domain": "project_management",
+      "ordered": false,
+      "row_count": 48,
+      "source": "from revisions enrich prj using projects matching project_id = _key expect optional",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "commerce.orders.explain_eq_status",
+      "plan_hash": "4e6de3b578c0eff8f8550d4c790c1ebea1c2416b335e9f966e37f01ef9a03c4c",
+      "row_materialization": false,
+      "source": "explain from orders where status = \"paid\"",
+      "status": "explain_contract_ok"
+    },
+    {
+      "case_id": "messaging.messages.within_conversation_unread",
+      "coverage_complete": true,
+      "digest": "fnv1a64:691ee9b8cbaefb05:len:1241",
+      "domain": "messaging",
+      "ordered": false,
+      "row_count": 16,
+      "source": "from conversations enrich messages using messages matching _key = conversation_id expect many within messages { where read = false } project { conversation_id: _key, messages { message_id } }",
+      "status": "oracle_ok"
+    },
+    {
+      "case_id": "directory.entries.str_prefix_display_name",
+      "coverage_complete": true,
+      "digest": "fnv1a64:b960baf46f40840e:len:121",
+      "domain": "directory",
+      "ordered": false,
+      "row_count": 0,
+      "source": "from entries where starts_with(display_name, \"Acme\")",
       "status": "oracle_ok"
     },
     {
@@ -1057,18 +1471,30 @@
       "status": "oracle_ok"
     }
   ],
-  "corpus_version": "rql-q1-corpus-v0.4.1",
+  "corpus_version": "rql-q1-corpus-v0.4.2",
   "format": "residiuum-rql-q3-1-oracle-report-v1",
   "oracle_profile": "residiuum-rql-q3-semantic-oracle-v1",
   "summary": {
+    "admitted_deferred_families": [
+      "group_aggregate",
+      "projection_computed_conditional",
+      "enrichment_cardinality"
+    ],
     "digest_mismatch": 0,
+    "explain_contract_ok": 1,
+    "non_row_fail": 0,
     "oracle_compile_fail": 0,
     "oracle_eval_fail": 0,
     "oracle_fixture_fail": 0,
-    "oracle_ok": 101,
-    "oracle_unsupported": 5,
-    "skipped_no_source": 1,
-    "skipped_non_oracle_rule_tier_a": 40,
-    "tier_a_oracle_rule_source": 106
+    "oracle_ok": 144,
+    "oracle_unsupported": 0,
+    "package_exit_ready": true,
+    "qualification_green": 147,
+    "qualification_residual": 0,
+    "skipped_no_source": 0,
+    "skipped_non_oracle_rule_tier_a": 0,
+    "stable_refusal_ok": 2,
+    "tier_a_semantic_source": 144,
+    "tier_a_total": 147
   }
 }

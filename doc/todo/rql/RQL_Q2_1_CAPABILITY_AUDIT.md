@@ -5,14 +5,20 @@ Status: **labor complete** (2026-08-07) · package RQL-Q2 **not accepted**
 **Re-audit after Q2.2b enrich dialect (2026-08-08):** execute_ok **122**/147; gap **23**; `pkg_enrich_corpus_dialect` **0**.  
 **Re-audit after Q2.2c array predicates (2026-08-08):** execute_ok **129**/147; gap **16**; `pkg_array_predicate_surface` **0**.
 **Re-audit after Q2.2d budget partial coverage (2026-08-08):** execute_ok **134**/147; gap **11**; `pkg_budget_partial_coverage` **0**.
+**Re-audit after Q2 closure tranche (2026-08-09):** execute_ok **145**/147;
+expected stable refusal **2**/147; **gap 0**. Computed conditional projection,
+textual authenticated continuation, and the grammar-aligned unread-within case
+all compile and execute through QVM. Full server wire remains separate.
 Task: Q2.1 · Feature `019fda4c-1227-7c93-b7e6-292141ec7a78`  
 Authority: [RQL_QUERY_QUALIFICATION_PROGRAM.md](./RQL_QUERY_QUALIFICATION_PROGRAM.md) §5  
 Machine report: [`spec/rql/qualification/corpus-v1/q2_1_capability_audit.json`](../../../spec/rql/qualification/corpus-v1/q2_1_capability_audit.json)  
-Harness: `cargo test -p residiuum-sdk --test rql_q2_capability_audit`
+Harness: `cargo test -p residiuum-sdk --test rql_q2_capability_audit` (writes
+`target/rql-q2/`); publish the reviewed snapshot with
+`RESIDIUUM_WRITE_SPEC_EVIDENCE=1 cargo test -p residiuum-sdk --test rql_q2_capability_audit`
 
 ## 1. What was audited
 
-Every **Tier-A** case in corpus `rql-q1-corpus-v0.4.0` (147 cases) was run on the
+Every **Tier-A** case in corpus `rql-q1-corpus-v0.4.2` (147 cases) was run on the
 **product** path only:
 
 1. **Compile:** `compile_rql_full` (Full surface; Application Core base via the same stack)
@@ -28,7 +34,7 @@ No silent skips. Unsupported outcomes are **error/refusal classification**, neve
 - Not Decision 0 / RQL-C1 close
 - Execute **ok** means the product path returned a page; row correctness is Q3
 
-## 2. Headline numbers
+## 2. Initial-audit numbers (historical)
 
 | Metric | Value |
 |---|---:|
@@ -57,7 +63,7 @@ stable product outcome; **54** remain implementation gaps for Q2.2.
 Wire path was **not** in scope (embedded Full path only). Full-over-wire remains the
 separate Q2-BLOCK-FULL-WIRE residual from Q0.
 
-## 4. Recommended implementation package order (impact-first)
+## 4. Initial implementation package order (historical; now closed embedded)
 
 Ordered by **number of Tier-A cases blocked**. Q2.2 must freeze semantics in
 `RQL_SPEC.md` before implementing each package.
@@ -94,10 +100,11 @@ optional / many) without conflating syntax with semantics.
 limit even under `CoveragePolicy::IncompleteAllowed`. Oracle text wants incomplete
 coverage when budgets exhaust — this is a semantic product gap, not a harness issue.
 
-**`pkg_cursor_after_clause`:** `after` in source is refused at compile
-(`rql_feature_unavailable: after / continuation clause`). Product multipage uses
-`QueryRunOptions.after` (APP-6). Corpus cases need either source support or rewritten
-intent that uses options-only resume (with stable documentation).
+**Closure:** textual `after $cursor` now accepts only an opaque string or byte
+parameter, removes that cursor binding from semantic parameter hashing, and
+executes the same authenticated continuation verifier as `QueryRunOptions.after`.
+The audit obtains a real first-page token and resumes it; it does not use a
+synthetic cursor.
 
 ## 5. What already works (no gap package)
 

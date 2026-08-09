@@ -3,12 +3,13 @@
 use crate::error::AuthorityError;
 use crate::provider::MasterKeyProvider;
 use crate::store::MasterAuthorityStore;
+use ed25519_dalek::VerifyingKey;
 use residiuum_format::{encode_deterministic_uint_map, CborValue};
 use residiuum_heap::{
     verify_certificate, AuthorityEpoch, AuthorityGeneration, CertificateId, DeploymentId, HeapId,
-    Rights, AUDIENCE_DATA_V1, CONTENT_TYPE_CERTIFICATE, EXTERNAL_AAD_CERTIFICATE, PROFILE_VERSION,
+    Rights, AUDIENCE_DATA_V1, CERT_MAX_LIFETIME_S, CONTENT_TYPE_CERTIFICATE,
+    EXTERNAL_AAD_CERTIFICATE, PROFILE_VERSION,
 };
-use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 
 /// Issue request (holder generates its own keypair).
@@ -43,11 +44,13 @@ pub fn issue_heap_key(
         .load_head()?
         .ok_or_else(|| AuthorityError::Refused("no authority head".into()))?;
     if provider.public_key() != head.master_public_key {
-        return Err(AuthorityError::Refused("provider does not match head".into()));
+        return Err(AuthorityError::Refused(
+            "provider does not match head".into(),
+        ));
     }
     VerifyingKey::from_bytes(&req.holder_public_key)
         .map_err(|e| AuthorityError::InvalidArgument(format!("holder key: {e}")))?;
-    if req.expires_at <= req.not_before || req.expires_at - req.not_before > 366 * 24 * 3600 {
+    if req.expires_at <= req.not_before || req.expires_at - req.not_before > CERT_MAX_LIFETIME_S {
         return Err(AuthorityError::InvalidArgument("validity window".into()));
     }
     if req.rights.bits() & !head.access_policy.allowed_rights_mask != 0 {
@@ -59,8 +62,8 @@ pub fn issue_heap_key(
         .map_err(|e| AuthorityError::Heap(e.to_string()))?;
     let heap = HeapId::from_bytes_unchecked_nonzero(head.heap_id)
         .map_err(|e| AuthorityError::Heap(e.to_string()))?;
-    let epoch =
-        AuthorityEpoch::new(head.authority_epoch).map_err(|e| AuthorityError::Heap(e.to_string()))?;
+    let epoch = AuthorityEpoch::new(head.authority_epoch)
+        .map_err(|e| AuthorityError::Heap(e.to_string()))?;
     let generation = AuthorityGeneration::new(head.master_generation)
         .map_err(|e| AuthorityError::Heap(e.to_string()))?;
 
@@ -105,11 +108,7 @@ pub fn issue_heap_key(
 }
 
 fn encode_protected_header(content_type: &str) -> Result<Vec<u8>, AuthorityError> {
-    let mut out = Vec::new();
-    out.push(0xa2);
-    out.push(0x01);
-    out.push(0x27); // alg = -8 (EdDSA)
-    out.push(0x03);
+    let mut out = vec![0xa2, 0x01, 0x27, 0x03]; // alg = -8 (EdDSA)
     write_text(&mut out, content_type);
     Ok(out)
 }

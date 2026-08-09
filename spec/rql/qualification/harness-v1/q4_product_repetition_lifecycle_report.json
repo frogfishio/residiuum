@@ -1,0 +1,2467 @@
+{
+  "authority": "doc/todo/rql/RQL_QUERY_QUALIFICATION_PROGRAM.md#73-cache-and-lifecycle-classes",
+  "format": "residiuum-rql-q4-product-repetition-lifecycle-report-v1",
+  "harness_profile": "residiuum-rql-qual-harness-v1",
+  "larger_dataset_cells": [
+    {
+      "cell_id": "cell_key_get",
+      "claims_larger_than_memory": false,
+      "document_count": 256,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_key_get_larger_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=52417250 workload_operations=2 aggregate_ops_per_s=38.155378 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 52367084,
+            "p50": 52367084,
+            "p95": 52367084,
+            "p99": 52367084,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 512,
+            "explain_plan_digest": "product_plan_hash:0f0217e222ae589e81e6b44193fa67584653e6f7a70520407b6eb07b69fab462",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 543582
+          },
+          "queries_per_s": 19.163764969224047,
+          "resource": {
+            "cpu_time_ns": 107280000,
+            "peak_rss_bytes": 16285696,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 16187392
+          },
+          "result_digest_echo": "bcc9ab2a751e11fca702c710396466681e73f6f9c877c9dff78350457045d7c0",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "684da7bb288def1fc8e6d66715b495a54a792b64353824b916dab93e814359a8",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 1,
+          "values_digest": "bcc9ab2a751e11fca702c710396466681e73f6f9c877c9dff78350457045d7c0"
+        },
+        "shared_work_hash": "014d99330e955752bdb145e88169e64212ea02212bab801f0078e7394f50d2a0",
+        "status": "ready"
+      },
+      "plan_id": "cell_key_get_larger_smoke_c2",
+      "scale_factor": 4,
+      "shared_work_hash": "014d99330e955752bdb145e88169e64212ea02212bab801f0078e7394f50d2a0",
+      "smoke_document_count": 64
+    },
+    {
+      "cell_id": "cell_indexed_eq_multi_sel",
+      "claims_larger_than_memory": false,
+      "document_count": 256,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_indexed_eq_multi_sel_larger_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=7299625 workload_operations=2 aggregate_ops_per_s=273.986677 indexes=1 index_entries_built=256 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 7259000,
+            "p50": 7259000,
+            "p95": 7259000,
+            "p99": 7259000,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 52,
+            "explain_plan_digest": "product_plan_hash:e96d639577d2d3a76bff9fde375d926a15f2337dc97f77be5582a26c34e2717d",
+            "index_build_ns": 24813125,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 55274
+          },
+          "queries_per_s": 140.2684387246092,
+          "resource": {
+            "cpu_time_ns": 14359000,
+            "peak_rss_bytes": 18513920,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 18497536
+          },
+          "result_digest_echo": "0fd48ffc90d36fc4a06b7937c35f205eef9391a87f251b86652d558f6b18264a",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "89d9105b49af98b6cb6348ccdb0777cb84c5ee5565645d9f13a891bf43195668",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 26,
+          "values_digest": "0fd48ffc90d36fc4a06b7937c35f205eef9391a87f251b86652d558f6b18264a"
+        },
+        "shared_work_hash": "39eb1f3868ce7ae4a926f4e41bb129448e9049b8846cc5043c36e71734ae4690",
+        "status": "ready"
+      },
+      "plan_id": "cell_indexed_eq_multi_sel_larger_smoke_c2",
+      "scale_factor": 4,
+      "shared_work_hash": "39eb1f3868ce7ae4a926f4e41bb129448e9049b8846cc5043c36e71734ae4690",
+      "smoke_document_count": 64
+    },
+    {
+      "cell_id": "cell_range_compound",
+      "claims_larger_than_memory": false,
+      "document_count": 256,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_range_compound_larger_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=59066542 workload_operations=2 aggregate_ops_per_s=33.860117 indexes=1 index_entries_built=256 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 59018917,
+            "p50": 59018917,
+            "p95": 59018917,
+            "p99": 59018917,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 512,
+            "explain_plan_digest": "product_plan_hash:d6580f5ec834400760bb38acedb0ec8fba0e17dd706bc9dd0f8439cb1885d73c",
+            "index_build_ns": 24927083,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 540772
+          },
+          "queries_per_s": 16.98233761316828,
+          "resource": {
+            "cpu_time_ns": 121023000,
+            "peak_rss_bytes": 19841024,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 19759104
+          },
+          "result_digest_echo": "e041a28bfb033710c92eb41df3c581701b910ec07ec2cc914a8968d0ae52334b",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "99192e6d1bb0140748dcb1cd2c28144bddf2c29a6d817798a6940b2967e82d0a",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 27,
+          "values_digest": "e041a28bfb033710c92eb41df3c581701b910ec07ec2cc914a8968d0ae52334b"
+        },
+        "shared_work_hash": "baa71665b90ed6aed9566ed8b3497117950c4a10289786d89f435f7fbf572323",
+        "status": "ready"
+      },
+      "plan_id": "cell_range_compound_larger_smoke_c2",
+      "scale_factor": 4,
+      "shared_work_hash": "baa71665b90ed6aed9566ed8b3497117950c4a10289786d89f435f7fbf572323",
+      "smoke_document_count": 64
+    },
+    {
+      "cell_id": "cell_nested_array_pred",
+      "claims_larger_than_memory": false,
+      "document_count": 256,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_nested_array_pred_larger_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=49729917 workload_operations=2 aggregate_ops_per_s=40.217240 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 49666083,
+            "p50": 49666083,
+            "p95": 49666083,
+            "p99": 49666083,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 254,
+            "explain_plan_digest": "product_plan_hash:66a3124e41f3e720efa7979ee7bbafaaa511660aaca02f73bd502192110756e8",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 285690
+          },
+          "queries_per_s": 20.16175615670475,
+          "resource": {
+            "cpu_time_ns": 105227000,
+            "peak_rss_bytes": 23232512,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 23232512
+          },
+          "result_digest_echo": "89c43554d83a7bcb3886c29426d6d20e90b77ee53a47b916a68cadc52aeac574",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "a09b43cde1ac7298aa7c18fe5540f1dc8f09814c8392fd062f4c795780b09af5",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 64,
+          "values_digest": "89c43554d83a7bcb3886c29426d6d20e90b77ee53a47b916a68cadc52aeac574"
+        },
+        "shared_work_hash": "e246e284c5de7b83577ae0baa7c74eb3b6f5cdef16fb49a2b055b5d89c0ca664",
+        "status": "ready"
+      },
+      "plan_id": "cell_nested_array_pred_larger_smoke_c2",
+      "scale_factor": 4,
+      "shared_work_hash": "e246e284c5de7b83577ae0baa7c74eb3b6f5cdef16fb49a2b055b5d89c0ca664",
+      "smoke_document_count": 64
+    },
+    {
+      "cell_id": "cell_project_covered",
+      "claims_larger_than_memory": false,
+      "document_count": 256,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_project_covered_larger_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=62977334 workload_operations=2 aggregate_ops_per_s=31.757457 indexes=1 index_entries_built=256 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 62884041,
+            "p50": 62884041,
+            "p95": 62884041,
+            "p99": 62884041,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 380,
+            "explain_plan_digest": "product_plan_hash:13855d39b504a7e7995de676b21d7104d381ae2be547b03be6c754418a81cca9",
+            "index_build_ns": 34982833,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 407592
+          },
+          "queries_per_s": 16.00807882915887,
+          "resource": {
+            "cpu_time_ns": 130923000,
+            "peak_rss_bytes": 24330240,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 24231936
+          },
+          "result_digest_echo": "03c6f5b9212f30e533deb5607d1818dd2b9e143463d3b0e434ff2d5b15ddc06c",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "42d147f2c22cf1a86c716f31dfba0eb0b427d74eb3ba7a39693869591d95cf9b",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 64,
+          "values_digest": "03c6f5b9212f30e533deb5607d1818dd2b9e143463d3b0e434ff2d5b15ddc06c"
+        },
+        "shared_work_hash": "1bf6835df580ba5a8e2160ef9fd6b9367ee67e030c2ba19a0e66216f915b20b6",
+        "status": "ready"
+      },
+      "plan_id": "cell_project_covered_larger_smoke_c2",
+      "scale_factor": 4,
+      "shared_work_hash": "1bf6835df580ba5a8e2160ef9fd6b9367ee67e030c2ba19a0e66216f915b20b6",
+      "smoke_document_count": 64
+    },
+    {
+      "cell_id": "cell_top_k",
+      "claims_larger_than_memory": false,
+      "document_count": 256,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_top_k_larger_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=73169291 workload_operations=2 aggregate_ops_per_s=27.333872 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 73103292,
+            "p50": 73103292,
+            "p95": 73103292,
+            "p99": 73103292,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 512,
+            "explain_plan_digest": "product_plan_hash:f3da0d43379905ca1a953a30a49df19a0757ba39f41302722127bd0209cddcb1",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 541018
+          },
+          "queries_per_s": 13.730660476280775,
+          "resource": {
+            "cpu_time_ns": 153581000,
+            "peak_rss_bytes": 24494080,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 24395776
+          },
+          "result_digest_echo": "fb4819f8ec36c62c801c50954b8140369376c1fdb099cda556830719f1f6e61c",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "2249f88095498c0caac8e6841778670c2d9a683f10d5b95f1d3388584b630a83",
+          "multiplicity": "ordered",
+          "order_sensitive": true,
+          "row_count": 10,
+          "values_digest": "fb4819f8ec36c62c801c50954b8140369376c1fdb099cda556830719f1f6e61c"
+        },
+        "shared_work_hash": "0f0a53ccd942cb5a8b43ef072a97470bbf705d955ab87c667d9b86ed80b53016",
+        "status": "ready"
+      },
+      "plan_id": "cell_top_k_larger_smoke_c2",
+      "scale_factor": 4,
+      "shared_work_hash": "0f0a53ccd942cb5a8b43ef072a97470bbf705d955ab87c667d9b86ed80b53016",
+      "smoke_document_count": 64
+    },
+    {
+      "cell_id": "cell_cursor_first_deep",
+      "claims_larger_than_memory": false,
+      "document_count": 256,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_cursor_first_deep_larger_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=32 worker_pages=64 workload_wall_ns=2801932000 workload_operations=64 aggregate_ops_per_s=22.841382 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 104971792,
+            "p50": 89997084,
+            "p95": 99664291,
+            "p99": 104936625,
+            "samples": 64
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 16384,
+            "explain_plan_digest": "product_plan_hash:2b64a206461a2495fbf71f128b777abbcf3980e5e114ec9ba5d70fdc2e397a96",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 17312576
+          },
+          "queries_per_s": 11.433341872050786,
+          "resource": {
+            "cpu_time_ns": 5844084000,
+            "peak_rss_bytes": 25608192,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 25509888
+          },
+          "result_digest_echo": "91fd6ad99853bf245e75ef25ee54206bdfdf4cf56ef4ee179d54439d19276b41",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "5013eef8f95f77bf7b4addbcde251e6fa47672afa9d93d929db49fd09089af44",
+          "multiplicity": "ordered",
+          "order_sensitive": true,
+          "row_count": 256,
+          "values_digest": "91fd6ad99853bf245e75ef25ee54206bdfdf4cf56ef4ee179d54439d19276b41"
+        },
+        "shared_work_hash": "ad7b63074533f96e525977737500c33b2f6b8d98d8fc84c811997a1d59453521",
+        "status": "ready"
+      },
+      "plan_id": "cell_cursor_first_deep_larger_smoke_c2",
+      "scale_factor": 4,
+      "shared_work_hash": "ad7b63074533f96e525977737500c33b2f6b8d98d8fc84c811997a1d59453521",
+      "smoke_document_count": 64
+    },
+    {
+      "cell_id": "cell_enrich_card",
+      "claims_larger_than_memory": false,
+      "document_count": 256,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_enrich_card_larger_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=48975541 workload_operations=2 aggregate_ops_per_s=40.836711 indexes=0 index_entries_built=0 full_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 48715916,
+            "p50": 48715916,
+            "p95": 48715916,
+            "p99": 48715916,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:db046d60b0cccfb5a28c853aa6cea3f25e59b017428394fbcb6deb9f30c75b6a",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 144260
+          },
+          "queries_per_s": 20.58454996343206,
+          "resource": {
+            "cpu_time_ns": 102060000,
+            "peak_rss_bytes": 27246592,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 27164672
+          },
+          "result_digest_echo": "1a1e7967827ba6a60c5601460368367df7c977a69f6a4c31edb51857f4abf758",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 64,
+          "values_digest": "1a1e7967827ba6a60c5601460368367df7c977a69f6a4c31edb51857f4abf758"
+        },
+        "shared_work_hash": "e4487ce3cc15625615df79fd4635c3eebe68da1e6e16beaaa63232dbc1ded815",
+        "status": "ready"
+      },
+      "plan_id": "cell_enrich_card_larger_smoke_c2",
+      "scale_factor": 4,
+      "shared_work_hash": "e4487ce3cc15625615df79fd4635c3eebe68da1e6e16beaaa63232dbc1ded815",
+      "smoke_document_count": 64
+    },
+    {
+      "cell_id": "cell_group_card",
+      "claims_larger_than_memory": false,
+      "document_count": 256,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_group_card_larger_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=92594625 workload_operations=2 aggregate_ops_per_s=21.599526 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 92502958,
+            "p50": 92502958,
+            "p95": 92502958,
+            "p99": 92502958,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 512,
+            "explain_plan_digest": "product_plan_hash:fe685af05ff56ce294a10a7dca6a7183db37e60be0101dc87dc54ff7a75d2480",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 541058
+          },
+          "queries_per_s": 10.858861330896575,
+          "resource": {
+            "cpu_time_ns": 190458000,
+            "peak_rss_bytes": 28278784,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 28180480
+          },
+          "result_digest_echo": "667c944b83c82ebb101314a7ccadf540090b1ed5f16dd21853c591c54683d93d",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "c102cd7ab6ced945c3e1e1b0f500191badbb6320e0221dcfa8822109f380884f",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 3,
+          "values_digest": "667c944b83c82ebb101314a7ccadf540090b1ed5f16dd21853c591c54683d93d"
+        },
+        "shared_work_hash": "57fa3f6dca2d0c4ab7f5cffb251ce846a515a03ee01b27efcfab5ea0c409b867",
+        "status": "ready"
+      },
+      "plan_id": "cell_group_card_larger_smoke_c2",
+      "scale_factor": 4,
+      "shared_work_hash": "57fa3f6dca2d0c4ab7f5cffb251ce846a515a03ee01b27efcfab5ea0c409b867",
+      "smoke_document_count": 64
+    },
+    {
+      "cell_id": "cell_agg_stats",
+      "claims_larger_than_memory": false,
+      "document_count": 256,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_agg_stats_larger_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=111285500 workload_operations=2 aggregate_ops_per_s=17.971793 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 111182459,
+            "p50": 111182459,
+            "p95": 111182459,
+            "p99": 111182459,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 512,
+            "explain_plan_digest": "product_plan_hash:514276b94db504bad2211e0d10d3f10c2c481e9de44d98f17b304d4f94c85ef6",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 541028
+          },
+          "queries_per_s": 9.005231436113876,
+          "resource": {
+            "cpu_time_ns": 232118000,
+            "peak_rss_bytes": 28475392,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 28377088
+          },
+          "result_digest_echo": "358378ae5f58c505bf91fe4031b6cb6d90eab3067d5d07077ee3c9a85151491e",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "3aa520d72c396ff3d708292a35fe58a2d085d53889bcccd41851395ed0ffa0e8",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 5,
+          "values_digest": "358378ae5f58c505bf91fe4031b6cb6d90eab3067d5d07077ee3c9a85151491e"
+        },
+        "shared_work_hash": "650ae5fe4dfb70e8638bd6bd1e88979887504412e1db2d94ea8f63d1e71cba75",
+        "status": "ready"
+      },
+      "plan_id": "cell_agg_stats_larger_smoke_c2",
+      "scale_factor": 4,
+      "shared_work_hash": "650ae5fe4dfb70e8638bd6bd1e88979887504412e1db2d94ea8f63d1e71cba75",
+      "smoke_document_count": 64
+    },
+    {
+      "cell_id": "cell_conditional_computed",
+      "claims_larger_than_memory": false,
+      "document_count": 256,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_conditional_computed_larger_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=22354125 workload_operations=2 aggregate_ops_per_s=89.468946 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 22274208,
+            "p50": 22274208,
+            "p95": 22274208,
+            "p99": 22274208,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:c17ae93acdf67118e0bb0d81ffea6ef1a2b0108c9826a1ad9d72134a30dadacc",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 137180
+          },
+          "queries_per_s": 45.330273539869395,
+          "resource": {
+            "cpu_time_ns": 46324000,
+            "peak_rss_bytes": 28753920,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 28655616
+          },
+          "result_digest_echo": "353f99fe170c72f1e528a9223f160019c801775e6d9f5ca70e323318deb5796d",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 64,
+          "values_digest": "353f99fe170c72f1e528a9223f160019c801775e6d9f5ca70e323318deb5796d"
+        },
+        "shared_work_hash": "920298648cf8938defc2e1ca73e212e52510e0d8a4f6699b191c2fbb54ac0b98",
+        "status": "ready"
+      },
+      "plan_id": "cell_conditional_computed_larger_smoke_c2",
+      "scale_factor": 4,
+      "shared_work_hash": "920298648cf8938defc2e1ca73e212e52510e0d8a4f6699b191c2fbb54ac0b98",
+      "smoke_document_count": 64
+    },
+    {
+      "cell_id": "cell_mixed_rw",
+      "claims_larger_than_memory": false,
+      "document_count": 256,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_mixed_rw_larger_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=100 worker_pages=2 workload_wall_ns=9254712375 workload_operations=200 aggregate_ops_per_s=21.610612 indexes=0 index_entries_built=0 mixed_rw=rw_90_10 reads=92 writes=8",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 168785167,
+            "p50": 85136167,
+            "p95": 133329917,
+            "p99": 156689250,
+            "samples": 200
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 50404,
+            "explain_plan_digest": "product_plan_hash:9960e8290d06a5b5f595125f27316e41b6db0d9bc40d72c3c17c499fbaa849bf",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 50063126
+          },
+          "queries_per_s": 10.990319764597656,
+          "resource": {
+            "cpu_time_ns": 18066442000,
+            "peak_rss_bytes": 29736960,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 339968,
+            "read_amplification": 0.0,
+            "rss_bytes": 29573120
+          },
+          "result_digest_echo": "80376373ed13deb0580584f4f110b1380cac46bfde07cc5fcdd21af283da37aa",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "89d9105b49af98b6cb6348ccdb0777cb84c5ee5565645d9f13a891bf43195668",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 26,
+          "values_digest": "80376373ed13deb0580584f4f110b1380cac46bfde07cc5fcdd21af283da37aa"
+        },
+        "shared_work_hash": "afac7737241e4c9d7db4549458e77474fbce0ecb25ca0e412dfa89316e267340",
+        "status": "ready"
+      },
+      "plan_id": "cell_mixed_rw_larger_smoke_c2",
+      "scale_factor": 4,
+      "shared_work_hash": "afac7737241e4c9d7db4549458e77474fbce0ecb25ca0e412dfa89316e267340",
+      "smoke_document_count": 64
+    }
+  ],
+  "non_claims": [
+    "not_gate1",
+    "not_competitive",
+    "not_q5_baseline",
+    "no_comparator_repetitions",
+    "reopen_is_not_device_cold",
+    "four_x_smoke_is_not_larger_than_memory"
+  ],
+  "repeated_cells": [
+    {
+      "cell_id": "cell_key_get",
+      "claims_device_cold": false,
+      "last_outcome": {
+        "detail": "product_embedded_shared plan=cell_key_get_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=15012916 workload_operations=2 aggregate_ops_per_s=133.218623 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 14970250,
+            "p50": 14970250,
+            "p95": 14970250,
+            "p99": 14970250,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:cb0de5867b598ac4713cd4cb48c720695694d400441b5aea672f323447447626",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135620
+          },
+          "queries_per_s": 67.07142482980123,
+          "resource": {
+            "cpu_time_ns": 31106000,
+            "peak_rss_bytes": 13107200,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 13008896
+          },
+          "result_digest_echo": "84ad02aeb68240cb66d3e15b2197f6d075fee1c627b57620d366bd52bcf0ea2c",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "684da7bb288def1fc8e6d66715b495a54a792b64353824b916dab93e814359a8",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 1,
+          "values_digest": "84ad02aeb68240cb66d3e15b2197f6d075fee1c627b57620d366bd52bcf0ea2c"
+        },
+        "shared_work_hash": "536dca5c16e419d03b07bdaf138fdeb2d7cbb197f8050d838f1a7d72203786f4",
+        "status": "ready"
+      },
+      "lifecycle": "fresh_reopen_then_warm_same_connection",
+      "plan_id": "cell_key_get_smoke_c2",
+      "repetitions": [
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 15477709,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5dfc831d9957a87fa18e69b6421903ef3a467fa582813b838ba71d41a911f995",
+          "qvm_hash": "cb0de5867b598ac4713cd4cb48c720695694d400441b5aea672f323447447626",
+          "repetition": 0,
+          "result_digest": "84ad02aeb68240cb66d3e15b2197f6d075fee1c627b57620d366bd52bcf0ea2c",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 15310417,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5dfc831d9957a87fa18e69b6421903ef3a467fa582813b838ba71d41a911f995",
+          "qvm_hash": "cb0de5867b598ac4713cd4cb48c720695694d400441b5aea672f323447447626",
+          "repetition": 1,
+          "result_digest": "84ad02aeb68240cb66d3e15b2197f6d075fee1c627b57620d366bd52bcf0ea2c",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 15358250,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5dfc831d9957a87fa18e69b6421903ef3a467fa582813b838ba71d41a911f995",
+          "qvm_hash": "cb0de5867b598ac4713cd4cb48c720695694d400441b5aea672f323447447626",
+          "repetition": 2,
+          "result_digest": "84ad02aeb68240cb66d3e15b2197f6d075fee1c627b57620d366bd52bcf0ea2c",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 15574750,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5dfc831d9957a87fa18e69b6421903ef3a467fa582813b838ba71d41a911f995",
+          "qvm_hash": "cb0de5867b598ac4713cd4cb48c720695694d400441b5aea672f323447447626",
+          "repetition": 3,
+          "result_digest": "84ad02aeb68240cb66d3e15b2197f6d075fee1c627b57620d366bd52bcf0ea2c",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 15449917,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5dfc831d9957a87fa18e69b6421903ef3a467fa582813b838ba71d41a911f995",
+          "qvm_hash": "cb0de5867b598ac4713cd4cb48c720695694d400441b5aea672f323447447626",
+          "repetition": 4,
+          "result_digest": "84ad02aeb68240cb66d3e15b2197f6d075fee1c627b57620d366bd52bcf0ea2c",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 15346666,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5dfc831d9957a87fa18e69b6421903ef3a467fa582813b838ba71d41a911f995",
+          "qvm_hash": "cb0de5867b598ac4713cd4cb48c720695694d400441b5aea672f323447447626",
+          "repetition": 5,
+          "result_digest": "84ad02aeb68240cb66d3e15b2197f6d075fee1c627b57620d366bd52bcf0ea2c",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 15012916,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5dfc831d9957a87fa18e69b6421903ef3a467fa582813b838ba71d41a911f995",
+          "qvm_hash": "cb0de5867b598ac4713cd4cb48c720695694d400441b5aea672f323447447626",
+          "repetition": 6,
+          "result_digest": "84ad02aeb68240cb66d3e15b2197f6d075fee1c627b57620d366bd52bcf0ea2c",
+          "valid": true
+        }
+      ],
+      "shared_work_hash": "536dca5c16e419d03b07bdaf138fdeb2d7cbb197f8050d838f1a7d72203786f4"
+    },
+    {
+      "cell_id": "cell_indexed_eq_multi_sel",
+      "claims_device_cold": false,
+      "last_outcome": {
+        "detail": "product_embedded_shared plan=cell_indexed_eq_multi_sel_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=2233792 workload_operations=2 aggregate_ops_per_s=895.338510 indexes=1 index_entries_built=64 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 2205917,
+            "p50": 2205917,
+            "p95": 2205917,
+            "p99": 2205917,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 14,
+            "explain_plan_digest": "product_plan_hash:a4d028fe2078c6d59e23a30106cde60d51f58532cac310b7e0b80c6fb9ba3509",
+            "index_build_ns": 14882292,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 14860
+          },
+          "queries_per_s": 465.6531880247038,
+          "resource": {
+            "cpu_time_ns": 4420000,
+            "peak_rss_bytes": 17154048,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 17055744
+          },
+          "result_digest_echo": "225295bef0a20579317cb0c52667aaacb166667993bb4b6523afdbf188ebab51",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "7852cc456e308d8c23142016fb9a147cef1277ed2fccc6196395bc4742dff2e3",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 7,
+          "values_digest": "225295bef0a20579317cb0c52667aaacb166667993bb4b6523afdbf188ebab51"
+        },
+        "shared_work_hash": "178c3167a07d42a07337cd23e01d3040bf55ebc0194e185bf2b5173b06440932",
+        "status": "ready"
+      },
+      "lifecycle": "fresh_reopen_then_warm_same_connection",
+      "plan_id": "cell_indexed_eq_multi_sel_smoke_c2",
+      "repetitions": [
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 2298208,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4e412b8ce6e68d2b0f54dd099e6e527411b7cd7c4529d607f084760f02140310",
+          "operations": 2,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "a4d028fe2078c6d59e23a30106cde60d51f58532cac310b7e0b80c6fb9ba3509",
+          "repetition": 0,
+          "result_digest": "225295bef0a20579317cb0c52667aaacb166667993bb4b6523afdbf188ebab51",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 2225333,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4e412b8ce6e68d2b0f54dd099e6e527411b7cd7c4529d607f084760f02140310",
+          "operations": 2,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "a4d028fe2078c6d59e23a30106cde60d51f58532cac310b7e0b80c6fb9ba3509",
+          "repetition": 1,
+          "result_digest": "225295bef0a20579317cb0c52667aaacb166667993bb4b6523afdbf188ebab51",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 2220584,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4e412b8ce6e68d2b0f54dd099e6e527411b7cd7c4529d607f084760f02140310",
+          "operations": 2,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "a4d028fe2078c6d59e23a30106cde60d51f58532cac310b7e0b80c6fb9ba3509",
+          "repetition": 2,
+          "result_digest": "225295bef0a20579317cb0c52667aaacb166667993bb4b6523afdbf188ebab51",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 2230375,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4e412b8ce6e68d2b0f54dd099e6e527411b7cd7c4529d607f084760f02140310",
+          "operations": 2,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "a4d028fe2078c6d59e23a30106cde60d51f58532cac310b7e0b80c6fb9ba3509",
+          "repetition": 3,
+          "result_digest": "225295bef0a20579317cb0c52667aaacb166667993bb4b6523afdbf188ebab51",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 2211750,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4e412b8ce6e68d2b0f54dd099e6e527411b7cd7c4529d607f084760f02140310",
+          "operations": 2,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "a4d028fe2078c6d59e23a30106cde60d51f58532cac310b7e0b80c6fb9ba3509",
+          "repetition": 4,
+          "result_digest": "225295bef0a20579317cb0c52667aaacb166667993bb4b6523afdbf188ebab51",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 2206333,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4e412b8ce6e68d2b0f54dd099e6e527411b7cd7c4529d607f084760f02140310",
+          "operations": 2,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "a4d028fe2078c6d59e23a30106cde60d51f58532cac310b7e0b80c6fb9ba3509",
+          "repetition": 5,
+          "result_digest": "225295bef0a20579317cb0c52667aaacb166667993bb4b6523afdbf188ebab51",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 2233792,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4e412b8ce6e68d2b0f54dd099e6e527411b7cd7c4529d607f084760f02140310",
+          "operations": 2,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "a4d028fe2078c6d59e23a30106cde60d51f58532cac310b7e0b80c6fb9ba3509",
+          "repetition": 6,
+          "result_digest": "225295bef0a20579317cb0c52667aaacb166667993bb4b6523afdbf188ebab51",
+          "valid": true
+        }
+      ],
+      "shared_work_hash": "178c3167a07d42a07337cd23e01d3040bf55ebc0194e185bf2b5173b06440932"
+    },
+    {
+      "cell_id": "cell_range_compound",
+      "claims_device_cold": false,
+      "last_outcome": {
+        "detail": "product_embedded_shared plan=cell_range_compound_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=15951584 workload_operations=2 aggregate_ops_per_s=125.379398 indexes=1 index_entries_built=64 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 15908625,
+            "p50": 15908625,
+            "p95": 15908625,
+            "p99": 15908625,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:77a318e4158ed42b484e72fbc5a3571323979c5e1bea01ef85ce73a6d38d1e46",
+            "index_build_ns": 11915583,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 134998
+          },
+          "queries_per_s": 63.0675269371656,
+          "resource": {
+            "cpu_time_ns": 32975000,
+            "peak_rss_bytes": 19316736,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 19218432
+          },
+          "result_digest_echo": "f01d388432f3388af69180ef7df7c400b0494198a3785d73f3095d47d73609b4",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "96ca104131b64503f0f0fc05509c50118e766d12ebf681ab9d0fb0324d52e3b1",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 7,
+          "values_digest": "f01d388432f3388af69180ef7df7c400b0494198a3785d73f3095d47d73609b4"
+        },
+        "shared_work_hash": "f042071b48d3c89a8467377340b36c95c79d0c8dae991801c07d7ec7de6c5e2b",
+        "status": "ready"
+      },
+      "lifecycle": "fresh_reopen_then_warm_same_connection",
+      "plan_id": "cell_range_compound_smoke_c2",
+      "repetitions": [
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 13828958,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "830953ef2c4cb3a8ea366373be1c145d6e849b1ad282755ee984c498c676d3b7",
+          "operations": 2,
+          "query_hash": "a4c36170d21113fd28c0efb0e3c1a74b9f75d0fb271857c8d757724fcca6fc91",
+          "qvm_hash": "77a318e4158ed42b484e72fbc5a3571323979c5e1bea01ef85ce73a6d38d1e46",
+          "repetition": 0,
+          "result_digest": "f01d388432f3388af69180ef7df7c400b0494198a3785d73f3095d47d73609b4",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 14948417,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "830953ef2c4cb3a8ea366373be1c145d6e849b1ad282755ee984c498c676d3b7",
+          "operations": 2,
+          "query_hash": "a4c36170d21113fd28c0efb0e3c1a74b9f75d0fb271857c8d757724fcca6fc91",
+          "qvm_hash": "77a318e4158ed42b484e72fbc5a3571323979c5e1bea01ef85ce73a6d38d1e46",
+          "repetition": 1,
+          "result_digest": "f01d388432f3388af69180ef7df7c400b0494198a3785d73f3095d47d73609b4",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 14819208,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "830953ef2c4cb3a8ea366373be1c145d6e849b1ad282755ee984c498c676d3b7",
+          "operations": 2,
+          "query_hash": "a4c36170d21113fd28c0efb0e3c1a74b9f75d0fb271857c8d757724fcca6fc91",
+          "qvm_hash": "77a318e4158ed42b484e72fbc5a3571323979c5e1bea01ef85ce73a6d38d1e46",
+          "repetition": 2,
+          "result_digest": "f01d388432f3388af69180ef7df7c400b0494198a3785d73f3095d47d73609b4",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 16030000,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "830953ef2c4cb3a8ea366373be1c145d6e849b1ad282755ee984c498c676d3b7",
+          "operations": 2,
+          "query_hash": "a4c36170d21113fd28c0efb0e3c1a74b9f75d0fb271857c8d757724fcca6fc91",
+          "qvm_hash": "77a318e4158ed42b484e72fbc5a3571323979c5e1bea01ef85ce73a6d38d1e46",
+          "repetition": 3,
+          "result_digest": "f01d388432f3388af69180ef7df7c400b0494198a3785d73f3095d47d73609b4",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 16223708,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "830953ef2c4cb3a8ea366373be1c145d6e849b1ad282755ee984c498c676d3b7",
+          "operations": 2,
+          "query_hash": "a4c36170d21113fd28c0efb0e3c1a74b9f75d0fb271857c8d757724fcca6fc91",
+          "qvm_hash": "77a318e4158ed42b484e72fbc5a3571323979c5e1bea01ef85ce73a6d38d1e46",
+          "repetition": 4,
+          "result_digest": "f01d388432f3388af69180ef7df7c400b0494198a3785d73f3095d47d73609b4",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 16107333,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "830953ef2c4cb3a8ea366373be1c145d6e849b1ad282755ee984c498c676d3b7",
+          "operations": 2,
+          "query_hash": "a4c36170d21113fd28c0efb0e3c1a74b9f75d0fb271857c8d757724fcca6fc91",
+          "qvm_hash": "77a318e4158ed42b484e72fbc5a3571323979c5e1bea01ef85ce73a6d38d1e46",
+          "repetition": 5,
+          "result_digest": "f01d388432f3388af69180ef7df7c400b0494198a3785d73f3095d47d73609b4",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 15951584,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "830953ef2c4cb3a8ea366373be1c145d6e849b1ad282755ee984c498c676d3b7",
+          "operations": 2,
+          "query_hash": "a4c36170d21113fd28c0efb0e3c1a74b9f75d0fb271857c8d757724fcca6fc91",
+          "qvm_hash": "77a318e4158ed42b484e72fbc5a3571323979c5e1bea01ef85ce73a6d38d1e46",
+          "repetition": 6,
+          "result_digest": "f01d388432f3388af69180ef7df7c400b0494198a3785d73f3095d47d73609b4",
+          "valid": true
+        }
+      ],
+      "shared_work_hash": "f042071b48d3c89a8467377340b36c95c79d0c8dae991801c07d7ec7de6c5e2b"
+    },
+    {
+      "cell_id": "cell_nested_array_pred",
+      "claims_device_cold": false,
+      "last_outcome": {
+        "detail": "product_embedded_shared plan=cell_nested_array_pred_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=24671375 workload_operations=2 aggregate_ops_per_s=81.065607 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 24605208,
+            "p50": 24605208,
+            "p95": 24605208,
+            "p99": 24605208,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:ef61d85135153e26f15210a3e0f28ca641ba362559e46b91157308ef2a0daf0f",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 141650
+          },
+          "queries_per_s": 40.694864816745934,
+          "resource": {
+            "cpu_time_ns": 51930000,
+            "peak_rss_bytes": 20676608,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 20578304
+          },
+          "result_digest_echo": "5aa6ff0ecc45e6f16538b50022dc660e186704d5fc477ac7bca19a4f473301f6",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "0659bba9c3c777209e74a425248d1d416ac0785ea1c2e7c33d70ed73beee4d44",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 32,
+          "values_digest": "5aa6ff0ecc45e6f16538b50022dc660e186704d5fc477ac7bca19a4f473301f6"
+        },
+        "shared_work_hash": "5ccf885aa5d9521daeac282ee717c8fddd7423bd8faa9c91c751335511bc486c",
+        "status": "ready"
+      },
+      "lifecycle": "fresh_reopen_then_warm_same_connection",
+      "plan_id": "cell_nested_array_pred_smoke_c2",
+      "repetitions": [
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 20276167,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "3b722b052f160282396e0be7ebc95813c40d4b0d5050997fa0b109dde675f975",
+          "qvm_hash": "ef61d85135153e26f15210a3e0f28ca641ba362559e46b91157308ef2a0daf0f",
+          "repetition": 0,
+          "result_digest": "5aa6ff0ecc45e6f16538b50022dc660e186704d5fc477ac7bca19a4f473301f6",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 18846458,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "3b722b052f160282396e0be7ebc95813c40d4b0d5050997fa0b109dde675f975",
+          "qvm_hash": "ef61d85135153e26f15210a3e0f28ca641ba362559e46b91157308ef2a0daf0f",
+          "repetition": 1,
+          "result_digest": "5aa6ff0ecc45e6f16538b50022dc660e186704d5fc477ac7bca19a4f473301f6",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 21892875,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "3b722b052f160282396e0be7ebc95813c40d4b0d5050997fa0b109dde675f975",
+          "qvm_hash": "ef61d85135153e26f15210a3e0f28ca641ba362559e46b91157308ef2a0daf0f",
+          "repetition": 2,
+          "result_digest": "5aa6ff0ecc45e6f16538b50022dc660e186704d5fc477ac7bca19a4f473301f6",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 21560958,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "3b722b052f160282396e0be7ebc95813c40d4b0d5050997fa0b109dde675f975",
+          "qvm_hash": "ef61d85135153e26f15210a3e0f28ca641ba362559e46b91157308ef2a0daf0f",
+          "repetition": 3,
+          "result_digest": "5aa6ff0ecc45e6f16538b50022dc660e186704d5fc477ac7bca19a4f473301f6",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 22996375,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "3b722b052f160282396e0be7ebc95813c40d4b0d5050997fa0b109dde675f975",
+          "qvm_hash": "ef61d85135153e26f15210a3e0f28ca641ba362559e46b91157308ef2a0daf0f",
+          "repetition": 4,
+          "result_digest": "5aa6ff0ecc45e6f16538b50022dc660e186704d5fc477ac7bca19a4f473301f6",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 24583042,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "3b722b052f160282396e0be7ebc95813c40d4b0d5050997fa0b109dde675f975",
+          "qvm_hash": "ef61d85135153e26f15210a3e0f28ca641ba362559e46b91157308ef2a0daf0f",
+          "repetition": 5,
+          "result_digest": "5aa6ff0ecc45e6f16538b50022dc660e186704d5fc477ac7bca19a4f473301f6",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 24671375,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "3b722b052f160282396e0be7ebc95813c40d4b0d5050997fa0b109dde675f975",
+          "qvm_hash": "ef61d85135153e26f15210a3e0f28ca641ba362559e46b91157308ef2a0daf0f",
+          "repetition": 6,
+          "result_digest": "5aa6ff0ecc45e6f16538b50022dc660e186704d5fc477ac7bca19a4f473301f6",
+          "valid": true
+        }
+      ],
+      "shared_work_hash": "5ccf885aa5d9521daeac282ee717c8fddd7423bd8faa9c91c751335511bc486c"
+    },
+    {
+      "cell_id": "cell_project_covered",
+      "claims_device_cold": false,
+      "last_outcome": {
+        "detail": "product_embedded_shared plan=cell_project_covered_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=14794709 workload_operations=2 aggregate_ops_per_s=135.183463 indexes=1 index_entries_built=64 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 14740042,
+            "p50": 14740042,
+            "p95": 14740042,
+            "p99": 14740042,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:5ceef028e748f8eb1daf79ab6899b82f2b156553392d1987c3fa35ea5d4c687a",
+            "index_build_ns": 21388625,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135018
+          },
+          "queries_per_s": 68.0928324565303,
+          "resource": {
+            "cpu_time_ns": 30970000,
+            "peak_rss_bytes": 23789568,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 23691264
+          },
+          "result_digest_echo": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "0659bba9c3c777209e74a425248d1d416ac0785ea1c2e7c33d70ed73beee4d44",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 32,
+          "values_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e"
+        },
+        "shared_work_hash": "fadd27c0fc2b24e0a7edfc5b386dc710243523ddc18e006b3eac87d30f7b97cd",
+        "status": "ready"
+      },
+      "lifecycle": "fresh_reopen_then_warm_same_connection",
+      "plan_id": "cell_project_covered_smoke_c2",
+      "repetitions": [
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 13604791,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "165f889ead6ed5775e83a5fed3f4060c65ccfce57a8d1916ba6c2a7635e045a9",
+          "operations": 2,
+          "query_hash": "20a73ffe3c25f321e789ac78e8a6e243e3da4754bd2aeb76fa3ed02117288836",
+          "qvm_hash": "5ceef028e748f8eb1daf79ab6899b82f2b156553392d1987c3fa35ea5d4c687a",
+          "repetition": 0,
+          "result_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 14860167,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "165f889ead6ed5775e83a5fed3f4060c65ccfce57a8d1916ba6c2a7635e045a9",
+          "operations": 2,
+          "query_hash": "20a73ffe3c25f321e789ac78e8a6e243e3da4754bd2aeb76fa3ed02117288836",
+          "qvm_hash": "5ceef028e748f8eb1daf79ab6899b82f2b156553392d1987c3fa35ea5d4c687a",
+          "repetition": 1,
+          "result_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 14591834,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "165f889ead6ed5775e83a5fed3f4060c65ccfce57a8d1916ba6c2a7635e045a9",
+          "operations": 2,
+          "query_hash": "20a73ffe3c25f321e789ac78e8a6e243e3da4754bd2aeb76fa3ed02117288836",
+          "qvm_hash": "5ceef028e748f8eb1daf79ab6899b82f2b156553392d1987c3fa35ea5d4c687a",
+          "repetition": 2,
+          "result_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 14618166,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "165f889ead6ed5775e83a5fed3f4060c65ccfce57a8d1916ba6c2a7635e045a9",
+          "operations": 2,
+          "query_hash": "20a73ffe3c25f321e789ac78e8a6e243e3da4754bd2aeb76fa3ed02117288836",
+          "qvm_hash": "5ceef028e748f8eb1daf79ab6899b82f2b156553392d1987c3fa35ea5d4c687a",
+          "repetition": 3,
+          "result_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 14499666,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "165f889ead6ed5775e83a5fed3f4060c65ccfce57a8d1916ba6c2a7635e045a9",
+          "operations": 2,
+          "query_hash": "20a73ffe3c25f321e789ac78e8a6e243e3da4754bd2aeb76fa3ed02117288836",
+          "qvm_hash": "5ceef028e748f8eb1daf79ab6899b82f2b156553392d1987c3fa35ea5d4c687a",
+          "repetition": 4,
+          "result_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 15014875,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "165f889ead6ed5775e83a5fed3f4060c65ccfce57a8d1916ba6c2a7635e045a9",
+          "operations": 2,
+          "query_hash": "20a73ffe3c25f321e789ac78e8a6e243e3da4754bd2aeb76fa3ed02117288836",
+          "qvm_hash": "5ceef028e748f8eb1daf79ab6899b82f2b156553392d1987c3fa35ea5d4c687a",
+          "repetition": 5,
+          "result_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 14794709,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "165f889ead6ed5775e83a5fed3f4060c65ccfce57a8d1916ba6c2a7635e045a9",
+          "operations": 2,
+          "query_hash": "20a73ffe3c25f321e789ac78e8a6e243e3da4754bd2aeb76fa3ed02117288836",
+          "qvm_hash": "5ceef028e748f8eb1daf79ab6899b82f2b156553392d1987c3fa35ea5d4c687a",
+          "repetition": 6,
+          "result_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
+          "valid": true
+        }
+      ],
+      "shared_work_hash": "fadd27c0fc2b24e0a7edfc5b386dc710243523ddc18e006b3eac87d30f7b97cd"
+    },
+    {
+      "cell_id": "cell_top_k",
+      "claims_device_cold": false,
+      "last_outcome": {
+        "detail": "product_embedded_shared plan=cell_top_k_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=20725333 workload_operations=2 aggregate_ops_per_s=96.500259 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 20625292,
+            "p50": 20625292,
+            "p95": 20625292,
+            "p99": 20625292,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:87aa8c44ec702de7d05a5b4eade0f156ae86c7f4bf2205a7faf30002e645e74a",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135068
+          },
+          "queries_per_s": 48.496408853048536,
+          "resource": {
+            "cpu_time_ns": 43907000,
+            "peak_rss_bytes": 24330240,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 24231936
+          },
+          "result_digest_echo": "02b7c4bcbda6565cb040d5ca332b42ddfd228a89672061b890de97d871bb50ec",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "8368abe9c3c9db9ea1e38e1e67d19c7d4c3abacc26fc96066732e5422f237cb2",
+          "multiplicity": "ordered",
+          "order_sensitive": true,
+          "row_count": 10,
+          "values_digest": "02b7c4bcbda6565cb040d5ca332b42ddfd228a89672061b890de97d871bb50ec"
+        },
+        "shared_work_hash": "f8065e2e1e903e0443bfb5b01525c15d5f7149c1aa793e917d0f0a0765a41bf1",
+        "status": "ready"
+      },
+      "lifecycle": "fresh_reopen_then_warm_same_connection",
+      "plan_id": "cell_top_k_smoke_c2",
+      "repetitions": [
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 23738208,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5644f48f9f257e198848aa9961b6fac5f0bb592ff4955325d36a4851d2adce9d",
+          "qvm_hash": "87aa8c44ec702de7d05a5b4eade0f156ae86c7f4bf2205a7faf30002e645e74a",
+          "repetition": 0,
+          "result_digest": "02b7c4bcbda6565cb040d5ca332b42ddfd228a89672061b890de97d871bb50ec",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 26636167,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5644f48f9f257e198848aa9961b6fac5f0bb592ff4955325d36a4851d2adce9d",
+          "qvm_hash": "87aa8c44ec702de7d05a5b4eade0f156ae86c7f4bf2205a7faf30002e645e74a",
+          "repetition": 1,
+          "result_digest": "02b7c4bcbda6565cb040d5ca332b42ddfd228a89672061b890de97d871bb50ec",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 22730750,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5644f48f9f257e198848aa9961b6fac5f0bb592ff4955325d36a4851d2adce9d",
+          "qvm_hash": "87aa8c44ec702de7d05a5b4eade0f156ae86c7f4bf2205a7faf30002e645e74a",
+          "repetition": 2,
+          "result_digest": "02b7c4bcbda6565cb040d5ca332b42ddfd228a89672061b890de97d871bb50ec",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 24217375,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5644f48f9f257e198848aa9961b6fac5f0bb592ff4955325d36a4851d2adce9d",
+          "qvm_hash": "87aa8c44ec702de7d05a5b4eade0f156ae86c7f4bf2205a7faf30002e645e74a",
+          "repetition": 3,
+          "result_digest": "02b7c4bcbda6565cb040d5ca332b42ddfd228a89672061b890de97d871bb50ec",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 21282333,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5644f48f9f257e198848aa9961b6fac5f0bb592ff4955325d36a4851d2adce9d",
+          "qvm_hash": "87aa8c44ec702de7d05a5b4eade0f156ae86c7f4bf2205a7faf30002e645e74a",
+          "repetition": 4,
+          "result_digest": "02b7c4bcbda6565cb040d5ca332b42ddfd228a89672061b890de97d871bb50ec",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 20530708,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5644f48f9f257e198848aa9961b6fac5f0bb592ff4955325d36a4851d2adce9d",
+          "qvm_hash": "87aa8c44ec702de7d05a5b4eade0f156ae86c7f4bf2205a7faf30002e645e74a",
+          "repetition": 5,
+          "result_digest": "02b7c4bcbda6565cb040d5ca332b42ddfd228a89672061b890de97d871bb50ec",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 20725333,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "5644f48f9f257e198848aa9961b6fac5f0bb592ff4955325d36a4851d2adce9d",
+          "qvm_hash": "87aa8c44ec702de7d05a5b4eade0f156ae86c7f4bf2205a7faf30002e645e74a",
+          "repetition": 6,
+          "result_digest": "02b7c4bcbda6565cb040d5ca332b42ddfd228a89672061b890de97d871bb50ec",
+          "valid": true
+        }
+      ],
+      "shared_work_hash": "f8065e2e1e903e0443bfb5b01525c15d5f7149c1aa793e917d0f0a0765a41bf1"
+    },
+    {
+      "cell_id": "cell_cursor_first_deep",
+      "claims_device_cold": false,
+      "last_outcome": {
+        "detail": "product_embedded_shared plan=cell_cursor_first_deep_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=8 worker_pages=16 workload_wall_ns=200494375 workload_operations=16 aggregate_ops_per_s=79.802738 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 26500375,
+            "p50": 25521834,
+            "p95": 26001292,
+            "p99": 26500375,
+            "samples": 16
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 1024,
+            "explain_plan_digest": "product_plan_hash:8b54b869b5714a4db1cbbf75792445f347556f1145f807716dc8710813116d89",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 1080576
+          },
+          "queries_per_s": 39.95880486970762,
+          "resource": {
+            "cpu_time_ns": 417923000,
+            "peak_rss_bytes": 25051136,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 24952832
+          },
+          "result_digest_echo": "a0a42c2432d803bbf511cc360c438518ea4dfc6d4e2a2a2055a80edb23baeea7",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
+          "multiplicity": "ordered",
+          "order_sensitive": true,
+          "row_count": 64,
+          "values_digest": "a0a42c2432d803bbf511cc360c438518ea4dfc6d4e2a2a2055a80edb23baeea7"
+        },
+        "shared_work_hash": "5c294a4ae7af8738d6eb5d47062fbe80489a7dd24b7f46b662c1db6dda824d09",
+        "status": "ready"
+      },
+      "lifecycle": "fresh_reopen_then_warm_same_connection",
+      "plan_id": "cell_cursor_first_deep_smoke_c2",
+      "repetitions": [
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 157265583,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 16,
+          "query_hash": "73d13503d17bb5227600b3e6b92f916597aab2d641c7eb8b335ab4550db23034",
+          "qvm_hash": "8b54b869b5714a4db1cbbf75792445f347556f1145f807716dc8710813116d89",
+          "repetition": 0,
+          "result_digest": "a0a42c2432d803bbf511cc360c438518ea4dfc6d4e2a2a2055a80edb23baeea7",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 175198125,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 16,
+          "query_hash": "73d13503d17bb5227600b3e6b92f916597aab2d641c7eb8b335ab4550db23034",
+          "qvm_hash": "8b54b869b5714a4db1cbbf75792445f347556f1145f807716dc8710813116d89",
+          "repetition": 1,
+          "result_digest": "a0a42c2432d803bbf511cc360c438518ea4dfc6d4e2a2a2055a80edb23baeea7",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 163405042,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 16,
+          "query_hash": "73d13503d17bb5227600b3e6b92f916597aab2d641c7eb8b335ab4550db23034",
+          "qvm_hash": "8b54b869b5714a4db1cbbf75792445f347556f1145f807716dc8710813116d89",
+          "repetition": 2,
+          "result_digest": "a0a42c2432d803bbf511cc360c438518ea4dfc6d4e2a2a2055a80edb23baeea7",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 190918166,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 16,
+          "query_hash": "73d13503d17bb5227600b3e6b92f916597aab2d641c7eb8b335ab4550db23034",
+          "qvm_hash": "8b54b869b5714a4db1cbbf75792445f347556f1145f807716dc8710813116d89",
+          "repetition": 3,
+          "result_digest": "a0a42c2432d803bbf511cc360c438518ea4dfc6d4e2a2a2055a80edb23baeea7",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 202230292,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 16,
+          "query_hash": "73d13503d17bb5227600b3e6b92f916597aab2d641c7eb8b335ab4550db23034",
+          "qvm_hash": "8b54b869b5714a4db1cbbf75792445f347556f1145f807716dc8710813116d89",
+          "repetition": 4,
+          "result_digest": "a0a42c2432d803bbf511cc360c438518ea4dfc6d4e2a2a2055a80edb23baeea7",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 200247458,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 16,
+          "query_hash": "73d13503d17bb5227600b3e6b92f916597aab2d641c7eb8b335ab4550db23034",
+          "qvm_hash": "8b54b869b5714a4db1cbbf75792445f347556f1145f807716dc8710813116d89",
+          "repetition": 5,
+          "result_digest": "a0a42c2432d803bbf511cc360c438518ea4dfc6d4e2a2a2055a80edb23baeea7",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 200494375,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 16,
+          "query_hash": "73d13503d17bb5227600b3e6b92f916597aab2d641c7eb8b335ab4550db23034",
+          "qvm_hash": "8b54b869b5714a4db1cbbf75792445f347556f1145f807716dc8710813116d89",
+          "repetition": 6,
+          "result_digest": "a0a42c2432d803bbf511cc360c438518ea4dfc6d4e2a2a2055a80edb23baeea7",
+          "valid": true
+        }
+      ],
+      "shared_work_hash": "5c294a4ae7af8738d6eb5d47062fbe80489a7dd24b7f46b662c1db6dda824d09"
+    },
+    {
+      "cell_id": "cell_enrich_card",
+      "claims_device_cold": false,
+      "last_outcome": {
+        "detail": "product_embedded_shared plan=cell_enrich_card_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=32319125 workload_operations=2 aggregate_ops_per_s=61.882863 indexes=0 index_entries_built=0 full_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 32067625,
+            "p50": 32067625,
+            "p95": 32067625,
+            "p99": 32067625,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:b7845a804e62f89e6907fe91c8d4daf67e53111891994221562b2404b5d8a89c",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 137016
+          },
+          "queries_per_s": 32.35925242037096,
+          "resource": {
+            "cpu_time_ns": 65774000,
+            "peak_rss_bytes": 26329088,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 26230784
+          },
+          "result_digest_echo": "b7c829fe674e735176083632c142c355b7e496aef653bab54929a501c9650b34",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 64,
+          "values_digest": "b7c829fe674e735176083632c142c355b7e496aef653bab54929a501c9650b34"
+        },
+        "shared_work_hash": "98c2855fa3246f34efe22512bd04dc8ba2e0d6ae5dc35c9f1e3a58136e8e3319",
+        "status": "ready"
+      },
+      "lifecycle": "fresh_reopen_then_warm_same_connection",
+      "plan_id": "cell_enrich_card_smoke_c2",
+      "repetitions": [
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 44651667,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "d4ce7f6fde0bcb866c226ca61a4b0ee4ea34c67794d4d4b6a0d9fbce6dd431ee",
+          "qvm_hash": "b7845a804e62f89e6907fe91c8d4daf67e53111891994221562b2404b5d8a89c",
+          "repetition": 0,
+          "result_digest": "b7c829fe674e735176083632c142c355b7e496aef653bab54929a501c9650b34",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 31684041,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "d4ce7f6fde0bcb866c226ca61a4b0ee4ea34c67794d4d4b6a0d9fbce6dd431ee",
+          "qvm_hash": "b7845a804e62f89e6907fe91c8d4daf67e53111891994221562b2404b5d8a89c",
+          "repetition": 1,
+          "result_digest": "b7c829fe674e735176083632c142c355b7e496aef653bab54929a501c9650b34",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 27377209,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "d4ce7f6fde0bcb866c226ca61a4b0ee4ea34c67794d4d4b6a0d9fbce6dd431ee",
+          "qvm_hash": "b7845a804e62f89e6907fe91c8d4daf67e53111891994221562b2404b5d8a89c",
+          "repetition": 2,
+          "result_digest": "b7c829fe674e735176083632c142c355b7e496aef653bab54929a501c9650b34",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 27485333,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "d4ce7f6fde0bcb866c226ca61a4b0ee4ea34c67794d4d4b6a0d9fbce6dd431ee",
+          "qvm_hash": "b7845a804e62f89e6907fe91c8d4daf67e53111891994221562b2404b5d8a89c",
+          "repetition": 3,
+          "result_digest": "b7c829fe674e735176083632c142c355b7e496aef653bab54929a501c9650b34",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 28400834,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "d4ce7f6fde0bcb866c226ca61a4b0ee4ea34c67794d4d4b6a0d9fbce6dd431ee",
+          "qvm_hash": "b7845a804e62f89e6907fe91c8d4daf67e53111891994221562b2404b5d8a89c",
+          "repetition": 4,
+          "result_digest": "b7c829fe674e735176083632c142c355b7e496aef653bab54929a501c9650b34",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 27721542,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "d4ce7f6fde0bcb866c226ca61a4b0ee4ea34c67794d4d4b6a0d9fbce6dd431ee",
+          "qvm_hash": "b7845a804e62f89e6907fe91c8d4daf67e53111891994221562b2404b5d8a89c",
+          "repetition": 5,
+          "result_digest": "b7c829fe674e735176083632c142c355b7e496aef653bab54929a501c9650b34",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 32319125,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "d4ce7f6fde0bcb866c226ca61a4b0ee4ea34c67794d4d4b6a0d9fbce6dd431ee",
+          "qvm_hash": "b7845a804e62f89e6907fe91c8d4daf67e53111891994221562b2404b5d8a89c",
+          "repetition": 6,
+          "result_digest": "b7c829fe674e735176083632c142c355b7e496aef653bab54929a501c9650b34",
+          "valid": true
+        }
+      ],
+      "shared_work_hash": "98c2855fa3246f34efe22512bd04dc8ba2e0d6ae5dc35c9f1e3a58136e8e3319"
+    },
+    {
+      "cell_id": "cell_group_card",
+      "claims_device_cold": false,
+      "last_outcome": {
+        "detail": "product_embedded_shared plan=cell_group_card_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=19954959 workload_operations=2 aggregate_ops_per_s=100.225713 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 19873833,
+            "p50": 19873833,
+            "p95": 19873833,
+            "p99": 19873833,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:7e841269c4fb9631bf7d7df4f9f7cf3849a2b640fe0fa33744cd73c96ab431a0",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135080
+          },
+          "queries_per_s": 50.433677935727374,
+          "resource": {
+            "cpu_time_ns": 42153000,
+            "peak_rss_bytes": 27656192,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 27557888
+          },
+          "result_digest_echo": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "e626c791929384370d4e76d61b77b91e5fcb7b7e72a79c70b2e01953f231cfa0",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 2,
+          "values_digest": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b"
+        },
+        "shared_work_hash": "3849e2cbb77d36b9459aca2c7ac554a03c753e2d34335f3c7d6237d8094cc1cd",
+        "status": "ready"
+      },
+      "lifecycle": "fresh_reopen_then_warm_same_connection",
+      "plan_id": "cell_group_card_smoke_c2",
+      "repetitions": [
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 23022500,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "70fb729796d3056e80c2171f76f2ae76cd102679c816ec5585636f1ed42580bc",
+          "qvm_hash": "7e841269c4fb9631bf7d7df4f9f7cf3849a2b640fe0fa33744cd73c96ab431a0",
+          "repetition": 0,
+          "result_digest": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 23012625,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "70fb729796d3056e80c2171f76f2ae76cd102679c816ec5585636f1ed42580bc",
+          "qvm_hash": "7e841269c4fb9631bf7d7df4f9f7cf3849a2b640fe0fa33744cd73c96ab431a0",
+          "repetition": 1,
+          "result_digest": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 20292542,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "70fb729796d3056e80c2171f76f2ae76cd102679c816ec5585636f1ed42580bc",
+          "qvm_hash": "7e841269c4fb9631bf7d7df4f9f7cf3849a2b640fe0fa33744cd73c96ab431a0",
+          "repetition": 2,
+          "result_digest": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 19875708,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "70fb729796d3056e80c2171f76f2ae76cd102679c816ec5585636f1ed42580bc",
+          "qvm_hash": "7e841269c4fb9631bf7d7df4f9f7cf3849a2b640fe0fa33744cd73c96ab431a0",
+          "repetition": 3,
+          "result_digest": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 20604125,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "70fb729796d3056e80c2171f76f2ae76cd102679c816ec5585636f1ed42580bc",
+          "qvm_hash": "7e841269c4fb9631bf7d7df4f9f7cf3849a2b640fe0fa33744cd73c96ab431a0",
+          "repetition": 4,
+          "result_digest": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 20162667,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "70fb729796d3056e80c2171f76f2ae76cd102679c816ec5585636f1ed42580bc",
+          "qvm_hash": "7e841269c4fb9631bf7d7df4f9f7cf3849a2b640fe0fa33744cd73c96ab431a0",
+          "repetition": 5,
+          "result_digest": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 19954959,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "70fb729796d3056e80c2171f76f2ae76cd102679c816ec5585636f1ed42580bc",
+          "qvm_hash": "7e841269c4fb9631bf7d7df4f9f7cf3849a2b640fe0fa33744cd73c96ab431a0",
+          "repetition": 6,
+          "result_digest": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b",
+          "valid": true
+        }
+      ],
+      "shared_work_hash": "3849e2cbb77d36b9459aca2c7ac554a03c753e2d34335f3c7d6237d8094cc1cd"
+    },
+    {
+      "cell_id": "cell_agg_stats",
+      "claims_device_cold": false,
+      "last_outcome": {
+        "detail": "product_embedded_shared plan=cell_agg_stats_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=28957917 workload_operations=2 aggregate_ops_per_s=69.065741 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 28876541,
+            "p50": 28876541,
+            "p95": 28876541,
+            "p99": 28876541,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:5b6535cfb3ecddce60ad88c0586a82eb2b588c4593e8a893f4d79e17fbad9145",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135082
+          },
+          "queries_per_s": 36.27854733948643,
+          "resource": {
+            "cpu_time_ns": 58627000,
+            "peak_rss_bytes": 28426240,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 28327936
+          },
+          "result_digest_echo": "c8005400ba2c00036d8b03c5dd89e2dadeaca51a29d7022e9566dbf4f0e27d9a",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "3aa520d72c396ff3d708292a35fe58a2d085d53889bcccd41851395ed0ffa0e8",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 5,
+          "values_digest": "c8005400ba2c00036d8b03c5dd89e2dadeaca51a29d7022e9566dbf4f0e27d9a"
+        },
+        "shared_work_hash": "841ebaba4a0513004f7211dbb0d252bdcab72a3319ca0110f2dfc7f6ff29d77d",
+        "status": "ready"
+      },
+      "lifecycle": "fresh_reopen_then_warm_same_connection",
+      "plan_id": "cell_agg_stats_smoke_c2",
+      "repetitions": [
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 29503083,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "62ce71b16de6cf5b7785fa9ea823e2407a76a47955a11d9972b60f35c8ef544e",
+          "qvm_hash": "5b6535cfb3ecddce60ad88c0586a82eb2b588c4593e8a893f4d79e17fbad9145",
+          "repetition": 0,
+          "result_digest": "c8005400ba2c00036d8b03c5dd89e2dadeaca51a29d7022e9566dbf4f0e27d9a",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 26293875,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "62ce71b16de6cf5b7785fa9ea823e2407a76a47955a11d9972b60f35c8ef544e",
+          "qvm_hash": "5b6535cfb3ecddce60ad88c0586a82eb2b588c4593e8a893f4d79e17fbad9145",
+          "repetition": 1,
+          "result_digest": "c8005400ba2c00036d8b03c5dd89e2dadeaca51a29d7022e9566dbf4f0e27d9a",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 30051125,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "62ce71b16de6cf5b7785fa9ea823e2407a76a47955a11d9972b60f35c8ef544e",
+          "qvm_hash": "5b6535cfb3ecddce60ad88c0586a82eb2b588c4593e8a893f4d79e17fbad9145",
+          "repetition": 2,
+          "result_digest": "c8005400ba2c00036d8b03c5dd89e2dadeaca51a29d7022e9566dbf4f0e27d9a",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 29858250,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "62ce71b16de6cf5b7785fa9ea823e2407a76a47955a11d9972b60f35c8ef544e",
+          "qvm_hash": "5b6535cfb3ecddce60ad88c0586a82eb2b588c4593e8a893f4d79e17fbad9145",
+          "repetition": 3,
+          "result_digest": "c8005400ba2c00036d8b03c5dd89e2dadeaca51a29d7022e9566dbf4f0e27d9a",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 30149292,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "62ce71b16de6cf5b7785fa9ea823e2407a76a47955a11d9972b60f35c8ef544e",
+          "qvm_hash": "5b6535cfb3ecddce60ad88c0586a82eb2b588c4593e8a893f4d79e17fbad9145",
+          "repetition": 4,
+          "result_digest": "c8005400ba2c00036d8b03c5dd89e2dadeaca51a29d7022e9566dbf4f0e27d9a",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 28450041,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "62ce71b16de6cf5b7785fa9ea823e2407a76a47955a11d9972b60f35c8ef544e",
+          "qvm_hash": "5b6535cfb3ecddce60ad88c0586a82eb2b588c4593e8a893f4d79e17fbad9145",
+          "repetition": 5,
+          "result_digest": "c8005400ba2c00036d8b03c5dd89e2dadeaca51a29d7022e9566dbf4f0e27d9a",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 28957917,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "62ce71b16de6cf5b7785fa9ea823e2407a76a47955a11d9972b60f35c8ef544e",
+          "qvm_hash": "5b6535cfb3ecddce60ad88c0586a82eb2b588c4593e8a893f4d79e17fbad9145",
+          "repetition": 6,
+          "result_digest": "c8005400ba2c00036d8b03c5dd89e2dadeaca51a29d7022e9566dbf4f0e27d9a",
+          "valid": true
+        }
+      ],
+      "shared_work_hash": "841ebaba4a0513004f7211dbb0d252bdcab72a3319ca0110f2dfc7f6ff29d77d"
+    },
+    {
+      "cell_id": "cell_conditional_computed",
+      "claims_device_cold": false,
+      "last_outcome": {
+        "detail": "product_embedded_shared plan=cell_conditional_computed_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=28849042 workload_operations=2 aggregate_ops_per_s=69.326392 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 28780833,
+            "p50": 28780833,
+            "p95": 28780833,
+            "p99": 28780833,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:3920990009ad495ab5dbcd09fc831b3949b3d8a6bc8a525d7c18efb1666505da",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135064
+          },
+          "queries_per_s": 35.04189372280716,
+          "resource": {
+            "cpu_time_ns": 59498000,
+            "peak_rss_bytes": 28524544,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 28426240
+          },
+          "result_digest_echo": "67b57d07db7132a9c7a3214c53fb657e513231e36dabe7e0f9c5c34b645a0210",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 64,
+          "values_digest": "67b57d07db7132a9c7a3214c53fb657e513231e36dabe7e0f9c5c34b645a0210"
+        },
+        "shared_work_hash": "b1e9fa65b4a338788e79b4ec86ee17a33afb79da29b5adfddc4915f57ba74740",
+        "status": "ready"
+      },
+      "lifecycle": "fresh_reopen_then_warm_same_connection",
+      "plan_id": "cell_conditional_computed_smoke_c2",
+      "repetitions": [
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 28270458,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "c806f220d460fca496a4ca5de15724c23bb88d3e30a8a860326f2b65b29828a7",
+          "qvm_hash": "3920990009ad495ab5dbcd09fc831b3949b3d8a6bc8a525d7c18efb1666505da",
+          "repetition": 0,
+          "result_digest": "67b57d07db7132a9c7a3214c53fb657e513231e36dabe7e0f9c5c34b645a0210",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 28128458,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "c806f220d460fca496a4ca5de15724c23bb88d3e30a8a860326f2b65b29828a7",
+          "qvm_hash": "3920990009ad495ab5dbcd09fc831b3949b3d8a6bc8a525d7c18efb1666505da",
+          "repetition": 1,
+          "result_digest": "67b57d07db7132a9c7a3214c53fb657e513231e36dabe7e0f9c5c34b645a0210",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 27293334,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "c806f220d460fca496a4ca5de15724c23bb88d3e30a8a860326f2b65b29828a7",
+          "qvm_hash": "3920990009ad495ab5dbcd09fc831b3949b3d8a6bc8a525d7c18efb1666505da",
+          "repetition": 2,
+          "result_digest": "67b57d07db7132a9c7a3214c53fb657e513231e36dabe7e0f9c5c34b645a0210",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 27956292,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "c806f220d460fca496a4ca5de15724c23bb88d3e30a8a860326f2b65b29828a7",
+          "qvm_hash": "3920990009ad495ab5dbcd09fc831b3949b3d8a6bc8a525d7c18efb1666505da",
+          "repetition": 3,
+          "result_digest": "67b57d07db7132a9c7a3214c53fb657e513231e36dabe7e0f9c5c34b645a0210",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 27062042,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "c806f220d460fca496a4ca5de15724c23bb88d3e30a8a860326f2b65b29828a7",
+          "qvm_hash": "3920990009ad495ab5dbcd09fc831b3949b3d8a6bc8a525d7c18efb1666505da",
+          "repetition": 4,
+          "result_digest": "67b57d07db7132a9c7a3214c53fb657e513231e36dabe7e0f9c5c34b645a0210",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 27770084,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "c806f220d460fca496a4ca5de15724c23bb88d3e30a8a860326f2b65b29828a7",
+          "qvm_hash": "3920990009ad495ab5dbcd09fc831b3949b3d8a6bc8a525d7c18efb1666505da",
+          "repetition": 5,
+          "result_digest": "67b57d07db7132a9c7a3214c53fb657e513231e36dabe7e0f9c5c34b645a0210",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 28849042,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 2,
+          "query_hash": "c806f220d460fca496a4ca5de15724c23bb88d3e30a8a860326f2b65b29828a7",
+          "qvm_hash": "3920990009ad495ab5dbcd09fc831b3949b3d8a6bc8a525d7c18efb1666505da",
+          "repetition": 6,
+          "result_digest": "67b57d07db7132a9c7a3214c53fb657e513231e36dabe7e0f9c5c34b645a0210",
+          "valid": true
+        }
+      ],
+      "shared_work_hash": "b1e9fa65b4a338788e79b4ec86ee17a33afb79da29b5adfddc4915f57ba74740"
+    },
+    {
+      "cell_id": "cell_mixed_rw",
+      "claims_device_cold": false,
+      "last_outcome": {
+        "detail": "product_embedded_shared plan=cell_mixed_rw_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=100 worker_pages=2 workload_wall_ns=5225083834 workload_operations=200 aggregate_ops_per_s=38.276898 indexes=0 index_entries_built=0 mixed_rw=rw_90_10 reads=95 writes=5",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 211596375,
+            "p50": 45962375,
+            "p95": 89870292,
+            "p99": 108796709,
+            "samples": 200
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 17484,
+            "explain_plan_digest": "product_plan_hash:e104b73fd38cdfdc11f64ee9ef94a2a80dba789e66d07f066fe47bda1635c491",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 13081008
+          },
+          "queries_per_s": 19.759017875914118,
+          "resource": {
+            "cpu_time_ns": 8807485000,
+            "peak_rss_bytes": 29343744,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 528384,
+            "read_amplification": 0.0,
+            "rss_bytes": 29179904
+          },
+          "result_digest_echo": "5a83736f7d3edc9fbdceb6c3f930cd28450c0be7a4703027ed11451a70d5cfc8",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "7852cc456e308d8c23142016fb9a147cef1277ed2fccc6196395bc4742dff2e3",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 7,
+          "values_digest": "5a83736f7d3edc9fbdceb6c3f930cd28450c0be7a4703027ed11451a70d5cfc8"
+        },
+        "shared_work_hash": "0311d50282933977a1fef67d1d3fdf5dda150bb775e8432537f7fb46ac55a69d",
+        "status": "ready"
+      },
+      "lifecycle": "fresh_reopen_then_warm_same_connection",
+      "plan_id": "cell_mixed_rw_smoke_c2",
+      "repetitions": [
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 3750478667,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 200,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "e104b73fd38cdfdc11f64ee9ef94a2a80dba789e66d07f066fe47bda1635c491",
+          "repetition": 0,
+          "result_digest": "5a83736f7d3edc9fbdceb6c3f930cd28450c0be7a4703027ed11451a70d5cfc8",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 3781226625,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 200,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "e104b73fd38cdfdc11f64ee9ef94a2a80dba789e66d07f066fe47bda1635c491",
+          "repetition": 1,
+          "result_digest": "5a83736f7d3edc9fbdceb6c3f930cd28450c0be7a4703027ed11451a70d5cfc8",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 3451298709,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 200,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "e104b73fd38cdfdc11f64ee9ef94a2a80dba789e66d07f066fe47bda1635c491",
+          "repetition": 2,
+          "result_digest": "5a83736f7d3edc9fbdceb6c3f930cd28450c0be7a4703027ed11451a70d5cfc8",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 3853778709,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 200,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "e104b73fd38cdfdc11f64ee9ef94a2a80dba789e66d07f066fe47bda1635c491",
+          "repetition": 3,
+          "result_digest": "5a83736f7d3edc9fbdceb6c3f930cd28450c0be7a4703027ed11451a70d5cfc8",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 3316635292,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 200,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "e104b73fd38cdfdc11f64ee9ef94a2a80dba789e66d07f066fe47bda1635c491",
+          "repetition": 4,
+          "result_digest": "5a83736f7d3edc9fbdceb6c3f930cd28450c0be7a4703027ed11451a70d5cfc8",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 5242588125,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 200,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "e104b73fd38cdfdc11f64ee9ef94a2a80dba789e66d07f066fe47bda1635c491",
+          "repetition": 5,
+          "result_digest": "5a83736f7d3edc9fbdceb6c3f930cd28450c0be7a4703027ed11451a70d5cfc8",
+          "valid": true
+        },
+        {
+          "cache_state": "same_deployment_reopen_then_same_connection_warmup",
+          "duration_ns": 5225083834,
+          "engine": "residiuum_embedded",
+          "index_config_hash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "operations": 200,
+          "query_hash": "c97c0feff791b3dfe0aaa9c3f6ba4d59cb6cd27991d199fc779a3683fb40fd03",
+          "qvm_hash": "e104b73fd38cdfdc11f64ee9ef94a2a80dba789e66d07f066fe47bda1635c491",
+          "repetition": 6,
+          "result_digest": "5a83736f7d3edc9fbdceb6c3f930cd28450c0be7a4703027ed11451a70d5cfc8",
+          "valid": true
+        }
+      ],
+      "shared_work_hash": "0311d50282933977a1fef67d1d3fdf5dda150bb775e8432537f7fb46ac55a69d"
+    }
+  ],
+  "seed": 1094,
+  "summary": {
+    "claims_device_cold": false,
+    "claims_larger_than_memory": false,
+    "cpu_time_probe_status": "process_cpu_clock_interval_including_sampler",
+    "cpu_time_samples_present": 24,
+    "larger_dataset_cells": 12,
+    "larger_dataset_document_count": 256,
+    "larger_dataset_scale_factor": 4,
+    "logical_byte_counters_present": 24,
+    "mandatory_cells": 12,
+    "peak_rss_probe_status": "sampled_1ms_in_process",
+    "peak_rss_samples_present": 24,
+    "physical_io_deltas_present": 24,
+    "physical_io_probe_status": "in_process_interval_delta",
+    "raw_repetitions": 84,
+    "read_amplification_present": 24,
+    "read_amplification_probe_status": "physical_over_vm_logical_bytes",
+    "repetitions_per_cell": 7,
+    "resource_probe_rows": 24,
+    "rss_probe_status": "in_process_interval_end",
+    "rss_snapshots_present": 24,
+    "same_connection_warmup_cells": 12,
+    "same_deployment_reopen_cells": 12,
+    "stable_identity_cells": 12
+  }
+}

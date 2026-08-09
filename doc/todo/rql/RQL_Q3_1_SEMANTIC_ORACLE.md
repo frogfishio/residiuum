@@ -1,6 +1,6 @@
 # RQL-Q3.1 — Independent semantic oracle (test-only)
 
-Status: **labor complete → board `in_review`** (2026-08-08) · package **not accepted**  
+Status: **labor exit ready → principal package review** (2026-08-09) · package **not yet accepted**
 Package: RQL-Q3 · Feature `019fda4c-5994-77e2-a2c9-aaa0c3097b29` · Task Q3.1  
 Authority: [RQL_QUERY_QUALIFICATION_PROGRAM.md](./RQL_QUERY_QUALIFICATION_PROGRAM.md) §6.1  
 Equivalence profile: [RQL_Q0_RESULT_EQUIVALENCE.md](./RQL_Q0_RESULT_EQUIVALENCE.md)  
@@ -20,7 +20,7 @@ index pushdown**.
 | Use [`compile_app_core`](../../../crates/residiuum-sdk/src/rql_app_core.rs) for **plan structure** (language meaning) | Call `CollectionClient::rql`, `execute_rql_full`, QVM `run_vm` |
 | Evaluate `where` with [`Predicate::eval`](../../../crates/residiuum-sdk/src/predicate.rs) (total predicate profile / APP-4) | Share **optimiser / index-selection** with the IUT |
 | Full-scan every document in the root collection | Depend on store media, equality indexes, or host index probes |
-| Project / order / limit / first-page truncate in pure Rust over the working set | Claim Gate-1 or Q3 package accept |
+| Project / enrich / within / group / order / limit in pure Rust over the working set | Claim Gate-1 or self-accept Q3 |
 
 **Profile stamp:** `residiuum-rql-q3-semantic-oracle-v1`  
 (distinct from product `residiuum-query-bytecode-v1`, `residiuum-app-core-exec-v1`, `rql-full-v1`)
@@ -39,7 +39,8 @@ logical fixture (all collections for case)
   → optional group/aggregate (pure)
   → optional order (pure; _key/$key = key)
   → limit + first page_size truncate
-  → path project (pure; missing omitted)
+  → enrich/within attach (pure complete-foreign-collection evaluation)
+  → path/brace/computed project (pure; missing omitted)
   → digests over keys + values + coverage
 ```
 
@@ -61,15 +62,20 @@ independent expected-result authority for those cases.
 
 | Metric | Value |
 |---:|---:|
-| Tier-A `oracle_rule` + RQL `source` considered | **106** |
-| `oracle_ok` (deterministic dual-run digests) | **101** |
-| `oracle_unsupported` (`after` / APP-6 continuation) | **5** |
+| Tier-A semantic sources considered | **144** |
+| `oracle_ok` (deterministic dual-run digests) | **144** |
+| Required stable refusals / explain contract | **2 / 1** |
+| `oracle_unsupported` | **0** |
+| Complete Tier-A package denominator | **147/147 green; 0 residual — LABOR EXIT READY** |
 | compile / eval / fixture fail | **0** |
 | Hand unit checks | **6** (eq, key, missing/null, order/limit, project, profile firewall) |
 
-Unsupported cases are **explicit** (not silent skips): first-page resume sources
-with `after $cursor`. Q3.2+ may extend page-concat laws once APP-6 cursor mint
-is available to the oracle harness without product store coupling.
+The complete Tier-A denominator is explicitly classified: 144 semantic-result
+cases, two required stable offset refusals, and one explain-without-rows
+contract. The pure evaluator covers group/aggregate, computed conditional and
+nested brace projection, cardinality-aware enrich, and nested `within` filter.
+Aggregate comparison ignores only executor-internal synthetic group row keys;
+all values, multiplicity, ordering declarations and coverage remain compared.
 
 ## 5. Non-claims
 
@@ -78,9 +84,8 @@ is available to the oracle harness without product store coupling.
 - Does not close Decision 0 / RQL-C1.
 - Does not replace product execution; digests are oracle-side expected anchors
   for later IUT comparison.
-- Full-RQL enrich / deferred_q2 families remain outside this oracle cut until
-  pure evaluation is extended (group/agg path exists; corpus deferred cases are
-  not required for Q3.1 exit).
+- Historical corpus `deferred_q2` labels are not rewritten here; Q1 amendment
+  remains a principal-controlled package action.
 
 ## 6. Exit checklist (Q3.1)
 
@@ -90,6 +95,7 @@ is available to the oracle harness without product store coupling.
 - [x] Hand fixtures with known answers (including missing≠null and key get)
 - [x] One-command verify script + machine report
 - [ ] Principal package accept (not labor)
+- [x] Complete Tier-A denominator green (147/147)
 
 ## 7. Next (Q3.2)
 

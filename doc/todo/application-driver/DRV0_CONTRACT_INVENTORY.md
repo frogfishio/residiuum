@@ -48,6 +48,9 @@ the authoritative dialogue commit.
   every public CAS precondition can be obtained after restart;
 - SDK-reexported `HeapCap`, authoritative named-Heap/capability matching, and
   bounded typed collection scan pages with collection-bound continuations;
+- bounded Application Core pages on cloneable `Collection<T>` handles and
+  bounded Full RQL pages on cloneable Heap bindings, both dispatched through
+  the one shared scheduler and canonical QVM runtime;
 - persistent `OperationId` deduplication, canonical request hashing, exact
   receipt replay, and typed conflicting-ID refusal;
 - structured client errors, retry dispositions, receipts, scheduler inspection,
@@ -58,8 +61,8 @@ the authoritative dialogue commit.
 ## Deliberate non-claims
 
 - No remote pool, reconnect, or non-blocking transport exists yet.
-- Bounded ordered collection scan pages are implemented. No streamed RQL or
-  predicate query cursor is claimed.
+- Bounded ordered scans and one-page Core/Full RQL calls are implemented. The
+  ergonomic lazy `QueryCursor<T>` / `Stream` surface is not yet claimed.
 - `Capabilities::atomics` is false. No multi-record transaction or Atomic
   behavior is implemented; applications must not infer it from key-level CAS.
 - Queued deadlines actively wake through one bounded scheduler timer. An
@@ -92,7 +95,8 @@ not replace the separate P0 Gremlin session-lifecycle correction.
 
 - Freeze sync migration naming and module placement.
 - Implement the bounded remote pool and negotiated wire features.
-- Add streamed RQL using the canonical QVM path.
+- Build the lazy typed query/cursor façade over the now-dispatched canonical
+  Core/Full QVM page calls.
 - Implement Heap-local Atomics before exposing any transaction-shaped API.
 - Add dispatched cancellation, outcome lookup, and crash-window closure.
 - Complete bulk/history/raw/prepared-query surfaces and embedded/remote parity.

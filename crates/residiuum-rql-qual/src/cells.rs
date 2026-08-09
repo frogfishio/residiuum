@@ -73,9 +73,12 @@ impl MandatoryCell {
         }
     }
 
-    /// Full enrich cells are lane-S ineligible until Full-over-wire (Q0.A4).
+    /// Whether the cell is structurally excluded from the server lane.
+    ///
+    /// Bounded Full RQL is now available over op 118, so no mandatory cell is
+    /// excluded merely for using enrich.
     pub fn server_lane_ineligible_by_default(self) -> bool {
-        matches!(self, Self::EnrichCardinalities)
+        false
     }
 }
 

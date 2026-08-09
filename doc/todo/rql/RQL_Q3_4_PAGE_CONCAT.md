@@ -20,10 +20,10 @@ Compare keys, values, multiplicity, declared order, and coverage — not row cou
 | Mechanism | Status |
 |---|---|
 | `QueryRunOptions.after` + authenticated continuation from `QueryPage.next` | **Law green** (this labor) |
-| RQL source `after $cursor` compile/oracle (5 corpus cases) | **Still residual** — explicit `oracle_unsupported` / unsupported in Q3.1–Q3.2 reports |
+| RQL source `after $cursor` compile/oracle (5 corpus cases) | **Green** — authenticated host-issued token, semantic parameter identity preserved |
 
-Source-level cursor tokens need host-minted bound continuations in the corpus
-fixture path; they are not silent skips.
+Source-level cursor tokens are host-minted and bound in the corpus fixture path;
+the cursor parameter is page identity, not query semantic identity.
 
 ## 3. Implementation
 
@@ -40,6 +40,7 @@ fixture path; they are not silent skips.
 2. Field order (`order by score desc, _key asc`): multipage page_size=2 equals unpaged.  
 3. Filtered + ordered: `where status = "paid"` multipage equals unpaged.  
 4. Single-page when page_size ≥ cardinality equals unpaged.
+5. Textual `after $cursor` page concatenation equals unpaged.
 
 Product path: `CollectionClient::rql` only (QVM1 / Core).
 
@@ -47,15 +48,15 @@ Product path: `CollectionClient::rql` only (QVM1 / Core).
 
 | Metric | Value |
 |---:|---:|
-| Unit laws | **5/5** (4 laws + report writer) |
+| Unit laws | **6/6** (5 laws + report writer) |
 | False absence / holey complete | **0** (healthy media) |
-| Source `after $cursor` corpus residual | **still 5** (Q3.1 report) |
+| Source `after $cursor` corpus residual | **0** |
 
 ## 5. Non-claims
 
 - Not Gate-1; not RQL-Q3 package accept.  
 - Does not close Decision 0 / RQL-C1.  
-- Does not clear the five source-`after` corpus cases for oracle_ok.  
+- Does not clear the remaining 41-case complete Tier-A semantic denominator.
 - Inter-page writes under SI not claimed (Available residual in Q3.3).
 
 ## 6. Exit checklist (Q3.4)

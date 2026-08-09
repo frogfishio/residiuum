@@ -40,6 +40,21 @@
   ],
   "summary": {
     "cold_reopen_claims_device_cold": false,
+    "concurrency_c8_cells": [
+      "cell_agg_stats",
+      "cell_conditional_computed",
+      "cell_cursor_first_deep",
+      "cell_enrich_card",
+      "cell_group_card",
+      "cell_indexed_eq_multi_sel",
+      "cell_key_get",
+      "cell_mixed_rw",
+      "cell_nested_array_pred",
+      "cell_project_covered",
+      "cell_range_compound",
+      "cell_top_k"
+    ],
+    "concurrency_expanded_all_cells": true,
     "concurrency_levels": [
       1,
       2,
@@ -48,12 +63,24 @@
     ],
     "concurrency_matrix_len": 5,
     "default_cold_method_reopen": "store_reopen",
+    "f11_plan_variants": true,
     "f2_real_cells": true,
+    "group_cardinality_variants": 2,
     "lifecycle_matrix_len": 7,
     "mandatory_cells": 12,
+    "nested_array_variants": 2,
     "oversubscribed_slot": "oversubscribed_host_declared",
-    "section_7_2_expanded_plans": 22,
+    "projection_cover_variants": 2,
+    "section_7_2_expanded_plans": 83,
     "selectivity_matrix_len": 5,
     "smoke_plans": 12
-  }
+  },
+  "variant_plan_ids": [
+    "cell_group_card_card_high",
+    "cell_group_card_card_low",
+    "cell_nested_array_pred_array_only",
+    "cell_nested_array_pred_nested_only",
+    "cell_project_covered_covered",
+    "cell_project_covered_non_covered"
+  ]
 }

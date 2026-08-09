@@ -655,6 +655,35 @@ impl<'a> Collection<'a> {
                 self.check_id(collection_id)?;
                 self.collection.get(key)
             }
+
+            fn get_json_covered(
+                &mut self,
+                collection_id: CollectionId,
+                key: &str,
+            ) -> Result<crate::query_bytecode_v1::HostDocument, Error> {
+                use crate::error::ErrorCode;
+                use crate::query_bytecode_v1::HostDocument;
+
+                self.check_id(collection_id)?;
+                match self.collection.get(key) {
+                    Ok(Some(value)) => Ok(HostDocument::Present(value)),
+                    Ok(None) => Ok(HostDocument::Absent),
+                    Err(error)
+                        if matches!(
+                            error.code(),
+                            ErrorCode::DataDamaged
+                                | ErrorCode::PayloadPartial
+                                | ErrorCode::CoverageIncomplete
+                                | ErrorCode::TypeMismatch
+                        ) =>
+                    {
+                        Ok(HostDocument::Hole {
+                            code: error.code().as_str().to_string(),
+                        })
+                    }
+                    Err(error) => Err(error),
+                }
+            }
         }
 
         let mut host = DialectHost {

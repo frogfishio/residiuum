@@ -1,0 +1,1084 @@
+{
+  "authority": "doc/todo/rql/RQL_QUERY_QUALIFICATION_PROGRAM.md#73-cache-and-lifecycle-classes",
+  "declared_damage": {
+    "baseline_result_digest": "86440223a5286d3e070a1ab3342e5f412afe54c2b0f05849838e98d5f606f735",
+    "baseline_rows": 64,
+    "damaged_bytes": 17,
+    "damaged_file": "0100000000000000308ea477655fdd1a.residiuum",
+    "damaged_item_frames": 17,
+    "execution": {
+      "classification": "partial_survivors_incomplete_coverage",
+      "exact_recovery": false,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_declared_damage_survivors_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=12699208 workload_operations=2 aggregate_ops_per_s=157.490136 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "declared_damage_survivors",
+          "coverage_complete": false,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 12659292,
+            "p50": 12659292,
+            "p95": 12659292,
+            "p99": 12659292,
+            "samples": 2
+          },
+          "lifecycle": "declared_damage",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:16952034ec3c911be01aa213e72d4ead12b0274cfff2721aebfd90e74c2b124b",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 108062
+          },
+          "queries_per_s": 79.0559392711248,
+          "resource": {
+            "cpu_time_ns": 25136000,
+            "peak_rss_bytes": 29458432,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 29360128
+          },
+          "result_digest_echo": "6d6c7b9a14ec7bdd0490953d3b0554f7b530dd116ab15a82872ff7b6f1da4db8",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": false,
+          "keys_digest": "12eebe100e38c97eafb9f08a018309a5738a575f6f93a79df69cd5fa37405e2c",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 51,
+          "values_digest": "6d6c7b9a14ec7bdd0490953d3b0554f7b530dd116ab15a82872ff7b6f1da4db8"
+        },
+        "shared_work_hash": "f7989985c509417a829936543fa5739b05b78366d8911e4d39ef6527fe32846a",
+        "status": "ready"
+      }
+    },
+    "injection": "xor_one_middle_byte_in_every_fifth_verified_item_event",
+    "strict_coverage_execution": {
+      "classification": "fail_closed_error",
+      "error": "execute: worker core rql: coverage incomplete: complete coverage required but 13 known hole(s); sample codes=[\"locator_frame_verify_failed\", \"locator_frame_verify_failed\", \"locator_frame_verify_failed\"] (set coverage incomplete_allowed to allow)"
+    }
+  },
+  "format": "residiuum-rql-q4-product-maintenance-damage-report-v1",
+  "harness_profile": "residiuum-rql-qual-harness-v1",
+  "maintenance_cells": [
+    {
+      "after_outcome": {
+        "detail": "product_embedded_shared plan=cell_key_get_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=12540917 workload_operations=2 aggregate_ops_per_s=159.477971 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 12516459,
+            "p50": 12516459,
+            "p95": 12516459,
+            "p99": 12516459,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:573886d3316ec25c0d1e15fd779fb52f5cc8fce0f08eba258dd866b1467da7dc",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135614
+          },
+          "queries_per_s": 80.0182697713542,
+          "resource": {
+            "cpu_time_ns": 24375000,
+            "peak_rss_bytes": 14958592,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 14860288
+          },
+          "result_digest_echo": "945ad2f8730ff40129d94b81d7b9e3f8a8c0b36de63d15a555df46c2865fd5e4",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "684da7bb288def1fc8e6d66715b495a54a792b64353824b916dab93e814359a8",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 1,
+          "values_digest": "945ad2f8730ff40129d94b81d7b9e3f8a8c0b36de63d15a555df46c2865fd5e4"
+        },
+        "shared_work_hash": "451fde7f996a62866b85ba767aac1098b4190104c5162d3284cb4fe9976ca96e",
+        "status": "ready"
+      },
+      "after_result_digest": "945ad2f8730ff40129d94b81d7b9e3f8a8c0b36de63d15a555df46c2865fd5e4",
+      "before_result_digest": "945ad2f8730ff40129d94b81d7b9e3f8a8c0b36de63d15a555df46c2865fd5e4",
+      "cell_id": "cell_key_get",
+      "compaction": {
+        "bytes_estimated_read": 89112,
+        "bytes_estimated_write": 44556,
+        "bytes_read": 89112,
+        "bytes_reclaimed": 0,
+        "bytes_retained": 89112,
+        "bytes_written": 88581,
+        "coverage": "live-projection",
+        "live_subjects_written": 82,
+        "phase": "activated",
+        "source_segments": [
+          "segments/01000000000000003a2ecc99516d4469.residiuum",
+          "segments/0200000000000000392ecc99516d4469.residiuum",
+          "active/active.residiuum"
+        ],
+        "sources_retained": true
+      },
+      "operator_boundary": "public_residiuum_store_maintenance_setup",
+      "plan_id": "cell_key_get_smoke_c2",
+      "seal": {
+        "catalog_publication_ns": 0,
+        "chimera_ns": 0,
+        "drain_lifecycle_ns": 29196291,
+        "final_active_seal_ns": 8541500,
+        "hydra_ns": 0,
+        "total_ns": 53817708
+      }
+    },
+    {
+      "after_outcome": {
+        "detail": "product_embedded_shared plan=cell_indexed_eq_multi_sel_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=3279292 workload_operations=2 aggregate_ops_per_s=609.887744 indexes=1 index_entries_built=64 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 3228542,
+            "p50": 3228542,
+            "p95": 3228542,
+            "p99": 3228542,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 14,
+            "explain_plan_digest": "product_plan_hash:ebc516cfa730964ac38a0dcb55f703f816d3ce41b1d6436bca8fe9dad459cfd5",
+            "index_build_ns": 11828500,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 14862
+          },
+          "queries_per_s": 317.00950980978,
+          "resource": {
+            "cpu_time_ns": 6730000,
+            "peak_rss_bytes": 17219584,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 17121280
+          },
+          "result_digest_echo": "6362615c99a9e6b0e2eefd29f286179f16baf6fb6d3d4f41d5761e07a465498a",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "7852cc456e308d8c23142016fb9a147cef1277ed2fccc6196395bc4742dff2e3",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 7,
+          "values_digest": "6362615c99a9e6b0e2eefd29f286179f16baf6fb6d3d4f41d5761e07a465498a"
+        },
+        "shared_work_hash": "f042071b48d3c89a8467377340b36c95c79d0c8dae991801c07d7ec7de6c5e2b",
+        "status": "ready"
+      },
+      "after_result_digest": "6362615c99a9e6b0e2eefd29f286179f16baf6fb6d3d4f41d5761e07a465498a",
+      "before_result_digest": "6362615c99a9e6b0e2eefd29f286179f16baf6fb6d3d4f41d5761e07a465498a",
+      "cell_id": "cell_indexed_eq_multi_sel",
+      "compaction": {
+        "bytes_estimated_read": 88804,
+        "bytes_estimated_write": 44402,
+        "bytes_read": 88804,
+        "bytes_reclaimed": 0,
+        "bytes_retained": 88804,
+        "bytes_written": 88273,
+        "coverage": "live-projection",
+        "live_subjects_written": 82,
+        "phase": "activated",
+        "source_segments": [
+          "segments/0100000000000000e9ae3086441f6c7f.residiuum",
+          "segments/0200000000000000eaae3086441f6c7f.residiuum",
+          "active/active.residiuum"
+        ],
+        "sources_retained": true
+      },
+      "operator_boundary": "public_residiuum_store_maintenance_setup",
+      "plan_id": "cell_indexed_eq_multi_sel_smoke_c2",
+      "seal": {
+        "catalog_publication_ns": 0,
+        "chimera_ns": 0,
+        "drain_lifecycle_ns": 27244999,
+        "final_active_seal_ns": 8660000,
+        "hydra_ns": 0,
+        "total_ns": 51931833
+      }
+    },
+    {
+      "after_outcome": {
+        "detail": "product_embedded_shared plan=cell_range_compound_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=15543875 workload_operations=2 aggregate_ops_per_s=128.668044 indexes=1 index_entries_built=64 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 15506292,
+            "p50": 15506292,
+            "p95": 15506292,
+            "p99": 15506292,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:f69cf010094c5bab075df120e480c8acee3ea3796ce24466c98e4724aec4aeeb",
+            "index_build_ns": 19700125,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135000
+          },
+          "queries_per_s": 64.6306232237283,
+          "resource": {
+            "cpu_time_ns": 32017000,
+            "peak_rss_bytes": 19578880,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 19480576
+          },
+          "result_digest_echo": "f6e3c4207948c56c9a4bc81b98685baf87903ea36fc4a99dff5c48e7a34cf66d",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "b2c6163f5016fca5748e0db1e071a4595abdb72200ae69c92f40c237d0ba9973",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 4,
+          "values_digest": "f6e3c4207948c56c9a4bc81b98685baf87903ea36fc4a99dff5c48e7a34cf66d"
+        },
+        "shared_work_hash": "26019818810c3c1ecdf4998f165dc22c489998a636dc076f71b7816711df3911",
+        "status": "ready"
+      },
+      "after_result_digest": "f6e3c4207948c56c9a4bc81b98685baf87903ea36fc4a99dff5c48e7a34cf66d",
+      "before_result_digest": "f6e3c4207948c56c9a4bc81b98685baf87903ea36fc4a99dff5c48e7a34cf66d",
+      "cell_id": "cell_range_compound",
+      "compaction": {
+        "bytes_estimated_read": 88805,
+        "bytes_estimated_write": 44402,
+        "bytes_read": 88805,
+        "bytes_reclaimed": 0,
+        "bytes_retained": 88805,
+        "bytes_written": 88274,
+        "coverage": "live-projection",
+        "live_subjects_written": 82,
+        "phase": "activated",
+        "source_segments": [
+          "segments/0100000000000000a2f3f63035de54e0.residiuum",
+          "segments/0200000000000000a1f3f63035de54e0.residiuum",
+          "active/active.residiuum"
+        ],
+        "sources_retained": true
+      },
+      "operator_boundary": "public_residiuum_store_maintenance_setup",
+      "plan_id": "cell_range_compound_smoke_c2",
+      "seal": {
+        "catalog_publication_ns": 0,
+        "chimera_ns": 0,
+        "drain_lifecycle_ns": 30280333,
+        "final_active_seal_ns": 10056667,
+        "hydra_ns": 0,
+        "total_ns": 56407166
+      }
+    },
+    {
+      "after_outcome": {
+        "detail": "product_embedded_shared plan=cell_nested_array_pred_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=16598084 workload_operations=2 aggregate_ops_per_s=120.495836 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 16551875,
+            "p50": 16551875,
+            "p95": 16551875,
+            "p99": 16551875,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:585276ecdbe35d8eba0e3521fcfda417b828a134bf9e876eee7e4cf53b796bf2",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 141644
+          },
+          "queries_per_s": 60.42592725473683,
+          "resource": {
+            "cpu_time_ns": 34146000,
+            "peak_rss_bytes": 22200320,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 22200320
+          },
+          "result_digest_echo": "c523f10cdeb57813530d73c79f636107529c8113d72129bc5a02f28cf6290298",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "0659bba9c3c777209e74a425248d1d416ac0785ea1c2e7c33d70ed73beee4d44",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 32,
+          "values_digest": "c523f10cdeb57813530d73c79f636107529c8113d72129bc5a02f28cf6290298"
+        },
+        "shared_work_hash": "450cd63041cd5d72976de1e1b71177faa24a1c1682251da34a9b7efcf11c377c",
+        "status": "ready"
+      },
+      "after_result_digest": "c523f10cdeb57813530d73c79f636107529c8113d72129bc5a02f28cf6290298",
+      "before_result_digest": "c523f10cdeb57813530d73c79f636107529c8113d72129bc5a02f28cf6290298",
+      "cell_id": "cell_nested_array_pred",
+      "compaction": {
+        "bytes_estimated_read": 92127,
+        "bytes_estimated_write": 46063,
+        "bytes_read": 92127,
+        "bytes_reclaimed": 0,
+        "bytes_retained": 92127,
+        "bytes_written": 91596,
+        "coverage": "live-projection",
+        "live_subjects_written": 82,
+        "phase": "activated",
+        "source_segments": [
+          "segments/0100000000000000ae52471a1ea7673d.residiuum",
+          "segments/0200000000000000ad52471a1ea7673d.residiuum",
+          "active/active.residiuum"
+        ],
+        "sources_retained": true
+      },
+      "operator_boundary": "public_residiuum_store_maintenance_setup",
+      "plan_id": "cell_nested_array_pred_smoke_c2",
+      "seal": {
+        "catalog_publication_ns": 0,
+        "chimera_ns": 0,
+        "drain_lifecycle_ns": 41442667,
+        "final_active_seal_ns": 11155666,
+        "hydra_ns": 0,
+        "total_ns": 86611000
+      }
+    },
+    {
+      "after_outcome": {
+        "detail": "product_embedded_shared plan=cell_project_covered_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=15065916 workload_operations=2 aggregate_ops_per_s=132.749977 indexes=1 index_entries_built=64 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 15019875,
+            "p50": 15019875,
+            "p95": 15019875,
+            "p99": 15019875,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:e31997531b72624bea343a06709ef689f65e4a94cf7983656beb3f8455653abb",
+            "index_build_ns": 22433250,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135004
+          },
+          "queries_per_s": 66.72106435043158,
+          "resource": {
+            "cpu_time_ns": 30775000,
+            "peak_rss_bytes": 23953408,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 23855104
+          },
+          "result_digest_echo": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "0659bba9c3c777209e74a425248d1d416ac0785ea1c2e7c33d70ed73beee4d44",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 32,
+          "values_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e"
+        },
+        "shared_work_hash": "0b99d0d8e74b11abc2d6ce0393692ebb16d96a012a767a3d6b6b2fa6cf4ab0b4",
+        "status": "ready"
+      },
+      "after_result_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
+      "before_result_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
+      "cell_id": "cell_project_covered",
+      "compaction": {
+        "bytes_estimated_read": 88807,
+        "bytes_estimated_write": 44403,
+        "bytes_read": 88807,
+        "bytes_reclaimed": 0,
+        "bytes_retained": 88807,
+        "bytes_written": 88276,
+        "coverage": "live-projection",
+        "live_subjects_written": 82,
+        "phase": "activated",
+        "source_segments": [
+          "segments/01000000000000004efd0f47ca8010c1.residiuum",
+          "segments/02000000000000004dfd0f47ca8010c1.residiuum",
+          "active/active.residiuum"
+        ],
+        "sources_retained": true
+      },
+      "operator_boundary": "public_residiuum_store_maintenance_setup",
+      "plan_id": "cell_project_covered_smoke_c2",
+      "seal": {
+        "catalog_publication_ns": 0,
+        "chimera_ns": 0,
+        "drain_lifecycle_ns": 29043666,
+        "final_active_seal_ns": 10287875,
+        "hydra_ns": 0,
+        "total_ns": 56372874
+      }
+    },
+    {
+      "after_outcome": {
+        "detail": "product_embedded_shared plan=cell_top_k_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=16099375 workload_operations=2 aggregate_ops_per_s=124.228425 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 16062584,
+            "p50": 16062584,
+            "p95": 16062584,
+            "p99": 16062584,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:ff3e331b4849710a2681839109017f9e9f7417aff64e9c88b55cf7995557981f",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135072
+          },
+          "queries_per_s": 62.30602188324562,
+          "resource": {
+            "cpu_time_ns": 32580000,
+            "peak_rss_bytes": 25575424,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 25477120
+          },
+          "result_digest_echo": "98aae295dd0b421d0a99b6dd9e6ae7f9ceb9e7186f29f5a4d2f10696ca7dcaf5",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "83a097203292e19bd35e45ce1a5664f17c6da4cb3dd6b191725363af5f3a417d",
+          "multiplicity": "ordered",
+          "order_sensitive": true,
+          "row_count": 10,
+          "values_digest": "98aae295dd0b421d0a99b6dd9e6ae7f9ceb9e7186f29f5a4d2f10696ca7dcaf5"
+        },
+        "shared_work_hash": "5c294a4ae7af8738d6eb5d47062fbe80489a7dd24b7f46b662c1db6dda824d09",
+        "status": "ready"
+      },
+      "after_result_digest": "98aae295dd0b421d0a99b6dd9e6ae7f9ceb9e7186f29f5a4d2f10696ca7dcaf5",
+      "before_result_digest": "98aae295dd0b421d0a99b6dd9e6ae7f9ceb9e7186f29f5a4d2f10696ca7dcaf5",
+      "cell_id": "cell_top_k",
+      "compaction": {
+        "bytes_estimated_read": 88841,
+        "bytes_estimated_write": 44420,
+        "bytes_read": 88841,
+        "bytes_reclaimed": 0,
+        "bytes_retained": 88841,
+        "bytes_written": 88310,
+        "coverage": "live-projection",
+        "live_subjects_written": 82,
+        "phase": "activated",
+        "source_segments": [
+          "segments/01000000000000002d85a3981ab9d12a.residiuum",
+          "segments/02000000000000002e85a3981ab9d12a.residiuum",
+          "active/active.residiuum"
+        ],
+        "sources_retained": true
+      },
+      "operator_boundary": "public_residiuum_store_maintenance_setup",
+      "plan_id": "cell_top_k_smoke_c2",
+      "seal": {
+        "catalog_publication_ns": 0,
+        "chimera_ns": 0,
+        "drain_lifecycle_ns": 28732166,
+        "final_active_seal_ns": 26444125,
+        "hydra_ns": 0,
+        "total_ns": 81074666
+      }
+    },
+    {
+      "after_outcome": {
+        "detail": "product_embedded_shared plan=cell_cursor_first_deep_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=8 worker_pages=16 workload_wall_ns=86252375 workload_operations=16 aggregate_ops_per_s=185.502138 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 11918666,
+            "p50": 10546417,
+            "p95": 11891083,
+            "p99": 11918666,
+            "samples": 16
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 1024,
+            "explain_plan_digest": "product_plan_hash:2b58c9d250b086f57f5c92bea3df3c672ba1ab8b070b671bfc33b5c850a1f1f4",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 1080576
+          },
+          "queries_per_s": 92.81628521126454,
+          "resource": {
+            "cpu_time_ns": 175004000,
+            "peak_rss_bytes": 27000832,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 26902528
+          },
+          "result_digest_echo": "5d1c7921202850640d08d3cb605d519f7bbf57252a8ed9fd14b708b7f775dcd7",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
+          "multiplicity": "ordered",
+          "order_sensitive": true,
+          "row_count": 64,
+          "values_digest": "5d1c7921202850640d08d3cb605d519f7bbf57252a8ed9fd14b708b7f775dcd7"
+        },
+        "shared_work_hash": "1ff151bf62fced7d997412075ca697b0b621199f144292d1f03c81a6203ce7c6",
+        "status": "ready"
+      },
+      "after_result_digest": "5d1c7921202850640d08d3cb605d519f7bbf57252a8ed9fd14b708b7f775dcd7",
+      "before_result_digest": "5d1c7921202850640d08d3cb605d519f7bbf57252a8ed9fd14b708b7f775dcd7",
+      "cell_id": "cell_cursor_first_deep",
+      "compaction": {
+        "bytes_estimated_read": 88841,
+        "bytes_estimated_write": 44420,
+        "bytes_read": 88841,
+        "bytes_reclaimed": 0,
+        "bytes_retained": 88841,
+        "bytes_written": 88310,
+        "coverage": "live-projection",
+        "live_subjects_written": 82,
+        "phase": "activated",
+        "source_segments": [
+          "segments/01000000000000008f0c760659c07ac9.residiuum",
+          "segments/02000000000000008c0c760659c07ac9.residiuum",
+          "active/active.residiuum"
+        ],
+        "sources_retained": true
+      },
+      "operator_boundary": "public_residiuum_store_maintenance_setup",
+      "plan_id": "cell_cursor_first_deep_smoke_c2",
+      "seal": {
+        "catalog_publication_ns": 0,
+        "chimera_ns": 0,
+        "drain_lifecycle_ns": 31362333,
+        "final_active_seal_ns": 7548792,
+        "hydra_ns": 0,
+        "total_ns": 56914958
+      }
+    },
+    {
+      "after_outcome": {
+        "detail": "product_embedded_shared plan=cell_enrich_card_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=18476167 workload_operations=2 aggregate_ops_per_s=108.247560 indexes=0 index_entries_built=0 full_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 18354458,
+            "p50": 18354458,
+            "p95": 18354458,
+            "p99": 18354458,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:96d1b3c534366d7d6405f23bd9dbff65a3f317329c9a66e1bf289daf7dd89299",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 137024
+          },
+          "queries_per_s": 54.61738812822797,
+          "resource": {
+            "cpu_time_ns": 38115000,
+            "peak_rss_bytes": 27738112,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 27639808
+          },
+          "result_digest_echo": "01fe82122c131966b043c7ab5a9f88fe3c1e2465a0cd50128e064b26b092deb0",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 64,
+          "values_digest": "01fe82122c131966b043c7ab5a9f88fe3c1e2465a0cd50128e064b26b092deb0"
+        },
+        "shared_work_hash": "2dc9f567c56157eeff488e817db65d913d8e486e41f8cb3429dc0db27f6c1a45",
+        "status": "ready"
+      },
+      "after_result_digest": "01fe82122c131966b043c7ab5a9f88fe3c1e2465a0cd50128e064b26b092deb0",
+      "before_result_digest": "01fe82122c131966b043c7ab5a9f88fe3c1e2465a0cd50128e064b26b092deb0",
+      "cell_id": "cell_enrich_card",
+      "compaction": {
+        "bytes_estimated_read": 88845,
+        "bytes_estimated_write": 44422,
+        "bytes_read": 88845,
+        "bytes_reclaimed": 0,
+        "bytes_retained": 88845,
+        "bytes_written": 88314,
+        "coverage": "live-projection",
+        "live_subjects_written": 82,
+        "phase": "activated",
+        "source_segments": [
+          "segments/01000000000000002b8784152d294329.residiuum",
+          "segments/0200000000000000288784152d294329.residiuum",
+          "active/active.residiuum"
+        ],
+        "sources_retained": true
+      },
+      "operator_boundary": "public_residiuum_store_maintenance_setup",
+      "plan_id": "cell_enrich_card_smoke_c2",
+      "seal": {
+        "catalog_publication_ns": 0,
+        "chimera_ns": 0,
+        "drain_lifecycle_ns": 29983042,
+        "final_active_seal_ns": 8298875,
+        "hydra_ns": 0,
+        "total_ns": 53306834
+      }
+    },
+    {
+      "after_outcome": {
+        "detail": "product_embedded_shared plan=cell_group_card_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=14816583 workload_operations=2 aggregate_ops_per_s=134.983889 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 14755833,
+            "p50": 14755833,
+            "p95": 14755833,
+            "p99": 14755833,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:57d7481e70576c1b61494ac21bfa355022c498881187a582136990f9326155e9",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135082
+          },
+          "queries_per_s": 67.77019357776439,
+          "resource": {
+            "cpu_time_ns": 30600000,
+            "peak_rss_bytes": 28737536,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 28639232
+          },
+          "result_digest_echo": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "e626c791929384370d4e76d61b77b91e5fcb7b7e72a79c70b2e01953f231cfa0",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 2,
+          "values_digest": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b"
+        },
+        "shared_work_hash": "4000d2f56792e0d79f9b504af05b6072668a83f233c71974daf0921d190bb239",
+        "status": "ready"
+      },
+      "after_result_digest": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b",
+      "before_result_digest": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b",
+      "cell_id": "cell_group_card",
+      "compaction": {
+        "bytes_estimated_read": 88846,
+        "bytes_estimated_write": 44423,
+        "bytes_read": 88846,
+        "bytes_reclaimed": 0,
+        "bytes_retained": 88846,
+        "bytes_written": 88315,
+        "coverage": "live-projection",
+        "live_subjects_written": 82,
+        "phase": "activated",
+        "source_segments": [
+          "segments/0100000000000000e18076f199ed89ea.residiuum",
+          "segments/0200000000000000e28076f199ed89ea.residiuum",
+          "active/active.residiuum"
+        ],
+        "sources_retained": true
+      },
+      "operator_boundary": "public_residiuum_store_maintenance_setup",
+      "plan_id": "cell_group_card_smoke_c2",
+      "seal": {
+        "catalog_publication_ns": 0,
+        "chimera_ns": 0,
+        "drain_lifecycle_ns": 33129958,
+        "final_active_seal_ns": 9133709,
+        "hydra_ns": 0,
+        "total_ns": 57238125
+      }
+    },
+    {
+      "after_outcome": {
+        "detail": "product_embedded_shared plan=cell_agg_stats_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=13750792 workload_operations=2 aggregate_ops_per_s=145.446168 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 13711833,
+            "p50": 13711833,
+            "p95": 13711833,
+            "p99": 13711833,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:db7bf7f25d070b99dbb8b0074819cec89303da70a1511efbb55560bad067c83a",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135064
+          },
+          "queries_per_s": 73.08527897308751,
+          "resource": {
+            "cpu_time_ns": 28492000,
+            "peak_rss_bytes": 28770304,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 28672000
+          },
+          "result_digest_echo": "046f6e689b53f888d673cf75a138dd5164cb262ba98f5ec60cda719a8e852e21",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "3aa520d72c396ff3d708292a35fe58a2d085d53889bcccd41851395ed0ffa0e8",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 5,
+          "values_digest": "046f6e689b53f888d673cf75a138dd5164cb262ba98f5ec60cda719a8e852e21"
+        },
+        "shared_work_hash": "b1e9fa65b4a338788e79b4ec86ee17a33afb79da29b5adfddc4915f57ba74740",
+        "status": "ready"
+      },
+      "after_result_digest": "046f6e689b53f888d673cf75a138dd5164cb262ba98f5ec60cda719a8e852e21",
+      "before_result_digest": "046f6e689b53f888d673cf75a138dd5164cb262ba98f5ec60cda719a8e852e21",
+      "cell_id": "cell_agg_stats",
+      "compaction": {
+        "bytes_estimated_read": 88837,
+        "bytes_estimated_write": 44418,
+        "bytes_read": 88837,
+        "bytes_reclaimed": 0,
+        "bytes_retained": 88837,
+        "bytes_written": 88306,
+        "coverage": "live-projection",
+        "live_subjects_written": 82,
+        "phase": "activated",
+        "source_segments": [
+          "segments/01000000000000007f905f4211870112.residiuum",
+          "segments/02000000000000007c905f4211870112.residiuum",
+          "active/active.residiuum"
+        ],
+        "sources_retained": true
+      },
+      "operator_boundary": "public_residiuum_store_maintenance_setup",
+      "plan_id": "cell_agg_stats_smoke_c2",
+      "seal": {
+        "catalog_publication_ns": 0,
+        "chimera_ns": 0,
+        "drain_lifecycle_ns": 32067541,
+        "final_active_seal_ns": 8976167,
+        "hydra_ns": 0,
+        "total_ns": 55084125
+      }
+    },
+    {
+      "after_outcome": {
+        "detail": "product_embedded_shared plan=cell_conditional_computed_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=1 worker_pages=2 workload_wall_ns=14247291 workload_operations=2 aggregate_ops_per_s=140.377564 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 14188708,
+            "p50": 14188708,
+            "p95": 14188708,
+            "p99": 14188708,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:c5c15ab22c5cc7caff7a1ebd36bc11b567117d21ef83477cec14724ecd8240b7",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 135072
+          },
+          "queries_per_s": 70.63144761376775,
+          "resource": {
+            "cpu_time_ns": 29211000,
+            "peak_rss_bytes": 29048832,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 0,
+            "read_amplification": 0.0,
+            "rss_bytes": 28950528
+          },
+          "result_digest_echo": "f407377bb42236be67cfcb46382b2bbcf67547c03f6e0dd071f27bf72a7fa544",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 64,
+          "values_digest": "f407377bb42236be67cfcb46382b2bbcf67547c03f6e0dd071f27bf72a7fa544"
+        },
+        "shared_work_hash": "6a905207b47716cb2f39a8d6765c8e5ffb821abb8d9370d12f555cb2743fb99e",
+        "status": "ready"
+      },
+      "after_result_digest": "f407377bb42236be67cfcb46382b2bbcf67547c03f6e0dd071f27bf72a7fa544",
+      "before_result_digest": "f407377bb42236be67cfcb46382b2bbcf67547c03f6e0dd071f27bf72a7fa544",
+      "cell_id": "cell_conditional_computed",
+      "compaction": {
+        "bytes_estimated_read": 88841,
+        "bytes_estimated_write": 44420,
+        "bytes_read": 88841,
+        "bytes_reclaimed": 0,
+        "bytes_retained": 88841,
+        "bytes_written": 88310,
+        "coverage": "live-projection",
+        "live_subjects_written": 82,
+        "phase": "activated",
+        "source_segments": [
+          "segments/0100000000000000480c57c9e1347971.residiuum",
+          "segments/02000000000000004b0c57c9e1347971.residiuum",
+          "active/active.residiuum"
+        ],
+        "sources_retained": true
+      },
+      "operator_boundary": "public_residiuum_store_maintenance_setup",
+      "plan_id": "cell_conditional_computed_smoke_c2",
+      "seal": {
+        "catalog_publication_ns": 0,
+        "chimera_ns": 0,
+        "drain_lifecycle_ns": 26997666,
+        "final_active_seal_ns": 9747958,
+        "hydra_ns": 0,
+        "total_ns": 50882999
+      }
+    },
+    {
+      "after_outcome": {
+        "detail": "product_embedded_shared plan=cell_mixed_rw_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 warmup_operations=100 worker_pages=2 workload_wall_ns=1517021209 workload_operations=200 aggregate_ops_per_s=131.837313 indexes=0 index_entries_built=0 mixed_rw=rw_90_10 reads=89 writes=11",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 44392000,
+            "p50": 13351417,
+            "p95": 28073625,
+            "p99": 30542417,
+            "samples": 200
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 16926,
+            "explain_plan_digest": "product_plan_hash:323aaf83cc1efadc355fde635ac53e127bfed33e7b223468d8a08fc4b230e296",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null,
+            "logical_bytes_examined": 13025952
+          },
+          "queries_per_s": 68.4925956368868,
+          "resource": {
+            "cpu_time_ns": 2540215000,
+            "peak_rss_bytes": 29638656,
+            "physical_bytes_read": 0,
+            "physical_bytes_written": 290816,
+            "read_amplification": 0.0,
+            "rss_bytes": 29474816
+          },
+          "result_digest_echo": "d34128bb7ffcb71f38ce865112606b409b339140dcaae46780b7db590cbe14d2",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "7852cc456e308d8c23142016fb9a147cef1277ed2fccc6196395bc4742dff2e3",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 7,
+          "values_digest": "d34128bb7ffcb71f38ce865112606b409b339140dcaae46780b7db590cbe14d2"
+        },
+        "shared_work_hash": "a59839799d1ab95c65b8a7b4de5fd9a9959c8b4c5dda808b01d621b131bec54a",
+        "status": "ready"
+      },
+      "after_result_digest": "d34128bb7ffcb71f38ce865112606b409b339140dcaae46780b7db590cbe14d2",
+      "before_result_digest": "d34128bb7ffcb71f38ce865112606b409b339140dcaae46780b7db590cbe14d2",
+      "cell_id": "cell_mixed_rw",
+      "compaction": {
+        "bytes_estimated_read": 99422,
+        "bytes_estimated_write": 49711,
+        "bytes_read": 99422,
+        "bytes_reclaimed": 0,
+        "bytes_retained": 99422,
+        "bytes_written": 97406,
+        "coverage": "live-projection",
+        "live_subjects_written": 109,
+        "phase": "activated",
+        "source_segments": [
+          "segments/010000000000000058a4835b04588ef3.residiuum",
+          "segments/02000000000000005ba4835b04588ef3.residiuum",
+          "active/active.residiuum"
+        ],
+        "sources_retained": true
+      },
+      "operator_boundary": "public_residiuum_store_maintenance_setup",
+      "plan_id": "cell_mixed_rw_smoke_c2",
+      "seal": {
+        "catalog_publication_ns": 0,
+        "chimera_ns": 0,
+        "drain_lifecycle_ns": 27731875,
+        "final_active_seal_ns": 9213583,
+        "hydra_ns": 0,
+        "total_ns": 52953791
+      }
+    }
+  ],
+  "memory_admission": {
+    "claims_larger_than_memory": false,
+    "executed": false,
+    "filesystem_available_bytes": 6955589632,
+    "filesystem_floor_bytes": 2147483648,
+    "filesystem_sufficient": false,
+    "host_memory_bytes": 17179869184,
+    "required_r400_bytes": 68719476736,
+    "safety_cap_bytes": 268435456,
+    "safety_cap_sufficient": false,
+    "status": "refused_resource_admission"
+  },
+  "non_claims": [
+    "not_gate1",
+    "not_competitive",
+    "maintenance_setup_uses_store_operator_boundary",
+    "no_device_cold_claim",
+    "memory_saturation_not_executed"
+  ],
+  "seed": 1095,
+  "summary": {
+    "declared_damage_cells": 1,
+    "false_complete_damage_outcomes": 0,
+    "maintenance_cells": 12,
+    "maintenance_digest_stable": 12,
+    "memory_saturation_executed": false
+  }
+}

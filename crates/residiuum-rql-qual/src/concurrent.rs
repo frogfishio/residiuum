@@ -87,10 +87,7 @@ pub fn run_logical_concurrent(
             requested_concurrency: 1,
             achieved_concurrency: 1,
             worker_count: 1,
-            worker_digests: vec![primary
-                .result
-                .as_ref()
-                .map(|r| r.values_digest.clone())],
+            worker_digests: vec![primary.result.as_ref().map(|r| r.values_digest.clone())],
             primary,
         });
     }
@@ -112,31 +109,33 @@ pub fn run_logical_concurrent(
         let peak = Arc::clone(&peak);
         let plan = Arc::clone(&plan);
         let work = Arc::clone(&work);
-        handles.push(thread::spawn(move || -> Result<EngineRunOutcome, AdapterError> {
-            let mut eng = LogicalHarnessEngine::new();
-            eng.load_shared_work(&work)?;
+        handles.push(thread::spawn(
+            move || -> Result<EngineRunOutcome, AdapterError> {
+                let mut eng = LogicalHarnessEngine::new();
+                eng.load_shared_work(&work)?;
 
-            // Rendezvous so all workers are ready, then enter critical section together.
-            start.wait();
-            let cur = active.fetch_add(1, Ordering::SeqCst) + 1;
-            peak.fetch_max(cur, Ordering::SeqCst);
-            // All N must be active before any proceeds — proves simultaneous workers.
-            overlap.wait();
+                // Rendezvous so all workers are ready, then enter critical section together.
+                start.wait();
+                let cur = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(cur, Ordering::SeqCst);
+                // All N must be active before any proceeds — proves simultaneous workers.
+                overlap.wait();
 
-            let t0 = Instant::now();
-            let mut outcome = eng.execute_plan(&plan)?;
-            let elapsed = t0.elapsed();
-            active.fetch_sub(1, Ordering::SeqCst);
+                let t0 = Instant::now();
+                let mut outcome = eng.execute_plan(&plan)?;
+                let elapsed = t0.elapsed();
+                active.fetch_sub(1, Ordering::SeqCst);
 
-            // Stamp per-worker wall into detail for diagnostics.
-            if let Some(d) = outcome.detail.as_mut() {
-                d.push_str(&format!(
-                    " worker_id={worker_id} worker_wall_ns={}",
-                    elapsed.as_nanos()
-                ));
-            }
-            Ok(outcome)
-        }));
+                // Stamp per-worker wall into detail for diagnostics.
+                if let Some(d) = outcome.detail.as_mut() {
+                    d.push_str(&format!(
+                        " worker_id={worker_id} worker_wall_ns={}",
+                        elapsed.as_nanos()
+                    ));
+                }
+                Ok(outcome)
+            },
+        ));
     }
 
     let mut outcomes: Vec<EngineRunOutcome> = Vec::with_capacity(n);
@@ -157,10 +156,7 @@ pub fn run_logical_concurrent(
         .collect();
 
     // All Ready workers must agree on values digest (deterministic logical eval).
-    let ready_digests: Vec<&str> = worker_digests
-        .iter()
-        .filter_map(|d| d.as_deref())
-        .collect();
+    let ready_digests: Vec<&str> = worker_digests.iter().filter_map(|d| d.as_deref()).collect();
     if let Some(first) = ready_digests.first() {
         for d in &ready_digests[1..] {
             if d != first {
@@ -236,19 +232,21 @@ fn merge_worker_outcomes(
             .as_ref()
             .and_then(|m| m.lifecycle)
             .unwrap_or(crate::metrics::LifecycleClass::WarmSteady);
-        let cold = primary
+        let cold = primary.metrics.as_ref().and_then(|m| m.cold_method.clone());
+        let explain_plan_digest = primary
             .metrics
             .as_ref()
-            .and_then(|m| m.cold_method.clone());
+            .and_then(|m| m.path.explain_plan_digest.clone());
         primary.metrics = Some(assemble_metrics(
             &lat,
             QueryPathMetrics {
                 documents_examined: Some(examined),
+                logical_bytes_examined: None,
                 index_entries_examined: None,
                 index_size_bytes: None,
                 index_build_ns: None,
                 indexed_write_penalty_ns: None,
-                explain_plan_digest: Some(format!("logical:{digest}")),
+                explain_plan_digest,
             },
             Some(life),
             cold,
@@ -271,7 +269,8 @@ mod tests {
     use crate::shared_work::SharedLogicalWork;
 
     fn key_plan(c: u32) -> (SharedLogicalWork, MeasuredCellPlan) {
-        let plan = MeasuredCellPlan::smoke_for(MandatoryCell::KeyGet, 42).with_concurrency(c, false);
+        let plan =
+            MeasuredCellPlan::smoke_for(MandatoryCell::KeyGet, 42).with_concurrency(c, false);
         let ds = generate_dataset(&plan.dataset);
         let work = SharedLogicalWork::from_dataset(ds);
         (work, plan)
@@ -303,8 +302,7 @@ mod tests {
         }
         let detail = r.primary.detail.as_deref().unwrap_or("");
         assert!(
-            detail.contains("concurrency_requested=4")
-                && detail.contains("concurrency_achieved=4"),
+            detail.contains("concurrency_requested=4") && detail.contains("concurrency_achieved=4"),
             "detail={detail}"
         );
     }
@@ -324,7 +322,8 @@ mod tests {
         let r = run_logical_concurrent(&work, &plan).expect("c8");
         assert_eq!(r.achieved_concurrency, 8);
 
-        let mut over = MeasuredCellPlan::smoke_for(MandatoryCell::KeyGet, 7).with_concurrency(16, true);
+        let mut over =
+            MeasuredCellPlan::smoke_for(MandatoryCell::KeyGet, 7).with_concurrency(16, true);
         over.notes = "oversub".into();
         let ds = generate_dataset(&over.dataset);
         let work = SharedLogicalWork::from_dataset(ds);

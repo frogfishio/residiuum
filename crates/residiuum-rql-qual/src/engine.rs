@@ -12,13 +12,13 @@ use crate::cells::MandatoryCell;
 use crate::fixture::CorpusCaseHandle;
 use crate::generator::LogicalDataset;
 use crate::lane::EngineId;
-use crate::lifecycle::LifecycleSpec;
 use crate::metrics::{
-    assemble_metrics, LatencyCollector, QueryPathMetrics, QueryTimer, CellMetrics,
+    assemble_metrics, CellMetrics, LatencyCollector, QueryPathMetrics, QueryTimer,
 };
 use crate::shared_work::SharedLogicalWork;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
@@ -39,6 +39,10 @@ pub enum AdapterStatus {
     Ready,
     NotConfigured,
     FeatureDisabled,
+    /// Adapter executed the request and the product refused it with a stable code.
+    Refused,
+    /// The measured construct is outside the adapter's current supported surface.
+    Unsupported,
 }
 
 /// How the outcome was produced (F5 — automated evidence must not confuse simulators).
@@ -99,8 +103,12 @@ pub trait EngineAdapter: Send {
         let _ = work;
         match self.status() {
             AdapterStatus::Ready | AdapterStatus::NotConfigured => Ok(()),
-            AdapterStatus::FeatureDisabled => Err(AdapterError::NotConfigured(
-                format!("{} feature disabled", self.engine_id().as_str()),
+            AdapterStatus::FeatureDisabled => Err(AdapterError::NotConfigured(format!(
+                "{} feature disabled",
+                self.engine_id().as_str()
+            ))),
+            AdapterStatus::Refused | AdapterStatus::Unsupported => Err(AdapterError::Unsupported(
+                format!("{} is not ready for preparation", self.engine_id().as_str()),
             )),
         }
     }
@@ -111,8 +119,12 @@ pub trait EngineAdapter: Send {
             AdapterStatus::NotConfigured => Err(AdapterError::NotConfigured(
                 self.engine_id().as_str().into(),
             )),
-            AdapterStatus::FeatureDisabled => Err(AdapterError::NotConfigured(
-                format!("{} feature disabled", self.engine_id().as_str()),
+            AdapterStatus::FeatureDisabled => Err(AdapterError::NotConfigured(format!(
+                "{} feature disabled",
+                self.engine_id().as_str()
+            ))),
+            AdapterStatus::Refused | AdapterStatus::Unsupported => Err(AdapterError::Unsupported(
+                format!("{} is not ready for execution", self.engine_id().as_str()),
             )),
         }
     }
@@ -324,9 +336,7 @@ impl LogicalHarnessEngine {
                         "covered"
                     }
                     Some(crate::cell_plan::ProjectCoverKind::NonCovered) => {
-                        let missing = project_fields
-                            .iter()
-                            .any(|f| !index_fields.contains(f));
+                        let missing = project_fields.iter().any(|f| !index_fields.contains(f));
                         if !missing {
                             return Err(AdapterError::Execute(format!(
                                 "project_cover=non_covered but index covers all projected fields; indexes={index_fields:?}"
@@ -390,13 +400,13 @@ impl LogicalHarnessEngine {
             MandatoryCell::NestedAndArrayPreds => {
                 use crate::cell_plan::NestedArrayFocus;
                 use crate::dataset::DocShape;
-                let focus = plan.nested_array_focus.or_else(|| {
-                    match plan.dataset.shape {
+                let focus = plan
+                    .nested_array_focus
+                    .or_else(|| match plan.dataset.shape {
                         DocShape::DeeplyNested => Some(NestedArrayFocus::NestedOnly),
                         DocShape::ArrayHeavy => Some(NestedArrayFocus::ArrayOnly),
                         _ => None,
-                    }
-                });
+                    });
                 for (k, v) in docs {
                     examined += 1;
                     let nested_ok = v
@@ -492,35 +502,44 @@ impl LogicalHarnessEngine {
                     examined += 1;
                     let cid = v.get("customer_id").and_then(|x| x.as_str());
                     let matches: Vec<&Value> = match (cid, customers) {
+                        (Some(id), Some(cs)) if expect == EnrichExpect::Many => cs
+                            .values()
+                            .filter(|candidate| {
+                                candidate.get("id").and_then(Value::as_str) == Some(id)
+                            })
+                            .collect(),
                         (Some(id), Some(cs)) => cs.get(id).into_iter().collect(),
                         _ => Vec::new(),
                     };
                     match expect {
                         EnrichExpect::Optional => {
                             let mut body = v.clone();
-                            if let (Some(c), Value::Object(ref mut m)) =
-                                (matches.first().copied(), &mut body)
-                            {
-                                m.insert("customer".into(), c.clone());
+                            if let Value::Object(ref mut m) = body {
+                                m.insert(
+                                    "customer".into(),
+                                    matches.first().copied().cloned().unwrap_or(Value::Null),
+                                );
                             }
                             rows.push(row_from_doc(k, &body));
                         }
                         EnrichExpect::ExactlyOne => {
-                            if matches.len() == 1 {
+                            if cid.is_some() && matches.len() == 1 {
                                 let mut body = v.clone();
                                 if let Value::Object(ref mut m) = body {
                                     m.insert("customer".into(), matches[0].clone());
                                 }
                                 rows.push(row_from_doc(k, &body));
                             }
-                            // 0 or many: omit (logical fail-closed drop; product may error)
+                            // Source prefilters missing customer_id; invalid fixture
+                            // cardinality remains absent from result and is caught by
+                            // product/differential validation.
                         }
                         EnrichExpect::Many => {
                             let mut body = v.clone();
                             if let Value::Object(ref mut m) = body {
                                 let arr: Vec<Value> =
                                     matches.iter().map(|c| (*c).clone()).collect();
-                                m.insert("customers".into(), Value::Array(arr));
+                                m.insert("customer".into(), Value::Array(arr));
                             }
                             rows.push(row_from_doc(k, &body));
                         }
@@ -554,20 +573,25 @@ fn metrics_from_run(
     examined: u64,
     digest: &str,
     coverage_complete: bool,
-    life: &LifecycleSpec,
+    plan: &MeasuredCellPlan,
 ) -> CellMetrics {
+    let plan_bytes =
+        serde_json::to_vec(plan).unwrap_or_else(|_| plan.rql_source.as_bytes().to_vec());
+    let plan_digest = hex::encode(Sha256::digest(plan_bytes));
     assemble_metrics(
         lat,
         QueryPathMetrics {
             documents_examined: Some(examined),
+            logical_bytes_examined: None,
             index_entries_examined: None,
             index_size_bytes: None,
             index_build_ns: None,
             indexed_write_penalty_ns: None,
-            explain_plan_digest: Some(format!("logical:{}", digest)),
+            // F15: plan identity must be independent of result identity.
+            explain_plan_digest: Some(format!("logical_plan:{plan_digest}")),
         },
-        Some(life.class),
-        Some(life.cold_method.as_str().into()),
+        Some(plan.lifecycle.class),
+        Some(plan.lifecycle.cold_method.as_str().into()),
         Some(digest.into()),
         Some(coverage_complete),
         Some(true),
@@ -610,7 +634,7 @@ impl EngineAdapter for LogicalHarnessEngine {
 
         let canon = canonicalize_rows(&rows, plan.order_sensitive, true);
         let digest = canon.values_digest.clone();
-        let metrics = metrics_from_run(&lat, examined, &digest, true, &plan.lifecycle);
+        let metrics = metrics_from_run(&lat, examined, &digest, true, plan);
 
         Ok(EngineRunOutcome {
             engine: self.engine_id(),
@@ -903,7 +927,10 @@ mod tests {
             .unwrap();
         assert_eq!(out.status, AdapterStatus::NotConfigured);
         assert!(out.result.is_none());
-        assert_eq!(out.shared_work_hash.as_deref(), Some(work.content_hash.as_str()));
+        assert_eq!(
+            out.shared_work_hash.as_deref(),
+            Some(work.content_hash.as_str())
+        );
     }
 
     #[test]
@@ -946,5 +973,43 @@ mod tests {
         assert_eq!(out.execution_kind, ExecutionKind::LogicalSimulator);
         assert!(!out.is_product_ready());
         assert!(out.result.is_some());
+    }
+
+    #[test]
+    fn enrich_many_produces_genuine_multiple_matches() {
+        let mut plan = MeasuredCellPlan::smoke_for(MandatoryCell::EnrichCardinalities, 7);
+        plan.enrich_expect = Some(crate::cell_plan::EnrichExpect::Many);
+        let ds = generate_dataset(&plan.dataset);
+        let work = SharedLogicalWork::from_dataset(ds);
+        let mut eng = LogicalHarnessEngine::new();
+        eng.load_shared_work(&work).unwrap();
+        let (rows, _, _) = eng.eval_plan(&plan).unwrap();
+        assert!(rows.iter().any(|row| {
+            row.value
+                .get("customer")
+                .and_then(Value::as_array)
+                .is_some_and(|matches| matches.len() >= 2)
+        }));
+    }
+
+    #[test]
+    fn logical_plan_digest_is_not_result_digest() {
+        let plan = MeasuredCellPlan::smoke_for(MandatoryCell::KeyGet, 2);
+        let ds = generate_dataset(&plan.dataset);
+        let work = SharedLogicalWork::from_dataset(ds);
+        let mut eng = LogicalHarnessEngine::new();
+        eng.load_shared_work(&work).unwrap();
+        let out = eng.execute_plan(&plan).unwrap();
+        let metrics = out.metrics.unwrap();
+        assert_ne!(
+            metrics.path.explain_plan_digest.as_deref(),
+            metrics.result_digest_echo.as_deref()
+        );
+        assert!(metrics
+            .path
+            .explain_plan_digest
+            .as_deref()
+            .unwrap()
+            .starts_with("logical_plan:"));
     }
 }

@@ -1,6 +1,6 @@
 {
   "authority": "doc/todo/rql/RQL_Q4_3_METRICS_ADAPTERS.md",
-  "bundle_path": "/Users/rumpelstiltskin/Code/Frogfish/residiuum/spec/rql/qualification/harness-v1/q4_3_smoke_evidence_bundle.json",
+  "bundle_path": "/Users/rumpelstiltskin/Code/Frogfish/residiuum/target/rql-q4/q4_3_smoke_evidence_bundle.json",
   "format": "residiuum-rql-q4-3-metrics-adapters-report-v1",
   "harness_profile": "residiuum-rql-qual-harness-v1",
   "non_claims": [
@@ -12,7 +12,7 @@
   ],
   "summary": {
     "cbl_shared_work_loaded": 12,
-    "content_hash": "4996f52c71544f9b97c13fe471a52a3d842674c9862c12b08d23fce882403a9f",
+    "content_hash": "0fd423b1da0b9f1a24b50ad962fbb2dd41f2aa71adc245cd1f9f133ac940c052",
     "lane_s_fixture_identity": true,
     "logical_ready_with_result": 12,
     "metric_envelope": "§7.4 collectors + path digests",

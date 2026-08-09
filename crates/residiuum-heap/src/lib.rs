@@ -77,7 +77,7 @@ pub use rights::{Operation, OperationStatus, Rights};
 pub use security_time::{SecurityTimeFloor, TimeDecision, TrustedInstant};
 pub use snapshot::{HeapAdministrativeState, HeapSecuritySnapshot, HeapSlot};
 pub use wire::{
-    AUDIENCE_DATA_V1, CONTENT_TYPE_CERTIFICATE, CONTENT_TYPE_HOLDER_PROOF,
+    AUDIENCE_DATA_V1, CERT_MAX_LIFETIME_S, CONTENT_TYPE_CERTIFICATE, CONTENT_TYPE_HOLDER_PROOF,
     EXTERNAL_AAD_CERTIFICATE, EXTERNAL_AAD_HOLDER_PROOF, PROFILE_VERSION,
 };
 

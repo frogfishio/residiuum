@@ -1,12 +1,17 @@
 {
   "type": "object",
   "additionalProperties": false,
-  "description": "Args for op 118 rql_query (execution + explain). Server recompiles any source and never trusts a client plan_hash.",
+  "description": "Args for op 118 rql_query (execution + explain). Server recompiles any source and never trusts a client plan_hash. The default profile is Application Core; Full is selected explicitly.",
   "properties": {
+    "profile": {
+      "type": "string",
+      "enum": ["core", "full"],
+      "description": "Execution profile. Omitted is equivalent to core; full selects server-side rql-full-v1."
+    },
     "source": {
       "type": "string",
       "maxLength": 1048576,
-      "description": "Optional RQL Application Core source (UTF-8). When present, server recompiles."
+      "description": "Optional UTF-8 RQL source in the selected profile. When present, server recompiles."
     },
     "plan": {
       "type": "object",

@@ -16,15 +16,16 @@
 //! Exit of this suite = oracle runs corpus expected-result checks independently
 //! of Residiuum plan selection. Green ≠ Gate-1; green ≠ full Q3 package accept.
 
-
 #[path = "common/rql_evidence_write.rs"]
 mod rql_evidence_write;
 
 use residiuum_heap::CollectionId;
 use residiuum_sdk::predicate::resolve_path;
 use residiuum_sdk::{
-    compile_app_core, AggFn, CollectionBindings, NullsOrder, OrderDir, OrderTerm, Parameters,
-    PredPath as Path, Predicate, Resolve, RqlPlanV1, APP_CORE_PROFILE,
+    compile_app_core, compile_rql_full, source_uses_rql_full_constructs, AggFn, CollectionBindings,
+    EnrichCardinality, EnrichStepV1, FullPipelineStepV1, NullsOrder, OrderDir, OrderTerm,
+    Parameters, PredPath as Path, Predicate, ProjectExprV1, ProjectItemV1, Resolve, RqlPlanV1,
+    WithinStepV1, APP_CORE_PROFILE,
 };
 use serde_json::{json, Map, Value};
 use std::cmp::Ordering;
@@ -44,7 +45,6 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root")
 }
 
-
 /// Bind `$param` names found in source (aligned with Q2 audit host binds).
 fn parameters_for_source(source: &str) -> Parameters {
     let mut values = BTreeMap::new();
@@ -54,9 +54,7 @@ fn parameters_for_source(source: &str) -> Parameters {
         if bytes[i] == b'$' && i + 1 < bytes.len() {
             let start = i + 1;
             let mut end = start;
-            while end < bytes.len()
-                && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-            {
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
                 end += 1;
             }
             if end > start {
@@ -327,6 +325,251 @@ fn apply_project_paths_oracle(key: &str, doc: &Value, paths: Option<&Vec<Path>>)
     Value::Object(out)
 }
 
+fn eval_project_expr_oracle(
+    key: &str,
+    doc: &Value,
+    expr: &ProjectExprV1,
+    params: &BTreeMap<String, Value>,
+) -> Result<Value, OracleError> {
+    match expr {
+        ProjectExprV1::Literal(v) => Ok(v.clone()),
+        ProjectExprV1::Path(path) => Ok(match path_resolve_with_key(key, doc, path) {
+            Resolve::Present(v) => v,
+            Resolve::Absent => Value::Null,
+        }),
+        ProjectExprV1::Conditional {
+            when,
+            then_expr,
+            else_expr,
+        } => {
+            let selected = if eval_pred_with_key(when, key, doc, params)? {
+                then_expr
+            } else {
+                else_expr
+            };
+            eval_project_expr_oracle(key, doc, selected, params)
+        }
+    }
+}
+
+fn apply_computed_project_oracle(
+    result: &mut OracleResult,
+    fields: &[ProjectItemV1],
+    params: &BTreeMap<String, Value>,
+) -> Result<(), OracleError> {
+    for row in &mut result.rows {
+        let mut out = Map::new();
+        for field in fields {
+            match field {
+                ProjectItemV1::Leaf { output, source } => {
+                    if let Resolve::Present(v) = path_resolve_with_key(&row.key, &row.value, source)
+                    {
+                        out.insert(output.clone(), v);
+                    }
+                }
+                ProjectItemV1::Computed { output, expression } => {
+                    out.insert(
+                        output.clone(),
+                        eval_project_expr_oracle(&row.key, &row.value, expression, params)?,
+                    );
+                }
+                ProjectItemV1::Nested { output, fields } => {
+                    let source = Path(vec![output.clone()]);
+                    let projected = match path_resolve_with_key(&row.key, &row.value, &source) {
+                        Resolve::Absent => continue,
+                        Resolve::Present(Value::Object(obj)) => {
+                            project_value_oracle(&row.key, Value::Object(obj), fields, params)?
+                        }
+                        Resolve::Present(Value::Array(items)) => Value::Array(
+                            items
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, item)| {
+                                    project_value_oracle(
+                                        &format!("{}#{i}", row.key),
+                                        item,
+                                        fields,
+                                        params,
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
+                        ),
+                        Resolve::Present(Value::Null) => Value::Null,
+                        Resolve::Present(_) => {
+                            return Err(OracleError::Eval(format!(
+                                "nested project `{output}` requires object/array"
+                            )));
+                        }
+                    };
+                    out.insert(output.clone(), projected);
+                }
+            }
+        }
+        row.value = Value::Object(out);
+    }
+    Ok(())
+}
+
+fn project_value_oracle(
+    key: &str,
+    value: Value,
+    fields: &[ProjectItemV1],
+    params: &BTreeMap<String, Value>,
+) -> Result<Value, OracleError> {
+    let mut result = OracleResult {
+        rows: vec![OracleRow {
+            key: key.into(),
+            value,
+        }],
+        coverage_complete: true,
+        oracle_profile: ORACLE_PROFILE,
+    };
+    apply_computed_project_oracle(&mut result, fields, params)?;
+    Ok(result.rows.pop().expect("one row").value)
+}
+
+fn strip_logical_key(mut value: Value) -> Value {
+    if let Value::Object(map) = &mut value {
+        map.remove("_key");
+    }
+    value
+}
+
+fn attach_enrich_oracle(
+    rows: Vec<OracleRow>,
+    db: &LogicalDb,
+    step: &EnrichStepV1,
+    params: &BTreeMap<String, Value>,
+) -> Result<Vec<OracleRow>, OracleError> {
+    let foreign = db.get(&step.using_name).ok_or_else(|| {
+        OracleError::Fixture(format!("missing foreign collection {}", step.using_name))
+    })?;
+    let mut out = Vec::with_capacity(rows.len());
+    for mut row in rows {
+        let left = path_resolve_with_key(&row.key, &row.value, &step.left);
+        let mut matches = Vec::new();
+        if let Resolve::Present(left_value) = left {
+            for (foreign_key, foreign_doc) in foreign {
+                if let Some(pred) = &step.candidate_where {
+                    if !eval_pred_with_key(pred, foreign_key, foreign_doc, params)? {
+                        continue;
+                    }
+                }
+                if let Resolve::Present(right_value) =
+                    path_resolve_with_key(foreign_key, foreign_doc, &step.right)
+                {
+                    if right_value == left_value {
+                        matches.push(strip_logical_key(foreign_doc.clone()));
+                    }
+                }
+            }
+        }
+        let attached = match (step.expect, matches.len()) {
+            (EnrichCardinality::ExactlyOne, 1) => matches.remove(0),
+            (EnrichCardinality::ExactlyOne, n) => {
+                return Err(OracleError::Eval(format!(
+                    "exactly_one expected 1 match, got {n}"
+                )));
+            }
+            (EnrichCardinality::Optional, 0) => Value::Null,
+            (EnrichCardinality::Optional, 1) => matches.remove(0),
+            (EnrichCardinality::Optional, n) => {
+                return Err(OracleError::Eval(format!(
+                    "optional expected at most 1 match, got {n}"
+                )));
+            }
+            (EnrichCardinality::Many, _) => Value::Array(matches),
+        };
+        row.value
+            .as_object_mut()
+            .ok_or_else(|| OracleError::Eval("enrich root must be object".into()))?
+            .insert(step.output.clone(), attached);
+        out.push(row);
+    }
+    Ok(out)
+}
+
+fn set_path_oracle(doc: &mut Value, path: &Path, value: Value) -> Result<(), OracleError> {
+    let (last, parents) = path
+        .0
+        .split_last()
+        .ok_or_else(|| OracleError::Eval("empty within carrier".into()))?;
+    let mut current = doc;
+    for segment in parents {
+        current = current
+            .as_object_mut()
+            .and_then(|map| map.get_mut(segment))
+            .ok_or_else(|| {
+                OracleError::Eval(format!("missing within carrier parent `{segment}`"))
+            })?;
+    }
+    current
+        .as_object_mut()
+        .ok_or_else(|| OracleError::Eval("within carrier parent must be object".into()))?
+        .insert(last.clone(), value);
+    Ok(())
+}
+
+fn apply_within_oracle(
+    rows: Vec<OracleRow>,
+    db: &LogicalDb,
+    step: &WithinStepV1,
+    params: &BTreeMap<String, Value>,
+) -> Result<Vec<OracleRow>, OracleError> {
+    let mut out = Vec::with_capacity(rows.len());
+    for mut parent in rows {
+        let items = match path_resolve_with_key(&parent.key, &parent.value, &step.carrier) {
+            Resolve::Present(Value::Array(items)) => items,
+            _ => {
+                return Err(OracleError::Eval(format!(
+                    "within `{}` requires array",
+                    step.carrier.dotted()
+                )));
+            }
+        };
+        let elements = items
+            .into_iter()
+            .enumerate()
+            .map(|(i, value)| OracleRow {
+                key: format!("{}#{i}", parent.key),
+                value,
+            })
+            .collect();
+        let elements = apply_pipeline_oracle(elements, db, &step.steps, params)?;
+        set_path_oracle(
+            &mut parent.value,
+            &step.carrier,
+            Value::Array(elements.into_iter().map(|row| row.value).collect()),
+        )?;
+        out.push(parent);
+    }
+    Ok(out)
+}
+
+fn apply_pipeline_oracle(
+    mut rows: Vec<OracleRow>,
+    db: &LogicalDb,
+    steps: &[FullPipelineStepV1],
+    params: &BTreeMap<String, Value>,
+) -> Result<Vec<OracleRow>, OracleError> {
+    for step in steps {
+        rows = match step {
+            FullPipelineStepV1::Enrich(step) => attach_enrich_oracle(rows, db, step, params)?,
+            FullPipelineStepV1::Within(step) => apply_within_oracle(rows, db, step, params)?,
+            FullPipelineStepV1::Filter(pred) => {
+                let mut kept = Vec::new();
+                for row in rows {
+                    if eval_pred_with_key(pred, &row.key, &row.value, params)? {
+                        kept.push(row);
+                    }
+                }
+                kept
+            }
+        };
+    }
+    Ok(rows)
+}
+
 fn json_ord(a: &Value, b: &Value) -> Ordering {
     use Value::*;
     match (a, b) {
@@ -563,9 +806,7 @@ fn oracle_eval_plan(
 ) -> Result<OracleResult, OracleError> {
     let src_name = &plan.from.source_name;
     let coll = db.get(src_name).ok_or_else(|| {
-        OracleError::Fixture(format!(
-            "logical fixture missing collection `{src_name}`"
-        ))
+        OracleError::Fixture(format!("logical fixture missing collection `{src_name}`"))
     })?;
 
     // Full scan — deliberately unoptimised; no index, no plan selection.
@@ -620,6 +861,16 @@ fn oracle_eval_source(
 ) -> Result<(RqlPlanV1, OracleResult), OracleError> {
     let names = extract_collection_names(source);
     let bindings = compile_bindings_for(&names);
+    if source_uses_rql_full_constructs(source) {
+        let compiled =
+            compile_rql_full(source, &bindings).map_err(|e| OracleError::Compile(e.to_string()))?;
+        let mut result = oracle_eval_plan(db, &compiled.base.plan, &params.values)?;
+        result.rows = apply_pipeline_oracle(result.rows, db, &compiled.pipeline, &params.values)?;
+        if let Some(fields) = &compiled.project {
+            apply_computed_project_oracle(&mut result, fields, &params.values)?;
+        }
+        return Ok((compiled.base.plan, result));
+    }
     let compiled = compile_app_core(source, &bindings).map_err(|e| {
         let msg = e.to_string();
         let low = msg.to_ascii_lowercase();
@@ -687,6 +938,27 @@ fn ordering_is_sensitive(meta: &Value) -> bool {
     }
 }
 
+/// Cases admitted to independent semantics after Q2 capability closure. The
+/// corpus labels remain untouched pending the Q1 principal amendment.
+fn semantic_oracle_eligible(case: &Value) -> bool {
+    if case["expected"]["kind"].as_str() == Some("oracle_rule") {
+        return true;
+    }
+    case["expected"]["kind"].as_str() == Some("deferred_q2")
+        && case["family_tags"].as_array().is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                matches!(
+                    tag.as_str(),
+                    Some(
+                        "group_aggregate"
+                            | "projection_computed_conditional"
+                            | "enrichment_cardinality"
+                    )
+                )
+            })
+        })
+}
+
 // ---------------------------------------------------------------------------
 // Unit checks (hand fixtures — expected results independent of product path)
 // ---------------------------------------------------------------------------
@@ -744,10 +1016,7 @@ fn q3_oracle_hand_missing_vs_null() {
     let mut orders = BTreeMap::new();
     orders.insert("a".into(), json!({"_key":"a","status":"paid"})); // missing notes
     orders.insert("b".into(), json!({"_key":"b","status":"paid","notes":null}));
-    orders.insert(
-        "c".into(),
-        json!({"_key":"c","status":"paid","notes":"x"}),
-    );
+    orders.insert("c".into(), json!({"_key":"c","status":"paid","notes":"x"}));
     let mut db = LogicalDb::new();
     db.insert("orders".into(), orders);
 
@@ -758,7 +1027,11 @@ fn q3_oracle_hand_missing_vs_null() {
     )
     .expect("missing");
     assert_eq!(
-        missing.rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
+        missing
+            .rows
+            .iter()
+            .map(|r| r.key.as_str())
+            .collect::<Vec<_>>(),
         vec!["a"]
     );
 
@@ -769,7 +1042,11 @@ fn q3_oracle_hand_missing_vs_null() {
     )
     .expect("null");
     assert_eq!(
-        is_null.rows.iter().map(|r| r.key.as_str()).collect::<Vec<_>>(),
+        is_null
+            .rows
+            .iter()
+            .map(|r| r.key.as_str())
+            .collect::<Vec<_>>(),
         vec!["b"]
     );
 }
@@ -777,7 +1054,11 @@ fn q3_oracle_hand_missing_vs_null() {
 #[test]
 fn q3_oracle_hand_order_and_limit() {
     let mut orders = BTreeMap::new();
-    for (k, t) in [("o-1", "2024-01-01"), ("o-2", "2024-01-03"), ("o-3", "2024-01-02")] {
+    for (k, t) in [
+        ("o-1", "2024-01-01"),
+        ("o-2", "2024-01-03"),
+        ("o-3", "2024-01-02"),
+    ] {
         orders.insert(
             k.into(),
             json!({"_key": k, "created_at": t, "status": "paid"}),
@@ -813,10 +1094,7 @@ fn q3_oracle_hand_project_paths() {
     )
     .expect("project");
     assert_eq!(res.rows.len(), 1);
-    assert_eq!(
-        res.rows[0].value,
-        json!({"_key":"o-1","status":"paid"})
-    );
+    assert_eq!(res.rows[0].value, json!({"_key":"o-1","status":"paid"}));
     assert!(res.rows[0].value.get("secret").is_none());
     assert!(res.rows[0].value.get("region").is_none());
 }
@@ -845,6 +1123,10 @@ fn rql_q3_1_corpus_oracle_suite() {
         .unwrap_or("unknown")
         .to_string();
     let cases = doc["cases"].as_array().expect("cases");
+    let tier_a_total = cases
+        .iter()
+        .filter(|case| case["tier"].as_str() == Some("A"))
+        .count() as u64;
 
     let mut case_results: Vec<Value> = Vec::new();
     let mut oracle_ok = 0u64;
@@ -856,26 +1138,93 @@ fn rql_q3_1_corpus_oracle_suite() {
     let mut skipped_no_source = 0u64;
     let mut tier_a_considered = 0u64;
     let mut digest_mismatch = 0u64;
+    let mut stable_refusal_ok = 0u64;
+    let mut explain_contract_ok = 0u64;
+    let mut non_row_fail = 0u64;
 
     for case in cases {
         let tier = case["tier"].as_str().unwrap_or("");
         if tier != "A" {
             continue;
         }
+        let rql = &case["implementations"]["rql"];
+        let rql_status = rql["status"].as_str().unwrap_or("");
+        let case_id = case["case_id"].as_str().unwrap_or("?").to_string();
+        let source = rql["source"].as_str().unwrap_or("").to_string();
         let expected_kind = case["expected"]["kind"].as_str().unwrap_or("");
-        if expected_kind != "oracle_rule" {
+
+        if expected_kind == "stable_refusal" {
+            let expected_code = rql["refusal_code"].as_str().unwrap_or("");
+            let bindings = compile_bindings_for(&extract_collection_names(&source));
+            let result = compile_rql_full(&source, &bindings);
+            match result {
+                Err(error)
+                    if !expected_code.is_empty() && error.to_string().contains(expected_code) =>
+                {
+                    stable_refusal_ok += 1;
+                    case_results.push(json!({
+                        "case_id": case_id,
+                        "status": "stable_refusal_ok",
+                        "refusal_code": expected_code,
+                        "source": source,
+                    }));
+                }
+                other => {
+                    non_row_fail += 1;
+                    case_results.push(json!({
+                        "case_id": case_id,
+                        "status": "stable_refusal_fail",
+                        "expected_code": expected_code,
+                        "observed": format!("{other:?}"),
+                        "source": source,
+                    }));
+                }
+            }
+            continue;
+        }
+
+        if source.to_ascii_lowercase().starts_with("explain ") {
+            let bindings = compile_bindings_for(&extract_collection_names(&source));
+            let first = compile_app_core(&source, &bindings);
+            let second = compile_app_core(&source, &bindings);
+            match (first, second) {
+                (Ok(a), Ok(b))
+                    if a.explain
+                        && b.explain
+                        && a.plan.plan_hash() == b.plan.plan_hash()
+                        && a.plan.to_canonical_json() == b.plan.to_canonical_json() =>
+                {
+                    explain_contract_ok += 1;
+                    case_results.push(json!({
+                        "case_id": case_id,
+                        "status": "explain_contract_ok",
+                        "plan_hash": a.plan.plan_hash_hex(),
+                        "row_materialization": false,
+                        "source": source,
+                    }));
+                }
+                other => {
+                    non_row_fail += 1;
+                    case_results.push(json!({
+                        "case_id": case_id,
+                        "status": "explain_contract_fail",
+                        "observed": format!("{other:?}"),
+                        "source": source,
+                    }));
+                }
+            }
+            continue;
+        }
+
+        if !semantic_oracle_eligible(case) {
             skipped_non_oracle_rule += 1;
             continue;
         }
-        let rql = &case["implementations"]["rql"];
-        let rql_status = rql["status"].as_str().unwrap_or("");
-        if rql_status != "source" {
+        if rql_status != "source" && rql_status != "pending" {
             skipped_no_source += 1;
             continue;
         }
         tier_a_considered += 1;
-        let case_id = case["case_id"].as_str().unwrap_or("?").to_string();
-        let source = rql["source"].as_str().unwrap_or("").to_string();
         let domain = case["domain"].as_str().unwrap_or("").to_string();
         let ordered = ordering_is_sensitive(&case["ordering_and_multiplicity"]);
 
@@ -969,6 +1318,7 @@ fn rql_q3_1_corpus_oracle_suite() {
         case_results.push(entry);
     }
 
+    let qualification_green = oracle_ok + stable_refusal_ok + explain_contract_ok;
     let summary = json!({
         "format": "residiuum-rql-q3-1-oracle-report-v1",
         "oracle_profile": ORACLE_PROFILE,
@@ -985,8 +1335,20 @@ fn rql_q3_1_corpus_oracle_suite() {
             "fixture_kind": "logical_generator_seed",
         },
         "summary": {
-            "tier_a_oracle_rule_source": tier_a_considered,
+            "tier_a_total": tier_a_total,
+            "qualification_green": qualification_green,
+            "qualification_residual": tier_a_total.saturating_sub(qualification_green),
+            "package_exit_ready": qualification_green == tier_a_total,
+            "tier_a_semantic_source": tier_a_considered,
+            "admitted_deferred_families": [
+                "group_aggregate",
+                "projection_computed_conditional",
+                "enrichment_cardinality"
+            ],
             "oracle_ok": oracle_ok,
+            "stable_refusal_ok": stable_refusal_ok,
+            "explain_contract_ok": explain_contract_ok,
+            "non_row_fail": non_row_fail,
             "oracle_unsupported": oracle_unsupported,
             "oracle_compile_fail": oracle_compile_fail,
             "oracle_eval_fail": oracle_eval_fail,
@@ -1006,13 +1368,17 @@ fn rql_q3_1_corpus_oracle_suite() {
     );
 
     eprintln!(
-        "rql_q3_1: oracle_ok={oracle_ok} unsupported={oracle_unsupported} compile_fail={oracle_compile_fail} eval_fail={oracle_eval_fail} fixture_fail={oracle_fixture_fail} digest_mismatch={digest_mismatch} considered={tier_a_considered}"
+        "rql_q3_1: qualification_green={qualification_green} oracle_ok={oracle_ok} stable_refusal_ok={stable_refusal_ok} explain_contract_ok={explain_contract_ok} unsupported={oracle_unsupported} compile_fail={oracle_compile_fail} eval_fail={oracle_eval_fail} fixture_fail={oracle_fixture_fail} digest_mismatch={digest_mismatch} considered={tier_a_considered}"
     );
     eprintln!("report: {}", report_path.display());
 
     assert_eq!(digest_mismatch, 0, "oracle digests must be deterministic");
-    assert_eq!(oracle_eval_fail, 0, "oracle eval must not error on Core cases");
+    assert_eq!(
+        oracle_eval_fail, 0,
+        "oracle eval must not error on Core cases"
+    );
     assert_eq!(oracle_fixture_fail, 0, "fixtures must materialise");
+    assert_eq!(non_row_fail, 0, "non-row contracts must qualify");
     // Floor: majority of Tier-A oracle_rule sources must be oracle-green.
     // Residual unsupported (after/enrich/…) is explicit, not silent skip.
     assert!(

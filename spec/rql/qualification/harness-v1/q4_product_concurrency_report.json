@@ -1,0 +1,741 @@
+{
+  "authority": "doc/todo/rql/RQL_Q4_3_METRICS_ADAPTERS.md",
+  "cells": [
+    {
+      "achieved_concurrency": 2,
+      "aggregate_ops_per_s": 130.959329,
+      "cell_id": "cell_key_get",
+      "one_physical_connection": true,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_key_get_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 worker_pages=2 workload_wall_ns=15271917 workload_operations=2 aggregate_ops_per_s=130.959329 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 15219708,
+            "p50": 15219708,
+            "p95": 15219708,
+            "p99": 15219708,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:f9d4fc49cc63810e536ef31fbf3f61c76390e4aa71a3738a273c5a87b8772427",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null
+          },
+          "queries_per_s": 66.28415407035745,
+          "resource": {
+            "cpu_time_ns": null,
+            "peak_rss_bytes": null,
+            "physical_bytes_read": null,
+            "physical_bytes_written": null,
+            "read_amplification": null,
+            "rss_bytes": null
+          },
+          "result_digest_echo": "9d99e18eba8c830d4c7ef1b7d132ba206a70d0da5fcb3bb64d9d438713898ddb",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "684da7bb288def1fc8e6d66715b495a54a792b64353824b916dab93e814359a8",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 1,
+          "values_digest": "9d99e18eba8c830d4c7ef1b7d132ba206a70d0da5fcb3bb64d9d438713898ddb"
+        },
+        "shared_work_hash": "23fbe06f73bf054bfcaeb9577c51b786621d77cdb05928a591de06b379ef46f8",
+        "status": "ready"
+      },
+      "plan_id": "cell_key_get_smoke_c2",
+      "product_ready": true,
+      "requested_concurrency": 2,
+      "workload_operations": 2,
+      "workload_wall_ns": 15271917
+    },
+    {
+      "achieved_concurrency": 2,
+      "aggregate_ops_per_s": 635.517416,
+      "cell_id": "cell_indexed_eq_multi_sel",
+      "one_physical_connection": true,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_indexed_eq_multi_sel_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 worker_pages=2 workload_wall_ns=3147042 workload_operations=2 aggregate_ops_per_s=635.517416 indexes=1 index_entries_built=64 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 3083958,
+            "p50": 3083958,
+            "p95": 3083958,
+            "p99": 3083958,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 14,
+            "explain_plan_digest": "product_plan_hash:0be0313831e008a345bfca176ef6913aefaf718aa0f1decdce7137dc5ceba724",
+            "index_build_ns": 18634333,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null
+          },
+          "queries_per_s": 324.65340003012784,
+          "resource": {
+            "cpu_time_ns": null,
+            "peak_rss_bytes": null,
+            "physical_bytes_read": null,
+            "physical_bytes_written": null,
+            "read_amplification": null,
+            "rss_bytes": null
+          },
+          "result_digest_echo": "72e37906a008e0b4cdd1c2d4e98b30f73defabb1f12110aa0c1ab7d26c33f8ce",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "7852cc456e308d8c23142016fb9a147cef1277ed2fccc6196395bc4742dff2e3",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 7,
+          "values_digest": "72e37906a008e0b4cdd1c2d4e98b30f73defabb1f12110aa0c1ab7d26c33f8ce"
+        },
+        "shared_work_hash": "1549c884ed018eebfc9a11765195bc46c7c826f1ef0f4d028224fc919cec736d",
+        "status": "ready"
+      },
+      "plan_id": "cell_indexed_eq_multi_sel_smoke_c2",
+      "product_ready": true,
+      "requested_concurrency": 2,
+      "workload_operations": 2,
+      "workload_wall_ns": 3147042
+    },
+    {
+      "achieved_concurrency": 2,
+      "aggregate_ops_per_s": 134.803064,
+      "cell_id": "cell_range_compound",
+      "one_physical_connection": true,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_range_compound_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 worker_pages=2 workload_wall_ns=14836458 workload_operations=2 aggregate_ops_per_s=134.803064 indexes=1 index_entries_built=64 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 14807958,
+            "p50": 14807958,
+            "p95": 14807958,
+            "p99": 14807958,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:09e132d0adec3faf26f16b9b0136f8c7114b477c535d24e0492c11c94023961e",
+            "index_build_ns": 17699584,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null
+          },
+          "queries_per_s": 67.72601440870956,
+          "resource": {
+            "cpu_time_ns": null,
+            "peak_rss_bytes": null,
+            "physical_bytes_read": null,
+            "physical_bytes_written": null,
+            "read_amplification": null,
+            "rss_bytes": null
+          },
+          "result_digest_echo": "0c074c8c144298670607d79837200dcd27bef97be88816ca0bc5608dc60ba19e",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "e6decc9a029a387e053109f309aa2477039211863fe6b81a93df4d4db7faf6fb",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 8,
+          "values_digest": "0c074c8c144298670607d79837200dcd27bef97be88816ca0bc5608dc60ba19e"
+        },
+        "shared_work_hash": "a5e372006ed713a6cdbbd23586364e534863efc150dd1845010d3d715e4ae202",
+        "status": "ready"
+      },
+      "plan_id": "cell_range_compound_smoke_c2",
+      "product_ready": true,
+      "requested_concurrency": 2,
+      "workload_operations": 2,
+      "workload_wall_ns": 14836458
+    },
+    {
+      "achieved_concurrency": 2,
+      "aggregate_ops_per_s": 127.99932,
+      "cell_id": "cell_nested_array_pred",
+      "one_physical_connection": true,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_nested_array_pred_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 worker_pages=2 workload_wall_ns=15625083 workload_operations=2 aggregate_ops_per_s=127.999320 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 15588917,
+            "p50": 15588917,
+            "p95": 15588917,
+            "p99": 15588917,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:b86f0286edbb2dd0425b72bb8575d677fa98ee23d503866bbd8e97b36e84f2af",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null
+          },
+          "queries_per_s": 64.341264005364,
+          "resource": {
+            "cpu_time_ns": null,
+            "peak_rss_bytes": null,
+            "physical_bytes_read": null,
+            "physical_bytes_written": null,
+            "read_amplification": null,
+            "rss_bytes": null
+          },
+          "result_digest_echo": "9843f50b451ce216e998e3560b98efb573d3894f76fbe21d93578d50ac24f173",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "0659bba9c3c777209e74a425248d1d416ac0785ea1c2e7c33d70ed73beee4d44",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 32,
+          "values_digest": "9843f50b451ce216e998e3560b98efb573d3894f76fbe21d93578d50ac24f173"
+        },
+        "shared_work_hash": "b909d46ace1916bc79e1c8db62ce3598b0a610cb20bf5c63563138a210de0f5f",
+        "status": "ready"
+      },
+      "plan_id": "cell_nested_array_pred_smoke_c2",
+      "product_ready": true,
+      "requested_concurrency": 2,
+      "workload_operations": 2,
+      "workload_wall_ns": 15625083
+    },
+    {
+      "achieved_concurrency": 2,
+      "aggregate_ops_per_s": 150.374527,
+      "cell_id": "cell_project_covered",
+      "one_physical_connection": true,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_project_covered_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 worker_pages=2 workload_wall_ns=13300125 workload_operations=2 aggregate_ops_per_s=150.374527 indexes=1 index_entries_built=64 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 13265500,
+            "p50": 13265500,
+            "p95": 13265500,
+            "p99": 13265500,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:92dee63b257bee39b6fe44f03c88f1bbb08ad2a7f85b22e54f8fd6fd212f1d52",
+            "index_build_ns": 17872458,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null
+          },
+          "queries_per_s": 75.45829216454676,
+          "resource": {
+            "cpu_time_ns": null,
+            "peak_rss_bytes": null,
+            "physical_bytes_read": null,
+            "physical_bytes_written": null,
+            "read_amplification": null,
+            "rss_bytes": null
+          },
+          "result_digest_echo": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "0659bba9c3c777209e74a425248d1d416ac0785ea1c2e7c33d70ed73beee4d44",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 32,
+          "values_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e"
+        },
+        "shared_work_hash": "6c2cf0ffdc36c07e20ad4b65ee9fa0a3e66118b27b5622dedd94567672cf7989",
+        "status": "ready"
+      },
+      "plan_id": "cell_project_covered_smoke_c2",
+      "product_ready": true,
+      "requested_concurrency": 2,
+      "workload_operations": 2,
+      "workload_wall_ns": 13300125
+    },
+    {
+      "achieved_concurrency": 2,
+      "aggregate_ops_per_s": 192.504361,
+      "cell_id": "cell_top_k",
+      "one_physical_connection": true,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_top_k_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 worker_pages=2 workload_wall_ns=10389375 workload_operations=2 aggregate_ops_per_s=192.504361 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 10348959,
+            "p50": 10348959,
+            "p95": 10348959,
+            "p99": 10348959,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:65f63667792c12bbbc8f1469326663ee9212688afbac6403a57a7e64c037b707",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null
+          },
+          "queries_per_s": 96.63138638644466,
+          "resource": {
+            "cpu_time_ns": null,
+            "peak_rss_bytes": null,
+            "physical_bytes_read": null,
+            "physical_bytes_written": null,
+            "read_amplification": null,
+            "rss_bytes": null
+          },
+          "result_digest_echo": "976faa765d1062f4728170c7b268d5170455491e6ae95de4fe515aa7063f5059",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "b208b3bf69c311d97c1801ec6b7d22a8dd30ff1af46db537b10a3fdbe42de8e9",
+          "multiplicity": "ordered",
+          "order_sensitive": true,
+          "row_count": 10,
+          "values_digest": "976faa765d1062f4728170c7b268d5170455491e6ae95de4fe515aa7063f5059"
+        },
+        "shared_work_hash": "84ffd6cfda591bd6f0c80d406d4c33f1489611dc17b92078cf7d8ee2374e734a",
+        "status": "ready"
+      },
+      "plan_id": "cell_top_k_smoke_c2",
+      "product_ready": true,
+      "requested_concurrency": 2,
+      "workload_operations": 2,
+      "workload_wall_ns": 10389375
+    },
+    {
+      "achieved_concurrency": 2,
+      "aggregate_ops_per_s": 224.783294,
+      "cell_id": "cell_cursor_first_deep",
+      "one_physical_connection": true,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_cursor_first_deep_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 worker_pages=16 workload_wall_ns=71179667 workload_operations=16 aggregate_ops_per_s=224.783294 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 12166708,
+            "p50": 8530458,
+            "p95": 12071625,
+            "p99": 12166708,
+            "samples": 16
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 1024,
+            "explain_plan_digest": "product_plan_hash:8060e8e40e9cf74906229065cdb5c346392c6a0651803fde0983b4aa91d0e7e7",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null
+          },
+          "queries_per_s": 112.53390541069489,
+          "resource": {
+            "cpu_time_ns": null,
+            "peak_rss_bytes": null,
+            "physical_bytes_read": null,
+            "physical_bytes_written": null,
+            "read_amplification": null,
+            "rss_bytes": null
+          },
+          "result_digest_echo": "1b2f41569f510d3a6b0762be0f245b152fa5b1bde667b37f3abf13dfa56052bf",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
+          "multiplicity": "ordered",
+          "order_sensitive": true,
+          "row_count": 64,
+          "values_digest": "1b2f41569f510d3a6b0762be0f245b152fa5b1bde667b37f3abf13dfa56052bf"
+        },
+        "shared_work_hash": "cc509988a1940d7cc6107cf2b309048909c0091cc6d4b5a0f776189705f470aa",
+        "status": "ready"
+      },
+      "plan_id": "cell_cursor_first_deep_smoke_c2",
+      "product_ready": true,
+      "requested_concurrency": 2,
+      "workload_operations": 16,
+      "workload_wall_ns": 71179667
+    },
+    {
+      "achieved_concurrency": 2,
+      "aggregate_ops_per_s": 129.272379,
+      "cell_id": "cell_enrich_card",
+      "one_physical_connection": true,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_enrich_card_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 worker_pages=2 workload_wall_ns=15471209 workload_operations=2 aggregate_ops_per_s=129.272379 indexes=0 index_entries_built=0 full_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 15346625,
+            "p50": 15346625,
+            "p95": 15346625,
+            "p99": 15346625,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:05b702d0d647fe05ff4ec5249ab120670f74cb794e263cebd5e9197841502360",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null
+          },
+          "queries_per_s": 65.27246423656412,
+          "resource": {
+            "cpu_time_ns": null,
+            "peak_rss_bytes": null,
+            "physical_bytes_read": null,
+            "physical_bytes_written": null,
+            "read_amplification": null,
+            "rss_bytes": null
+          },
+          "result_digest_echo": "75bc1cdd55f1556aa3f91132cafb27fc2130a331074bd6eb103adc62b7fcb071",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 64,
+          "values_digest": "75bc1cdd55f1556aa3f91132cafb27fc2130a331074bd6eb103adc62b7fcb071"
+        },
+        "shared_work_hash": "03070cd12b0bd8df714bea7f7ffd0a3a43ebf37c8eadc5f161495eb95b3d139c",
+        "status": "ready"
+      },
+      "plan_id": "cell_enrich_card_smoke_c2",
+      "product_ready": true,
+      "requested_concurrency": 2,
+      "workload_operations": 2,
+      "workload_wall_ns": 15471209
+    },
+    {
+      "achieved_concurrency": 2,
+      "aggregate_ops_per_s": 165.963631,
+      "cell_id": "cell_group_card",
+      "one_physical_connection": true,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_group_card_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 worker_pages=2 workload_wall_ns=12050833 workload_operations=2 aggregate_ops_per_s=165.963631 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 12017666,
+            "p50": 12017666,
+            "p95": 12017666,
+            "p99": 12017666,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:f3fa71e3e6be3686ae3078e63c7e426c218a0a4348fe76d1fda23767a95919cb",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null
+          },
+          "queries_per_s": 83.52169214948294,
+          "resource": {
+            "cpu_time_ns": null,
+            "peak_rss_bytes": null,
+            "physical_bytes_read": null,
+            "physical_bytes_written": null,
+            "read_amplification": null,
+            "rss_bytes": null
+          },
+          "result_digest_echo": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "e626c791929384370d4e76d61b77b91e5fcb7b7e72a79c70b2e01953f231cfa0",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 2,
+          "values_digest": "b16ee42633a2bd090d847863644b8a41c0ce3cf890ac4242759f60adcaabf42b"
+        },
+        "shared_work_hash": "088c18f4892bde703779a0a6b5344aee23bcf445e5483b06ee8ef21b1da3442e",
+        "status": "ready"
+      },
+      "plan_id": "cell_group_card_smoke_c2",
+      "product_ready": true,
+      "requested_concurrency": 2,
+      "workload_operations": 2,
+      "workload_wall_ns": 12050833
+    },
+    {
+      "achieved_concurrency": 2,
+      "aggregate_ops_per_s": 211.544133,
+      "cell_id": "cell_agg_stats",
+      "one_physical_connection": true,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_agg_stats_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 worker_pages=2 workload_wall_ns=9454292 workload_operations=2 aggregate_ops_per_s=211.544133 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 9385667,
+            "p50": 9385667,
+            "p95": 9385667,
+            "p99": 9385667,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:87d0bef9738ee2b9cf7389c32402ff5e3c4939dfead5d79c827352b72e6d5ff9",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null
+          },
+          "queries_per_s": 106.62093623630867,
+          "resource": {
+            "cpu_time_ns": null,
+            "peak_rss_bytes": null,
+            "physical_bytes_read": null,
+            "physical_bytes_written": null,
+            "read_amplification": null,
+            "rss_bytes": null
+          },
+          "result_digest_echo": "d9f85d57231951355a31da7159589ec75f3f54369d7f50d4fc5ac82d0e52656b",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "3aa520d72c396ff3d708292a35fe58a2d085d53889bcccd41851395ed0ffa0e8",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 5,
+          "values_digest": "d9f85d57231951355a31da7159589ec75f3f54369d7f50d4fc5ac82d0e52656b"
+        },
+        "shared_work_hash": "98c2855fa3246f34efe22512bd04dc8ba2e0d6ae5dc35c9f1e3a58136e8e3319",
+        "status": "ready"
+      },
+      "plan_id": "cell_agg_stats_smoke_c2",
+      "product_ready": true,
+      "requested_concurrency": 2,
+      "workload_operations": 2,
+      "workload_wall_ns": 9454292
+    },
+    {
+      "achieved_concurrency": 2,
+      "aggregate_ops_per_s": 182.07267,
+      "cell_id": "cell_conditional_computed",
+      "one_physical_connection": true,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_conditional_computed_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 worker_pages=2 workload_wall_ns=10984625 workload_operations=2 aggregate_ops_per_s=182.072670 indexes=0 index_entries_built=0 core_rql=true",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 10951042,
+            "p50": 10951042,
+            "p95": 10951042,
+            "p99": 10951042,
+            "samples": 2
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 128,
+            "explain_plan_digest": "product_plan_hash:237f3a713ed64a1526089e20afb2e2b860427b70fb3902f8c919ba954ab6cf96",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null
+          },
+          "queries_per_s": 92.32136012997739,
+          "resource": {
+            "cpu_time_ns": null,
+            "peak_rss_bytes": null,
+            "physical_bytes_read": null,
+            "physical_bytes_written": null,
+            "read_amplification": null,
+            "rss_bytes": null
+          },
+          "result_digest_echo": "8e3a131137f6f56970b71972f7eeb69cee39eec510e6e8b678368dcbb3a6e1be",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 64,
+          "values_digest": "8e3a131137f6f56970b71972f7eeb69cee39eec510e6e8b678368dcbb3a6e1be"
+        },
+        "shared_work_hash": "2dc9f567c56157eeff488e817db65d913d8e486e41f8cb3429dc0db27f6c1a45",
+        "status": "ready"
+      },
+      "plan_id": "cell_conditional_computed_smoke_c2",
+      "product_ready": true,
+      "requested_concurrency": 2,
+      "workload_operations": 2,
+      "workload_wall_ns": 10984625
+    },
+    {
+      "achieved_concurrency": 2,
+      "aggregate_ops_per_s": 172.235791,
+      "cell_id": "cell_mixed_rw",
+      "one_physical_connection": true,
+      "outcome": {
+        "detail": "product_embedded_shared plan=cell_mixed_rw_smoke_c2 concurrency_requested=2 concurrency_achieved=2 workers=2 worker_pages=2 workload_wall_ns=1161198834 workload_operations=200 aggregate_ops_per_s=172.235791 indexes=0 index_entries_built=0 mixed_rw=rw_90_10 reads=94 writes=6",
+        "engine": "residiuum_embedded",
+        "execution_kind": "product",
+        "metrics": {
+          "cold_method": "not_cold_warm_steady",
+          "coverage_complete": true,
+          "deferred_drained": true,
+          "deferred_work_units": 0,
+          "latency": {
+            "max": 36249958,
+            "p50": 9755000,
+            "p95": 23347167,
+            "p99": 26706500,
+            "samples": 200
+          },
+          "lifecycle": "warm_steady",
+          "path": {
+            "documents_examined": 13226,
+            "explain_plan_digest": "product_plan_hash:06c11a32c917031a8c707d9e975504b949515d1cd1d4953255369c3bf51efa51",
+            "index_build_ns": null,
+            "index_entries_examined": null,
+            "index_size_bytes": null,
+            "indexed_write_penalty_ns": null
+          },
+          "queries_per_s": 88.77272981138525,
+          "resource": {
+            "cpu_time_ns": null,
+            "peak_rss_bytes": null,
+            "physical_bytes_read": null,
+            "physical_bytes_written": null,
+            "read_amplification": null,
+            "rss_bytes": null
+          },
+          "result_digest_echo": "332d0f2bacc2f416b03bb58af49d4b1aa26f1507d638e146cf797f6bf7714d3e",
+          "validity_ok": true
+        },
+        "refuse_code": null,
+        "result": {
+          "coverage_complete": true,
+          "keys_digest": "7852cc456e308d8c23142016fb9a147cef1277ed2fccc6196395bc4742dff2e3",
+          "multiplicity": "multiset",
+          "order_sensitive": false,
+          "row_count": 7,
+          "values_digest": "332d0f2bacc2f416b03bb58af49d4b1aa26f1507d638e146cf797f6bf7714d3e"
+        },
+        "shared_work_hash": "53f4714e680cecc418214a6fcd7d1634b22520d67fee46d4d59dc26911540e6a",
+        "status": "ready"
+      },
+      "plan_id": "cell_mixed_rw_smoke_c2",
+      "product_ready": true,
+      "requested_concurrency": 2,
+      "workload_operations": 200,
+      "workload_wall_ns": 1161198834
+    }
+  ],
+  "format": "residiuum-rql-q4-product-concurrency-report-v1",
+  "harness_profile": "residiuum-rql-qual-harness-v1",
+  "non_claims": [
+    "not_gate1",
+    "not_competitive",
+    "not_comparator_campaign",
+    "two_worker_smoke_does_not_replace_full_scaling_matrix"
+  ],
+  "seed": 1092,
+  "summary": {
+    "connection_model": "one_physical_client_shared_by_all_workers_per_cell",
+    "exact_concurrency_matches": 12,
+    "mandatory_cells": 12,
+    "product_ready": 12,
+    "requested_concurrency": 2
+  }
+}

@@ -93,10 +93,18 @@ if int(s1.get("digest_mismatch") or 0) or int(s1.get("oracle_eval_fail") or 0):
     raise SystemExit(f"q3.1 residual fail: {s1}")
 if int(s1.get("oracle_ok") or 0) < 90:
     raise SystemExit(f"q3.1 oracle_ok floor: {s1}")
+if int(s1.get("tier_a_total") or 0) != 147:
+    raise SystemExit(f"q3.1 Tier-A denominator drift: {s1}")
+if int(s1.get("qualification_green") or 0) + int(s1.get("qualification_residual") or 0) != int(s1.get("tier_a_total") or 0):
+    raise SystemExit(f"q3.1 qualification accounting mismatch: {s1}")
 if int(s2.get("matrix_diverge") or 0) or int(s2.get("errors") or 0) or int(s2.get("reopen_fail") or 0):
     raise SystemExit(f"q3.2 residual fail: {s2}")
 if int(s2.get("matrix_equal") or 0) < 90:
     raise SystemExit(f"q3.2 matrix_equal floor: {s2}")
+if int(s2.get("tier_a_total") or 0) != 147:
+    raise SystemExit(f"q3.2 Tier-A denominator drift: {s2}")
+if int(s2.get("qualification_green") or 0) + int(s2.get("qualification_residual") or 0) != int(s2.get("tier_a_total") or 0):
+    raise SystemExit(f"q3.2 qualification accounting mismatch: {s2}")
 if int(s3.get("false_absence_defects") or 0) or int(s3.get("false_completeness_defects") or 0):
     raise SystemExit(f"q3.3 false absence/completeness: {s3}")
 if int(s3.get("unresolved_divergence") or 0):
@@ -116,6 +124,13 @@ print(
     f"page_concat_laws={s4.get('law_count')} "
     f"source_after_residual={s4.get('source_after_cursor_residual')}"
 )
+denominator_green = bool(s1.get("package_exit_ready")) and bool(s2.get("package_exit_ready"))
+state = "LABOR EXIT READY / PACKAGE REVIEW" if denominator_green else "PACKAGE HOLD"
+print(
+    f"verify-rql-q3: {state} "
+    f"oracle_green={s1.get('qualification_green')}/{s1.get('tier_a_total')} "
+    f"matrix_green={s2.get('qualification_green')}/{s2.get('tier_a_total')}"
+)
 PY
 
 SPEC_AFTER=$(
@@ -130,4 +145,4 @@ if [[ "$SPEC_BEFORE" != "$SPEC_AFTER" ]]; then
   after:  $SPEC_AFTER"
 fi
 
-ok "PASS (Q3.1–Q3.4 labor evidence only — not package accept; F8 no-spec-churn)"
+ok "PASS (Tier-A denominator green; package awaits principal review; F8 no-spec-churn)"

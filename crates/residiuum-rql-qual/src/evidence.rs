@@ -25,6 +25,68 @@ pub enum EvidenceError {
     Fingerprint(String),
 }
 
+/// Evidence intent. Scaffold bundles can exercise structure but can never be
+/// accepted as competitive campaign evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CampaignClass {
+    Scaffold,
+    Qualification,
+}
+
+/// Frozen execution protocol carried by every evidence bundle (F14).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CampaignProtocol {
+    pub class: CampaignClass,
+    pub seed: u64,
+    pub warmup_operations: u64,
+    pub minimum_repetitions: u32,
+    pub minimum_duration_ms: u64,
+    pub minimum_operations: u64,
+    pub engine_order_policy: String,
+}
+
+impl CampaignProtocol {
+    pub fn scaffold(seed: u64) -> Self {
+        Self {
+            class: CampaignClass::Scaffold,
+            seed,
+            warmup_operations: 0,
+            minimum_repetitions: 1,
+            minimum_duration_ms: 0,
+            minimum_operations: 1,
+            engine_order_policy: "fixed_scaffold_not_competitive".into(),
+        }
+    }
+
+    pub fn q5(seed: u64, minimum_duration_ms: u64, minimum_operations: u64) -> Self {
+        Self {
+            class: CampaignClass::Qualification,
+            seed,
+            warmup_operations: minimum_operations,
+            minimum_repetitions: 7,
+            minimum_duration_ms,
+            minimum_operations,
+            engine_order_policy: "alternating_seeded_randomized".into(),
+        }
+    }
+}
+
+/// One raw engine repetition. Aggregates never replace these records.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawRepetition {
+    pub repetition: u32,
+    pub engine: EngineId,
+    pub operations: u64,
+    pub duration_ns: u64,
+    pub valid: bool,
+    pub result_digest: String,
+    pub query_hash: String,
+    pub qvm_hash: Option<String>,
+    pub index_config_hash: String,
+    pub cache_state: String,
+}
+
 /// Q0-aligned environment fingerprint for evidence bundles.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnvFingerprint {
@@ -66,9 +128,8 @@ impl Default for QueryDefaultsPin {
 impl EnvFingerprint {
     /// Capture host fingerprint. `dirty` from `git status --porcelain`.
     pub fn capture(workspace_root: &Path) -> Result<Self, EvidenceError> {
-        let git_sha = git_stdout(workspace_root, &["rev-parse", "HEAD"]).unwrap_or_else(|_| {
-            "0000000000000000000000000000000000000000".into()
-        });
+        let git_sha = git_stdout(workspace_root, &["rev-parse", "HEAD"])
+            .unwrap_or_else(|_| "0000000000000000000000000000000000000000".into());
         let porcelain = git_stdout(workspace_root, &["status", "--porcelain"]).unwrap_or_default();
         let dirty = !porcelain.trim().is_empty();
         let rustc = Command::new("rustc")
@@ -149,6 +210,9 @@ pub struct CellEvidence {
     pub equivalence_detail: Option<String>,
     pub metrics_a: Option<CellMetrics>,
     pub metrics_b: Option<CellMetrics>,
+    /// Raw repetitions from which aggregate metrics were derived (F14/Q5).
+    #[serde(default)]
+    pub raw_repetitions: Vec<RawRepetition>,
     /// True when this record is structural scaffold only (not competitive).
     pub scaffold_only: bool,
 }
@@ -164,6 +228,7 @@ pub struct EvidenceBundle {
     pub harness_profile: String,
     pub env: EnvFingerprint,
     pub campaign_id: String,
+    pub protocol: CampaignProtocol,
     pub notes: Vec<String>,
     pub cells: Vec<CellEvidence>,
     /// Content hash of the bundle body without this field (filled on write).
@@ -177,6 +242,7 @@ impl EvidenceBundle {
             harness_profile: HARNESS_PROFILE.into(),
             env,
             campaign_id: campaign_id.into(),
+            protocol: CampaignProtocol::scaffold(0),
             notes: vec![
                 "Q4.1 scaffold — not Gate-1; not competitive".into(),
                 "Mongo/CBL adapters not configured until Q4.3".into(),
@@ -190,10 +256,65 @@ impl EvidenceBundle {
         self.cells.push(cell);
     }
 
+    /// Fail closed unless the bundle has the campaign fields and raw evidence
+    /// required by programme §8. Scaffold bundles always fail this check.
+    pub fn validate_qualification_ready(&self) -> Result<(), EvidenceError> {
+        if self.protocol.class != CampaignClass::Qualification {
+            return Err(EvidenceError::Fingerprint(
+                "scaffold bundle is not qualification evidence".into(),
+            ));
+        }
+        if self.protocol.minimum_repetitions < 7
+            || self.protocol.minimum_duration_ms == 0
+            || self.protocol.minimum_operations == 0
+            || self.protocol.warmup_operations == 0
+            || self.protocol.engine_order_policy != "alternating_seeded_randomized"
+        {
+            return Err(EvidenceError::Fingerprint(
+                "qualification protocol below Q5 floors".into(),
+            ));
+        }
+        if self.cells.is_empty() {
+            return Err(EvidenceError::Fingerprint(
+                "qualification bundle has no cells".into(),
+            ));
+        }
+        for cell in &self.cells {
+            if cell.scaffold_only {
+                return Err(EvidenceError::Fingerprint(format!(
+                    "cell {} is scaffold-only",
+                    cell.cell_id
+                )));
+            }
+            let valid = cell.raw_repetitions.iter().filter(|r| r.valid).count();
+            if valid < self.protocol.minimum_repetitions as usize {
+                return Err(EvidenceError::Fingerprint(format!(
+                    "cell {} has {valid} valid repetitions; need {}",
+                    cell.cell_id, self.protocol.minimum_repetitions
+                )));
+            }
+            if cell.raw_repetitions.iter().any(|r| {
+                r.operations < self.protocol.minimum_operations
+                    || r.duration_ns < self.protocol.minimum_duration_ms.saturating_mul(1_000_000)
+                    || r.result_digest.is_empty()
+                    || r.query_hash.is_empty()
+                    || r.index_config_hash.is_empty()
+                    || r.cache_state.is_empty()
+            }) {
+                return Err(EvidenceError::Fingerprint(format!(
+                    "cell {} has incomplete/below-floor raw repetition",
+                    cell.cell_id
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Serialize, hash, write JSON to path.
     pub fn write_json(&mut self, path: impl AsRef<Path>) -> Result<(), EvidenceError> {
         self.content_hash = None;
-        let mut body = serde_json::to_value(&*self).map_err(|e| EvidenceError::Json(e.to_string()))?;
+        let mut body =
+            serde_json::to_value(&*self).map_err(|e| EvidenceError::Json(e.to_string()))?;
         if let Some(obj) = body.as_object_mut() {
             obj.remove("content_hash");
         }
@@ -262,10 +383,10 @@ pub fn scaffold_cell_with_concurrency(
         equivalence_detail,
         metrics_a: None,
         metrics_b: None,
+        raw_repetitions: Vec::new(),
         scaffold_only: true,
     }
 }
-
 
 /// Env flag: when truthy, also write checked-in `spec/` evidence snapshots (F8).
 /// Default is off — tests/verify write under `target/rql-q4/` only.
@@ -380,10 +501,7 @@ mod tests {
             lane_hint: None,
         };
         let side_b = mongo.execute_case(&case).unwrap();
-        let side_a = synthetic_ready_outcome(
-            crate::lane::EngineId::ResidiuumEmbedded,
-            "aaa",
-        );
+        let side_a = synthetic_ready_outcome(crate::lane::EngineId::ResidiuumEmbedded, "aaa");
         bundle.push_cell(scaffold_cell(
             "cell_key_get",
             LanePairing::EMBEDDED,
@@ -401,7 +519,10 @@ mod tests {
         let spec = root.join("spec/rql/qualification/harness-v1/q4_1_architecture_report.json");
         let report = write_architecture_report(&target).expect("arch report");
         assert!(target.is_file());
-        assert_eq!(report["format"], "residiuum-rql-q4-1-architecture-report-v1");
+        assert_eq!(
+            report["format"],
+            "residiuum-rql-q4-1-architecture-report-v1"
+        );
         if write_spec_evidence_enabled() {
             write_architecture_report(&spec).expect("arch report spec");
             assert!(spec.is_file());
@@ -414,5 +535,27 @@ mod tests {
         env.dirty = true;
         assert!(env.assert_clean_for_campaign(false).is_err());
         assert!(env.assert_clean_for_campaign(true).is_ok());
+    }
+
+    #[test]
+    fn scaffold_bundle_cannot_validate_as_q5_evidence() {
+        let env = EnvFingerprint::capture(&workspace_root()).unwrap();
+        let bundle = EvidenceBundle::new(env, "scaffold");
+        assert!(bundle.validate_qualification_ready().is_err());
+    }
+
+    #[test]
+    fn q5_protocol_requires_cells_and_raw_repetitions() {
+        let env = EnvFingerprint::capture(&workspace_root()).unwrap();
+        let mut bundle = EvidenceBundle::new(env, "q5-empty");
+        bundle.protocol = CampaignProtocol::q5(7, 1_000, 100);
+        assert!(bundle.validate_qualification_ready().is_err());
+
+        let side_a = synthetic_ready_outcome(EngineId::ResidiuumEmbedded, "a");
+        let side_b = synthetic_ready_outcome(EngineId::CouchbaseLiteEmbedded, "a");
+        let mut cell = scaffold_cell("cell_key_get", LanePairing::EMBEDDED, side_a, side_b);
+        cell.scaffold_only = false;
+        bundle.push_cell(cell);
+        assert!(bundle.validate_qualification_ready().is_err());
     }
 }

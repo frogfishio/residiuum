@@ -9,15 +9,24 @@ mod ceremony;
 mod error;
 mod head;
 mod issue;
+mod product;
 mod provider;
 mod reload;
 mod slot;
 mod store;
 
-pub use ceremony::{commit_genesis, GenesisRequest, GenesisResult};
+pub use ceremony::{
+    commit_genesis, commit_prepared_genesis, prepare_genesis, GenesisRequest, GenesisResult,
+    PreparedGenesis,
+};
 pub use error::{AuthorityError, AuthorityStoreError};
 pub use head::{AccessPolicy, AuthorityHead, RecoveryProfile};
 pub use issue::{issue_heap_key, IssueRequest, IssuedHeapKey};
+pub use residiuum_heap::Rights;
+pub use product::{
+    bootstrap_development_file_product, DevelopmentFileProductBootstrap, ProductBootstrapResult,
+    ProductHeapCapability, ProductHeapDisposition, ProductHeapRequest,
+};
 pub use provider::{EphemeralMasterKeyProvider, MasterKeyProvider};
 pub use reload::{
     apply_reload_request, notify_reload, peek_reload_request, ReloadNotify, ReloadRequest,

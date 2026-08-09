@@ -39,7 +39,6 @@ pub(crate) fn apply_project_paths(
     Ok(JsonValue::Object(out))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

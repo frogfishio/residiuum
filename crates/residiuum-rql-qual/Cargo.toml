@@ -17,6 +17,8 @@ residiuum-embedded = [
   "dep:residiuum-sdk",
   "dep:residiuum-heap",
   "dep:residiuum-store",
+  "dep:residiuum-format",
+  "residiuum-store/legacy-raw-store",
   "dep:tempfile",
 ]
 
@@ -26,9 +28,12 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+sysinfo = { workspace = true }
+rustix = { workspace = true }
 residiuum-sdk = { workspace = true, optional = true }
 residiuum-heap = { workspace = true, optional = true }
 residiuum-store = { workspace = true, optional = true, default-features = false }
+residiuum-format = { workspace = true, optional = true }
 tempfile = { workspace = true, optional = true }
 
 [dev-dependencies]

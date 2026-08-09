@@ -4,21 +4,21 @@
   "human": "doc/todo/rql/RQL_Q3_4_PAGE_CONCAT.md",
   "non_claims": [
     "not_gate1",
-    "not_package_accept",
-    "source_after_cursor_still_residual"
+    "not_package_accept"
   ],
   "package": "RQL-Q3",
   "summary": {
     "false_absence_defects": 0,
-    "law_count": 4,
+    "law_count": 5,
     "laws": [
       "page_concat_key_order",
       "page_concat_field_order",
       "page_concat_filtered",
-      "single_page_equals_unpaged"
+      "single_page_equals_unpaged",
+      "textual_after_page_concat"
     ],
-    "product_path": "CollectionClient::rql + QueryRunOptions.after",
-    "source_after_cursor_residual": true
+    "product_path": "CollectionClient::rql + QueryRunOptions.after + textual after $cursor",
+    "source_after_cursor_residual": false
   },
   "task": "Q3.4"
 }

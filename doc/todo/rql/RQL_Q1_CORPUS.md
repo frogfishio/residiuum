@@ -20,7 +20,7 @@ Not another multi-document Q0-style freeze family.
 |---|---|
 | Format | `residiuum-rql-q1-corpus-v1` |
 | Profile | `rql-gate1-practical-corpus-v1` |
-| Corpus version | **`rql-q1-corpus-v0.4.1`** (was v0.4.0; Q2.2b enrich dialect align) |
+| Corpus version | **`rql-q1-corpus-v0.4.2`** (Q2 within case aligned to frozen enrich/within grammar; amendment pending principal disposition) |
 | Equivalence profile | `rql-q0-result-equivalence-v1` |
 | Q0 freeze tip (authority) | `e1f5c670a99dc54da477c531c83bca4985199a42` |
 | Live cases | **153** (A=147 / B=2 / C=4); status `ready` (not `frozen`) |

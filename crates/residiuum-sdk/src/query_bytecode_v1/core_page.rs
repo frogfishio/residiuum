@@ -31,6 +31,7 @@ use crate::predicate::{CompareOp, Operand, Predicate};
 use crate::rql_app_core::compile_app_core;
 use residiuum_heap::CollectionId;
 use serde_json::Value as JsonValue;
+use super::HostDocument;
 use std::collections::BTreeMap;
 
 /// Profile label for this executor cut (not full product query).
@@ -48,6 +49,15 @@ pub(crate) trait DocScan {
 
     /// JSON get (None when absent).
     fn get_json(&mut self, key: &str) -> Result<Option<JsonValue>, Error>;
+
+    /// Coverage-aware get; storage adapters override this to expose damage as
+    /// hole evidence instead of aborting an incomplete-allowed query.
+    fn get_json_covered(&mut self, key: &str) -> Result<HostDocument, Error> {
+        Ok(match self.get_json(key)? {
+            Some(value) => HostDocument::Present(value),
+            None => HostDocument::Absent,
+        })
+    }
 
     /// Optional equality-index acceleration (APB-7 T4).
     ///
@@ -72,10 +82,15 @@ pub fn explain_rql_source(
     };
     bindings.bind(collection_name, collection_id);
     let compiled = compile_app_core(source, &bindings)?;
+    let plan_profile = compiled.plan.profile.clone();
+    let tree = compiled.plan.to_canonical_json();
+    let qvm = super::QueryBytecodeV1::from_core_plan(compiled.plan, compiled.budget)?;
     Ok(QueryExplanation {
-        plan_profile: compiled.plan.profile.clone(),
-        plan_hash: compiled.plan.plan_hash(),
-        tree: compiled.plan.to_canonical_json(),
+        plan_profile,
+        // Identity of the default executable QVM, matching QueryPage::plan_hash.
+        // The tree remains the canonical logical shape for human inspection.
+        plan_hash: qvm.qvm_hash(),
+        tree,
     })
 }
 
@@ -126,4 +141,3 @@ fn operand_as_json(op: &Operand, params: &BTreeMap<String, JsonValue>) -> Option
         Operand::Path { .. } => None,
     }
 }
-

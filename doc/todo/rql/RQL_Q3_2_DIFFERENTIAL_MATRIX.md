@@ -1,6 +1,6 @@
 # RQL-Q3.2 — Differential matrix + metamorphic laws
 
-Status: **labor complete → board `in_review`** (2026-08-08) · package **not accepted**  
+Status: **labor exit ready → principal package review** (2026-08-09) · package **not yet accepted**
 Package: RQL-Q3 · Feature `019fda4c-5994-77e2-a2c9-aaa0c3097b29` · Task Q3.2  
 Depends: Q3.1 independent oracle  
 Authority: [RQL_QUERY_QUALIFICATION_PROGRAM.md](./RQL_QUERY_QUALIFICATION_PROGRAM.md) §6.2–6.3  
@@ -28,6 +28,7 @@ row count alone. Failures are **defects**, not warnings.
 | `reference_oracle` | Same model as Q3.1: full logical-fixture scan + `Predicate::eval` |
 | `forced_scan_QVM` | `QueryBytecodeV1::from_core_plan_force_scan(..., true)` + `execute_bytecode` on `DiffHost` |
 | `admitted_index_plan` | Same host with `lookup_index_keys` equality indexes; `force_scan=false` |
+| Full-QVM attach/project | Collection-qualified host; independent per-collection indexes; forced foreign scan versus admitted foreign index |
 | `reopened_store` | Seed embedded Heap, `CollectionClient::rql`, drop writer, reopen deployment, re-query (budget 12 cases) |
 | `comparator` | Explicitly `deferred_q4` (cross-engine harness owns Mongo/CBL) |
 
@@ -42,6 +43,10 @@ Core filter now injects logical `_key` when the store body omits it
 and `project _key` now match the independent oracle. This is not an optimiser
 change — it restores key-path semantics on the product path.
 
+Core explain now reports the default executable QVM hash, matching the identity
+returned by execution; its logical tree remains diagnostic. The matrix caught
+the previous logical-plan/QVM hash mismatch.
+
 ## 3. Metamorphic laws (unit)
 
 | Law | Test |
@@ -54,18 +59,26 @@ change — it restores key-path semantics on the product path.
 | complete coverage ⇒ zero holes | `q32_law_complete_coverage_implies_zero_holes` |
 
 Page-concat via product `QueryRunOptions.after`: see [RQL_Q3_4_PAGE_CONCAT.md](./RQL_Q3_4_PAGE_CONCAT.md).
-Source-level `after $cursor` remains residual (same five corpus cases as Q3.1 unsupported).
+Source-level `after $cursor` is now covered by the corpus matrix and Q3.4's
+direct textual page-concat law.
 
 ## 4. Evidence (latest labor)
 
 | Metric | Value |
 |---:|---:|
-| Tier-A `oracle_rule` + source considered | **106** |
-| `matrix_equal` (oracle=scan=index + coverage) | **101** |
-| `unsupported` (`after` / APP-6) | **5** |
+| Tier-A outcomes considered | **147** |
+| `matrix_equal` | **147** |
+| Stable refusal / explain identity | **2 / 1** |
+| `unsupported` | **0** |
+| Complete Tier-A package denominator | **147/147 green; 0 residual — LABOR EXIT READY** |
 | `matrix_diverge` / errors / reopen_fail | **0** |
 | reopen_store checked | **12** (budget; all equal) |
 | Metamorphic unit tests | **6/6** |
+
+All Core and Full Tier-A families now compare complete result shapes. This
+includes group/aggregate, computed projection, enrich cardinality and nested
+`within` projection. Foreign equality indexes are collection-qualified in the
+harness, preventing cross-collection candidate leakage.
 
 ## 5. Non-claims
 
@@ -81,6 +94,7 @@ Source-level `after $cursor` remains residual (same five corpus cases as Q3.1 un
 - [x] Metamorphic laws as hard unit tests
 - [x] Machine report + scoreboard note
 - [ ] Principal package accept (not labor)
+- [x] Complete Tier-A denominator green (147/147)
 
 ## Evidence write policy (F8)
 

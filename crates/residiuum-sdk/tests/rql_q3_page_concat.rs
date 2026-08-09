@@ -7,9 +7,8 @@
 //! multipage `CollectionClient::rql` with authenticated continuation equals a
 //! single large page (keys, values, order when declared, coverage complete).
 //!
-//! **Still residual:** RQL source `after $cursor` (compile/oracle) — five corpus
-//! cases remain `oracle_unsupported` until host mints bound cursors into source.
-//! That is distinct from `QueryRunOptions.after` (this suite).
+//! Source `after $cursor` is also drained with a host-issued opaque token and
+//! must reconstruct the same stream without changing canonical plan identity.
 //!
 //! Not Gate-1; not RQL-Q3 package accept.
 
@@ -293,6 +292,38 @@ fn q34_law_single_page_is_unpaged() {
 }
 
 #[test]
+fn q34_law_textual_after_concat_equals_unpaged() {
+    let (_dir, mut client) = open_client();
+    let mut col = client.create_collection("docs").unwrap().collection;
+    for i in 0..11 {
+        col.put(&format!("k{i:02}"), &json!({"i": i})).unwrap();
+    }
+    let first_source = "from docs page size 3";
+    let resumed_source = "from docs page size 3 after $cursor";
+    let mut params = Parameters::default();
+    let mut pages = Vec::new();
+    let first = col
+        .rql(first_source, &params, QueryRunOptions::default())
+        .unwrap();
+    let mut next = first.next.clone();
+    pages.push(first);
+    while let Some(cursor) = next {
+        params.values.insert(
+            "cursor".into(),
+            Value::String(String::from_utf8(cursor.token).unwrap()),
+        );
+        let page = col
+            .rql(resumed_source, &params, QueryRunOptions::default())
+            .unwrap();
+        next = page.next.clone();
+        pages.push(page);
+        assert!(pages.len() < 16, "textual cursor drain runaway");
+    }
+    let unpaged = unpaged_rql(&mut col, "from docs", &Parameters::default());
+    assert_concat_equals_unpaged(&pages, &unpaged, true);
+}
+
+#[test]
 fn q34_write_report() {
     // Evidence stamp for verify script (unit law suite presence).
     // F8: default → target/ only; RESIDIUUM_WRITE_SPEC_EVIDENCE=1 publishes spec/.
@@ -307,17 +338,17 @@ fn q34_write_report() {
                 "page_concat_key_order",
                 "page_concat_field_order",
                 "page_concat_filtered",
-                "single_page_equals_unpaged"
+                "single_page_equals_unpaged",
+                "textual_after_page_concat"
             ],
-            "law_count": 4,
-            "product_path": "CollectionClient::rql + QueryRunOptions.after",
-            "source_after_cursor_residual": true,
+            "law_count": 5,
+            "product_path": "CollectionClient::rql + QueryRunOptions.after + textual after $cursor",
+            "source_after_cursor_residual": false,
             "false_absence_defects": 0,
         },
         "non_claims": [
             "not_gate1",
-            "not_package_accept",
-            "source_after_cursor_still_residual"
+            "not_package_accept"
         ],
         "human": "doc/todo/rql/RQL_Q3_4_PAGE_CONCAT.md",
     });

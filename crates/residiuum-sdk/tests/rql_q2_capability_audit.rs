@@ -6,8 +6,8 @@
 //! This is a **capability audit**, not Q3 semantic qualification:
 //! every Tier-A case is attempted on the product path
 //! (`compile_rql_full` + `execute_rql_full` / QVM). Failures are classified;
-//! no silent skips. Writes a machine-readable gap report under
-//! `spec/rql/qualification/corpus-v1/q2_1_capability_audit.json`.
+//! no silent skips. Default evidence is written under `target/rql-q2/`;
+//! `RESIDIUUM_WRITE_SPEC_EVIDENCE=1` explicitly publishes the checked snapshot.
 //!
 //! Exit of this test = audit completed (report written). Green test ≠ Gate-1
 //! pass and ≠ 100% Tier-A expressible.
@@ -70,7 +70,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid_bytes() -> [u8; 16] {
@@ -166,7 +173,8 @@ fn classify_error(msg: &str, source: &str) -> FailureClass {
     if m.contains("op 118") || m.contains("core wire") || m.contains("not on application core") {
         return FailureClass::Wire;
     }
-    if m.contains("index") && (m.contains("pushdown") || m.contains("missing") || m.contains("stale"))
+    if m.contains("index")
+        && (m.contains("pushdown") || m.contains("missing") || m.contains("stale"))
     {
         return FailureClass::Index;
     }
@@ -174,8 +182,11 @@ fn classify_error(msg: &str, source: &str) -> FailureClass {
         return FailureClass::Qvm;
     }
     // Budget cases must return partial coverage, not hard resource-limit abort.
-    if (m.contains("resource limit") || m.contains("budget") || m.contains("max_documents")
-        || m.contains("max_result_bytes") || m.contains("result_bytes"))
+    if (m.contains("resource limit")
+        || m.contains("budget")
+        || m.contains("max_documents")
+        || m.contains("max_result_bytes")
+        || m.contains("result_bytes"))
         && s.contains("budget")
     {
         return FailureClass::Semantic;
@@ -325,9 +336,7 @@ fn parameters_for_source(source: &str) -> Parameters {
         if bytes[i] == b'$' && i + 1 < bytes.len() {
             let start = i + 1;
             let mut end = start;
-            while end < bytes.len()
-                && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_')
-            {
+            while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
                 end += 1;
             }
             if end > start {
@@ -383,7 +392,8 @@ fn open_heap_client(root: &Path) -> HeapClient {
     let layout = HeapMetaLayout::new(root);
     let dep = *DeploymentId::new_random().unwrap().as_bytes();
     let heap_bytes = *HeapId::new_random().unwrap().as_bytes();
-    let staged = stage_heap_genesis(&layout, dep, heap_bytes, uuid_bytes(), "heap-q2-audit").unwrap();
+    let staged =
+        stage_heap_genesis(&layout, dep, heap_bytes, uuid_bytes(), "heap-q2-audit").unwrap();
     publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
     let heap_id = HeapId::from_bytes_unchecked_nonzero(heap_bytes).unwrap();
     let dep_id = DeploymentId::from_bytes_unchecked_nonzero(dep).unwrap();
@@ -396,7 +406,9 @@ fn seed_collections(client: &mut HeapClient, collections: &Map<String, Value>) {
             .create_collection(name)
             .unwrap_or_else(|e| panic!("create_collection {name}: {e}"))
             .collection;
-        let arr = docs.as_array().unwrap_or_else(|| panic!("{name} not array"));
+        let arr = docs
+            .as_array()
+            .unwrap_or_else(|| panic!("{name} not array"));
         for doc in arr {
             let key = doc
                 .get("_key")
@@ -484,7 +496,10 @@ fn rql_q2_1_tier_a_capability_audit() {
     let corpus_path = root.join("spec/rql/qualification/corpus-v1/corpus-v1.json");
     let text = fs::read_to_string(&corpus_path).expect("read corpus-v1.json");
     let doc: Value = serde_json::from_str(&text).expect("parse corpus");
-    let corpus_version = doc["corpus_version"].as_str().unwrap_or("unknown").to_string();
+    let corpus_version = doc["corpus_version"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string();
     let cases = doc["cases"].as_array().expect("cases array");
 
     let mut case_results: Vec<Value> = Vec::new();
@@ -539,9 +554,18 @@ fn rql_q2_1_tier_a_capability_audit() {
 
         if source.is_empty() {
             silent_skip += 1;
-            outcome.insert("compile".into(), json!({"status": "skipped", "reason": "no_source"}));
-            outcome.insert("execute".into(), json!({"status": "skipped", "reason": "no_source"}));
-            outcome.insert("failure_class".into(), json!(FailureClass::CorpusGap.as_str()));
+            outcome.insert(
+                "compile".into(),
+                json!({"status": "skipped", "reason": "no_source"}),
+            );
+            outcome.insert(
+                "execute".into(),
+                json!({"status": "skipped", "reason": "no_source"}),
+            );
+            outcome.insert(
+                "failure_class".into(),
+                json!(FailureClass::CorpusGap.as_str()),
+            );
             outcome.insert(
                 "gap_package".into(),
                 json!(gap_package_id(FailureClass::CorpusGap, "", &family_tags)),
@@ -601,19 +625,19 @@ fn rql_q2_1_tier_a_capability_audit() {
                 );
                 if want_refusal {
                     expected_refusal_ok += 1;
-                    outcome.insert("execute".into(), json!({
-                        "status": "skipped",
-                        "reason": "expected_refusal_at_compile"
-                    }));
+                    outcome.insert(
+                        "execute".into(),
+                        json!({
+                            "status": "skipped",
+                            "reason": "expected_refusal_at_compile"
+                        }),
+                    );
                     outcome.insert("failure_class".into(), json!(class.as_str()));
                     outcome.insert(
                         "gap_package".into(),
                         json!(gap_package_id(class, &source, &family_tags)),
                     );
-                    outcome.insert(
-                        "product_expressible".into(),
-                        json!(false),
-                    );
+                    outcome.insert("product_expressible".into(), json!(false));
                     outcome.insert(
                         "notes".into(),
                         json!(format!(
@@ -654,11 +678,11 @@ fn rql_q2_1_tier_a_capability_audit() {
                     "reason": "refusal_expected_but_compiled"
                 }),
             );
-            outcome.insert("failure_class".into(), json!(FailureClass::Semantic.as_str()));
             outcome.insert(
-                "gap_package".into(),
-                json!("pkg_offset_refusal_harden"),
+                "failure_class".into(),
+                json!(FailureClass::Semantic.as_str()),
             );
+            outcome.insert("gap_package".into(), json!("pkg_offset_refusal_harden"));
             outcome.insert("product_expressible".into(), json!(false));
             outcome.insert(
                 "notes".into(),
@@ -679,7 +703,23 @@ fn rql_q2_1_tier_a_capability_audit() {
         let fixture = &case["fixture"];
         let generator_id = fixture["generator_id"].as_str().unwrap_or("");
         let seed = fixture["seed"].as_u64().unwrap_or(0);
-        let params = fixture.get("params").cloned().unwrap_or_else(|| json!({}));
+        let mut params = fixture.get("params").cloned().unwrap_or_else(|| json!({}));
+        // A continuation capability case must actually have a second page.
+        // Some corpus fixtures are intentionally small/selective, so enlarge
+        // only their generator cardinality for this capability audit.
+        if source.contains(" after $cursor") {
+            if let Some(obj) = params.as_object_mut() {
+                for (key, minimum) in [("n_messages", 512_u64), ("n_events", 512_u64)] {
+                    if obj
+                        .get(key)
+                        .and_then(Value::as_u64)
+                        .is_some_and(|n| n < minimum)
+                    {
+                        obj.insert(key.into(), json!(minimum));
+                    }
+                }
+            }
+        }
 
         let exec_outcome = (|| -> Result<(u64, bool), (FailureClass, String)> {
             let mat = materialise_fixture(&root, generator_id, seed, &params)
@@ -706,11 +746,39 @@ fn rql_q2_1_tier_a_capability_audit() {
 
             let mut opts = QueryRunOptions::default();
             opts.page_size = Some(64);
+            if source.contains(" after $cursor") {
+                // Preserve the source page size so the first-page cursor binds
+                // to exactly the same effective plan as textual resume.
+                opts.page_size = None;
+            }
             // Budget cases require incomplete coverage when budgets exhaust (not hard fail).
             if source.to_ascii_lowercase().contains("budget") {
                 opts.coverage = CoveragePolicy::IncompleteAllowed;
             }
-            let run_params = parameters_for_source(&source);
+            let mut run_params = parameters_for_source(&source);
+            if source.contains(" after $cursor") {
+                let first_source = source.strip_suffix(" after $cursor").ok_or_else(|| {
+                    (
+                        FailureClass::Compiler,
+                        "cursor clause is not terminal".into(),
+                    )
+                })?;
+                let first = execute_rql_full(&mut client, first_source, &run_params, opts.clone())
+                    .map_err(|e| (classify_error(&e.to_string(), first_source), e.to_string()))?;
+                let cursor = first.base.next.ok_or_else(|| {
+                    (
+                        FailureClass::Semantic,
+                        "cursor capability fixture did not produce a second page".into(),
+                    )
+                })?;
+                let token = String::from_utf8(cursor.token).map_err(|_| {
+                    (
+                        FailureClass::Compiler,
+                        "issued continuation is not representable as textual bytes".into(),
+                    )
+                })?;
+                run_params.values.insert("cursor".into(), json!(token));
+            }
             match execute_rql_full(&mut client, &source, &run_params, opts) {
                 Ok(page) => {
                     let n = page.rows.len() as u64;
@@ -858,7 +926,13 @@ fn rql_q2_1_tier_a_capability_audit() {
         "cases": case_results,
     });
 
-    let out_path = root.join("spec/rql/qualification/corpus-v1/q2_1_capability_audit.json");
+    let out_path = if std::env::var_os("RESIDIUUM_WRITE_SPEC_EVIDENCE").is_some() {
+        root.join("spec/rql/qualification/corpus-v1/q2_1_capability_audit.json")
+    } else {
+        root.join("target/rql-q2/q2_1_capability_audit.json")
+    };
+    fs::create_dir_all(out_path.parent().expect("report parent"))
+        .expect("create Q2 report directory");
     let pretty = serde_json::to_string_pretty(&report).expect("serialize report");
     fs::write(&out_path, pretty + "\n").expect("write gap report");
 

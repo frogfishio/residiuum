@@ -10,7 +10,7 @@ use residiuum_sdk::driver::{
     HeapClient, OperationContext, OperationId, PutOptions, ReplaceOptions, ScanOptions,
     MAX_SCAN_PAGE_SIZE,
 };
-use residiuum_sdk::ResidiuumDeployment;
+use residiuum_sdk::{Parameters, QueryRunOptions, ResidiuumDeployment, RqlFullExecuteOptions};
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
 use serde_json::{json, Value};
 use std::future::Future;
@@ -162,6 +162,72 @@ fn compile_contract_handles_are_clone_send_sync() {
 }
 
 #[test]
+fn bounded_driver_runs_core_and_full_queries_on_one_shared_connection() {
+    let (directory, capability) = prepared_deployment();
+    let connection = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path())
+            .workers(4)
+            .queue_capacity(32),
+    ))
+    .unwrap();
+    let heap = block_on(connection.open_heap(capability)).unwrap();
+    let docs: Collection<Value> =
+        block_on(heap.create_collection("docs", CreateCollectionOptions::default())).unwrap();
+    let customers: Collection<Value> =
+        block_on(heap.create_collection("customers", CreateCollectionOptions::default())).unwrap();
+    block_on(customers.put("c-1", &json!({"name":"Customer 1"}))).unwrap();
+    for index in 0..256u32 {
+        block_on(docs.put(
+            format!("d-{index:04}"),
+            &json!({
+                "status": if index % 2 == 0 { "paid" } else { "open" },
+                "customer_id": "c-1",
+                "ordinal": index,
+            }),
+        ))
+        .unwrap();
+    }
+
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let mut workers = Vec::new();
+    for _ in 0..4 {
+        let docs = docs.clone();
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            block_on(docs.rql(
+                r#"from docs where status = "paid""#,
+                &Parameters::default(),
+                QueryRunOptions::default(),
+            ))
+            .unwrap()
+        }));
+    }
+    for worker in workers {
+        let page = worker.join().unwrap();
+        assert!(!page.rows.is_empty());
+    }
+    assert!(
+        connection.inspect().peak_running >= 2,
+        "queries must overlap inside the shared bounded scheduler: {:?}",
+        connection.inspect()
+    );
+
+    let full = block_on(heap.rql_full(
+        "from docs enrich customer using customers matching customer_id = _key expect exactly_one",
+        &Parameters::default(),
+        RqlFullExecuteOptions::default(),
+    ))
+    .unwrap();
+    assert!(!full.rows.is_empty());
+    assert!(full
+        .rows
+        .iter()
+        .all(|(_, row)| row.get("customer").is_some()));
+    block_on(connection.close()).unwrap();
+}
+
+#[test]
 fn one_physical_connection_serves_multiple_authorized_heaps() {
     let (directory, tinker_capability, gremlin_capability) = prepared_two_heap_deployment();
     let connection = block_on(Client::open_embedded(
@@ -171,8 +237,7 @@ fn one_physical_connection_serves_multiple_authorized_heaps() {
     ))
     .unwrap();
     assert!(connection.capabilities().multi_heap_bindings);
-    let tinker =
-        block_on(connection.open_named_heap("tinker", tinker_capability.clone())).unwrap();
+    let tinker = block_on(connection.open_named_heap("tinker", tinker_capability.clone())).unwrap();
     let gremlin =
         block_on(connection.open_named_heap("gremlin", gremlin_capability.clone())).unwrap();
     assert_ne!(tinker.heap_id(), gremlin.heap_id());
@@ -245,7 +310,9 @@ fn one_physical_connection_serves_multiple_authorized_heaps() {
     assert_eq!(tinker.inspect(), gremlin.inspect());
     block_on(connection.close()).unwrap();
     assert_eq!(
-        block_on(tinker_sessions.get("shared-key")).unwrap_err().code,
+        block_on(tinker_sessions.get("shared-key"))
+            .unwrap_err()
+            .code,
         ErrorCode::Closed
     );
     assert_eq!(
@@ -260,10 +327,11 @@ fn one_physical_connection_serves_multiple_authorized_heaps() {
     drop(gremlin);
     drop(connection);
 
-    let reopened =
-        block_on(Client::open_embedded(EmbeddedOptions::new(directory.path()))).unwrap();
-    let reopened_tinker =
-        block_on(reopened.open_named_heap("tinker", tinker_capability)).unwrap();
+    let reopened = block_on(Client::open_embedded(EmbeddedOptions::new(
+        directory.path(),
+    )))
+    .unwrap();
+    let reopened_tinker = block_on(reopened.open_named_heap("tinker", tinker_capability)).unwrap();
     let reopened_gremlin =
         block_on(reopened.open_named_heap("gremlin", gremlin_capability)).unwrap();
     let reopened_tinker_sessions: Collection<Value> =
@@ -494,8 +562,10 @@ fn embedded_named_heap_and_bounded_scan_pages_are_honest() {
 #[test]
 fn versioned_reads_survive_restart_and_supply_real_cas_tokens() {
     let (directory, capability) = prepared_deployment();
-    let first_connection =
-        block_on(Client::open_embedded(EmbeddedOptions::new(directory.path()))).unwrap();
+    let first_connection = block_on(Client::open_embedded(EmbeddedOptions::new(
+        directory.path(),
+    )))
+    .unwrap();
     let first_client =
         block_on(first_connection.open_named_heap("driver-test", capability.clone())).unwrap();
     let first_records: Collection<Value> = block_on(first_client.create_collection(
@@ -524,8 +594,10 @@ fn versioned_reads_survive_restart_and_supply_real_cas_tokens() {
     drop(first_client);
     drop(first_connection);
 
-    let second_connection =
-        block_on(Client::open_embedded(EmbeddedOptions::new(directory.path()))).unwrap();
+    let second_connection = block_on(Client::open_embedded(EmbeddedOptions::new(
+        directory.path(),
+    )))
+    .unwrap();
     let second_client =
         block_on(second_connection.open_named_heap("driver-test", capability.clone())).unwrap();
     let second_records: Collection<Value> =
@@ -566,8 +638,10 @@ fn versioned_reads_survive_restart_and_supply_real_cas_tokens() {
     drop(second_client);
     drop(second_connection);
 
-    let third_connection =
-        block_on(Client::open_embedded(EmbeddedOptions::new(directory.path()))).unwrap();
+    let third_connection = block_on(Client::open_embedded(EmbeddedOptions::new(
+        directory.path(),
+    )))
+    .unwrap();
     let third_client =
         block_on(third_connection.open_named_heap("driver-test", capability)).unwrap();
     let third_records: Collection<Value> =
@@ -597,11 +671,13 @@ fn versioned_reads_survive_restart_and_supply_real_cas_tokens() {
 #[test]
 fn embedded_named_heap_refuses_a_capability_name_mismatch() {
     let (directory, capability) = prepared_deployment();
-    let connection =
-        block_on(Client::open_embedded(EmbeddedOptions::new(directory.path()))).unwrap();
+    let connection = block_on(Client::open_embedded(EmbeddedOptions::new(
+        directory.path(),
+    )))
+    .unwrap();
     let error = block_on(connection.open_named_heap("not-driver-test", capability))
-    .err()
-    .expect("heap name mismatch must be refused");
+        .err()
+        .expect("heap name mismatch must be refused");
     assert_eq!(error.code, ErrorCode::Validation);
 }
 
@@ -663,18 +739,11 @@ fn gremlin_profile_replaces_one_large_conversation_document_per_command() {
             ..OperationContext::default()
         },
     };
-    let committed = block_on(conversations.replace(
-        "gremlin-7",
-        &completed_turn,
-        replace_options.clone(),
-    ))
-    .unwrap();
-    let replay = block_on(conversations.replace(
-        "gremlin-7",
-        &completed_turn,
-        replace_options,
-    ))
-    .unwrap();
+    let committed =
+        block_on(conversations.replace("gremlin-7", &completed_turn, replace_options.clone()))
+            .unwrap();
+    let replay =
+        block_on(conversations.replace("gremlin-7", &completed_turn, replace_options)).unwrap();
     assert!(replay.deduplicated);
     assert_eq!(committed.storage.event_id, replay.storage.event_id);
 

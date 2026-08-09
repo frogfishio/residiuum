@@ -137,7 +137,8 @@ pub struct MeasuredCellPlan {
 impl MeasuredCellPlan {
     /// Build the smoke-scale default plan for one mandatory cell.
     pub fn smoke_for(cell: MandatoryCell, seed: u64) -> Self {
-        let mut dataset = DatasetSpec::smoke_default(seed.wrapping_add(cell.programme_index() as u64));
+        let mut dataset =
+            DatasetSpec::smoke_default(seed.wrapping_add(cell.programme_index() as u64));
         let (rql, indexes, order_sensitive, page_size, rw_mix, shape, sel, card, notes) =
             cell_defaults(cell, &mut dataset);
         dataset.shape = shape;
@@ -315,8 +316,7 @@ fn cell_defaults(
                 .into(),
         ),
         MandatoryCell::EnrichCardinalities => (
-            // Full enrich — lane S ineligible until wire (Q0.A4).
-            "from docs enrich customer using customers matching customer_id = id expect optional"
+            "from docs enrich customer using customers matching customer_id = _key expect optional"
                 .into(),
             vec![],
             false,
@@ -331,7 +331,7 @@ fn cell_defaults(
         MandatoryCell::GroupLowHighCard => {
             dataset.cardinality = CardinalityClass::Low;
             (
-                "from docs group by status count".into(),
+                "from docs group by status project status, count() as count".into(),
                 vec![],
                 false,
                 None,
@@ -343,8 +343,7 @@ fn cell_defaults(
             )
         }
         MandatoryCell::AggCountSumMinMaxAvg => (
-            "from docs group by region count sum(amount) min(amount) max(amount) avg(amount)"
-                .into(),
+            "from docs group by region project region, count() as count, sum(amount) as sum, min(amount) as min, max(amount) as max, avg(amount) as avg".into(),
             vec![],
             false,
             None,
@@ -474,8 +473,7 @@ pub fn projection_cover_variants(seed: u64) -> Vec<MeasuredCellPlan> {
         MandatoryCell::CoveredNonCoveredProject.id(),
         ProjectCoverKind::Covered.as_str()
     );
-    covered.notes =
-        "Covered: index {status,region} includes every projected field.".into();
+    covered.notes = "Covered: index {status,region} includes every projected field.".into();
 
     let mut non = MeasuredCellPlan::smoke_for(MandatoryCell::CoveredNonCoveredProject, seed);
     non.project_cover = Some(ProjectCoverKind::NonCovered);
@@ -504,11 +502,7 @@ pub fn group_cardinality_variants(seed: u64) -> Vec<MeasuredCellPlan> {
         .map(|card| {
             let mut p = MeasuredCellPlan::smoke_for(MandatoryCell::GroupLowHighCard, seed);
             p.dataset.cardinality = card;
-            p.plan_id = format!(
-                "{}_{}",
-                MandatoryCell::GroupLowHighCard.id(),
-                card.as_str()
-            );
+            p.plan_id = format!("{}_{}", MandatoryCell::GroupLowHighCard.id(), card.as_str());
             p.notes = format!("Group by status; cardinality={}", card.as_str());
             p
         })
@@ -526,10 +520,19 @@ pub fn enrich_variants(seed: u64) -> Vec<MeasuredCellPlan> {
     .map(|ex| {
         let mut p = MeasuredCellPlan::smoke_for(MandatoryCell::EnrichCardinalities, seed);
         p.enrich_expect = Some(ex);
-        p.rql_source = format!(
-            "from docs enrich customer using customers matching customer_id = id expect {}",
-            ex.as_str()
-        );
+        p.rql_source = match ex {
+            EnrichExpect::Optional => {
+                "from docs enrich customer using customers matching customer_id = _key expect optional"
+                    .into()
+            }
+            EnrichExpect::ExactlyOne => {
+                "from docs where present(customer_id) enrich customer using customers matching customer_id = _key expect exactly_one"
+                    .into()
+            }
+            EnrichExpect::Many => {
+                "from docs enrich customer using customers matching customer_id = id expect many".into()
+            }
+        };
         p.plan_id = format!("{}_{}", MandatoryCell::EnrichCardinalities.id(), ex.as_str());
         p.notes = format!("Enrich expect={}", ex.as_str());
         p
@@ -557,7 +560,11 @@ pub fn concurrency_matrix(base: &MeasuredCellPlan, oversub_factor: u32) -> Vec<M
     for &c in CONCURRENCY_LEVELS {
         out.push(base.clone().with_concurrency(c, false));
     }
-    let over = CONCURRENCY_LEVELS.last().copied().unwrap_or(8).saturating_mul(oversub_factor.max(2));
+    let over = CONCURRENCY_LEVELS
+        .last()
+        .copied()
+        .unwrap_or(8)
+        .saturating_mul(oversub_factor.max(2));
     let mut p = base.clone().with_concurrency(over, true);
     p.notes = format!(
         "{}; oversubscribed slot ({OVERSUBSCRIBED_SLOT}) concurrency={over}",
@@ -590,7 +597,11 @@ pub fn selectivity_matrix(seed: u64) -> Vec<MeasuredCellPlan> {
             p.dataset.seed = seed.wrapping_add(100 + i as u64);
             let lit = sel_bucket_literal(*sel);
             p.rql_source = format!(r#"from docs where sel_bucket = "{lit}""#);
-            p.plan_id = format!("{}_{}", MandatoryCell::IndexedEqMultiSelectivity.id(), sel.as_str());
+            p.plan_id = format!(
+                "{}_{}",
+                MandatoryCell::IndexedEqMultiSelectivity.id(),
+                sel.as_str()
+            );
             p.notes = format!("Indexed eq selectivity={} predicate={lit}", sel.as_str());
             p
         })
@@ -694,7 +705,7 @@ mod tests {
             .iter()
             .find(|p| p.cell == MandatoryCell::EnrichCardinalities)
             .unwrap();
-        assert!(enrich.server_lane_ineligible);
+        assert!(!enrich.server_lane_ineligible);
         let cursor = plans
             .iter()
             .find(|p| p.cell == MandatoryCell::FirstAndDeepCursor)
@@ -747,9 +758,15 @@ mod tests {
     fn nested_array_variants_honest_shapes() {
         let v = nested_array_predicate_variants(3);
         assert_eq!(v.len(), 2);
-        let nested = v.iter().find(|p| p.plan_id.contains("nested_only")).unwrap();
+        let nested = v
+            .iter()
+            .find(|p| p.plan_id.contains("nested_only"))
+            .unwrap();
         assert_eq!(nested.dataset.shape, DocShape::DeeplyNested);
-        assert_eq!(nested.nested_array_focus, Some(NestedArrayFocus::NestedOnly));
+        assert_eq!(
+            nested.nested_array_focus,
+            Some(NestedArrayFocus::NestedOnly)
+        );
         assert!(!nested.rql_source.contains("tags"));
         let array = v.iter().find(|p| p.plan_id.contains("array_only")).unwrap();
         assert_eq!(array.dataset.shape, DocShape::ArrayHeavy);
@@ -760,7 +777,10 @@ mod tests {
     #[test]
     fn projection_cover_variants_confirm_indexes() {
         let v = projection_cover_variants(3);
-        let cov = v.iter().find(|p| p.project_cover == Some(ProjectCoverKind::Covered)).unwrap();
+        let cov = v
+            .iter()
+            .find(|p| p.project_cover == Some(ProjectCoverKind::Covered))
+            .unwrap();
         let idx: std::collections::BTreeSet<_> = cov
             .indexes
             .iter()
@@ -777,15 +797,22 @@ mod tests {
             .flat_map(|i| i.fields.iter().cloned())
             .collect();
         assert!(idx.contains("status"));
-        assert!(!idx.contains("region"), "non-covered must omit region from index");
+        assert!(
+            !idx.contains("region"),
+            "non-covered must omit region from index"
+        );
     }
 
     #[test]
     fn group_cardinality_variants_low_high() {
         let v = group_cardinality_variants(5);
         assert_eq!(v.len(), 2);
-        assert!(v.iter().any(|p| p.dataset.cardinality == CardinalityClass::Low));
-        assert!(v.iter().any(|p| p.dataset.cardinality == CardinalityClass::High));
+        assert!(v
+            .iter()
+            .any(|p| p.dataset.cardinality == CardinalityClass::Low));
+        assert!(v
+            .iter()
+            .any(|p| p.dataset.cardinality == CardinalityClass::High));
     }
 
     #[test]
@@ -812,7 +839,10 @@ mod tests {
         eng.load_shared_work(&work).unwrap();
         let out = eng.execute_plan(point).unwrap();
         let r = out.result.expect("result");
-        assert_eq!(r.row_count, 1, "point selectivity must return exactly one row");
+        assert_eq!(
+            r.row_count, 1,
+            "point selectivity must return exactly one row"
+        );
     }
 
     #[test]

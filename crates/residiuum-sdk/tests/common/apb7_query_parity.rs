@@ -17,7 +17,7 @@
 
 use residiuum_sdk::{
     compile_app_core, field, param, AppQueryBudget, CollectionBindings, CollectionClient,
-    ErrorCode, OrderDir, Parameters, QueryRunOptions, ScanJsonOptions,
+    ErrorCode, OrderDir, Parameters, QueryBytecodeV1, QueryRunOptions, ScanJsonOptions,
 };
 use residiuum_store::IndexState;
 
@@ -34,13 +34,19 @@ pub const SCENARIO_IDS: &[&str] = &[
 ];
 
 /// Independent oracle: full list_keys + get, optional filter, key order.
-fn oracle_key_order(col: &mut CollectionClient, pred: impl Fn(&serde_json::Value) -> bool) -> Vec<String> {
+fn oracle_key_order(
+    col: &mut CollectionClient,
+    pred: impl Fn(&serde_json::Value) -> bool,
+) -> Vec<String> {
     let mut out = Vec::new();
     for k in col
         .list_keys(Some(1000), None)
         .unwrap_or_else(|e| panic!("parity list_keys: {e:?}"))
     {
-        if let Some(v) = col.get(&k).unwrap_or_else(|e| panic!("parity get({k}): {e:?}")) {
+        if let Some(v) = col
+            .get(&k)
+            .unwrap_or_else(|e| panic!("parity get({k}): {e:?}"))
+        {
             if pred(&v) {
                 out.push(k);
             }
@@ -56,7 +62,10 @@ fn oracle_score_desc(col: &mut CollectionClient) -> Vec<String> {
         .list_keys(Some(1000), None)
         .unwrap_or_else(|e| panic!("parity list_keys: {e:?}"))
     {
-        if let Some(v) = col.get(&k).unwrap_or_else(|e| panic!("parity get({k}): {e:?}")) {
+        if let Some(v) = col
+            .get(&k)
+            .unwrap_or_else(|e| panic!("parity get({k}): {e:?}"))
+        {
             rows.push((k, v["score"].as_i64().unwrap_or(0)));
         }
     }
@@ -248,7 +257,7 @@ pub fn scenario_multipage_field_order_oracle(col: &mut CollectionClient) {
     );
 }
 
-/// explain_rql returns plan hash matching compile_app_core (no row scan claim).
+/// explain_rql identifies the default QVM produced from the compiled plan.
 pub fn scenario_explain_rql_surface(col: &mut CollectionClient) {
     let name = col.name().to_string();
     let source = format!(r#"from {name} where status = $status"#);
@@ -258,11 +267,12 @@ pub fn scenario_explain_rql_surface(col: &mut CollectionClient) {
 
     let mut bindings = CollectionBindings::default();
     bindings.bind(&name, col.id());
-    let compiled = compile_app_core(&source, &bindings)
-        .expect("compile")
-        .plan;
-    assert_eq!(explained.plan_hash, compiled.plan_hash());
-    assert_eq!(explained.plan_profile, compiled.profile);
+    let compiled = compile_app_core(&source, &bindings).expect("compile");
+    let expected_qvm =
+        QueryBytecodeV1::from_core_plan(compiled.plan.clone(), compiled.budget.clone())
+            .expect("lower default QVM");
+    assert_eq!(explained.plan_hash, expected_qvm.qvm_hash());
+    assert_eq!(explained.plan_profile, compiled.plan.profile);
     assert!(!explained.tree.is_null());
 }
 

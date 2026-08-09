@@ -4,20 +4,21 @@
 //! Token/RBAC fields are rejected. Active ops: process 1–3 plus collection data
 //! 105–106 / 110–112 / 114–118 / 120–122 and secondary indexes 130–133.
 //!
-//! Op **118** `rql_query` is active (APP-7 T6) — Application Core page execution
-//! through [`residiuum_sdk::execute_core_rql`] / [`residiuum_sdk::explain_core_source`]
-//! (same `query_bytecode_v1` runtime as embedded). Package accept remains
+//! Op **118** `rql_query` is active (APP-7 T6) — Application Core by default,
+//! plus explicitly selected bounded Full RQL. Both execute through the same
+//! verified `query_bytecode_v1` QVM runtime as embedded. Package accept remains
 //! principal-gated.
 
 use residiuum_client::b64u_decode;
 use residiuum_heap::{
-    active_operation_ids, refresh_capability_or_terminate, CollectionId, HeapCap, HeapId, Operation,
-    OperationStatus, Rights,
+    active_operation_ids, refresh_capability_or_terminate, CollectionId, HeapCap, HeapId,
+    Operation, OperationStatus, Rights,
 };
 use residiuum_sdk::{
-    execute_core_rql, explain_core_source, refuse_full_language_on_core_wire, AppQueryBudget,
-    ConsistencyMode, Continuation, CoveragePolicy, HostCapabilities, Error as SdkError, Filter,
-    Parameters, Pred, QueryRunOptions,
+    compile_rql_full, execute_core_rql, execute_rql_full_on_host_with, explain_core_source,
+    explain_rql_full, refuse_full_language_on_core_wire, AppQueryBudget, CollectionBindings,
+    ConsistencyMode, Continuation, CoveragePolicy, Error as SdkError, Filter, HostCapabilities,
+    Parameters, Pred, QueryRunOptions, RqlFullExecuteOptions,
 };
 use residiuum_store::{
     create_collection_idempotent, hex16, rebuild_object_entry_from_chain,
@@ -26,6 +27,7 @@ use residiuum_store::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Public error code for heap-isolation failures on an established channel.
@@ -319,7 +321,9 @@ fn err_code(id: u64, code: &str) -> HeapDispatchResult {
 }
 
 fn require_string_arg(args: &Map<String, Value>, key: &str) -> Option<String> {
-    args.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Optional put condition from wire args (APB-2 T7).
@@ -457,7 +461,9 @@ fn dispatch_collection_create(
         {
             err_code(id, "already_exists")
         }
-        Err(StoreError::HeapAdmit(ref msg)) if msg.contains("empty") || msg.contains("too long") || msg.contains("NUL") => {
+        Err(StoreError::HeapAdmit(ref msg))
+            if msg.contains("empty") || msg.contains("too long") || msg.contains("NUL") =>
+        {
             err_code(id, "validation_failed")
         }
         Err(_) => unavailable_id(id),
@@ -549,7 +555,10 @@ fn dispatch_list_collections(
 fn limit_arg(args: &Map<String, Value>) -> Option<usize> {
     match args.get("limit") {
         None => Some(64),
-        Some(Value::Number(n)) => n.as_u64().map(|u| u as usize).filter(|&u| (1..=4096).contains(&u)),
+        Some(Value::Number(n)) => n
+            .as_u64()
+            .map(|u| u as usize)
+            .filter(|&u| (1..=4096).contains(&u)),
         _ => None,
     }
 }
@@ -578,18 +587,22 @@ fn dispatch_list_keys(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> He
         None => return unavailable_id(id),
     };
     let heap_id = *ctx.store.capability().heap_id().as_bytes();
-    if rebuild_object_entry_from_chain(ctx.layout, &heap_id, ObjectKind::Collection, coll.as_bytes())
-        .ok()
-        .flatten()
-        .is_none()
+    if rebuild_object_entry_from_chain(
+        ctx.layout,
+        &heap_id,
+        ObjectKind::Collection,
+        coll.as_bytes(),
+    )
+    .ok()
+    .flatten()
+    .is_none()
     {
         return unavailable_id(id);
     }
-    match ctx.store.list_collection_keys(
-        coll.as_bytes(),
-        limit,
-        after.map(|s| s.as_bytes()),
-    ) {
+    match ctx
+        .store
+        .list_collection_keys(coll.as_bytes(), limit, after.map(|s| s.as_bytes()))
+    {
         Ok(keys) => {
             let keys: Vec<String> = keys
                 .into_iter()
@@ -618,10 +631,15 @@ fn dispatch_history(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> Heap
         None => return unavailable_id(id),
     };
     let heap_id = *ctx.store.capability().heap_id().as_bytes();
-    if rebuild_object_entry_from_chain(ctx.layout, &heap_id, ObjectKind::Collection, coll.as_bytes())
-        .ok()
-        .flatten()
-        .is_none()
+    if rebuild_object_entry_from_chain(
+        ctx.layout,
+        &heap_id,
+        ObjectKind::Collection,
+        coll.as_bytes(),
+    )
+    .ok()
+    .flatten()
+    .is_none()
     {
         return unavailable_id(id);
     }
@@ -643,10 +661,7 @@ fn dispatch_history(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> Heap
         obj.insert("event_id".into(), Value::String(hex16(&ev.event_id)));
         obj.insert("item_id".into(), Value::String(hex16(&ev.item_id)));
         obj.insert("segment_id".into(), Value::String(hex16(&ev.segment_id)));
-        obj.insert(
-            "known_gap_before".into(),
-            Value::Bool(ev.known_gap_before),
-        );
+        obj.insert("known_gap_before".into(), Value::Bool(ev.known_gap_before));
         if ev.kind == residiuum_store::EventKind::Put && ev.body.first() == Some(&0x01) {
             if let Ok(json) = serde_json::from_slice::<Value>(&ev.body[1..]) {
                 obj.insert("json".into(), json);
@@ -692,10 +707,15 @@ fn dispatch_find(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> HeapDis
         None => return unavailable_id(id),
     };
     let heap_id = *ctx.store.capability().heap_id().as_bytes();
-    if rebuild_object_entry_from_chain(ctx.layout, &heap_id, ObjectKind::Collection, coll.as_bytes())
-        .ok()
-        .flatten()
-        .is_none()
+    if rebuild_object_entry_from_chain(
+        ctx.layout,
+        &heap_id,
+        ObjectKind::Collection,
+        coll.as_bytes(),
+    )
+    .ok()
+    .flatten()
+    .is_none()
     {
         return unavailable_id(id);
     }
@@ -803,9 +823,7 @@ fn materialize_find_from_keys(
                 }));
             }
             Err(e) => {
-                if let Some(hole) =
-                    residiuum_store::CollectionScanHole::from_error(key, &e)
-                {
+                if let Some(hole) = residiuum_store::CollectionScanHole::from_error(key, &e) {
                     match hole_to_json(&hole) {
                         Ok(v) => incomplete.push(v),
                         Err(()) => return err_code(id, "data_damaged"),
@@ -845,7 +863,6 @@ fn equality_fields(filter: &Filter) -> Vec<(String, Value)> {
     }
 }
 
-
 /// Wire JSON application keys and pagination cursors require **exact** UTF-8.
 ///
 /// Never use [`String::from_utf8_lossy`] for a cursor: replacement characters
@@ -865,7 +882,10 @@ fn hole_to_json(h: &residiuum_store::CollectionScanHole) -> Result<Value, ()> {
     m.insert("reason".into(), Value::String(h.reason.as_str().into()));
     if let Some(ref loc) = h.locator {
         m.insert("segment_id".into(), Value::String(loc.segment_hex()));
-        m.insert("frame_offset".into(), Value::Number(loc.frame_offset.into()));
+        m.insert(
+            "frame_offset".into(),
+            Value::Number(loc.frame_offset.into()),
+        );
         if let Some(ref path) = loc.path {
             m.insert("path".into(), Value::String(path.clone()));
         }
@@ -909,10 +929,15 @@ fn dispatch_scan_json(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> He
         None => return unavailable_id(id),
     };
     let heap_id = *ctx.store.capability().heap_id().as_bytes();
-    if rebuild_object_entry_from_chain(ctx.layout, &heap_id, ObjectKind::Collection, coll.as_bytes())
-        .ok()
-        .flatten()
-        .is_none()
+    if rebuild_object_entry_from_chain(
+        ctx.layout,
+        &heap_id,
+        ObjectKind::Collection,
+        coll.as_bytes(),
+    )
+    .ok()
+    .flatten()
+    .is_none()
     {
         return unavailable_id(id);
     }
@@ -1002,10 +1027,15 @@ fn dispatch_get(
     };
     // Verify collection is known for this heap (catalog or chain).
     let heap_id = *ctx.store.capability().heap_id().as_bytes();
-    if rebuild_object_entry_from_chain(ctx.layout, &heap_id, ObjectKind::Collection, coll.as_bytes())
-        .ok()
-        .flatten()
-        .is_none()
+    if rebuild_object_entry_from_chain(
+        ctx.layout,
+        &heap_id,
+        ObjectKind::Collection,
+        coll.as_bytes(),
+    )
+    .ok()
+    .flatten()
+    .is_none()
     {
         return unavailable_id(id);
     }
@@ -1016,10 +1046,7 @@ fn dispatch_get(
                 // Typed bytes body: tag 0x02 + payload.
                 if body.first() == Some(&0x02) {
                     let b64 = residiuum_client::b64u_encode(&body[1..]);
-                    ok_id(
-                        id,
-                        serde_json::json!({ "found": true, "bytes_b64": b64 }),
-                    )
+                    ok_id(id, serde_json::json!({ "found": true, "bytes_b64": b64 }))
                 } else {
                     unavailable_id(id)
                 }
@@ -1058,10 +1085,15 @@ fn dispatch_put(
         None => return unavailable_id(id),
     };
     let heap_id = *ctx.store.capability().heap_id().as_bytes();
-    if rebuild_object_entry_from_chain(ctx.layout, &heap_id, ObjectKind::Collection, coll.as_bytes())
-        .ok()
-        .flatten()
-        .is_none()
+    if rebuild_object_entry_from_chain(
+        ctx.layout,
+        &heap_id,
+        ObjectKind::Collection,
+        coll.as_bytes(),
+    )
+    .ok()
+    .flatten()
+    .is_none()
     {
         return unavailable_id(id);
     }
@@ -1118,10 +1150,15 @@ fn dispatch_delete(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> HeapD
         None => return unavailable_id(id),
     };
     let heap_id = *ctx.store.capability().heap_id().as_bytes();
-    if rebuild_object_entry_from_chain(ctx.layout, &heap_id, ObjectKind::Collection, coll.as_bytes())
-        .ok()
-        .flatten()
-        .is_none()
+    if rebuild_object_entry_from_chain(
+        ctx.layout,
+        &heap_id,
+        ObjectKind::Collection,
+        coll.as_bytes(),
+    )
+    .ok()
+    .flatten()
+    .is_none()
     {
         return unavailable_id(id);
     }
@@ -1194,10 +1231,15 @@ fn require_known_collection<'a>(
     let cid_s = req.collection_id.as_deref()?;
     let coll = parse_collection_id(cid_s)?;
     let heap_id = *ctx.store.capability().heap_id().as_bytes();
-    if rebuild_object_entry_from_chain(ctx.layout, &heap_id, ObjectKind::Collection, coll.as_bytes())
-        .ok()
-        .flatten()
-        .is_none()
+    if rebuild_object_entry_from_chain(
+        ctx.layout,
+        &heap_id,
+        ObjectKind::Collection,
+        coll.as_bytes(),
+    )
+    .ok()
+    .flatten()
+    .is_none()
     {
         return None;
     }
@@ -1221,7 +1263,11 @@ fn dispatch_index_list(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> H
     }
 }
 
-fn dispatch_index_create(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> HeapDispatchResult {
+fn dispatch_index_create(
+    id: u64,
+    req: &HeapRpcRequest,
+    ctx: HeapDataCtx<'_>,
+) -> HeapDispatchResult {
     let name = match require_string_arg(&req.args, "name") {
         Some(n) if !n.is_empty() && n.len() <= 256 => n,
         _ => return unavailable_id(id),
@@ -1252,10 +1298,7 @@ fn dispatch_index_create(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) ->
         None => return unavailable_id(id),
     };
     let field_refs: Vec<&str> = fields.iter().map(|s| s.as_str()).collect();
-    match ctx
-        .store
-        .create_index(coll.as_bytes(), &name, &field_refs)
-    {
+    match ctx.store.create_index(coll.as_bytes(), &name, &field_refs) {
         Ok(idx) => ok_id(id, index_meta_json(&idx)),
         Err(_) => unavailable_id(id),
     }
@@ -1309,10 +1352,10 @@ pub fn request_registry_allows(op_id: u16) -> bool {
 
 // --- APP-7 T6: op 118 rql_query -------------------------------------------------
 
-/// Store-backed [`HostCapabilities`] for Application Core on the server (op 118).
+/// Store-backed, Heap-confined [`HostCapabilities`] for Core and Full op 118.
 struct HeapStoreDocScan<'a> {
     store: &'a HeapStore,
-    collection_id: [u8; 16],
+    allowed_collections: BTreeSet<[u8; 16]>,
 }
 
 impl HostCapabilities for HeapStoreDocScan<'_> {
@@ -1322,16 +1365,16 @@ impl HostCapabilities for HeapStoreDocScan<'_> {
         limit: Option<usize>,
         after_key: Option<&str>,
     ) -> Result<Vec<String>, SdkError> {
-        if collection_id.as_bytes() != &self.collection_id {
+        if !self.allowed_collections.contains(collection_id.as_bytes()) {
             return Err(SdkError::QueryInvalid(
-                "HostCapabilities: collection_id mismatch on HeapStoreDocScan".into(),
+                "HostCapabilities: collection is outside the authorised Heap catalogue".into(),
             ));
         }
         let lim = limit.unwrap_or(256).clamp(1, 4096);
         let after = after_key.map(|s| s.as_bytes());
         let keys = self
             .store
-            .list_collection_keys(&self.collection_id, lim, after)
+            .list_collection_keys(collection_id.as_bytes(), lim, after)
             .map_err(|e| SdkError::Internal(format!("list_collection_keys: {e}")))?;
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
@@ -1347,14 +1390,14 @@ impl HostCapabilities for HeapStoreDocScan<'_> {
         collection_id: residiuum_heap::CollectionId,
         key: &str,
     ) -> Result<Option<Value>, SdkError> {
-        if collection_id.as_bytes() != &self.collection_id {
+        if !self.allowed_collections.contains(collection_id.as_bytes()) {
             return Err(SdkError::QueryInvalid(
-                "HostCapabilities: collection_id mismatch on HeapStoreDocScan".into(),
+                "HostCapabilities: collection is outside the authorised Heap catalogue".into(),
             ));
         }
         let body = self
             .store
-            .get_collection(&self.collection_id, key.as_bytes())
+            .get_collection(collection_id.as_bytes(), key.as_bytes())
             .map_err(|e| SdkError::Internal(format!("get_collection: {e}")))?;
         let Some(body) = body else {
             return Ok(None);
@@ -1372,14 +1415,14 @@ impl HostCapabilities for HeapStoreDocScan<'_> {
         collection_id: residiuum_heap::CollectionId,
         equalities: &[(String, Value)],
     ) -> Result<Option<Vec<String>>, SdkError> {
-        if collection_id.as_bytes() != &self.collection_id {
+        if !self.allowed_collections.contains(collection_id.as_bytes()) {
             return Err(SdkError::QueryInvalid(
-                "HostCapabilities: collection_id mismatch on HeapStoreDocScan".into(),
+                "HostCapabilities: collection is outside the authorised Heap catalogue".into(),
             ));
         }
         let found = self
             .store
-            .lookup_index_keys(&self.collection_id, equalities)
+            .lookup_index_keys(collection_id.as_bytes(), equalities)
             .map_err(|e| SdkError::Internal(format!("lookup_index_keys: {e}")))?;
         match found {
             None => Ok(None),
@@ -1399,13 +1442,33 @@ impl HostCapabilities for HeapStoreDocScan<'_> {
 
 fn collection_name_for_id(ctx: &HeapDataCtx<'_>, coll: &[u8; 16]) -> Option<String> {
     let heap_id = *ctx.store.capability().heap_id().as_bytes();
-    let entries = try_load_collections_catalog(ctx.layout, &heap_id).ok().flatten()?;
+    let entries = try_load_collections_catalog(ctx.layout, &heap_id)
+        .ok()
+        .flatten()?;
     for entry in entries {
         if &entry.object_id == coll {
             return Some(entry.name);
         }
     }
     None
+}
+
+fn query_catalog(
+    ctx: &HeapDataCtx<'_>,
+) -> Result<(CollectionBindings, BTreeSet<[u8; 16]>), SdkError> {
+    let heap_id = *ctx.store.capability().heap_id().as_bytes();
+    let entries = try_load_collections_catalog(ctx.layout, &heap_id)
+        .map_err(|e| SdkError::Internal(format!("load collections catalogue: {e}")))?
+        .ok_or_else(|| SdkError::Internal("collections catalogue unavailable".into()))?;
+    let mut bindings = CollectionBindings::default();
+    let mut allowed = BTreeSet::new();
+    for entry in entries {
+        let id = CollectionId::from_bytes_unchecked_nonzero(entry.object_id)
+            .map_err(|e| SdkError::Internal(format!("catalogue collection id: {e}")))?;
+        bindings.bind(&entry.name, id);
+        allowed.insert(entry.object_id);
+    }
+    Ok((bindings, allowed))
 }
 
 fn dispatch_rql_query(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> HeapDispatchResult {
@@ -1439,12 +1502,27 @@ fn dispatch_rql_query(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> He
         Err(_) => return unavailable_id(id),
     };
 
-    let explain = req.args.get("explain").and_then(|v| v.as_bool()).unwrap_or(false);
+    let explain = req
+        .args
+        .get("explain")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let source = req.args.get("source").and_then(|v| v.as_str());
+    let profile = req
+        .args
+        .get("profile")
+        .and_then(|v| v.as_str())
+        .unwrap_or("core");
+    let full = match profile {
+        "core" => false,
+        "full" => true,
+        _ => return err_code(id, "validation_failed"),
+    };
 
     // Allowed arg keys for first cut (APP-7 T6).
     const ALLOWED: &[&str] = &[
         "source",
+        "profile",
         "plan",
         "parameters",
         "explain",
@@ -1464,10 +1542,26 @@ fn dispatch_rql_query(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> He
         let Some(src) = source else {
             return err_code(id, "validation_failed");
         };
-        if refuse_full_language_on_core_wire(src).is_err() {
-            return err_code(id, "rql_feature_unavailable");
-        }
-        match explain_core_source(src, coll, &collection_name) {
+        let explanation = if full {
+            let (bindings, _) = match query_catalog(&ctx) {
+                Ok(v) => v,
+                Err(_) => return unavailable_id(id),
+            };
+            let compiled = match compile_rql_full(src, &bindings) {
+                Ok(c) => c,
+                Err(_) => return err_code(id, "validation_failed"),
+            };
+            if compiled.base.plan.from.collection_id != coll {
+                return err_code(id, "validation_failed");
+            }
+            explain_rql_full(src, &bindings)
+        } else {
+            if refuse_full_language_on_core_wire(src).is_err() {
+                return err_code(id, "rql_feature_unavailable");
+            }
+            explain_core_source(src, coll, &collection_name)
+        };
+        match explanation {
             Ok(ex) => {
                 return ok_id(
                     id,
@@ -1476,6 +1570,7 @@ fn dispatch_rql_query(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> He
                         "plan_hash": hex32(&ex.plan_hash),
                         "heap_id": heap_id.to_string(),
                         "collection_id": coll.to_string(),
+                        "profile": if full { "rql-full-v1" } else { "rql-app-core-v1" },
                         "rows": [],
                         "exhausted": true,
                         "coverage": { "complete": true, "mode": "complete" },
@@ -1496,7 +1591,7 @@ fn dispatch_rql_query(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> He
         // plan-only / continuation-only residual: require source for T6 first cut.
         return err_code(id, "validation_failed");
     };
-    if refuse_full_language_on_core_wire(src).is_err() {
+    if !full && refuse_full_language_on_core_wire(src).is_err() {
         return err_code(id, "rql_feature_unavailable");
     }
 
@@ -1549,9 +1644,111 @@ fn dispatch_rql_query(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> He
         });
     }
 
+    if full {
+        let (bindings, allowed_collections) = match query_catalog(&ctx) {
+            Ok(v) => v,
+            Err(_) => return unavailable_id(id),
+        };
+        let compiled = match compile_rql_full(src, &bindings) {
+            Ok(c) => c,
+            Err(_) => return err_code(id, "validation_failed"),
+        };
+        if compiled.base.plan.from.collection_id != coll {
+            return err_code(id, "validation_failed");
+        }
+        let mut host = HeapStoreDocScan {
+            store: ctx.store,
+            allowed_collections,
+        };
+        let page = match execute_rql_full_on_host_with(
+            &mut host,
+            heap_id,
+            src,
+            &bindings,
+            &params,
+            RqlFullExecuteOptions {
+                query: options,
+                force_enrich_scan: false,
+            },
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                let code = match e {
+                    SdkError::CoverageIncomplete(_) => "coverage_incomplete",
+                    SdkError::QueryBudgetRequired(_) => "query_budget_required",
+                    SdkError::ResourceLimit(_) => "resource_limit",
+                    SdkError::DeadlineExceeded(_) => "deadline_exceeded",
+                    SdkError::QueryInvalid(_) => "validation_failed",
+                    _ => return unavailable_id(id),
+                };
+                return err_code(id, code);
+            }
+        };
+        let base = &page.base;
+        let rows: Vec<Value> = page
+            .rows
+            .iter()
+            .map(|(key, value)| serde_json::json!({ "key": key, "value": value }))
+            .collect();
+        let base_rows: Vec<Value> = base
+            .rows
+            .iter()
+            .map(|r| serde_json::json!({ "key": r.key, "value": r.value }))
+            .collect();
+        let next = base
+            .next
+            .as_ref()
+            .map(|c| match std::str::from_utf8(&c.token) {
+                Ok(s) => s.to_string(),
+                Err(_) => residiuum_client::b64u_encode(&c.token),
+            });
+        let cov_mode = match base.coverage.mode {
+            CoveragePolicy::Complete => "complete",
+            CoveragePolicy::IncompleteAllowed => "incomplete_allowed",
+        };
+        let cons_mode = match base.consistency.mode {
+            ConsistencyMode::Available => "available",
+            ConsistencyMode::Current => "current",
+        };
+        let query_id_hex: String = base.query_id.0.iter().map(|b| format!("{b:02x}")).collect();
+        let enrich_loads: Vec<Value> = page
+            .enrich_loads
+            .iter()
+            .map(|load| {
+                serde_json::json!({
+                    "using": load.using,
+                    "output": load.output,
+                    "mode": load.mode.as_str()
+                })
+            })
+            .collect();
+        return ok_id(
+            id,
+            serde_json::json!({
+                "profile": page.profile,
+                "query_id": query_id_hex,
+                "plan_hash": hex32(&base.plan_hash),
+                "heap_id": heap_id.to_string(),
+                "collection_id": coll.to_string(),
+                "rows": rows,
+                "base_rows": base_rows,
+                "next": next,
+                "exhausted": base.exhausted,
+                "coverage": { "complete": base.coverage.complete, "mode": cov_mode },
+                "consistency": { "mode": cons_mode },
+                "remaining_limit": base.remaining_limit,
+                "logical_bytes_examined": base.logical_bytes_examined,
+                "known_holes": base.known_holes.iter().map(|h| {
+                    serde_json::json!({ "code": h.code, "key": h.key })
+                }).collect::<Vec<_>>(),
+                "enrich_loads": enrich_loads,
+            }),
+        );
+    }
+
     let mut scan = HeapStoreDocScan {
         store: ctx.store,
-        collection_id: *coll.as_bytes(),
+        allowed_collections: BTreeSet::from([*coll.as_bytes()]),
     };
     let page = match execute_core_rql(
         &mut scan,
@@ -1567,6 +1764,7 @@ fn dispatch_rql_query(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> He
             // Map public app errors to registry codes where possible.
             let code = match e {
                 SdkError::CoverageIncomplete(_) => "coverage_incomplete",
+                SdkError::QueryBudgetRequired(_) => "query_budget_required",
                 SdkError::ResourceLimit(_) => "resource_limit",
                 SdkError::DeadlineExceeded(_) => "deadline_exceeded",
                 SdkError::QueryInvalid(_) => "validation_failed",
@@ -1598,6 +1796,7 @@ fn dispatch_rql_query(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> He
     };
     let query_id_hex: String = page.query_id.0.iter().map(|b| format!("{b:02x}")).collect();
     let result = serde_json::json!({
+        "profile": "rql-app-core-v1",
         "query_id": query_id_hex,
         "plan_hash": hex32(&page.plan_hash),
         "heap_id": heap_id.to_string(),
@@ -1611,6 +1810,7 @@ fn dispatch_rql_query(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> He
         },
         "consistency": { "mode": cons_mode },
         "remaining_limit": page.remaining_limit,
+        "logical_bytes_examined": page.logical_bytes_examined,
         "known_holes": page.known_holes.iter().map(|h| {
             serde_json::json!({ "code": h.code, "key": h.key })
         }).collect::<Vec<_>>(),

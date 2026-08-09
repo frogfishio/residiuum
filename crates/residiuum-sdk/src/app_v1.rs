@@ -13,15 +13,13 @@ use crate::filter::Filter;
 use crate::heap::{Heap, HeapCollection};
 use crate::history::{KeyHistory, Version};
 use crate::indexes::IndexInfo;
-use crate::plan_v1::{
-    CollectionBindings, NullsOrder, OrderDir, PlanBuilder, RqlPlanV1,
-};
+use crate::plan_v1::{CollectionBindings, NullsOrder, OrderDir, PlanBuilder, RqlPlanV1};
 use crate::predicate::Predicate;
 use crate::receipt::{DeleteReceipt, PutOptions, WriteReceipt};
 use crate::remote_heap::RemoteHeap;
-use residiuum_store::IndexState;
 use residiuum_heap::{CollectionId, HeapId};
 use residiuum_store::DurabilityMode;
+use residiuum_store::IndexState;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -306,6 +304,11 @@ pub struct QueryPage {
     pub remaining_limit: Option<u64>,
     /// Explicit hole evidence.
     pub known_holes: Vec<HoleEvidence>,
+    /// Serialized logical JSON payload bytes successfully read from every QVM
+    /// source while producing this page. Full RQL includes foreign enrich and
+    /// nested-within loads; damaged/unavailable bodies contribute zero bytes
+    /// and remain represented by coverage holes.
+    pub logical_bytes_examined: u64,
 }
 
 /// One projected row.
@@ -354,11 +357,7 @@ impl CoverageEvidence {
     }
 
     /// Incomplete page with hole evidence (only when incomplete is allowed).
-    pub fn incomplete(
-        mode: CoveragePolicy,
-        examined_documents: u64,
-        hole_count: u32,
-    ) -> Self {
+    pub fn incomplete(mode: CoveragePolicy, examined_documents: u64, hole_count: u32) -> Self {
         Self {
             complete: false,
             mode,
@@ -387,9 +386,9 @@ pub struct HoleEvidence {
 /// Structured explain result (op 118 with `explain: true`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct QueryExplanation {
-    /// Plan profile label.
+    /// Query language / plan profile label.
     pub plan_profile: String,
-    /// Canonical plan hash.
+    /// Canonical executable QVM hash (the identity returned by execution).
     pub plan_hash: [u8; 32],
     /// Human/debug tree (shape only at APP-0).
     pub tree: serde_json::Value,
@@ -544,10 +543,7 @@ impl HeapClient {
     }
 
     /// Create a collection (APP-1 / APB-1).
-    pub fn create_collection(
-        &mut self,
-        name: &str,
-    ) -> Result<CreateCollectionResult, Error> {
+    pub fn create_collection(&mut self, name: &str) -> Result<CreateCollectionResult, Error> {
         self.create_collection_with(name, CreateCollectionOptions::default())
     }
 
@@ -664,17 +660,68 @@ impl HeapClient {
             }
         }
     }
+
+    /// Execute the current bounded Full RQL profile against this Heap.
+    ///
+    /// Unlike [`CollectionClient::rql`], the Full surface is Heap-bound because
+    /// `enrich` and nested `within` may read several authorised collections.
+    /// Embedded execution and remote op 118 both compile the same source to the
+    /// same verified QVM profile; remote execution occurs on the server.
+    pub fn rql_full(
+        &mut self,
+        source: &str,
+        parameters: &Parameters,
+        options: QueryRunOptions,
+    ) -> Result<crate::query_bytecode_v1::RqlFullPage, Error> {
+        if options.explain {
+            return Err(Error::QueryInvalid(
+                "HeapClient::rql_full executes pages; use explain_rql_full_on_heap for compile-only Full explanation"
+                    .into(),
+            ));
+        }
+        if matches!(self.backend, HeapBackend::Unbound) {
+            return Err(Error::Internal(
+                "HeapClient unbound; construct with From<Heap|RemoteHeap> (APB-1)".into(),
+            ));
+        }
+        let remote = match &self.backend {
+            HeapBackend::Remote(remote) => Some(Arc::clone(remote)),
+            HeapBackend::Embedded(_) | HeapBackend::Unbound => None,
+        };
+        let Some(remote) = remote else {
+            return crate::query_bytecode_v1::execute_rql_full(self, source, parameters, options);
+        };
+
+        let infos = self.list_collections()?;
+        let mut bindings = CollectionBindings::default();
+        for info in &infos {
+            bindings.bind(&info.name, info.collection_id);
+        }
+        let compiled = crate::query_bytecode_v1::compile_rql_full(source, &bindings)?;
+        let root_id = compiled.base.plan.from.collection_id;
+        if !infos.iter().any(|info| info.collection_id == root_id) {
+            return Err(Error::QueryInvalid(format!(
+                "Full RQL root collection {root_id} is outside the authorised Heap catalogue"
+            )));
+        }
+
+        let args = rql_wire_args(source, parameters, &options, Some("full"))?;
+        let mut guard = lock_remote(&remote)?;
+        let result = guard.rql_query(&root_id.to_string(), serde_json::Value::Object(args))?;
+        drop(guard);
+        parse_rql_full_result(result, self.heap_id, root_id, compiled)
+    }
 }
 
-fn lock_remote(remote: &Arc<Mutex<RemoteHeap>>) -> Result<std::sync::MutexGuard<'_, RemoteHeap>, Error> {
+fn lock_remote(
+    remote: &Arc<Mutex<RemoteHeap>>,
+) -> Result<std::sync::MutexGuard<'_, RemoteHeap>, Error> {
     remote
         .lock()
         .map_err(|_| Error::Internal("RemoteHeap mutex poisoned".into()))
 }
 
-fn create_result_from_embedded(
-    created: crate::heap::CreatedCollection,
-) -> CreateCollectionResult {
+fn create_result_from_embedded(created: crate::heap::CreatedCollection) -> CreateCollectionResult {
     let heap_id = created.collection.heap_id();
     let collection_id = created.collection.id();
     let created_at = UNIX_EPOCH + Duration::from_secs(created.created_at_unix_s);
@@ -867,14 +914,11 @@ impl CollectionClient {
     }
 
     /// JSON put (APP-3 / APB-2 path; embedded + remote).
-    pub fn put<T: Serialize>(
-        &mut self,
-        key: &str,
-        value: &T,
-    ) -> Result<WriteReceipt, Error> {
+    pub fn put<T: Serialize>(&mut self, key: &str, value: &T) -> Result<WriteReceipt, Error> {
         match &self.backend {
             CollectionBackend::Unbound => Err(Error::Internal(
-                "CollectionClient unbound; open via HeapClient::open_collection / create (APB-1)".into(),
+                "CollectionClient unbound; open via HeapClient::open_collection / create (APB-1)"
+                    .into(),
             )),
             CollectionBackend::Embedded(hc) => hc.put(key, value),
             CollectionBackend::Remote {
@@ -884,8 +928,7 @@ impl CollectionClient {
                 let json = serde_json::to_value(value)
                     .map_err(|e| Error::ValidationMsg(format!("serialize: {e}")))?;
                 let mut guard = lock_remote(remote)?;
-                let (event_id_s, version_s) =
-                    guard.put_json(wire_collection_id, key, &json)?;
+                let (event_id_s, version_s) = guard.put_json(wire_collection_id, key, &json)?;
                 Ok(write_receipt_from_remote_ids(key, &event_id_s, &version_s)?)
             }
         }
@@ -924,8 +967,7 @@ impl CollectionClient {
                 wire_collection_id,
             } => {
                 let mut guard = lock_remote(remote)?;
-                let (event_id_s, version_s) =
-                    guard.put_bytes(wire_collection_id, key, value)?;
+                let (event_id_s, version_s) = guard.put_bytes(wire_collection_id, key, value)?;
                 Ok(write_receipt_from_remote_ids(key, &event_id_s, &version_s)?)
             }
         }
@@ -996,11 +1038,7 @@ impl CollectionClient {
     /// Create JSON only when the key is currently absent (APB-2 / `apb.doc.create`).
     ///
     /// Embedded store CAS and remote wire `if_absent` (APB-2 T7) are Key Atomic.
-    pub fn create<T: Serialize>(
-        &mut self,
-        key: &str,
-        value: &T,
-    ) -> Result<WriteReceipt, Error> {
+    pub fn create<T: Serialize>(&mut self, key: &str, value: &T) -> Result<WriteReceipt, Error> {
         match &self.backend {
             CollectionBackend::Unbound => Err(Error::Internal(
                 "CollectionClient unbound; open via HeapClient (APB-1)".into(),
@@ -1027,11 +1065,7 @@ impl CollectionClient {
     /// Upsert JSON; reports whether the key was absent before the write (APB-2).
     ///
     /// Create path is Key Atomic on both backends (T5/T7).
-    pub fn upsert<T: Serialize>(
-        &mut self,
-        key: &str,
-        value: &T,
-    ) -> Result<UpsertResult, Error> {
+    pub fn upsert<T: Serialize>(&mut self, key: &str, value: &T) -> Result<UpsertResult, Error> {
         match self.create(key, value) {
             Ok(receipt) => Ok(UpsertResult {
                 inserted: true,
@@ -1059,7 +1093,12 @@ impl CollectionClient {
         value: &T,
         if_version: [u8; 16],
     ) -> Result<WriteReceipt, Error> {
-        self.replace_with(key, value, ReplaceOptions { if_version }, PutOptions::default())
+        self.replace_with(
+            key,
+            value,
+            ReplaceOptions { if_version },
+            PutOptions::default(),
+        )
     }
 
     /// Insert with a generated key (APB-2 / `apb.doc.add` / PD-004).
@@ -1131,7 +1170,10 @@ impl CollectionClient {
                     Ok((event_id_s, version_s)) => {
                         Ok(write_receipt_from_remote_ids(key, &event_id_s, &version_s)?)
                     }
-                    Err(Error::VersionConflict { expected: _, observed }) => {
+                    Err(Error::VersionConflict {
+                        expected: _,
+                        observed,
+                    }) => {
                         // Prefer caller's token as expected (server echoes same).
                         Err(Error::VersionConflict {
                             expected: replace.if_version,
@@ -1205,10 +1247,8 @@ impl CollectionClient {
                     Ok(r) => Ok(r),
                     Err(e) => {
                         let e = crate::error::lift_store_cas(e);
-                        if matches!(
-                            condition,
-                            residiuum_store::WriteCondition::Present
-                        ) && e.code() == ErrorCode::VersionConflict
+                        if matches!(condition, residiuum_store::WriteCondition::Present)
+                            && e.code() == ErrorCode::VersionConflict
                         {
                             return Err(Error::NotFound(format!("key absent: {key}")));
                         }
@@ -1222,12 +1262,7 @@ impl CollectionClient {
             } => {
                 let _ = options;
                 let mut guard = lock_remote(remote)?;
-                match guard.delete_if(
-                    wire_collection_id,
-                    key,
-                    cond.if_version,
-                    cond.if_present,
-                ) {
+                match guard.delete_if(wire_collection_id, key, cond.if_version, cond.if_present) {
                     Ok((removed, event_id_s, version_s)) => {
                         let event_id = parse_hex16(&event_id_s).unwrap_or([0u8; 16]);
                         let version = parse_hex16(&version_s).unwrap_or(event_id);
@@ -1340,10 +1375,7 @@ impl CollectionClient {
                 "CollectionClient unbound; open via HeapClient (APB-1)".into(),
             ));
         }
-        let limit = options
-            .limit
-            .unwrap_or(256)
-            .clamp(1, 4_096) as usize;
+        let limit = options.limit.unwrap_or(256).clamp(1, 4_096) as usize;
         let after = options.after_key.as_deref();
 
         match &self.backend {
@@ -1441,10 +1473,7 @@ impl CollectionClient {
             .incomplete
             .iter()
             .map(|h| {
-                let key = h
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
+                let key = h.get("key").and_then(|v| v.as_str()).map(|s| s.to_string());
                 let code = h
                     .get("reason")
                     .and_then(|v| v.as_str())
@@ -1551,7 +1580,7 @@ impl CollectionClient {
     /// name. Compiles via [`PlanBuilder`] to the same [`RqlPlanV1`] shape as
     /// RQL Application Core; execute reuses the APP-6 page executor.
     ///
-    /// **Not** a product query claim; op 118 remains reserved.
+    /// Executes through the same Core QVM path used by active op 118.
     pub fn query(&mut self) -> CollectionQuery<'_> {
         CollectionQuery::open(self)
     }
@@ -1563,8 +1592,8 @@ impl CollectionClient {
     ///
     /// **Remote:** product wire op **118** `rql_query` (APP-7 T6). Server
     /// recompiles source; not a package-accept claim. Full-language
-    /// (`enrich` / `within` / brace `project`) is refused here — use
-    /// [`crate::execute_rql_full`] locally (RQL-F2).
+    /// (`enrich` / `within` / brace `project`) is refused on this collection-
+    /// bound Core surface — use [`HeapClient::rql_full`] (RQL-F2).
     pub fn rql(
         &mut self,
         source: &str,
@@ -1607,7 +1636,8 @@ impl CollectionClient {
     /// RQL explain — plan tree + hash (no row scan).
     ///
     /// Remote uses op **118** with `explain: true` when available.
-    /// Full-language explain uses [`crate::explain_rql_full`] (not op 118).
+    /// Full-language explain uses [`crate::explain_rql_full`]; the Heap-bound
+    /// Full execute surface is [`HeapClient::rql_full`].
     pub fn explain_rql(
         &mut self,
         source: &str,
@@ -1661,73 +1691,7 @@ impl CollectionClient {
         parameters: &Parameters,
         options: QueryRunOptions,
     ) -> Result<QueryPage, Error> {
-        let mut args = serde_json::Map::new();
-        args.insert("source".into(), serde_json::Value::String(source.into()));
-        if !parameters.values.is_empty() {
-            let mut m = serde_json::Map::new();
-            for (k, v) in &parameters.values {
-                m.insert(k.clone(), v.clone());
-            }
-            args.insert("parameters".into(), serde_json::Value::Object(m));
-        }
-        if options.explain {
-            args.insert("explain".into(), serde_json::Value::Bool(true));
-        }
-        if let Some(ps) = options.page_size {
-            args.insert("page_size".into(), serde_json::json!(ps));
-        }
-        match options.coverage {
-            CoveragePolicy::Complete => {
-                args.insert("coverage".into(), serde_json::Value::String("complete".into()));
-            }
-            CoveragePolicy::IncompleteAllowed => {
-                args.insert(
-                    "coverage".into(),
-                    serde_json::Value::String("incomplete_allowed".into()),
-                );
-            }
-        }
-        match options.consistency {
-            ConsistencyMode::Available => {
-                args.insert(
-                    "consistency".into(),
-                    serde_json::Value::String("available".into()),
-                );
-            }
-            ConsistencyMode::Current => {
-                args.insert(
-                    "consistency".into(),
-                    serde_json::Value::String("current".into()),
-                );
-            }
-        }
-        if let Some(ref cont) = options.after {
-            let s = match std::str::from_utf8(&cont.token) {
-                Ok(t) => t.to_string(),
-                Err(_) => {
-                    // fall back: hex is not schema-native; require UTF-8 cursors on wire
-                    return Err(Error::QueryInvalid(
-                        "continuation token must be UTF-8 for wire op 118".into(),
-                    ));
-                }
-            };
-            args.insert("continuation".into(), serde_json::Value::String(s));
-        }
-        if let Some(b) = options.budget {
-            let mut bm = serde_json::Map::new();
-            if let Some(n) = b.max_documents {
-                bm.insert("max_documents".into(), serde_json::json!(n));
-            }
-            if let Some(n) = b.max_bytes {
-                bm.insert("max_bytes".into(), serde_json::json!(n));
-            }
-            if let Some(n) = b.max_result_bytes {
-                bm.insert("max_result_bytes".into(), serde_json::json!(n));
-            }
-            if !bm.is_empty() {
-                args.insert("budget".into(), serde_json::Value::Object(bm));
-            }
-        }
+        let args = rql_wire_args(source, parameters, &options, None)?;
 
         let mut guard = remote
             .lock()
@@ -1738,12 +1702,182 @@ impl CollectionClient {
     }
 }
 
+fn rql_wire_args(
+    source: &str,
+    parameters: &Parameters,
+    options: &QueryRunOptions,
+    profile: Option<&str>,
+) -> Result<serde_json::Map<String, serde_json::Value>, Error> {
+    let mut args = serde_json::Map::new();
+    args.insert("source".into(), serde_json::Value::String(source.into()));
+    if let Some(profile) = profile {
+        args.insert("profile".into(), serde_json::Value::String(profile.into()));
+    }
+    if !parameters.values.is_empty() {
+        let mut m = serde_json::Map::new();
+        for (k, v) in &parameters.values {
+            m.insert(k.clone(), v.clone());
+        }
+        args.insert("parameters".into(), serde_json::Value::Object(m));
+    }
+    if options.explain {
+        args.insert("explain".into(), serde_json::Value::Bool(true));
+    }
+    if let Some(ps) = options.page_size {
+        args.insert("page_size".into(), serde_json::json!(ps));
+    }
+    let coverage = match options.coverage {
+        CoveragePolicy::Complete => "complete",
+        CoveragePolicy::IncompleteAllowed => "incomplete_allowed",
+    };
+    args.insert(
+        "coverage".into(),
+        serde_json::Value::String(coverage.into()),
+    );
+    let consistency = match options.consistency {
+        ConsistencyMode::Available => "available",
+        ConsistencyMode::Current => "current",
+    };
+    args.insert(
+        "consistency".into(),
+        serde_json::Value::String(consistency.into()),
+    );
+    if let Some(ref cont) = options.after {
+        let s = std::str::from_utf8(&cont.token).map_err(|_| {
+            Error::QueryInvalid("continuation token must be UTF-8 for wire op 118".into())
+        })?;
+        args.insert("continuation".into(), serde_json::Value::String(s.into()));
+    }
+    if let Some(b) = options.budget {
+        let mut bm = serde_json::Map::new();
+        if let Some(n) = b.max_documents {
+            bm.insert("max_documents".into(), serde_json::json!(n));
+        }
+        if let Some(n) = b.max_bytes {
+            bm.insert("max_bytes".into(), serde_json::json!(n));
+        }
+        if let Some(n) = b.max_result_bytes {
+            bm.insert("max_result_bytes".into(), serde_json::json!(n));
+        }
+        if !bm.is_empty() {
+            args.insert("budget".into(), serde_json::Value::Object(bm));
+        }
+    }
+    Ok(args)
+}
+
+fn parse_rql_full_result(
+    result: serde_json::Value,
+    heap_id: HeapId,
+    root_id: CollectionId,
+    compiled: crate::query_bytecode_v1::CompiledRqlFull,
+) -> Result<crate::query_bytecode_v1::RqlFullPage, Error> {
+    let expected_program_hash = compiled.program_hash()?;
+    if result.get("profile").and_then(|v| v.as_str()) != Some(crate::RQL_FULL_PROFILE) {
+        return Err(Error::ProtocolViolation(
+            "rql_query Full response missing rql-full-v1 profile".into(),
+        ));
+    }
+    let rows_v = result
+        .get("rows")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| Error::ProtocolViolation("rql_query Full missing rows".into()))?;
+    let mut rows = Vec::with_capacity(rows_v.len());
+    for row in rows_v {
+        let key = row
+            .get("key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::ProtocolViolation("rql_query Full row key".into()))?;
+        let value = row
+            .get("value")
+            .cloned()
+            .ok_or_else(|| Error::ProtocolViolation("rql_query Full row value".into()))?;
+        rows.push((key.to_string(), value));
+    }
+
+    let base_rows = result
+        .get("base_rows")
+        .cloned()
+        .ok_or_else(|| Error::ProtocolViolation("rql_query Full missing base_rows".into()))?;
+    let mut base_result = result.clone();
+    base_result
+        .as_object_mut()
+        .expect("wire result is object when fields are readable")
+        .insert("rows".into(), base_rows);
+    let base = parse_rql_query_result(base_result, heap_id, root_id)?;
+    if base.plan_hash != expected_program_hash {
+        return Err(Error::ProtocolViolation(
+            "rql_query Full server QVM identity differs from the locally compiled programme".into(),
+        ));
+    }
+
+    let mut enrich_loads = Vec::new();
+    let loads = result
+        .get("enrich_loads")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| Error::ProtocolViolation("rql_query Full missing enrich_loads".into()))?;
+    for load in loads {
+        let using = load
+            .get("using")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::ProtocolViolation("rql_query Full enrich using".into()))?;
+        let output = load
+            .get("output")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| Error::ProtocolViolation("rql_query Full enrich output".into()))?;
+        let mode = match load.get("mode").and_then(|v| v.as_str()) {
+            Some("scan_list_keys_get") => crate::query_bytecode_v1::EnrichAttachMode::Scan,
+            Some("equality_index") => crate::query_bytecode_v1::EnrichAttachMode::EqualityIndex,
+            _ => {
+                return Err(Error::ProtocolViolation(
+                    "rql_query Full enrich mode".into(),
+                ))
+            }
+        };
+        enrich_loads.push(crate::query_bytecode_v1::EnrichLoadEvidence {
+            using: using.into(),
+            output: output.into(),
+            mode,
+        });
+    }
+
+    Ok(crate::query_bytecode_v1::RqlFullPage {
+        profile: crate::RQL_FULL_PROFILE,
+        rows,
+        base,
+        pipeline: compiled.pipeline,
+        project: compiled.project,
+        enrich_loads,
+    })
+}
+
 /// Parse op 118 response into [`QueryPage`].
 fn parse_rql_query_result(
     result: serde_json::Value,
     fallback_heap: HeapId,
     fallback_coll: CollectionId,
 ) -> Result<QueryPage, Error> {
+    let wire_heap = result
+        .get("heap_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::ProtocolViolation("rql_query missing heap_id".into()))?;
+    let wire_heap = HeapId::from_str(wire_heap)
+        .map_err(|e| Error::ProtocolViolation(format!("rql_query bad heap_id: {e}")))?;
+    if wire_heap != fallback_heap {
+        return Err(Error::ProtocolViolation(
+            "rql_query response crossed the bound Heap identity".into(),
+        ));
+    }
+    let wire_coll = result
+        .get("collection_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| Error::ProtocolViolation("rql_query missing collection_id".into()))?;
+    let wire_coll = collection_id_from_wire(wire_coll)?;
+    if wire_coll != fallback_coll {
+        return Err(Error::ProtocolViolation(
+            "rql_query response crossed the bound collection identity".into(),
+        ));
+    }
     let plan_hash_hex = result
         .get("plan_hash")
         .and_then(|v| v.as_str())
@@ -1840,6 +1974,10 @@ fn parse_rql_query_result(
         consistency: ConsistencyEvidence { mode: cons_mode },
         remaining_limit,
         known_holes,
+        logical_bytes_examined: result
+            .get("logical_bytes_examined")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
     })
 }
 
@@ -2025,6 +2163,19 @@ impl crate::query_bytecode_v1::HostCapabilities for HeapClient {
         CollectionClient::get(&mut col, key)
     }
 
+    fn get_json_covered(
+        &mut self,
+        collection_id: CollectionId,
+        key: &str,
+    ) -> Result<crate::query_bytecode_v1::HostDocument, Error> {
+        let mut col = self.open_collection_by_id(collection_id)?;
+        <CollectionClient as crate::query_bytecode_v1::HostCapabilities>::get_json_covered(
+            &mut col,
+            collection_id,
+            key,
+        )
+    }
+
     fn lookup_index_keys(
         &mut self,
         collection_id: CollectionId,
@@ -2067,6 +2218,48 @@ impl crate::query_bytecode_v1::HostCapabilities for CollectionClient {
         CollectionClient::get(self, key)
     }
 
+    fn get_json_covered(
+        &mut self,
+        collection_id: CollectionId,
+        key: &str,
+    ) -> Result<crate::query_bytecode_v1::HostDocument, Error> {
+        use crate::query_bytecode_v1::HostDocument;
+        use residiuum_store::CollectionScanHoleReason;
+
+        if collection_id != self.collection_id {
+            return Err(Error::QueryInvalid(
+                "HostCapabilities: collection_id mismatch on CollectionClient".into(),
+            ));
+        }
+        match CollectionClient::get(self, key) {
+            Ok(Some(value)) => Ok(HostDocument::Present(value)),
+            Ok(None) => Ok(HostDocument::Absent),
+            Err(Error::Store(store_error)) => {
+                if let Some(reason) = CollectionScanHoleReason::from_store_error(&store_error) {
+                    Ok(HostDocument::Hole {
+                        code: reason.as_str().to_string(),
+                    })
+                } else {
+                    Err(Error::Store(store_error))
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.code(),
+                    crate::error::ErrorCode::DataDamaged
+                        | crate::error::ErrorCode::PayloadPartial
+                        | crate::error::ErrorCode::CoverageIncomplete
+                        | crate::error::ErrorCode::TypeMismatch
+                ) =>
+            {
+                Ok(HostDocument::Hole {
+                    code: error.code().as_str().to_string(),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn lookup_index_keys(
         &mut self,
         collection_id: CollectionId,
@@ -2101,6 +2294,17 @@ impl crate::query_bytecode_v1::DocScan for CollectionClient {
 
     fn get_json(&mut self, key: &str) -> Result<Option<serde_json::Value>, Error> {
         <Self as crate::query_bytecode_v1::HostCapabilities>::get_json(
+            self,
+            self.collection_id,
+            key,
+        )
+    }
+
+    fn get_json_covered(
+        &mut self,
+        key: &str,
+    ) -> Result<crate::query_bytecode_v1::HostDocument, Error> {
+        <Self as crate::query_bytecode_v1::HostCapabilities>::get_json_covered(
             self,
             self.collection_id,
             key,
@@ -2302,10 +2506,7 @@ impl crate::read_view_v1::ReadView {
             ));
         }
         let inner = heap.open_collection(name)?;
-        Ok(ViewBoundCollection {
-            view: self,
-            inner,
-        })
+        Ok(ViewBoundCollection { view: self, inner })
     }
 }
 
@@ -2440,17 +2641,11 @@ fn index_info_from_remote_json(
                 .collect()
         })
         .unwrap_or_default();
-    let state_s = row
-        .get("state")
-        .and_then(|v| v.as_str())
-        .unwrap_or("ready");
+    let state_s = row.get("state").and_then(|v| v.as_str()).unwrap_or("ready");
     let state = IndexState::parse(state_s).ok_or_else(|| {
         Error::ProtocolViolation(format!("unknown index state from remote: {state_s}"))
     })?;
-    let entry_count = row
-        .get("entry_count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0);
+    let entry_count = row.get("entry_count").and_then(|v| v.as_u64()).unwrap_or(0);
     let complete_coverage = row
         .get("complete_coverage")
         .and_then(|v| v.as_bool())

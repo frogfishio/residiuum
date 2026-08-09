@@ -8,6 +8,7 @@
     "harness_profile",
     "env",
     "campaign_id",
+    "protocol",
     "notes",
     "cells"
   ],
@@ -16,6 +17,28 @@
     "harness_profile": { "type": "string" },
     "env": { "type": "object" },
     "campaign_id": { "type": "string" },
+    "protocol": {
+      "type": "object",
+      "required": [
+        "class",
+        "seed",
+        "warmup_operations",
+        "minimum_repetitions",
+        "minimum_duration_ms",
+        "minimum_operations",
+        "engine_order_policy"
+      ],
+      "properties": {
+        "class": { "enum": ["scaffold", "qualification"] },
+        "seed": { "type": "integer", "minimum": 0 },
+        "warmup_operations": { "type": "integer", "minimum": 0 },
+        "minimum_repetitions": { "type": "integer", "minimum": 1 },
+        "minimum_duration_ms": { "type": "integer", "minimum": 0 },
+        "minimum_operations": { "type": "integer", "minimum": 1 },
+        "engine_order_policy": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
     "notes": {
       "type": "array",
       "items": { "type": "string" }

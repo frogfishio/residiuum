@@ -2,9 +2,10 @@
 //! reload cannot mutate, data-server does not link authority.
 
 use residiuum_authority::{
-    apply_reload_request, commit_genesis, issue_heap_key, peek_reload_request, AuthorityError,
-    AuthorityPaths, AuthorityStoreError, EphemeralMasterKeyProvider, GenesisRequest, IssueRequest,
-    MasterAuthorityStore, MasterKeyProvider,
+    apply_reload_request, commit_genesis, commit_prepared_genesis, issue_heap_key,
+    peek_reload_request, prepare_genesis, AuthorityError, AuthorityPaths, AuthorityStoreError,
+    EphemeralMasterKeyProvider, GenesisRequest, IssueRequest, MasterAuthorityStore,
+    MasterKeyProvider,
 };
 use residiuum_heap::{DeploymentId, HeapId, Rights};
 use residiuum_store::{try_load_heap_catalog, HeapMetaLayout};
@@ -44,8 +45,7 @@ fn genesis_commit_publishes_and_issues() {
     )
     .unwrap();
 
-    let store =
-        MasterAuthorityStore::open(AuthorityPaths::new(&auth, &deployment, &heap)).unwrap();
+    let store = MasterAuthorityStore::open(AuthorityPaths::new(&auth, &deployment, &heap)).unwrap();
     let head = store.load_head().unwrap().expect("head");
     assert_eq!(head.storage_genesis_hash, result.descriptor_hash);
     assert_eq!(head.current_descriptor_hash, result.descriptor_hash);
@@ -79,13 +79,48 @@ fn staged_only_before_authority_commit_is_invisible() {
     fs::create_dir_all(&data).unwrap();
     let layout = HeapMetaLayout::new(&data);
     let (deployment, heap, creation) = ids();
-    let staged = residiuum_store::stage_heap_genesis(&layout, deployment, heap, creation, "ghost")
-        .unwrap();
+    let staged =
+        residiuum_store::stage_heap_genesis(&layout, deployment, heap, creation, "ghost").unwrap();
     assert!(try_load_heap_catalog(&layout).unwrap().is_none());
     // Authority never committed — published discovery stays empty.
-    assert!(residiuum_store::load_staged_genesis(&layout, &staged.staging_id)
+    assert!(
+        residiuum_store::load_staged_genesis(&layout, &staged.staging_id)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn exact_prepared_genesis_retry_is_idempotent() {
+    let dir = tempdir().unwrap();
+    let auth = dir.path().join("auth");
+    let data = dir.path().join("data");
+    fs::create_dir_all(&auth).unwrap();
+    fs::create_dir_all(&data).unwrap();
+    let (deployment, heap, creation) = ids();
+    let provider = EphemeralMasterKeyProvider::generate().unwrap();
+    let prepared = prepare_genesis(GenesisRequest {
+        authority_root: auth,
+        data_root: data.clone(),
+        deployment_id: deployment,
+        heap_id: heap,
+        name: "restart-safe".into(),
+        creation_event_id: creation,
+        effective_at: 1_700_000_000,
+    })
+    .unwrap();
+    let first = commit_prepared_genesis(&provider, &prepared).unwrap();
+    let second = commit_prepared_genesis(&provider, &prepared).unwrap();
+    assert_eq!(first.descriptor_hash, second.descriptor_hash);
+    assert_eq!(
+        first.authority_chain_head_hash,
+        second.authority_chain_head_hash
+    );
+    let catalog = try_load_heap_catalog(&HeapMetaLayout::new(data))
         .unwrap()
-        .is_some());
+        .unwrap();
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].name, "restart-safe");
 }
 
 #[test]
@@ -111,8 +146,7 @@ fn equal_sequence_unequal_payloads_are_fork() {
     )
     .unwrap();
 
-    let store =
-        MasterAuthorityStore::open(AuthorityPaths::new(&auth, &deployment, &heap)).unwrap();
+    let store = MasterAuthorityStore::open(AuthorityPaths::new(&auth, &deployment, &heap)).unwrap();
     let head = store.load_head().unwrap().unwrap();
     let payload_a = head.encode_payload().unwrap();
     residiuum_authority::AuthorityHead::decode_payload(&payload_a).unwrap();
@@ -169,7 +203,10 @@ fn reload_reads_head_but_cannot_commit() {
 
     assert!(peek_reload_request(&data).unwrap().is_some());
     let snap = apply_reload_request(&data).unwrap().expect("snap");
-    assert_eq!(snap.authority_chain_head_hash, result.authority_chain_head_hash);
+    assert_eq!(
+        snap.authority_chain_head_hash,
+        result.authority_chain_head_hash
+    );
     // Pending cleared; second apply is a no-op.
     assert!(apply_reload_request(&data).unwrap().is_none());
     // Reload API surface has no commit_head — enforced by type system / crate split.
@@ -178,8 +215,7 @@ fn reload_reads_head_but_cannot_commit() {
 #[test]
 fn residiuum_server_does_not_depend_on_residiuum_authority() {
     let toml = fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../residiuum-server/Cargo.toml"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../residiuum-server/Cargo.toml"),
     )
     .unwrap();
     assert!(

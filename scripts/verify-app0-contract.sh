@@ -58,7 +58,7 @@ for p in [
 
 ops = load("spec/heap/operations-v1.json")
 by_id = {o["id"]: o for o in ops["operations"]}
-# APP-1 activates collection_create (106). rql_query (118) stays reserved until APP-7.
+# APP-1 activates collection_create (106); APP-7 activates rql_query (118).
 o106 = by_id.get(106)
 if not o106:
     sys.exit("missing operation 106")
@@ -73,10 +73,10 @@ if not o118:
     sys.exit("missing operation 118")
 if o118.get("wire_name") != "rql_query":
     sys.exit(f"op 118 wire_name expected rql_query, got {o118.get('wire_name')}")
-if o118.get("status") != "reserved":
-    sys.exit(f"op 118 must remain reserved until APP-7 (got {o118.get('status')})")
-if o118.get("request_schema") is not None or o118.get("response_schema") is not None:
-    sys.exit("reserved op 118 must keep null schema pointers (architecture rule)")
+if o118.get("status") != "active":
+    sys.exit(f"op 118 must be active after APP-7 (got {o118.get('status')})")
+if not o118.get("request_schema") or not o118.get("response_schema"):
+    sys.exit("active op 118 must have non-null schema pointers")
 
 em = load("spec/app/v1/error_mapping_v1.json")
 if not em.get("required_error_codes"):

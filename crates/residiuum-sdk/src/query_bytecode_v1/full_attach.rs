@@ -30,10 +30,9 @@ use crate::app_v1::{HeapClient, Parameters, QueryExplanation, QueryPage, QueryRu
 use crate::error::Error;
 use crate::plan_v1::{CollectionBindings, PLAN_HASH_DOMAIN};
 use crate::predicate::{resolve_path, Path, Predicate, Resolve};
-use crate::rql_app_core::{
-    compile_app_core, CompiledAppCore, DIAG_RQL_FEATURE_UNAVAILABLE,
-};
-use residiuum_heap::CollectionId;
+use crate::resource::{check_result_bytes, estimate_row_bytes, host_limits};
+use crate::rql_app_core::{compile_app_core, CompiledAppCore, DIAG_RQL_FEATURE_UNAVAILABLE};
+use residiuum_heap::{CollectionId, HeapId};
 use serde_json::{Map, Value as JsonValue};
 use std::collections::BTreeMap;
 
@@ -186,6 +185,31 @@ pub enum ProjectItemV1 {
         /// Nested projection items.
         fields: Vec<ProjectItemV1>,
     },
+    /// Computed field evaluated against the current materialised row.
+    Computed {
+        /// Output field name.
+        output: String,
+        /// Canonical expression carried in the QVM immediate.
+        expression: ProjectExprV1,
+    },
+}
+
+/// Bounded computed-projection expression admitted by the Tier-A profile.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProjectExprV1 {
+    /// JSON scalar/compound literal.
+    Literal(JsonValue),
+    /// Copy a path value.
+    Path(Path),
+    /// `if predicate then expression else expression`.
+    Conditional {
+        /// Condition evaluated through the canonical SDA predicate kernel.
+        when: Predicate,
+        /// Selected when `when` is true.
+        then_expr: Box<ProjectExprV1>,
+        /// Selected when `when` is false.
+        else_expr: Box<ProjectExprV1>,
+    },
 }
 
 /// Compiled full-language query (Core base + ordered enrich/within pipeline).
@@ -205,6 +229,18 @@ pub struct CompiledRqlFull {
 }
 
 impl CompiledRqlFull {
+    /// Canonical identity of the QVM programme produced by this compile.
+    pub fn program_hash(&self) -> Result<[u8; 32], Error> {
+        let vm = lower_full(
+            self.base.plan.clone(),
+            self.base.budget,
+            self.pipeline.clone(),
+            self.project.clone(),
+        );
+        let qvm = super::qvm::encode_qvm(&vm)?;
+        Ok(super::qvm::qvm_hash(&qvm))
+    }
+
     /// Root enrich steps in pipeline order (skips `within` / filter).
     pub fn root_enrich(&self) -> Vec<&EnrichStepV1> {
         self.pipeline
@@ -227,14 +263,8 @@ impl CompiledRqlFull {
     /// Structured explain tree (base Core plan + pipeline + project). No rows.
     pub fn to_explain_tree(&self) -> JsonValue {
         let mut root = BTreeMap::new();
-        root.insert(
-            "profile".into(),
-            JsonValue::String(RQL_FULL_PROFILE.into()),
-        );
-        root.insert(
-            "base".into(),
-            self.base.plan.to_canonical_json(),
-        );
+        root.insert("profile".into(), JsonValue::String(RQL_FULL_PROFILE.into()));
+        root.insert("base".into(), self.base.plan.to_canonical_json());
         root.insert(
             "base_plan_hash".into(),
             JsonValue::String(bytes_to_hex(&self.base.plan.plan_hash())),
@@ -245,12 +275,7 @@ impl CompiledRqlFull {
         );
         root.insert(
             "pipeline".into(),
-            JsonValue::Array(
-                self.pipeline
-                    .iter()
-                    .map(pipeline_step_to_json)
-                    .collect(),
-            ),
+            JsonValue::Array(self.pipeline.iter().map(pipeline_step_to_json).collect()),
         );
         match &self.project {
             Some(items) => root.insert(
@@ -263,10 +288,7 @@ impl CompiledRqlFull {
             "attach_oracle".into(),
             JsonValue::String("scan_or_equality_index".into()),
         );
-        root.insert(
-            "wire".into(),
-            JsonValue::String("local_facade_only".into()),
-        );
+        root.insert("wire".into(), JsonValue::String("local_facade_only".into()));
         btree_to_json_obj(root)
     }
 
@@ -322,7 +344,17 @@ pub fn compile_rql_full(
     }
     refuse_residual_constructs(source)?;
 
-    let (without_project, project) = extract_brace_project(source)?;
+    let (without_computed, computed_project) = extract_computed_project(source)?;
+    let (without_project, brace_project) = extract_brace_project(&without_computed)?;
+    let project = match (computed_project, brace_project) {
+        (Some(_), Some(_)) => {
+            return Err(Error::QueryInvalid(
+                "computed and brace project clauses cannot be combined".into(),
+            ))
+        }
+        (Some(p), None) | (None, Some(p)) => Some(p),
+        (None, None) => None,
+    };
     let (base_source, raw_steps) = split_full_clauses(&without_project)?;
     let base = compile_app_core(&base_source, bindings)?;
     let mut pipeline = Vec::with_capacity(raw_steps.len());
@@ -373,15 +405,20 @@ fn refuse_residual_constructs(source: &str) -> Result<(), Error> {
 }
 
 /// True when source uses constructs that require [`compile_rql_full`] /
-/// [`execute_rql_full`] (not Application Core / op 118).
+/// [`execute_rql_full`] (not the collection-bound Application Core profile).
 pub fn source_uses_rql_full_constructs(source: &str) -> bool {
     let lower = source.to_ascii_lowercase();
     let padded = format!(" {} ", lower.replace('\t', " "));
     if padded.contains(" enrich ")
         || padded.contains("\nenrich ")
-        || lower.split_whitespace().any(|t| t == "enrich" || t == "within")
+        || lower
+            .split_whitespace()
+            .any(|t| t == "enrich" || t == "within")
         || padded.contains(" within ")
     {
+        return true;
+    }
+    if padded.contains(" project ") && padded.contains(" = if ") && padded.contains(" then ") {
         return true;
     }
     // Brace `project { … }` (flat Core `project a, b` is fine on Core wire).
@@ -414,15 +451,15 @@ pub fn source_uses_rql_full_constructs(source: &str) -> bool {
     false
 }
 
-/// Refuse full-language source on the Application Core / op **118** wire.
+/// Refuse full-language source when op **118** is using its Core profile.
 ///
-/// RQL-F2 honesty: enrich/within/brace-project are local façade only until a
-/// dedicated wire package lands. Callers must use [`execute_rql_full`].
+/// RQL-F2 honesty: a caller must explicitly choose the Heap-bound Full profile;
+/// the collection-bound Core surface never silently widens its semantics.
 pub fn refuse_full_language_on_core_wire(source: &str) -> Result<(), Error> {
     if source_uses_rql_full_constructs(source) {
         return Err(Error::QueryInvalid(format!(
             "{DIAG_RQL_FEATURE_UNAVAILABLE}: enrich/within/brace-project require \
-             execute_rql_full; not on Application Core op-118 wire"
+             HeapClient::rql_full; not the Application Core op-118 profile"
         )));
     }
     Ok(())
@@ -436,7 +473,9 @@ pub fn explain_rql_full(
     let compiled = compile_rql_full(source, bindings)?;
     Ok(QueryExplanation {
         plan_profile: RQL_FULL_PROFILE.into(),
-        plan_hash: compiled.explain_hash(),
+        // Explain identity is the canonical QVM programme that execute will
+        // decode and run, not a second hash over a diagnostic tree.
+        plan_hash: compiled.program_hash()?,
         tree: compiled.to_explain_tree(),
     })
 }
@@ -461,16 +500,10 @@ fn pipeline_step_to_json(step: &FullPipelineStepV1) -> JsonValue {
             m.insert("kind".into(), JsonValue::String("enrich".into()));
             m.insert("output".into(), JsonValue::String(e.output.clone()));
             m.insert("using".into(), JsonValue::String(e.using_name.clone()));
-            m.insert(
-                "using_id".into(),
-                JsonValue::String(e.using_id.to_string()),
-            );
+            m.insert("using_id".into(), JsonValue::String(e.using_id.to_string()));
             m.insert("left".into(), JsonValue::String(e.left.dotted()));
             m.insert("right".into(), JsonValue::String(e.right.dotted()));
-            m.insert(
-                "expect".into(),
-                JsonValue::String(e.expect.as_str().into()),
-            );
+            m.insert("expect".into(), JsonValue::String(e.expect.as_str().into()));
             match &e.candidate_where {
                 Some(p) => m.insert("candidate_where".into(), p.to_canonical_json()),
                 None => m.insert("candidate_where".into(), JsonValue::Null),
@@ -519,6 +552,30 @@ fn project_item_to_json(item: &ProjectItemV1) -> JsonValue {
             );
             btree_to_json_obj(m)
         }
+        ProjectItemV1::Computed { output, expression } => {
+            let mut m = BTreeMap::new();
+            m.insert("kind".into(), JsonValue::String("computed".into()));
+            m.insert("output".into(), JsonValue::String(output.clone()));
+            m.insert("expression".into(), computed_expr_explain_json(expression));
+            btree_to_json_obj(m)
+        }
+    }
+}
+
+fn computed_expr_explain_json(expr: &ProjectExprV1) -> JsonValue {
+    match expr {
+        ProjectExprV1::Literal(v) => serde_json::json!({"kind": "literal", "value": v}),
+        ProjectExprV1::Path(p) => serde_json::json!({"kind": "path", "path": p.dotted()}),
+        ProjectExprV1::Conditional {
+            when,
+            then_expr,
+            else_expr,
+        } => serde_json::json!({
+            "kind": "conditional",
+            "when": when.to_canonical_json(),
+            "then": computed_expr_explain_json(then_expr),
+            "else": computed_expr_explain_json(else_expr),
+        }),
     }
 }
 
@@ -540,10 +597,251 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
     out
 }
 
+/// Extract the Gate-1 flat computed projection and lower it to the same
+/// ProjectBrace QVM opcode used by structured projection. Ordinary flat path
+/// projection remains in Application Core.
+fn extract_computed_project(source: &str) -> Result<(String, Option<Vec<ProjectItemV1>>), Error> {
+    let Some(start) = find_top_level_keyword(source, "project", 0) else {
+        return Ok((source.to_string(), None));
+    };
+    let body_start = start + "project".len();
+    let trimmed = source[body_start..].trim_start();
+    if trimmed.starts_with('{') {
+        return Ok((source.to_string(), None));
+    }
+    let ws = source[body_start..].len() - trimmed.len();
+    let body_start = body_start + ws;
+    let mut end = source.len();
+    for kw in [
+        "order",
+        "limit",
+        "page",
+        "coverage",
+        "consistency",
+        "budget",
+        "after",
+        "access",
+    ] {
+        if let Some(at) = find_top_level_keyword(source, kw, body_start) {
+            end = end.min(at);
+        }
+    }
+    let body = source[body_start..end].trim();
+    let raw_items = split_top_level(body, ',')?;
+    let is_computed = raw_items.iter().any(|item| {
+        item.split_once('=')
+            .map(|(_, rhs)| rhs.trim_start().to_ascii_lowercase().starts_with("if "))
+            .unwrap_or(false)
+    });
+    if !is_computed {
+        return Ok((source.to_string(), None));
+    }
+
+    let mut fields = Vec::with_capacity(raw_items.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for raw in raw_items {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Err(Error::QueryInvalid("empty computed project item".into()));
+        }
+        let item = if let Some((output, rhs)) = raw.split_once('=') {
+            let output = output.trim();
+            if !is_plain_identifier(output) {
+                return Err(Error::QueryInvalid(format!(
+                    "computed project output `{output}` is not an identifier"
+                )));
+            }
+            ProjectItemV1::Computed {
+                output: output.to_string(),
+                expression: parse_project_expr(rhs.trim())?,
+            }
+        } else {
+            let source_path = Path::parse_dotted(raw)?;
+            let output = source_path
+                .0
+                .last()
+                .cloned()
+                .ok_or_else(|| Error::QueryInvalid("empty project path".into()))?;
+            ProjectItemV1::Leaf {
+                output,
+                source: source_path,
+            }
+        };
+        let output = match &item {
+            ProjectItemV1::Leaf { output, .. }
+            | ProjectItemV1::Nested { output, .. }
+            | ProjectItemV1::Computed { output, .. } => output,
+        };
+        if !seen.insert(output.clone()) {
+            return Err(Error::QueryInvalid(format!(
+                "{DIAG_RQL_PROJECTION_CONFLICT}: duplicate output `{output}`"
+            )));
+        }
+        fields.push(item);
+    }
+    let mut base = String::new();
+    base.push_str(&source[..start]);
+    base.push_str(&source[end..]);
+    Ok((base, Some(fields)))
+}
+
+fn parse_project_expr(source: &str) -> Result<ProjectExprV1, Error> {
+    let source = source.trim();
+    if source.len() >= 2
+        && source[..2].eq_ignore_ascii_case("if")
+        && source[2..].chars().next().is_some_and(char::is_whitespace)
+    {
+        let then_at = find_top_level_keyword(source, "then", 2)
+            .ok_or_else(|| Error::QueryInvalid("computed project `if` requires `then`".into()))?;
+        let condition = source[2..then_at].trim();
+        let branches = &source[then_at + "then".len()..];
+        let else_at = find_matching_else(branches)?;
+        let then_source = branches[..else_at].trim();
+        let else_source = branches[else_at + "else".len()..].trim();
+        if then_source.is_empty() || else_source.is_empty() {
+            return Err(Error::QueryInvalid(
+                "computed project conditional requires both branches".into(),
+            ));
+        }
+        return Ok(ProjectExprV1::Conditional {
+            when: crate::rql_app_core::parse_predicate_expression(condition)?,
+            then_expr: Box::new(parse_project_expr(then_source)?),
+            else_expr: Box::new(parse_project_expr(else_source)?),
+        });
+    }
+    if let Ok(value) = serde_json::from_str::<JsonValue>(source) {
+        return Ok(ProjectExprV1::Literal(value));
+    }
+    Ok(ProjectExprV1::Path(Path::parse_dotted(source)?))
+}
+
+fn find_matching_else(source: &str) -> Result<usize, Error> {
+    let mut search = 0usize;
+    let mut nested = 0usize;
+    loop {
+        let next_if = find_top_level_keyword(source, "if", search);
+        let next_else = find_top_level_keyword(source, "else", search);
+        match (next_if, next_else) {
+            (_, None) => {
+                return Err(Error::QueryInvalid(
+                    "computed project `if` requires `else`".into(),
+                ))
+            }
+            (Some(i), Some(e)) if i < e => {
+                nested += 1;
+                search = i + 2;
+            }
+            (_, Some(e)) if nested == 0 => return Ok(e),
+            (_, Some(e)) => {
+                nested -= 1;
+                search = e + 4;
+            }
+        }
+    }
+}
+
+fn split_top_level(source: &str, separator: char) -> Result<Vec<&str>, Error> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut square = 0usize;
+    let mut round = 0usize;
+    let mut brace = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (i, ch) in source.char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => quoted = true,
+            '[' => square += 1,
+            ']' => {
+                square = square.checked_sub(1).ok_or_else(|| {
+                    Error::QueryInvalid("unbalanced `]` in computed project".into())
+                })?
+            }
+            '(' => round += 1,
+            ')' => {
+                round = round.checked_sub(1).ok_or_else(|| {
+                    Error::QueryInvalid("unbalanced `)` in computed project".into())
+                })?
+            }
+            '{' => brace += 1,
+            '}' => {
+                brace = brace.checked_sub(1).ok_or_else(|| {
+                    Error::QueryInvalid("unbalanced `}` in computed project".into())
+                })?
+            }
+            c if c == separator && square == 0 && round == 0 && brace == 0 => {
+                out.push(&source[start..i]);
+                start = i + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if quoted || square != 0 || round != 0 || brace != 0 {
+        return Err(Error::QueryInvalid(
+            "unbalanced computed project expression".into(),
+        ));
+    }
+    out.push(&source[start..]);
+    Ok(out)
+}
+
+fn find_top_level_keyword(source: &str, keyword: &str, from: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut square = 0usize;
+    let mut round = 0usize;
+    let mut brace = 0usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut i = 0usize;
+    while i < source.len() {
+        let b = bytes[i];
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                quoted = false;
+            }
+            i += 1;
+            continue;
+        }
+        match b {
+            b'"' => quoted = true,
+            b'[' => square += 1,
+            b']' => square = square.saturating_sub(1),
+            b'(' => round += 1,
+            b')' => round = round.saturating_sub(1),
+            b'{' => brace += 1,
+            b'}' => brace = brace.saturating_sub(1),
+            _ => {}
+        }
+        if i >= from && square == 0 && round == 0 && brace == 0 && matches_kw(source, i, keyword) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn is_plain_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Extract top-level nested `project { … }` (brace form). Flat Core `project a, b` stays.
-fn extract_brace_project(
-    source: &str,
-) -> Result<(String, Option<Vec<ProjectItemV1>>), Error> {
+fn extract_brace_project(source: &str) -> Result<(String, Option<Vec<ProjectItemV1>>), Error> {
     let lower = source.to_ascii_lowercase();
     let bytes = lower.as_bytes();
     let mut i = 0usize;
@@ -644,9 +942,9 @@ fn parse_project_items(inner: &str, depth: usize) -> Result<Vec<ProjectItemV1>, 
             ProjectItemV1::Leaf { output, source }
         };
         let out_name = match &item {
-            ProjectItemV1::Leaf { output, .. } | ProjectItemV1::Nested { output, .. } => {
-                output.clone()
-            }
+            ProjectItemV1::Leaf { output, .. }
+            | ProjectItemV1::Nested { output, .. }
+            | ProjectItemV1::Computed { output, .. } => output.clone(),
         };
         if !seen.insert(out_name.clone()) {
             return Err(Error::QueryInvalid(format!(
@@ -714,7 +1012,10 @@ fn split_full_clauses(source: &str) -> Result<(String, Vec<RawPipelineStep>), Er
     }
 
     if spans.is_empty() {
-        return Ok((source.to_string(), Vec::new()));
+        return Ok((
+            source.split_whitespace().collect::<Vec<_>>().join(" "),
+            Vec::new(),
+        ));
     }
 
     let mut core = String::new();
@@ -734,9 +1035,7 @@ fn split_full_clauses(source: &str) -> Result<(String, Vec<RawPipelineStep>), Er
             2 => {
                 let body = source[start + "where".len()..end].trim();
                 if body.is_empty() {
-                    return Err(Error::QueryInvalid(
-                        "pipeline where clause is empty".into(),
-                    ));
+                    return Err(Error::QueryInvalid("pipeline where clause is empty".into()));
                 }
                 steps.push(RawPipelineStep::Where(body.to_string()));
             }
@@ -781,7 +1080,7 @@ fn matches_kw(lower: &str, start: usize, kw: &str) -> bool {
     if start + kw.len() > lower.len() {
         return false;
     }
-    if &lower[start..start + kw.len()] != kw {
+    if !lower[start..start + kw.len()].eq_ignore_ascii_case(kw) {
         return false;
     }
     let before_ok = start == 0 || !bytes[start - 1].is_ascii_alphanumeric();
@@ -1010,9 +1309,7 @@ fn split_nested_pipeline(source: &str) -> Result<Vec<RawNestedStep>, Error> {
             2 => {
                 let body = source[start + "where".len()..end].trim();
                 if body.is_empty() {
-                    return Err(Error::QueryInvalid(
-                        "within where clause is empty".into(),
-                    ));
+                    return Err(Error::QueryInvalid("within where clause is empty".into()));
                 }
                 steps.push(RawNestedStep::Where(body.to_string()));
             }
@@ -1111,7 +1408,10 @@ fn strip_alias_from_predicate(pred: Predicate, alias: Option<&str>) -> Result<Pr
     })
 }
 
-fn strip_alias_from_operand(op: crate::predicate::Operand, alias: &str) -> Result<crate::predicate::Operand, Error> {
+fn strip_alias_from_operand(
+    op: crate::predicate::Operand,
+    alias: &str,
+) -> Result<crate::predicate::Operand, Error> {
     use crate::predicate::Operand;
     match op {
         Operand::Path { path } => Ok(Operand::Path {
@@ -1178,9 +1478,7 @@ fn parse_enrich_step(
     let candidate_where = if !corpus_dialect && p.eat("where") {
         let where_src = p.take_until_keyword("expect")?;
         if where_src.trim().is_empty() {
-            return Err(Error::QueryInvalid(
-                "enrich where clause is empty".into(),
-            ));
+            return Err(Error::QueryInvalid("enrich where clause is empty".into()));
         }
         let fake = format!("from {using_name} where {where_src}");
         let compiled = compile_app_core(&fake, bindings)?;
@@ -1208,15 +1506,11 @@ fn parse_enrich_step(
             p.rest()
         )));
     }
-    let using_id = bindings
-        .by_name
-        .get(&using_name)
-        .copied()
-        .ok_or_else(|| {
-            Error::QueryInvalid(format!(
-                "unknown collection binding `{using_name}` for enrich using"
-            ))
-        })?;
+    let using_id = bindings.by_name.get(&using_name).copied().ok_or_else(|| {
+        Error::QueryInvalid(format!(
+            "unknown collection binding `{using_name}` for enrich using"
+        ))
+    })?;
     Ok(EnrichStepV1 {
         output,
         using_name,
@@ -1308,7 +1602,8 @@ impl<'a> Words<'a> {
         let lower = r.to_ascii_lowercase();
         if lower.starts_with(kw)
             && (r.len() == kw.len()
-                || !r.as_bytes()[kw.len()].is_ascii_alphanumeric() && r.as_bytes()[kw.len()] != b'_')
+                || !r.as_bytes()[kw.len()].is_ascii_alphanumeric()
+                    && r.as_bytes()[kw.len()] != b'_')
         {
             self.i += kw.len();
             true
@@ -1398,8 +1693,7 @@ impl<'a> Words<'a> {
                 )));
             };
             let at = search + rel;
-            let before_ok =
-                at == 0 || lower.as_bytes()[at - 1].is_ascii_whitespace();
+            let before_ok = at == 0 || lower.as_bytes()[at - 1].is_ascii_whitespace();
             let after = at + kw.len();
             let after_ok = after >= lower.len()
                 || (!lower.as_bytes()[after].is_ascii_alphanumeric()
@@ -1436,19 +1730,33 @@ pub(crate) fn filter_rows(
 pub(crate) fn apply_project_rows(
     rows: &[(String, JsonValue)],
     fields: &[ProjectItemV1],
+    params: &BTreeMap<String, JsonValue>,
 ) -> Result<Vec<(String, JsonValue)>, Error> {
     let mut out = Vec::with_capacity(rows.len());
     for (k, v) in rows {
-        let projected = project_value(v, fields)?;
+        let projected = project_value(v, Some(k), fields, params)?;
         out.push((k.clone(), projected));
     }
     Ok(out)
 }
 
-fn project_value(doc: &JsonValue, fields: &[ProjectItemV1]) -> Result<JsonValue, Error> {
+fn project_value(
+    doc: &JsonValue,
+    row_key: Option<&str>,
+    fields: &[ProjectItemV1],
+    params: &BTreeMap<String, JsonValue>,
+) -> Result<JsonValue, Error> {
     let mut map = serde_json::Map::new();
     for item in fields {
         match item {
+            ProjectItemV1::Leaf { output, source }
+                if source.dotted() == "_key" && row_key.is_some() =>
+            {
+                map.insert(
+                    output.clone(),
+                    JsonValue::String(row_key.unwrap_or_default().to_string()),
+                );
+            }
             ProjectItemV1::Leaf { output, source } => match resolve_path(doc, source) {
                 Resolve::Present(v) => {
                     map.insert(output.clone(), v);
@@ -1463,13 +1771,13 @@ fn project_value(doc: &JsonValue, fields: &[ProjectItemV1]) -> Result<JsonValue,
                         map.insert(output.clone(), JsonValue::Null);
                     }
                     Resolve::Present(JsonValue::Object(obj)) => {
-                        let nested = project_value(&JsonValue::Object(obj), fields)?;
+                        let nested = project_value(&JsonValue::Object(obj), None, fields, params)?;
                         map.insert(output.clone(), nested);
                     }
                     Resolve::Present(JsonValue::Array(arr)) => {
                         let mut mapped = Vec::with_capacity(arr.len());
                         for el in arr {
-                            mapped.push(project_value(&el, fields)?);
+                            mapped.push(project_value(&el, None, fields, params)?);
                         }
                         map.insert(output.clone(), JsonValue::Array(mapped));
                     }
@@ -1481,9 +1789,38 @@ fn project_value(doc: &JsonValue, fields: &[ProjectItemV1]) -> Result<JsonValue,
                     }
                 }
             }
+            ProjectItemV1::Computed { output, expression } => {
+                map.insert(output.clone(), eval_project_expr(doc, expression, params)?);
+            }
         }
     }
     Ok(JsonValue::Object(map))
+}
+
+fn eval_project_expr(
+    doc: &JsonValue,
+    expression: &ProjectExprV1,
+    params: &BTreeMap<String, JsonValue>,
+) -> Result<JsonValue, Error> {
+    match expression {
+        ProjectExprV1::Literal(v) => Ok(v.clone()),
+        ProjectExprV1::Path(path) => match resolve_path(doc, path) {
+            Resolve::Present(v) => Ok(v),
+            Resolve::Absent => Ok(JsonValue::Null),
+        },
+        ProjectExprV1::Conditional {
+            when,
+            then_expr,
+            else_expr,
+        } => {
+            let kernel = super::kernel::compile_where(when, params)?;
+            if kernel.eval_doc(doc)? {
+                eval_project_expr(doc, then_expr, params)
+            } else {
+                eval_project_expr(doc, else_expr, params)
+            }
+        }
+    }
 }
 
 /// Attach enrich fields onto already-materialised root JSON documents.
@@ -1526,37 +1863,32 @@ pub(crate) fn attach_enrich_rows(
     for (key, root) in roots {
         let left_key = match resolve_enrich_match_value(key, root, &step.left) {
             Some(v) => canonical_match_key(&v),
-            None => {
-                match step.expect {
-                    EnrichCardinality::Optional => {
-                        let mut row = root.clone();
-                        if let JsonValue::Object(map) = &mut row {
-                            map.insert(step.output.clone(), JsonValue::Null);
-                        }
-                        out.push((key.clone(), row));
-                        continue;
+            None => match step.expect {
+                EnrichCardinality::Optional => {
+                    let mut row = root.clone();
+                    if let JsonValue::Object(map) = &mut row {
+                        map.insert(step.output.clone(), JsonValue::Null);
                     }
-                    EnrichCardinality::Many => {
-                        let mut row = root.clone();
-                        if let JsonValue::Object(map) = &mut row {
-                            map.insert(step.output.clone(), JsonValue::Array(vec![]));
-                        }
-                        out.push((key.clone(), row));
-                        continue;
+                    out.push((key.clone(), row));
+                    continue;
+                }
+                EnrichCardinality::Many => {
+                    let mut row = root.clone();
+                    if let JsonValue::Object(map) = &mut row {
+                        map.insert(step.output.clone(), JsonValue::Array(vec![]));
                     }
-                    EnrichCardinality::ExactlyOne => {
-                        return Err(Error::QueryInvalid(format!(
+                    out.push((key.clone(), row));
+                    continue;
+                }
+                EnrichCardinality::ExactlyOne => {
+                    return Err(Error::QueryInvalid(format!(
                             "{DIAG_RQL_ENRICH_CARDINALITY}: missing left match path `{}` on key `{key}`",
                             step.left.0.join(".")
                         )));
-                    }
                 }
-            }
+            },
         };
-        let candidates = by_right
-            .get(&left_key)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
+        let candidates = by_right.get(&left_key).map(|v| v.as_slice()).unwrap_or(&[]);
         let attached = match (step.expect, candidates.len()) {
             (EnrichCardinality::ExactlyOne, 1) => candidates[0].1.clone(),
             (EnrichCardinality::ExactlyOne, n) => {
@@ -1571,9 +1903,9 @@ pub(crate) fn attach_enrich_rows(
                     "{DIAG_RQL_ENRICH_CARDINALITY}: optional expected ≤1 match, got {n} (key `{key}`)"
                 )));
             }
-            (EnrichCardinality::Many, _) => JsonValue::Array(
-                candidates.iter().map(|(_, d)| d.clone()).collect(),
-            ),
+            (EnrichCardinality::Many, _) => {
+                JsonValue::Array(candidates.iter().map(|(_, d)| d.clone()).collect())
+            }
         };
         let mut row = root.clone();
         match &mut row {
@@ -1815,7 +2147,29 @@ pub fn execute_rql_full_with(
     for info in &infos {
         bindings.bind(&info.name, info.collection_id);
     }
-    let compiled = compile_rql_full(source, &bindings)?;
+    let heap_id = client.id();
+    execute_rql_full_on_host_with(client, heap_id, source, &bindings, parameters, options)
+}
+
+/// Compile and execute Full RQL against collection-qualified host capabilities.
+///
+/// This is the shared embedded/server entry. The caller supplies bindings
+/// derived from its authorised Heap catalogue; the compiled root collection
+/// and every foreign collection id remain encoded in verified QVM operands.
+pub fn execute_rql_full_on_host_with<H: HostCapabilities>(
+    host: &mut H,
+    heap_id: HeapId,
+    source: &str,
+    bindings: &CollectionBindings,
+    parameters: &Parameters,
+    mut options: RqlFullExecuteOptions,
+) -> Result<RqlFullPage, Error> {
+    let compiled = compile_rql_full(source, bindings)?;
+    let semantic_parameters = crate::rql_app_core::bind_textual_after(
+        compiled.base.after.as_ref(),
+        parameters,
+        &mut options.query,
+    )?;
     let vm = lower_full(
         compiled.base.plan.clone(),
         compiled.base.budget,
@@ -1823,7 +2177,7 @@ pub fn execute_rql_full_with(
         compiled.project.clone(),
     );
     let qvm = super::qvm::encode_qvm(&vm)?;
-    execute_full_qvm_with(client, &qvm, parameters, options)
+    execute_full_qvm_on_host_with(host, heap_id, &qvm, &semantic_parameters, options)
 }
 
 /// Full-language product entry: decode **QVM1**, then [`run_vm`] once.
@@ -1832,6 +2186,18 @@ pub fn execute_rql_full_with(
 /// collection id (RQL-P1b).
 pub fn execute_full_qvm_with(
     client: &mut HeapClient,
+    qvm_bytes: &[u8],
+    parameters: &Parameters,
+    options: RqlFullExecuteOptions,
+) -> Result<RqlFullPage, Error> {
+    let heap_id = client.id();
+    execute_full_qvm_on_host_with(client, heap_id, qvm_bytes, parameters, options)
+}
+
+/// Decode, verify and execute Full QVM against an authorised host.
+pub fn execute_full_qvm_on_host_with<H: HostCapabilities>(
+    host: &mut H,
+    heap_id: HeapId,
     qvm_bytes: &[u8],
     parameters: &Parameters,
     options: RqlFullExecuteOptions,
@@ -1846,11 +2212,10 @@ pub fn execute_full_qvm_with(
             ))
         }
     };
-    let heap_id = client.id();
     // Recover attach pipeline/project for response diagnostics only (not authority).
     let (pipeline, project) = reconstruct_attach_from_ops(&vm.ops)?;
     let out = run_vm(
-        client,
+        host,
         &vm,
         &parameters.values,
         &options.query,
@@ -1987,18 +2352,12 @@ pub(crate) fn load_foreign_docs_for_root_enrich<H: HostCapabilities>(
 ) -> Result<(Vec<(String, JsonValue)>, EnrichAttachMode), Error> {
     let cid = step.using_id;
     if force_scan {
-        return Ok((
-            load_collection_docs(host, cid)?,
-            EnrichAttachMode::Scan,
-        ));
+        return Ok((load_collection_docs(host, cid)?, EnrichAttachMode::Scan));
     }
     let right_field = step.right.dotted();
     // Equality indexes today are single-field path labels (APB-7 T4).
     if right_field.is_empty() || right_field.contains('.') {
-        return Ok((
-            load_collection_docs(host, cid)?,
-            EnrichAttachMode::Scan,
-        ));
+        return Ok((load_collection_docs(host, cid)?, EnrichAttachMode::Scan));
     }
 
     let left_values = collect_present_left_values(roots, &step.left);
@@ -2007,23 +2366,19 @@ pub(crate) fn load_foreign_docs_for_root_enrich<H: HostCapabilities>(
         // Probe whether a usable equality index exists without loading all docs.
         match host.lookup_index_keys(cid, &[(right_field.clone(), JsonValue::Null)])? {
             None => {
-                return Ok((
-                    load_collection_docs(host, cid)?,
-                    EnrichAttachMode::Scan,
-                ));
+                return Ok((load_collection_docs(host, cid)?, EnrichAttachMode::Scan));
             }
             Some(_) => return Ok((Vec::new(), EnrichAttachMode::EqualityIndex)),
         }
     }
 
     let mut by_key: BTreeMap<String, JsonValue> = BTreeMap::new();
+    let limits = host_limits();
+    let mut materialized_bytes = 0u64;
     for val in left_values.values() {
         match host.lookup_index_keys(cid, &[(right_field.clone(), val.clone())])? {
             None => {
-                return Ok((
-                    load_collection_docs(host, cid)?,
-                    EnrichAttachMode::Scan,
-                ));
+                return Ok((load_collection_docs(host, cid)?, EnrichAttachMode::Scan));
             }
             Some(keys) => {
                 for k in keys {
@@ -2031,6 +2386,9 @@ pub(crate) fn load_foreign_docs_for_root_enrich<H: HostCapabilities>(
                         continue;
                     }
                     if let Some(doc) = host.get_json(cid, &k)? {
+                        materialized_bytes =
+                            materialized_bytes.saturating_add(estimate_row_bytes(&k, &doc));
+                        check_result_bytes(materialized_bytes, None, &limits)?;
                         by_key.insert(k, doc);
                     }
                 }
@@ -2060,11 +2418,7 @@ fn collect_present_left_values(
 ///
 /// `_key` / `$key` means the store document key (not a body field). Audit
 /// fixtures strip `_key` from the JSON body after using it as `put` key.
-fn resolve_enrich_match_value(
-    doc_key: &str,
-    doc: &JsonValue,
-    path: &Path,
-) -> Option<JsonValue> {
+fn resolve_enrich_match_value(doc_key: &str, doc: &JsonValue, path: &Path) -> Option<JsonValue> {
     if is_store_key_path(path) {
         return Some(JsonValue::String(doc_key.to_string()));
     }
@@ -2135,6 +2489,8 @@ fn load_collection_docs<H: HostCapabilities>(
     collection_id: CollectionId,
 ) -> Result<Vec<(String, JsonValue)>, Error> {
     let mut foreign = Vec::new();
+    let limits = host_limits();
+    let mut materialized_bytes = 0u64;
     let mut after: Option<String> = None;
     loop {
         let batch = host.list_keys(collection_id, Some(256), after.as_deref())?;
@@ -2143,6 +2499,8 @@ fn load_collection_docs<H: HostCapabilities>(
         }
         for k in &batch {
             if let Some(v) = host.get_json(collection_id, k)? {
+                materialized_bytes = materialized_bytes.saturating_add(estimate_row_bytes(k, &v));
+                check_result_bytes(materialized_bytes, None, &limits)?;
                 foreign.push((k.clone(), v));
             }
         }
@@ -2228,6 +2586,35 @@ mod tests {
     }
 
     #[test]
+    fn computed_conditional_project_compiles_and_evaluates() {
+        let compiled = compile_rql_full(
+            r#"from orders project _key, amount_band = if amount < 100 then "low" else if amount < 500 then "mid" else "high""#,
+            &bindings(),
+        )
+        .unwrap();
+        assert_eq!(compiled.base_source, "from orders");
+        let project = compiled.project.as_ref().unwrap();
+        let rows = vec![
+            ("o1".into(), serde_json::json!({"amount": 10})),
+            ("o2".into(), serde_json::json!({"amount": 250})),
+            ("o3".into(), serde_json::json!({"amount": 900})),
+        ];
+        let out = apply_project_rows(&rows, project, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            out[0].1,
+            serde_json::json!({"_key": "o1", "amount_band": "low"})
+        );
+        assert_eq!(
+            out[1].1,
+            serde_json::json!({"_key": "o2", "amount_band": "mid"})
+        );
+        assert_eq!(
+            out[2].1,
+            serde_json::json!({"_key": "o3", "amount_band": "high"})
+        );
+    }
+
+    #[test]
     fn compile_corpus_enrich_dialect_from_on_card() {
         let c = compile_rql_full(
             "from orders enrich customer from customers on customer.id = customers._key exactly_one",
@@ -2245,10 +2632,7 @@ mod tests {
 
     #[test]
     fn attach_enrich_matches_store_key_path() {
-        let roots = vec![(
-            "o1".into(),
-            serde_json::json!({"customer": {"id": "c1"}}),
-        )];
+        let roots = vec![("o1".into(), serde_json::json!({"customer": {"id": "c1"}}))];
         let foreign = vec![
             ("c1".into(), serde_json::json!({"name": "Ada"})),
             ("c2".into(), serde_json::json!({"name": "Bob"})),
@@ -2289,10 +2673,7 @@ mod tests {
         assert_eq!(w.enrich_steps()[0].left.dotted(), "product_id");
         assert_eq!(w.enrich_steps()[0].right.dotted(), "id");
 
-        let roots = vec![(
-            "o1".into(),
-            serde_json::json!({"order_id": "o1"}),
-        )];
+        let roots = vec![("o1".into(), serde_json::json!({"order_id": "o1"}))];
         let lines = vec![
             (
                 "l1".into(),
@@ -2304,15 +2685,20 @@ mod tests {
             ),
         ];
         let products = vec![
-            ("p1".into(), serde_json::json!({"id": "p1", "name": "Widget"})),
-            ("p2".into(), serde_json::json!({"id": "p2", "name": "Gadget"})),
+            (
+                "p1".into(),
+                serde_json::json!({"id": "p1", "name": "Widget"}),
+            ),
+            (
+                "p2".into(),
+                serde_json::json!({"id": "p2", "name": "Gadget"}),
+            ),
         ];
         let after_many =
             attach_enrich_rows(&roots, &lines, c.root_enrich()[0], &BTreeMap::new()).unwrap();
         let mut foreign = BTreeMap::new();
         foreign.insert(cid("products"), products);
-        let out =
-            attach_within_rows(&after_many, &foreign, w, &BTreeMap::new()).unwrap();
+        let out = attach_within_rows(&after_many, &foreign, w, &BTreeMap::new()).unwrap();
         let bag = out[0].1["items"].as_array().unwrap();
         assert_eq!(bag.len(), 2);
         assert_eq!(bag[0]["product"]["name"], "Widget");
@@ -2338,8 +2724,14 @@ mod tests {
         )];
         let customers = vec![("c1".into(), serde_json::json!({"id": "c1", "name": "Ada"}))];
         let lines = vec![
-            ("l1".into(), serde_json::json!({"order_id": "o1", "sku": "A"})),
-            ("l2".into(), serde_json::json!({"order_id": "o1", "sku": "B"})),
+            (
+                "l1".into(),
+                serde_json::json!({"order_id": "o1", "sku": "A"}),
+            ),
+            (
+                "l2".into(),
+                serde_json::json!({"order_id": "o1", "sku": "B"}),
+            ),
         ];
         let mid =
             attach_enrich_rows(&roots, &customers, c.root_enrich()[0], &BTreeMap::new()).unwrap();
@@ -2383,15 +2775,17 @@ mod tests {
                 "warehouse_id": "w1"
             }),
         )];
-        let products = vec![("p1".into(), serde_json::json!({"id": "p1", "name": "Widget"}))];
+        let products = vec![(
+            "p1".into(),
+            serde_json::json!({"id": "p1", "name": "Widget"}),
+        )];
         let warehouses = vec![("w1".into(), serde_json::json!({"id": "w1", "city": "Oslo"}))];
         let after_many =
             attach_enrich_rows(&roots, &lines, c.root_enrich()[0], &BTreeMap::new()).unwrap();
         let mut foreign = BTreeMap::new();
         foreign.insert(cid("products"), products);
         foreign.insert(cid("warehouses"), warehouses);
-        let out =
-            attach_within_rows(&after_many, &foreign, w, &BTreeMap::new()).unwrap();
+        let out = attach_within_rows(&after_many, &foreign, w, &BTreeMap::new()).unwrap();
         let item = &out[0].1["items"].as_array().unwrap()[0];
         assert_eq!(item["product"]["name"], "Widget");
         assert_eq!(item["warehouse"]["city"], "Oslo");
@@ -2405,8 +2799,7 @@ mod tests {
             steps: vec![FullPipelineStepV1::Enrich(EnrichStepV1 {
                 output: "product".into(),
                 using_name: "products".into(),
-                using_id: CollectionId::from_str("00000000-0000-4000-8000-0000000000a4")
-                    .unwrap(),
+                using_id: CollectionId::from_str("00000000-0000-4000-8000-0000000000a4").unwrap(),
                 left: Path::parse_dotted("product_id").unwrap(),
                 right: Path::parse_dotted("id").unwrap(),
                 candidate_where: None,
@@ -2466,16 +2859,21 @@ mod tests {
             ),
         ];
         let products = vec![
-            ("p1".into(), serde_json::json!({"id": "p1", "name": "Widget"})),
-            ("p2".into(), serde_json::json!({"id": "p2", "name": "Gadget"})),
+            (
+                "p1".into(),
+                serde_json::json!({"id": "p1", "name": "Widget"}),
+            ),
+            (
+                "p2".into(),
+                serde_json::json!({"id": "p2", "name": "Gadget"}),
+            ),
         ];
         let after_many =
             attach_enrich_rows(&roots, &lines, c.root_enrich()[0], &BTreeMap::new()).unwrap();
         let mut foreign = BTreeMap::new();
         foreign.insert(cid("components"), components);
         foreign.insert(cid("products"), products);
-        let out =
-            attach_within_rows(&after_many, &foreign, w, &BTreeMap::new()).unwrap();
+        let out = attach_within_rows(&after_many, &foreign, w, &BTreeMap::new()).unwrap();
         let parts = out[0].1["items"].as_array().unwrap()[0]["parts"]
             .as_array()
             .unwrap();
@@ -2513,18 +2911,24 @@ mod tests {
             "l1".into(),
             serde_json::json!({"order_id": "o1", "product_id": "p1"}),
         )];
-        let products = vec![("p1".into(), serde_json::json!({"id": "p1", "name": "Widget"}))];
+        let products = vec![(
+            "p1".into(),
+            serde_json::json!({"id": "p1", "name": "Widget"}),
+        )];
         let customers = vec![("c1".into(), serde_json::json!({"id": "c1", "name": "Ada"}))];
-        let mid =
-            attach_enrich_rows(&roots, &lines, c.root_enrich()[0], &BTreeMap::new()).unwrap();
+        let mid = attach_enrich_rows(&roots, &lines, c.root_enrich()[0], &BTreeMap::new()).unwrap();
         let mut foreign = BTreeMap::new();
         foreign.insert(cid("products"), products);
         let after_within =
             attach_within_rows(&mid, &foreign, c.first_within().unwrap(), &BTreeMap::new())
                 .unwrap();
-        let out =
-            attach_enrich_rows(&after_within, &customers, c.root_enrich()[1], &BTreeMap::new())
-                .unwrap();
+        let out = attach_enrich_rows(
+            &after_within,
+            &customers,
+            c.root_enrich()[1],
+            &BTreeMap::new(),
+        )
+        .unwrap();
         assert_eq!(out[0].1["customer"]["name"], "Ada");
         assert_eq!(
             out[0].1["items"].as_array().unwrap()[0]["product"]["name"],
@@ -2580,15 +2984,20 @@ mod tests {
             ),
         ];
         let products = vec![
-            ("p1".into(), serde_json::json!({"id": "p1", "name": "Widget"})),
-            ("p2".into(), serde_json::json!({"id": "p2", "name": "Gadget"})),
+            (
+                "p1".into(),
+                serde_json::json!({"id": "p1", "name": "Widget"}),
+            ),
+            (
+                "p2".into(),
+                serde_json::json!({"id": "p2", "name": "Gadget"}),
+            ),
         ];
         let after_many =
             attach_enrich_rows(&roots, &lines, c.root_enrich()[0], &BTreeMap::new()).unwrap();
         let mut foreign = BTreeMap::new();
         foreign.insert(cid("products"), products);
-        let out =
-            attach_within_rows(&after_many, &foreign, w, &BTreeMap::new()).unwrap();
+        let out = attach_within_rows(&after_many, &foreign, w, &BTreeMap::new()).unwrap();
         let bag = out[0].1["items"].as_array().unwrap();
         assert_eq!(bag.len(), 1);
         assert_eq!(bag[0]["qty"], 3);
@@ -2625,15 +3034,20 @@ mod tests {
             ),
         ];
         let products = vec![
-            ("p1".into(), serde_json::json!({"id": "p1", "name": "Widget"})),
-            ("p2".into(), serde_json::json!({"id": "p2", "name": "Gadget"})),
+            (
+                "p1".into(),
+                serde_json::json!({"id": "p1", "name": "Widget"}),
+            ),
+            (
+                "p2".into(),
+                serde_json::json!({"id": "p2", "name": "Gadget"}),
+            ),
         ];
         let after_many =
             attach_enrich_rows(&roots, &lines, c.root_enrich()[0], &BTreeMap::new()).unwrap();
         let mut foreign = BTreeMap::new();
         foreign.insert(cid("products"), products);
-        let out =
-            attach_within_rows(&after_many, &foreign, w, &BTreeMap::new()).unwrap();
+        let out = attach_within_rows(&after_many, &foreign, w, &BTreeMap::new()).unwrap();
         let bag = out[0].1["items"].as_array().unwrap();
         assert_eq!(bag.len(), 1);
         assert_eq!(bag[0]["product"]["name"], "Widget");
@@ -2719,17 +3133,19 @@ mod tests {
             "l1".into(),
             serde_json::json!({"order_id": "o1", "product_id": "p1", "sku": "A"}),
         )];
-        let products = vec![("p1".into(), serde_json::json!({"id": "p1", "name": "Widget"}))];
+        let products = vec![(
+            "p1".into(),
+            serde_json::json!({"id": "p1", "name": "Widget"}),
+        )];
         let mid =
             attach_enrich_rows(&roots, &customers, c.root_enrich()[0], &BTreeMap::new()).unwrap();
-        let mid2 =
-            attach_enrich_rows(&mid, &lines, c.root_enrich()[1], &BTreeMap::new()).unwrap();
+        let mid2 = attach_enrich_rows(&mid, &lines, c.root_enrich()[1], &BTreeMap::new()).unwrap();
         let mut foreign = BTreeMap::new();
         foreign.insert(cid("products"), products);
         let enriched =
             attach_within_rows(&mid2, &foreign, c.first_within().unwrap(), &BTreeMap::new())
                 .unwrap();
-        let out = apply_project_rows(&enriched, proj).unwrap();
+        let out = apply_project_rows(&enriched, proj, &BTreeMap::new()).unwrap();
         assert_eq!(out[0].1["order_id"], "o1");
         assert_eq!(out[0].1["customer"]["name"], "Ada");
         assert!(out[0].1["customer"].get("id").is_none());
@@ -2741,11 +3157,7 @@ mod tests {
 
     #[test]
     fn project_conflict_and_type_error() {
-        let err = compile_rql_full(
-            r#"from orders project { id, id }"#,
-            &bindings(),
-        )
-        .unwrap_err();
+        let err = compile_rql_full(r#"from orders project { id, id }"#, &bindings()).unwrap_err();
         assert!(err.to_string().contains(DIAG_RQL_PROJECTION_CONFLICT));
 
         let fields = vec![ProjectItemV1::Nested {
@@ -2756,7 +3168,7 @@ mod tests {
             }],
         }];
         let rows = vec![("o1".into(), serde_json::json!({"status": "paid"}))];
-        let err = apply_project_rows(&rows, &fields).unwrap_err();
+        let err = apply_project_rows(&rows, &fields, &BTreeMap::new()).unwrap_err();
         assert!(err.to_string().contains(DIAG_RQL_PROJECT_TYPE));
     }
 
@@ -2775,9 +3187,18 @@ mod tests {
             ("o2".into(), serde_json::json!({"order_id": "o2"})),
         ];
         let foreign = vec![
-            ("l2".into(), serde_json::json!({"order_id": "o1", "sku": "B"})),
-            ("l1".into(), serde_json::json!({"order_id": "o1", "sku": "A"})),
-            ("l3".into(), serde_json::json!({"order_id": "o2", "sku": "C"})),
+            (
+                "l2".into(),
+                serde_json::json!({"order_id": "o1", "sku": "B"}),
+            ),
+            (
+                "l1".into(),
+                serde_json::json!({"order_id": "o1", "sku": "A"}),
+            ),
+            (
+                "l3".into(),
+                serde_json::json!({"order_id": "o2", "sku": "C"}),
+            ),
         ];
         let out = attach_enrich_rows(&roots, &foreign, step, &BTreeMap::new()).unwrap();
         let bag = out[0].1["items"].as_array().unwrap();
@@ -2798,12 +3219,10 @@ mod tests {
             candidate_where: None,
             expect: EnrichCardinality::ExactlyOne,
         };
-        let roots = vec![
-            (
-                "o1".into(),
-                serde_json::json!({"customer_id": "c1", "n": 1}),
-            ),
-        ];
+        let roots = vec![(
+            "o1".into(),
+            serde_json::json!({"customer_id": "c1", "n": 1}),
+        )];
         let foreign = vec![
             ("c1".into(), serde_json::json!({"id": "c1", "name": "Ada"})),
             ("c2".into(), serde_json::json!({"id": "c2", "name": "Bob"})),

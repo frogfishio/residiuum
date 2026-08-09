@@ -49,11 +49,8 @@ pub fn compile_where(
     params: &BTreeMap<String, JsonValue>,
 ) -> Result<CompiledKernelWhere, Error> {
     let source = lower_predicate(pred, params)?;
-    let prog = sda_core::Program::parse(&source).map_err(|e| {
-        Error::QueryInvalid(format!(
-            "kernel SDA parse failed: {e}; src={source}"
-        ))
-    })?;
+    let prog = sda_core::Program::parse(&source)
+        .map_err(|e| Error::QueryInvalid(format!("kernel SDA parse failed: {e}; src={source}")))?;
     Ok(CompiledKernelWhere {
         profile: KERNEL_PROFILE,
         source,
@@ -164,10 +161,7 @@ enum OpLower {
     Lit(JsonValue),
 }
 
-fn resolve_operand(
-    op: &Operand,
-    params: &BTreeMap<String, JsonValue>,
-) -> Result<OpLower, Error> {
+fn resolve_operand(op: &Operand, params: &BTreeMap<String, JsonValue>) -> Result<OpLower, Error> {
     match op {
         Operand::Path { path } => Ok(OpLower::Path(path.clone())),
         Operand::Literal { value } => Ok(OpLower::Lit(value.clone())),
@@ -328,7 +322,9 @@ fn json_to_sda_literal(v: &JsonValue) -> String {
         JsonValue::Object(map) => {
             let inner = map
                 .iter()
-                .map(|(k, val)| format!("{} -> {}", sda_string_literal(k), json_to_sda_literal(val)))
+                .map(|(k, val)| {
+                    format!("{} -> {}", sda_string_literal(k), json_to_sda_literal(val))
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("Map{{{inner}}}")
@@ -425,13 +421,21 @@ mod tests {
     fn present_missing_isnull() {
         let params = BTreeMap::new();
         let path = Path::parse_dotted("x").unwrap();
-        eq_oracle(&Predicate::Present { path: path.clone() }, &json!({}), &params);
+        eq_oracle(
+            &Predicate::Present { path: path.clone() },
+            &json!({}),
+            &params,
+        );
         eq_oracle(
             &Predicate::Present { path: path.clone() },
             &json!({"x": null}),
             &params,
         );
-        eq_oracle(&Predicate::Missing { path: path.clone() }, &json!({}), &params);
+        eq_oracle(
+            &Predicate::Missing { path: path.clone() },
+            &json!({}),
+            &params,
+        );
         eq_oracle(
             &Predicate::IsNull {
                 path: path.clone(),

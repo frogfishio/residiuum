@@ -148,11 +148,10 @@ fn json_ord(a: &JsonValue, b: &JsonValue) -> Ordering {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan_v1::{OrderDir, OrderTerm, NullsOrder};
+    use crate::plan_v1::{NullsOrder, OrderDir, OrderTerm};
     use crate::predicate::Path;
     use serde_json::json;
     use std::cmp::Ordering;

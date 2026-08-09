@@ -101,6 +101,8 @@ messages.
 - collection create/open/list;
 - typed JSON get, atomic value-plus-version get, and version-bearing bounded
   ordered scan pages;
+- bounded Application Core query pages on `Collection<T>` and bounded Full RQL
+  pages on a Heap binding, using the shared scheduler and canonical QVM;
 - durable idempotent put and create-if-absent;
 - version-conditional replace and delete;
 - stable structured errors, retry dispositions, and receipts;
@@ -112,7 +114,7 @@ messages.
 
 ## Explicit residuals
 
-This handoff does not claim remote pooling, streamed RQL/predicate queries,
+This handoff does not claim remote pooling, a lazy typed RQL stream/cursor,
 cancellation of a running synchronous kernel call, automatic retry, a separate
 status-only outcome API, bulk calls, or multi-record Atomics. Those remain
 driver work and must not be recreated in Gremlin.

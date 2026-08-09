@@ -15,7 +15,9 @@
 //! [`CompiledAppCore::budget`] for merge with [`crate::app_v1::QueryRunOptions`]
 //! at execution (not part of plan hash). No product query claim until APB-7.
 
-use crate::app_v1::{ConsistencyMode, CoveragePolicy, QueryBudget};
+use crate::app_v1::{
+    ConsistencyMode, Continuation, CoveragePolicy, Parameters, QueryBudget, QueryRunOptions,
+};
 use crate::error::Error;
 use crate::plan_v1::{
     CollectionBindings, NullsOrder, OrderDir, PlanBuilder, RqlPlanV1, DEFAULT_PAGE_SIZE,
@@ -33,6 +35,13 @@ pub const MAX_RQL_SOURCE_BYTES: usize = 1_048_576;
 /// Diagnostic tag for unsupported Application Core features (error map).
 pub const DIAG_RQL_FEATURE_UNAVAILABLE: &str = "rql_feature_unavailable";
 
+/// Stable refusal for offset/skip discard pagination.
+///
+/// Application queries must use authenticated cursor continuation (`after`);
+/// silently accepting offset would make work and consistency proportional to
+/// discarded rows.
+pub const DIAG_RQL_OFFSET_DISCARD_UNSUPPORTED: &str = "rql_offset_discard_unsupported";
+
 /// Result of compiling Application Core source.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledAppCore {
@@ -42,8 +51,21 @@ pub struct CompiledAppCore {
     pub explain: bool,
     /// Optional budgets from `budget { … }` (run options, not plan hash).
     pub budget: Option<QueryBudget>,
+    /// Textual continuation selector. This is execution metadata and is
+    /// deliberately excluded from the canonical logical plan/hash.
+    pub after: Option<TextualAfter>,
     /// Profile string for advertising.
     pub profile: &'static str,
+}
+
+/// Source-level `after` value. The opaque token is resolved only at execute
+/// time so query identity never depends on a particular page cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextualAfter {
+    /// `after $name`.
+    Parameter(String),
+    /// `after "opaque-token"`.
+    Literal(Vec<u8>),
 }
 
 /// Compile Application Core RQL into [`RqlPlanV1`] (+ explain/budget run metadata).
@@ -99,6 +121,7 @@ pub fn compile_app_core(
     let mut saw_coverage = false;
     let mut saw_consistency = false;
     let mut saw_budget = false;
+    let mut after: Option<TextualAfter> = None;
     let mut group_keys: Vec<crate::predicate::Path> = Vec::new();
 
     loop {
@@ -286,8 +309,31 @@ pub fn compile_app_core(
             continue;
         }
         if p.eat_keyword("after") {
-            // Continuation is APP-6 product surface; never silently ignore.
-            return feature_unavailable("after / continuation clause (APP-6)");
+            if after.is_some() {
+                return Err(Error::QueryInvalid("duplicate after clause".into()));
+            }
+            p.skip_ws();
+            if p.eat_char('$') {
+                let name = p.parse_ident_or_string()?;
+                if name.starts_with('$') {
+                    return Err(Error::QueryInvalid(
+                        "after parameter has duplicate `$`".into(),
+                    ));
+                }
+                after = Some(TextualAfter::Parameter(name));
+            } else if p.peek() == Some('"') {
+                after = Some(TextualAfter::Literal(p.parse_string()?.into_bytes()));
+            } else {
+                return Err(Error::QueryInvalid(
+                    "after expects an opaque string or `$parameter`".into(),
+                ));
+            }
+            continue;
+        }
+        if p.eat_keyword("offset") || p.eat_keyword("skip") {
+            return Err(Error::QueryInvalid(format!(
+                "{DIAG_RQL_OFFSET_DISCARD_UNSUPPORTED}: offset/skip discard is unsupported; use `after`"
+            )));
         }
         return Err(Error::QueryInvalid(format!(
             "unexpected token near `{}`",
@@ -326,8 +372,77 @@ pub fn compile_app_core(
         plan,
         explain,
         budget,
+        after,
         profile: APP_CORE_PROFILE,
     })
+}
+
+/// Parse one standalone RQL predicate using the same parser as root `where`.
+pub(crate) fn parse_predicate_expression(source: &str) -> Result<Predicate, Error> {
+    let mut p = Parser::new(source);
+    p.skip_ws();
+    let pred = p.parse_or()?;
+    p.skip_ws();
+    if !p.is_eof() {
+        return Err(Error::QueryInvalid(format!(
+            "unexpected predicate token near `{}`",
+            p.snippet()
+        )));
+    }
+    Ok(pred)
+}
+
+/// Resolve source-level continuation metadata into run options and return the
+/// semantic parameter set used for predicate hashing/evaluation. The cursor
+/// binding itself is removed because it identifies a page, not query meaning.
+pub(crate) fn bind_textual_after(
+    after: Option<&TextualAfter>,
+    parameters: &Parameters,
+    options: &mut QueryRunOptions,
+) -> Result<Parameters, Error> {
+    let Some(after) = after else {
+        return Ok(parameters.clone());
+    };
+    if options.after.is_some() {
+        return Err(Error::QueryInvalid(
+            "continuation supplied both in source and QueryRunOptions".into(),
+        ));
+    }
+    let mut semantic = parameters.clone();
+    let token = match after {
+        TextualAfter::Literal(bytes) => bytes.clone(),
+        TextualAfter::Parameter(name) => {
+            let value = semantic.values.remove(name).ok_or_else(|| {
+                Error::QueryInvalid(format!("unbound continuation parameter `${name}`"))
+            })?;
+            match value {
+                JsonValue::String(s) => s.into_bytes(),
+                JsonValue::Array(values) => values
+                    .into_iter()
+                    .map(|v| {
+                        v.as_u64()
+                            .filter(|n| *n <= 255)
+                            .map(|n| n as u8)
+                            .ok_or_else(|| {
+                                Error::QueryInvalid(format!(
+                                    "continuation `${name}` byte array contains a non-byte"
+                                ))
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                _ => {
+                    return Err(Error::QueryInvalid(format!(
+                        "continuation `${name}` must be a string or byte array"
+                    )))
+                }
+            }
+        }
+    };
+    if token.is_empty() {
+        return Err(Error::QueryInvalid("continuation token is empty".into()));
+    }
+    options.after = Some(Continuation { token });
+    Ok(semantic)
 }
 
 /// Merge source-clause budget with run-option budget (stricter wins per field).
@@ -352,12 +467,6 @@ fn min_opt(a: Option<u64>, b: Option<u64>) -> Option<u64> {
         (Some(x), None) | (None, Some(x)) => Some(x),
         (Some(x), Some(y)) => Some(x.min(y)),
     }
-}
-
-fn feature_unavailable(what: &str) -> Result<CompiledAppCore, Error> {
-    Err(Error::QueryInvalid(format!(
-        "{DIAG_RQL_FEATURE_UNAVAILABLE}: {what}"
-    )))
 }
 
 fn reject_excluded_features(source: &str) -> Result<(), Error> {
@@ -1046,7 +1155,9 @@ impl<'a> Parser<'a> {
             return Ok(Operand::literal(JsonValue::String(self.parse_string()?)));
         }
         if self.peek() == Some('[') {
-            return Ok(Operand::literal(JsonValue::Array(self.parse_literal_list()?)));
+            return Ok(Operand::literal(JsonValue::Array(
+                self.parse_literal_list()?,
+            )));
         }
         if self.eat_keyword("true") {
             return Ok(Operand::literal(JsonValue::Bool(true)));
@@ -1264,11 +1375,7 @@ mod tests {
             } => assert_eq!(value, &JsonValue::Array(vec![])),
             other => panic!("expected eq empty array, got {other:?}"),
         }
-        let nonempty = compile_app_core(
-            r#"from orders where attachments != []"#,
-            &b,
-        )
-        .unwrap();
+        let nonempty = compile_app_core(r#"from orders where attachments != []"#, &b).unwrap();
         assert!(matches!(
             &nonempty.plan.where_pred,
             Predicate::Cmp {
@@ -1295,9 +1402,10 @@ mod tests {
         let nested = compile_app_core(r#"from orders where tags = ["a", "b"]"#, &b).unwrap();
         match &nested.plan.where_pred {
             Predicate::Cmp {
-                right: Operand::Literal {
-                    value: JsonValue::Array(items),
-                },
+                right:
+                    Operand::Literal {
+                        value: JsonValue::Array(items),
+                    },
                 ..
             } => assert_eq!(items.len(), 2),
             other => panic!("expected array lit cmp, got {other:?}"),
@@ -1356,9 +1464,24 @@ mod tests {
     }
 
     #[test]
-    fn after_still_feature_unavailable() {
-        let err = compile_app_core("from orders after $c", &bindings()).unwrap_err();
-        assert!(err.to_string().contains(DIAG_RQL_FEATURE_UNAVAILABLE));
+    fn after_compiles_as_non_plan_execution_metadata() {
+        let plain = compile_app_core("from orders", &bindings()).unwrap();
+        let resumed = compile_app_core("from orders after $c", &bindings()).unwrap();
+        assert_eq!(resumed.after, Some(TextualAfter::Parameter("c".into())));
+        assert_eq!(plain.plan.plan_hash(), resumed.plan.plan_hash());
+    }
+
+    #[test]
+    fn offset_and_skip_have_stable_cursor_refusal() {
+        for source in [
+            "from orders order by created_at desc offset 8 limit 8",
+            "from orders skip 5 limit 5",
+        ] {
+            let err = compile_app_core(source, &bindings()).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains(DIAG_RQL_OFFSET_DISCARD_UNSUPPORTED), "{msg}");
+            assert!(msg.contains("use `after`"), "{msg}");
+        }
     }
 
     #[test]

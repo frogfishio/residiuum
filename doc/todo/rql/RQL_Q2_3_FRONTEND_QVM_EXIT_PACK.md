@@ -97,24 +97,22 @@ Q2.3 elevates these to **QVM byte identity**, not plan_hash alone.
 
 ## 4. Tier-A expressibility residual (blocks Q2 exit)
 
-From Q2.1 re-audit after Q2.2d (budget partial coverage):
+From Q2.1 re-audit after computed projection, textual continuation and the
+versioned within corpus correction (2026-08-09):
 
 | Metric | Value |
 |---|---:|
 | Tier-A cases | 147 |
-| Execute ok (product expressible) | **134** |
+| Execute ok (product expressible) | **145** |
 | Expected stable refusal ok | **2** |
-| Gap cases | **11** |
+| Gap cases | **0** |
 
-### Residual packages (claim as separate Q2.2 work — not this card)
-
-| Package | Cases |
-|---|---:|
-| `pkg_computed_conditional_project` | 5 |
-| `pkg_cursor_after_clause` | 5 |
-| `pkg_enrich_semantics` | 1 |
-
-Closed in prior waves: `pkg_group_aggregate`, `pkg_enrich_corpus_dialect`, `pkg_array_predicate_surface`, `pkg_budget_partial_coverage` ([RQL_Q2_2D_BUDGET_PARTIAL.md](./RQL_Q2_2D_BUDGET_PARTIAL.md)).
+All case-count packages are closed on the embedded product path. The explicit
+Full op-118 profile and backend-neutral `HeapClient::rql_full` close the
+Full-over-wire labor blocker with qualified TLS parity/refusal/isolation tests.
+Package exit still requires the principal's corpus/Q1 and Decision-0
+dispositions and complete Q3 semantics; 145 successful executions plus two
+deliberate refusals are not by themselves a package acceptance.
 
 ## 5. Sole production authority (QVM)
 

@@ -108,7 +108,7 @@ pub use plan_v1::{
     PLAN_PROFILE,
 };
 pub use rql_app_core::{
-    compile_app_core, merge_budgets, CompiledAppCore, APP_CORE_PROFILE,
+    compile_app_core, merge_budgets, CompiledAppCore, TextualAfter, APP_CORE_PROFILE,
     DIAG_RQL_FEATURE_UNAVAILABLE, MAX_RQL_SOURCE_BYTES,
 };
 pub use sql_plus::{
@@ -159,12 +159,13 @@ pub use predicate::{
     MAX_PATH_SEGMENTS, MAX_PREDICATE_NODES, PREDICATE_PROFILE_V1,
 };
 pub use query_bytecode_v1::{
-    compile_rql_full, compile_where, execute_bytecode, execute_core_rql, execute_full_qvm_with,
-    execute_qvm_bytes, execute_rql_full, execute_rql_full_with, explain_core_source,
-    explain_rql_full, explain_rql_full_on_heap, explain_rql_source, lower_core_source,
-    lower_predicate, qvm_hash, refuse_full_language_on_core_wire, source_uses_rql_full_constructs,
-    validate_qvm, CompiledKernelWhere, CompiledRqlFull, EnrichAttachMode, EnrichCardinality,
-    EnrichLoadEvidence, EnrichStepV1, FullPipelineStepV1, HostCapabilities, Instruction, OpCode,
+    compile_rql_full, compile_where, execute_bytecode, execute_core_rql,
+    execute_full_qvm_on_host_with, execute_full_qvm_with, execute_qvm_bytes, execute_rql_full,
+    execute_rql_full_on_host_with, execute_rql_full_with, explain_core_source, explain_rql_full,
+    explain_rql_full_on_heap, explain_rql_source, lower_core_source, lower_predicate, qvm_hash,
+    refuse_full_language_on_core_wire, source_uses_rql_full_constructs, validate_qvm,
+    CompiledKernelWhere, CompiledRqlFull, EnrichAttachMode, EnrichCardinality, EnrichLoadEvidence,
+    EnrichStepV1, FullPipelineStepV1, HostCapabilities, HostDocument, Instruction, OpCode, ProjectExprV1,
     ProjectItemV1, QueryBytecodeV1, RqlFullExecuteOptions, RqlFullPage, WithinStepV1,
     ATTACH_IR_PROFILE, BYTECODE_PROFILE, DIAG_RQL_ENRICH_CARDINALITY, DIAG_RQL_FULL_RESIDUAL,
     DIAG_RQL_PROJECTION_CONFLICT, DIAG_RQL_PROJECT_TYPE, DIAG_RQL_WITHIN_TYPE, EXEC_PROFILE,
@@ -199,6 +200,7 @@ pub use resource::{
     DEFAULT_MAX_JSON_DEPTH, DEFAULT_MAX_PAYLOAD_BYTES, DEFAULT_MAX_RESULT_BYTES,
     DEFAULT_MAX_RPC_LINE_BYTES, RESOURCE_PROFILE,
 };
+pub use rql_app_core::DIAG_RQL_OFFSET_DISCARD_UNSUPPORTED;
 #[cfg(feature = "legacy-flat-sdk")]
 pub use sda_query::{eval_sda_program, SdaTextQuery, SDA_QUERY_PROFILE};
 pub use subject::{
@@ -298,6 +300,10 @@ pub use residiuum_cluster::ClusterConfig;
 
 /// Re-export durability modes used on receipts and put options.
 pub use residiuum_store::DurabilityMode;
+/// Primary checkpoint acceptance/rejection decision.
+pub use residiuum_store::IndexCacheDecision;
+/// Primary-index startup disposition.
+pub use residiuum_store::IndexOpenDisposition;
 /// Re-export index lifecycle states (DX_SPEC §8.2).
 pub use residiuum_store::IndexState;
 /// Re-export chunked payload completeness (FORMAT_SPEC §8).
@@ -306,10 +312,6 @@ pub use residiuum_store::PayloadResult;
 pub use residiuum_store::StoreOpenMetrics;
 /// Structured store startup report.
 pub use residiuum_store::StoreOpenReport;
-/// Primary-index startup disposition.
-pub use residiuum_store::IndexOpenDisposition;
-/// Primary checkpoint acceptance/rejection decision.
-pub use residiuum_store::IndexCacheDecision;
 
 /// Build a `serde_json::Value` from a JSON literal (re-export for examples/tests).
 pub use serde_json::json;

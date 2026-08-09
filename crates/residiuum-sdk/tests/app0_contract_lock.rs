@@ -2,12 +2,12 @@
 //!
 //! Normative: `doc/todo/application-baseline/CORE_APPLICATION_API_IMPLEMENTATION_PLAN.md` §12–§14 APP-0.
 
+use residiuum_heap::{CollectionId, HeapId};
 use residiuum_sdk::{
-    AppQueryBudget, CollectionClient, ConsistencyMode, CoveragePolicy, CURSOR_PROFILE,
-    RQL_APP_CORE_PROFILE, RQL_PLAN_PROFILE, ErrorCode, HeapClient, Parameters, PREDICATE_PROFILE,
-    QueryRunOptions, RUST_APP_PROFILE,
+    AppQueryBudget, CollectionClient, ConsistencyMode, CoveragePolicy, ErrorCode, HeapClient,
+    Parameters, QueryRunOptions, CURSOR_PROFILE, PREDICATE_PROFILE, RQL_APP_CORE_PROFILE,
+    RQL_PLAN_PROFILE, RUST_APP_PROFILE,
 };
-use residiuum_heap::{HeapId, CollectionId};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -27,7 +27,11 @@ fn read_json(rel: &str) -> Value {
 
 fn must_exist(rel: &str) {
     let path = workspace_root().join(rel);
-    assert!(path.is_file(), "missing required APP-0 artifact {}", path.display());
+    assert!(
+        path.is_file(),
+        "missing required APP-0 artifact {}",
+        path.display()
+    );
 }
 
 #[test]
@@ -54,14 +58,18 @@ fn app0_wire_artifacts_present() {
 }
 
 #[test]
-fn app0_ops_106_active_118_reserved() {
+fn app0_ops_106_and_118_active() {
     let ops = read_json("spec/heap/operations-v1.json");
     let list = ops["operations"].as_array().expect("operations array");
     let op106 = list
         .iter()
         .find(|o| o["id"].as_u64() == Some(106))
         .expect("missing op 106");
-    assert_eq!(op106["status"].as_str(), Some("active"), "APP-1 activates 106");
+    assert_eq!(
+        op106["status"].as_str(),
+        Some("active"),
+        "APP-1 activates 106"
+    );
     assert!(
         op106["request_schema"].is_string() && op106["response_schema"].is_string(),
         "active op 106 must have schema pointers"
@@ -72,12 +80,12 @@ fn app0_ops_106_active_118_reserved() {
         .expect("missing op 118");
     assert_eq!(
         op118["status"].as_str(),
-        Some("reserved"),
-        "op 118 stays reserved until APP-7"
+        Some("active"),
+        "APP-7 activates op 118"
     );
     assert!(
-        op118["request_schema"].is_null() && op118["response_schema"].is_null(),
-        "reserved op 118 must keep null schema pointers"
+        op118["request_schema"].is_string() && op118["response_schema"].is_string(),
+        "active op 118 must have schema pointers"
     );
 }
 
@@ -133,7 +141,10 @@ fn app0_error_mapping_codes_are_sdk_codes() {
             assert_eq!(m["code"].as_str(), Some("query_invalid"));
         }
     }
-    assert!(found_feature, "must map unsupported RQL feature → query_invalid + rql_feature_unavailable");
+    assert!(
+        found_feature,
+        "must map unsupported RQL feature → query_invalid + rql_feature_unavailable"
+    );
 }
 
 #[test]
@@ -169,7 +180,10 @@ fn app0_fixtures_match_op_ids() {
     assert!(rql["result"]["exhausted"].as_bool().is_some());
 
     let rql_rej = read_json("spec/heap/fixtures/rql_query.rejected.json");
-    assert_eq!(rql_rej["error"]["diagnostic"].as_str(), Some("rql_feature_unavailable"));
+    assert_eq!(
+        rql_rej["error"]["diagnostic"].as_str(),
+        Some("rql_feature_unavailable")
+    );
 }
 
 fn v4(seed: u8) -> [u8; 16] {

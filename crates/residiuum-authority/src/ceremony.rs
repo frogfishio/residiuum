@@ -46,6 +46,20 @@ pub struct GenesisResult {
     pub master_public_key: [u8; 32],
 }
 
+/// Durable inputs required to resume a staged Heap genesis after interruption.
+///
+/// Callers that need restart-safe orchestration must persist this value (or the
+/// equivalent fields) before calling [`commit_prepared_genesis`].
+#[derive(Debug, Clone)]
+pub struct PreparedGenesis {
+    /// Original, authority-bound request.
+    pub request: GenesisRequest,
+    /// Non-discoverable storage genesis staged under the data root.
+    pub staged: StagedGenesis,
+    /// Stable authority-root event id used by retries and receipts.
+    pub root_event_id: [u8; 16],
+}
+
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -99,6 +113,13 @@ pub fn commit_genesis(
     provider: &dyn MasterKeyProvider,
     req: GenesisRequest,
 ) -> Result<GenesisResult, AuthorityError> {
+    let prepared = prepare_genesis(req)?;
+    commit_prepared_genesis(provider, &prepared)
+}
+
+/// Stage a non-discoverable storage genesis and allocate the stable authority
+/// event identity needed for an interruption-safe commit.
+pub fn prepare_genesis(req: GenesisRequest) -> Result<PreparedGenesis, AuthorityError> {
     let layout = HeapMetaLayout::new(&req.data_root);
     let staged: StagedGenesis = stage_heap_genesis(
         &layout,
@@ -108,9 +129,39 @@ pub fn commit_genesis(
         &req.name,
     )
     .map_err(|e| AuthorityError::Provisioning(e.to_string()))?;
+    Ok(PreparedGenesis {
+        request: req,
+        staged,
+        root_event_id: random_id16()?,
+    })
+}
+
+/// Commit and publish a previously prepared genesis.
+///
+/// This operation is idempotent for the exact prepared request. If authority
+/// committed before an interruption, retry validates the anchored head and
+/// completes publication of the byte-identical staged descriptor. Conflicting
+/// authority or published storage fails closed.
+pub fn commit_prepared_genesis(
+    provider: &dyn MasterKeyProvider,
+    prepared: &PreparedGenesis,
+) -> Result<GenesisResult, AuthorityError> {
+    let req = &prepared.request;
+    let staged = &prepared.staged;
+    if staged.heap_id != req.heap_id {
+        return Err(AuthorityError::InvalidArgument(
+            "prepared heap id does not match request".into(),
+        ));
+    }
+    if staged.name != req.name {
+        return Err(AuthorityError::InvalidArgument(
+            "prepared heap name does not match request".into(),
+        ));
+    }
+    let layout = HeapMetaLayout::new(&req.data_root);
 
     let master_pk = provider.public_key();
-    let root_event_id = random_id16()?;
+    let root_event_id = prepared.root_event_id;
     // New-master possession: sign domain || 0x00 || SHA-256(labels 1..14 map without sigs).
     // Simplified HP-005: sign genesis hash under possession domain.
     let mut possession_msg = Vec::new();
@@ -120,7 +171,7 @@ pub fn commit_genesis(
     let possession_sig = provider.sign(&possession_msg)?;
 
     let body = encode_root_event(
-        &req,
+        req,
         &master_pk,
         &staged.descriptor_hash,
         root_event_id,
@@ -167,20 +218,37 @@ pub fn commit_genesis(
 
     let paths = AuthorityPaths::new(&req.authority_root, &req.deployment_id, &req.heap_id);
     let store = MasterAuthorityStore::open(paths)?;
-    if store.load_head()?.is_some() {
-        return Err(AuthorityError::Refused("heap authority already exists".into()));
+    let existing = store.load_head()?;
+    if let Some(existing) = existing.as_ref() {
+        validate_retry_head(existing, req, staged, &master_pk, &event_hash)?;
+    } else {
+        store.commit_head(&head, 1, &body, prev_event)?;
     }
-    store.commit_head(&head, 1, &body, prev_event)?;
 
     // After authority commit: must publish byte-identical staged genesis.
-    let still = load_staged_genesis(&layout, &staged.staging_id)
+    match residiuum_store::rebuild_heap_entry_from_chain(&layout, &req.heap_id)
         .map_err(|e| AuthorityError::Provisioning(e.to_string()))?
-        .ok_or(AuthorityStoreError::StagedGenesisConflict)?;
-    if still.descriptor_hash != staged.descriptor_hash {
-        return Err(AuthorityStoreError::StagedGenesisConflict.into());
+    {
+        Some(published) => {
+            if published.heap_id != req.heap_id
+                || published.name != req.name
+                || published.origin_deployment_id != req.deployment_id
+                || published.descriptor_hash != staged.descriptor_hash
+            {
+                return Err(AuthorityStoreError::StagedGenesisConflict.into());
+            }
+        }
+        None => {
+            let still = load_staged_genesis(&layout, &staged.staging_id)
+                .map_err(|e| AuthorityError::Provisioning(e.to_string()))?
+                .ok_or(AuthorityStoreError::StagedGenesisConflict)?;
+            if still != *staged {
+                return Err(AuthorityStoreError::StagedGenesisConflict.into());
+            }
+            publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash)
+                .map_err(|e| AuthorityError::Provisioning(e.to_string()))?;
+        }
     }
-    publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash)
-        .map_err(|e| AuthorityError::Provisioning(e.to_string()))?;
 
     let receipt = encode_deterministic_uint_map(&[
         (1u64, CborValue::Uint(1)),
@@ -209,6 +277,32 @@ pub fn commit_genesis(
         authority_chain_head_hash: event_hash,
         master_public_key: master_pk,
     })
+}
+
+fn validate_retry_head(
+    head: &AuthorityHead,
+    req: &GenesisRequest,
+    staged: &StagedGenesis,
+    master_pk: &[u8; 32],
+    event_hash: &[u8; 32],
+) -> Result<(), AuthorityError> {
+    let exact = head.deployment_id == req.deployment_id
+        && head.heap_id == req.heap_id
+        && head.authority_epoch == 1
+        && head.security_revision == 1
+        && head.authority_revision == 1
+        && head.master_generation == 1
+        && &head.master_public_key == master_pk
+        && &head.authority_chain_head_hash == event_hash
+        && head.storage_genesis_hash == staged.descriptor_hash
+        && head.current_descriptor_hash == staged.descriptor_hash;
+    if exact {
+        Ok(())
+    } else {
+        Err(AuthorityError::Refused(
+            "existing heap authority conflicts with prepared genesis".into(),
+        ))
+    }
 }
 
 fn random_id16() -> Result<[u8; 16], AuthorityError> {

@@ -111,12 +111,12 @@ product executor.
 |---|---|---|
 | Application Core RQL | `CollectionClient::rql` → `execute_core_rql` | compile App Core → `encode_qvm` → `execute_qvm_bytes` → `run_vm` |
 | Bytecode envelope | `execute_bytecode` / `execute_qvm_bytes` | decode QVM → verify → `run_vm` |
-| Full RQL (local) | `execute_rql_full` / `_with` | `compile_rql_full` → `lower_full` → `encode_qvm` → `execute_full_qvm_with` → `run_vm` |
+| Full RQL (embedded) | `HeapClient::rql_full` / `execute_rql_full` | `compile_rql_full` → `lower_full` → `encode_qvm` → `execute_full_qvm_with` → `run_vm` |
 | Full QVM bytes | `execute_full_qvm_with` | decode QVM → `run_vm` |
 | Portable dialects | `Collection::find_dialect` sql/json/mongo | `CompiledPortable` → plan → `QueryBytecodeV1` → `execute_bytecode` → `run_vm` |
 | ~~Legacy Core ISA import~~ | ~~`execute_isa_bytes`~~ | **Removed (Q0.A10)** — not a product path |
 | ~~Legacy Full ISA import~~ | ~~`execute_full_isa_with`~~ | **Removed (Q0.A10)** — not a product path |
-| Remote Core | op **118** `rql_query` | Server/host path uses same Core execute stack (product wire; Full refused on Core wire — RQL-F2) |
+| Remote Core + bounded Full | op **118** `rql_query` | Omitted/`core` uses Core QVM; explicit `full` uses the same Full QVM executor over authorised collection-qualified host capabilities |
 
 ### 2.2 Paths that are **not** product QVM (allowed under invariant)
 
@@ -131,7 +131,7 @@ product executor.
 | Residual | Detail |
 |---|---|
 | Dialect id binding | `Collection::find_portable_with` derives **synthetic** `CollectionId` / `HeapId` from collection **name** (stable, not Heap-durable). Official Heap product path is `CollectionClient::rql` with real ids. |
-| Full vs Core wire | Full language is **refused** on Application Core op-118 wire (`refuse_full_language_on_core_wire`); Full is local `execute_rql_full` until a dedicated wire package. |
+| Full vs Core profile | Application Core op-118 still refuses Full constructs; callers must explicitly select the Heap-bound Full profile through `HeapClient::rql_full`. This preserves fail-closed Core semantics while sharing the product wire and QVM executor. |
 | Response diagnostics | `execute_full_qvm_with` may `reconstruct_attach_from_ops` for page metadata — **not** execute authority (QVM bytes are). |
 | Public API surface | `execute_rql_full` remains a named entry; it is **not** a parallel semantic executor — it lowers to QVM first. |
 | Kernel substrate | Filter meaning is SDA-evaluated text programs (`kernel.rs`), not a QVM micro-op for each compare. Host is still scan/index/get only. |

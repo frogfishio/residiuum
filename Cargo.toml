@@ -40,8 +40,8 @@ repository = "https://github.com/frogfishio/dingodb"
 # is `residiuum_sda`. `version` is required so `cargo package` can rewrite path deps.
 sda-core = { package = "residiuum-sda", path = "crates/sda-core", version = "0.2.2" }
 residiuum-format = { path = "crates/residiuum-format", version = "0.2.2" }
-residiuum-heap = { path = "crates/residiuum-heap", version = "0.2.2" }
-residiuum-authority = { path = "crates/residiuum-authority", version = "0.2.2" }
+residiuum-heap = { path = "crates/residiuum-heap", version = "0.2.3" }
+residiuum-authority = { path = "crates/residiuum-authority", version = "0.2.5" }
 # default-features false: public raw `Store` is opt-in via `legacy-raw-store`
 # (HP-003 / CPR-001). Dependents that need Stages 3–9 flat store enable the feature.
 residiuum-store = { path = "crates/residiuum-store", version = "0.2.4", default-features = false }
@@ -67,3 +67,5 @@ ureq = { version = "2", default-features = false, features = ["tls"] }
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+sysinfo = { version = "0.32", default-features = false, features = ["system"] }
+rustix = { version = "1.1", default-features = false, features = ["time"] }

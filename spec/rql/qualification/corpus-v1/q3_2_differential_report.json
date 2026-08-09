@@ -233,6 +233,20 @@
         "oracle_vs_force_scan": "equal",
         "reopen_store": "skipped"
       },
+      "case_id": "commerce.orders.project_computed_amount_band",
+      "ordered": false,
+      "row_count": 32,
+      "source": "from orders project _key, amount_band = if amount < 100 then \"low\" else if amount < 500 then \"mid\" else \"high\"",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
       "case_id": "commerce.orders.order_created_desc",
       "ordered": true,
       "row_count": 32,
@@ -268,9 +282,18 @@
       "status": "matrix_equal"
     },
     {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
       "case_id": "commerce.orders.page_resume",
-      "reason": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
-      "status": "unsupported"
+      "ordered": true,
+      "row_count": 8,
+      "source": "from orders order by created_at desc, _key asc page size 8 after $cursor",
+      "status": "matrix_equal"
     },
     {
       "arms": {
@@ -284,6 +307,104 @@
       "ordered": true,
       "row_count": 38,
       "source": "from products where active = true order by price_cents asc, sku asc",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "commerce.orders.enrich_customer_exactly_one",
+      "ordered": false,
+      "row_count": 27,
+      "source": "from orders where present(customer.id) enrich customer using customers matching customer.id = _key expect exactly_one",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "commerce.orders.enrich_line_items_many",
+      "ordered": false,
+      "row_count": 32,
+      "source": "from orders enrich items using line_items matching _key = order_id expect many",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "commerce.line_items.enrich_product_optional",
+      "ordered": false,
+      "row_count": 63,
+      "source": "from line_items enrich product using products matching product_id = _key expect optional",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "commerce.orders.group_region_count",
+      "ordered": false,
+      "row_count": 3,
+      "source": "from orders group by region project region, count() as order_count",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "commerce.orders.group_status_sum_amount",
+      "ordered": false,
+      "row_count": 4,
+      "source": "from orders group by status project status, sum(amount) as total_amount",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "commerce.orders.agg_min_max_amount",
+      "ordered": false,
+      "row_count": 1,
+      "source": "from orders project min(amount) as min_amount, max(amount) as max_amount",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "commerce.orders.agg_avg_amount_paid",
+      "ordered": false,
+      "row_count": 1,
+      "source": "from orders where status = \"paid\" project avg(amount) as avg_amount",
       "status": "matrix_equal"
     },
     {
@@ -312,6 +433,18 @@
       "ordered": false,
       "row_count": 32,
       "source": "from orders coverage incomplete",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "compile_a_vs_compile_b": "equal",
+        "required_refusal": "equal"
+      },
+      "case_id": "commerce.orders.refuse_offset_discard",
+      "outcome": "stable_refusal",
+      "refusal_code": "rql_offset_discard_unsupported",
+      "source": "from orders order by created_at desc offset 8 limit 8",
       "status": "matrix_equal"
     },
     {
@@ -413,9 +546,18 @@
       "status": "matrix_equal"
     },
     {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
       "case_id": "messaging.messages.conversation_history_resume",
-      "reason": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
-      "status": "unsupported"
+      "ordered": true,
+      "row_count": 4,
+      "source": "from messages where conversation_id = \"cv-0001\" order by sent_at asc, _key asc page size 16 after $cursor",
+      "status": "matrix_equal"
     },
     {
       "arms": {
@@ -499,6 +641,62 @@
       "ordered": false,
       "row_count": 12,
       "source": "from participants where muted = true",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "messaging.messages.enrich_conversation_exactly_one",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from messages enrich conversation using conversations matching conversation_id = _key expect exactly_one",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "messaging.conversations.enrich_participants_many",
+      "ordered": false,
+      "row_count": 24,
+      "source": "from conversations enrich members using participants matching _key = conversation_id expect many",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "messaging.messages.group_unread_by_conversation",
+      "ordered": false,
+      "row_count": 16,
+      "source": "from messages where read_at is null or missing(read_at) group by conversation_id project conversation_id, count() as unread_count",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "messaging.messages.group_sender_count",
+      "ordered": false,
+      "row_count": 12,
+      "source": "from messages group by sender_id project sender_id, count() as message_count",
       "status": "matrix_equal"
     },
     {
@@ -761,6 +959,20 @@
         "oracle_vs_force_scan": "equal",
         "reopen_store": "skipped"
       },
+      "case_id": "directory.entries.project_computed_kind_label",
+      "ordered": false,
+      "row_count": 40,
+      "source": "from entries project _key, kind_label = if kind = \"person\" then \"Person\" else \"Org\"",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
       "case_id": "directory.entries.order_name_asc",
       "ordered": true,
       "row_count": 40,
@@ -796,9 +1008,74 @@
       "status": "matrix_equal"
     },
     {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
       "case_id": "directory.entries.page_resume",
-      "reason": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
-      "status": "unsupported"
+      "ordered": true,
+      "row_count": 8,
+      "source": "from entries order by name asc, _key asc page size 8 after $cursor",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "directory.entries.enrich_category_exactly_one",
+      "ordered": false,
+      "row_count": 40,
+      "source": "from entries enrich cat using categories matching category_id = _key expect exactly_one",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "directory.entries.enrich_location_optional",
+      "ordered": false,
+      "row_count": 40,
+      "source": "from entries enrich loc using locations matching location_id = _key expect optional",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "directory.entries.group_by_category_count",
+      "ordered": false,
+      "row_count": 8,
+      "source": "from entries group by category_id project category_id, count() as entry_count",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "directory.entries.group_by_kind_count",
+      "ordered": false,
+      "row_count": 2,
+      "source": "from entries group by kind project kind, count() as n",
+      "status": "matrix_equal"
     },
     {
       "arms": {
@@ -1046,6 +1323,34 @@
         "oracle_vs_force_scan": "equal",
         "reopen_store": "skipped"
       },
+      "case_id": "telemetry.events.project_computed_sev_band",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from events project _key, sev_band = if severity in [\"error\",\"critical\"] then \"high\" else \"low\"",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "telemetry.metrics.project_value_rounded_band",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from metrics project _key, value_band = if value < 33 then \"low\" else if value < 66 then \"mid\" else \"high\"",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
       "case_id": "telemetry.events.recent_topk",
       "ordered": true,
       "row_count": 15,
@@ -1067,9 +1372,116 @@
       "status": "matrix_equal"
     },
     {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
       "case_id": "telemetry.events.device_history_resume",
-      "reason": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
-      "status": "unsupported"
+      "ordered": true,
+      "row_count": 6,
+      "source": "from events where device_id = \"d-0001\" order by ts desc, _key asc page size 8 after $cursor",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "telemetry.events.enrich_device_exactly_one",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from events enrich dev using devices matching device_id = _key expect exactly_one",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "telemetry.devices.enrich_events_many",
+      "ordered": false,
+      "row_count": 24,
+      "source": "from devices enrich evs using events matching _key = device_id expect many",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "telemetry.metrics.enrich_device_optional",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from metrics enrich dev using devices matching device_id = _key expect optional",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "telemetry.events.group_by_device_count",
+      "ordered": false,
+      "row_count": 24,
+      "source": "from events group by device_id project device_id, count() as event_count",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "telemetry.events.group_severity_count",
+      "ordered": false,
+      "row_count": 4,
+      "source": "from events group by severity project severity, count() as n",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "telemetry.metrics.agg_avg_by_name",
+      "ordered": false,
+      "row_count": 3,
+      "source": "from metrics group by metric_name project metric_name, avg(value) as avg_value",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "telemetry.metrics.agg_min_max_value",
+      "ordered": false,
+      "row_count": 1,
+      "source": "from metrics project min(value) as min_v, max(value) as max_v",
+      "status": "matrix_equal"
     },
     {
       "arms": {
@@ -1331,6 +1743,20 @@
         "oracle_vs_force_scan": "equal",
         "reopen_store": "skipped"
       },
+      "case_id": "project_management.tasks.project_computed_overdue_flag",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from tasks project _key, overdue = if due_at < \"2024-03-01T00:00:00Z+100m\" then true else false",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
       "case_id": "project_management.revisions.order_committed_desc",
       "ordered": true,
       "row_count": 48,
@@ -1366,9 +1792,130 @@
       "status": "matrix_equal"
     },
     {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
       "case_id": "project_management.tasks.page_resume_by_updated",
-      "reason": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
-      "status": "unsupported"
+      "ordered": true,
+      "row_count": 10,
+      "source": "from tasks order by updated_at desc, _key asc page size 10 after $cursor",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "project_management.tasks.enrich_project_exactly_one",
+      "ordered": false,
+      "row_count": 64,
+      "source": "from tasks enrich prj using projects matching project_id = _key expect exactly_one",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "project_management.projects.enrich_tasks_many",
+      "ordered": false,
+      "row_count": 20,
+      "source": "from projects enrich tsks using tasks matching _key = project_id expect many",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "project_management.projects.enrich_memberships_many",
+      "ordered": false,
+      "row_count": 20,
+      "source": "from projects enrich mbs using memberships matching _key = project_id expect many",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "project_management.memberships.enrich_project_optional",
+      "ordered": false,
+      "row_count": 59,
+      "source": "from memberships enrich prj using projects matching project_id = _key expect optional",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "project_management.tasks.group_status_count",
+      "ordered": false,
+      "row_count": 4,
+      "source": "from tasks group by status project status, count() as n",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "project_management.tasks.group_by_assignee_count",
+      "ordered": false,
+      "row_count": 8,
+      "source": "from tasks group by assignee_id project assignee_id, count() as task_count",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "project_management.tasks.group_by_project_sum_points",
+      "ordered": false,
+      "row_count": 20,
+      "source": "from tasks group by project_id project project_id, sum(estimate_points) as total_points",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "project_management.projects.group_by_owner_count",
+      "ordered": false,
+      "row_count": 8,
+      "source": "from projects group by owner_id project owner_id, count() as project_count",
+      "status": "matrix_equal"
     },
     {
       "arms": {
@@ -1415,6 +1962,18 @@
     {
       "arms": {
         "comparator_mongo_cbl": "deferred_q4",
+        "compile_a_vs_compile_b": "equal",
+        "required_refusal": "equal"
+      },
+      "case_id": "project_management.projects.refuse_offset_discard",
+      "outcome": "stable_refusal",
+      "refusal_code": "rql_offset_discard_unsupported",
+      "source": "from projects order by created_at desc offset 5 limit 5",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
         "coverage_holes": "equal",
         "force_scan_vs_index": "equal",
         "oracle_vs_force_scan": "equal",
@@ -1434,6 +1993,62 @@
         "oracle_vs_force_scan": "equal",
         "reopen_store": "skipped"
       },
+      "case_id": "project_management.revisions.enrich_project_optional",
+      "ordered": false,
+      "row_count": 48,
+      "source": "from revisions enrich prj using projects matching project_id = _key expect optional",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "explain_vs_compiled": "equal",
+        "explain_vs_default_qvm": "equal",
+        "forced_scan_qvm": "deliberately_distinct_program"
+      },
+      "case_id": "commerce.orders.explain_eq_status",
+      "outcome": "explain_identity",
+      "plan_hash": "de161f18b658aaebee4d1f9f3194baa5c3d502f42ebefd8a07ae8d99bf15251c",
+      "row_materialization": false,
+      "source": "explain from orders where status = \"paid\"",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "messaging.messages.within_conversation_unread",
+      "ordered": false,
+      "row_count": 16,
+      "source": "from conversations enrich messages using messages matching _key = conversation_id expect many within messages { where read = false } project { conversation_id: _key, messages { message_id } }",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
+      "case_id": "directory.entries.str_prefix_display_name",
+      "ordered": false,
+      "row_count": 0,
+      "source": "from entries where starts_with(display_name, \"Acme\")",
+      "status": "matrix_equal"
+    },
+    {
+      "arms": {
+        "comparator_mongo_cbl": "deferred_q4",
+        "coverage_holes": "equal",
+        "force_scan_vs_index": "equal",
+        "oracle_vs_force_scan": "equal",
+        "reopen_store": "skipped"
+      },
       "case_id": "telemetry.events.damage_coverage_incomplete",
       "ordered": false,
       "row_count": 64,
@@ -1441,24 +2056,34 @@
       "status": "matrix_equal"
     }
   ],
-  "corpus_version": "rql-q1-corpus-v0.4.1",
+  "corpus_version": "rql-q1-corpus-v0.4.2",
   "format": "residiuum-rql-q3-2-differential-report-v1",
-  "generated_unix_s": 1786163316,
+  "generated_unix_s": 1786244352,
   "matrix": {
     "admitted_index_plan": true,
     "comparator_result": "deferred_q4",
+    "explain_execution_identity": true,
     "forced_scan_qvm": true,
+    "full_computed_projection": true,
     "reference_oracle": true,
-    "reopened_store": true
+    "reopened_store": true,
+    "stable_refusal_contract": true
   },
   "oracle_profile": "residiuum-rql-q3-semantic-oracle-v1",
   "summary": {
-    "considered": 106,
+    "considered": 147,
     "errors": 0,
+    "explain_identity_ok": 1,
     "matrix_diverge": 0,
-    "matrix_equal": 101,
+    "matrix_equal": 147,
+    "non_row_fail": 0,
+    "package_exit_ready": true,
+    "qualification_green": 147,
+    "qualification_residual": 0,
     "reopen_checked": 12,
     "reopen_fail": 0,
-    "unsupported": 5
+    "stable_refusal_ok": 2,
+    "tier_a_total": 147,
+    "unsupported": 0
   }
 }

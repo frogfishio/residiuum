@@ -54,39 +54,98 @@ pub struct LogicalDataset {
     pub content_hash: String,
 }
 
-/// Generate deterministic logical docs for the primary `docs` collection
-/// (plus optional `customers` for enrich cells).
-pub fn generate_dataset(spec: &DatasetSpec) -> LogicalDataset {
-    let mut rng = SplitMix64::new(spec.seed);
-    let mut docs = BTreeMap::new();
-    let n = spec.doc_count.max(1);
-    let n_status = distinct_count(n, spec.cardinality);
-    let statuses: Vec<String> = (0..n_status).map(|i| format!("st-{i:04}")).collect();
-    // Hot key for Zipf: first status is heavily preferred.
-    let hot = statuses.first().cloned().unwrap_or_else(|| "st-0000".into());
+/// Constant-memory deterministic document stream for campaign-sized fixtures.
+/// It is byte-for-byte equivalent to the `docs` collection materialised by
+/// [`generate_dataset`] for the same specification.
+pub struct GeneratedDocs {
+    spec: DatasetSpec,
+    rng: SplitMix64,
+    next: u64,
+    count: u64,
+    distinct_statuses: u64,
+    customer_count: u64,
+}
 
-    for i in 0..n {
-        let key = match spec.distribution {
+impl Iterator for GeneratedDocs {
+    type Item = (String, Value);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next >= self.count {
+            return None;
+        }
+        let i = self.next;
+        self.next += 1;
+        let key = match self.spec.distribution {
             DistributionKind::TimeOrdered => format!("t-{i:08}"),
             _ => format!("d-{i:08}"),
         };
-        let status = pick_status(&mut rng, &statuses, &hot, spec.distribution, i, n);
-        let score = match spec.distribution {
+        let status_index = match self.spec.distribution {
+            DistributionKind::Uniform | DistributionKind::TimeOrdered => i % self.distinct_statuses,
+            DistributionKind::ZipfHotKey if self.rng.next_u32() % 100 < 80 => 0,
+            DistributionKind::ZipfHotKey => self.rng.gen_range(0, self.distinct_statuses),
+        };
+        let status = format!("st-{status_index:04}");
+        let score = match self.spec.distribution {
             DistributionKind::TimeOrdered => i as i64,
-            _ => rng.gen_range(0, 10_000) as i64,
+            _ => self.rng.gen_range(0, 10_000) as i64,
         };
-        let region_idx = (i as u64) % 5;
-        let region = format!("r{region_idx}");
-        let amount = match spec.selectivity {
+        let region = format!("r{}", i % 5);
+        let amount = match self.spec.selectivity {
             SelectivityClass::Point if i == 0 => 42,
-            _ => 10 + (rng.next_u32() % 990) as i64,
+            _ => 10 + (self.rng.next_u32() % 990) as i64,
         };
-
-        let mut doc = base_doc(&key, &status, score, &region, amount, i, &mut rng, spec);
-        pad_payload(&mut doc, spec.payload, &mut rng, i == 0 && spec.include_heavy_tail);
-        apply_shape(&mut doc, spec.shape, i, &mut rng);
-        docs.insert(key, doc);
+        let mut document = base_doc(
+            &key,
+            &status,
+            score,
+            &region,
+            amount,
+            i,
+            &mut self.rng,
+            &self.spec,
+        );
+        pad_payload(
+            &mut document,
+            self.spec.payload,
+            &mut self.rng,
+            i == 0 && self.spec.include_heavy_tail,
+        );
+        apply_shape(&mut document, self.spec.shape, i, &mut self.rng);
+        if i % 4 != 3 {
+            if let Value::Object(map) = &mut document {
+                map.insert(
+                    "customer_id".into(),
+                    json!(format!("c-{:08}", i % self.customer_count)),
+                );
+            }
+        }
+        Some((key, document))
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.count.saturating_sub(self.next).min(usize::MAX as u64) as usize;
+        (remaining, Some(remaining))
+    }
+}
+
+/// Create a constant-memory stream of primary documents.
+pub fn generated_docs(spec: &DatasetSpec) -> GeneratedDocs {
+    let count = spec.doc_count.max(1);
+    GeneratedDocs {
+        spec: spec.clone(),
+        rng: SplitMix64::new(spec.seed),
+        next: 0,
+        count,
+        distinct_statuses: distinct_count(count, spec.cardinality),
+        customer_count: (count / 4).max(8),
+    }
+}
+
+/// Generate deterministic logical docs for the primary `docs` collection
+/// (plus optional `customers` for enrich cells).
+pub fn generate_dataset(spec: &DatasetSpec) -> LogicalDataset {
+    let n = spec.doc_count.max(1);
+    let docs: BTreeMap<_, _> = generated_docs(spec).collect();
 
     // Companion customers for enrich cells (1:1 default + some optional gaps).
     let mut customers = BTreeMap::new();
@@ -104,16 +163,20 @@ pub fn generate_dataset(spec: &DatasetSpec) -> LogicalDataset {
         );
     }
 
-    // Wire customer_id on docs for enrich (every 4th missing for optional/zero).
-    for (i, (_k, doc)) in docs.iter_mut().enumerate() {
-        if let Value::Object(m) = doc {
-            if i % 4 != 3 {
-                m.insert(
-                    "customer_id".into(),
-                    json!(format!("c-{:08}", i % n_cust as usize)),
-                );
-            }
-        }
+    // F12: preserve genuine 1:N cardinality in the shared logical fixture.
+    // These documents have distinct immutable keys but deliberately share the
+    // join field used by `customer_id = id`.
+    for fanout in 1..=2 {
+        let key = format!("c-00000000-fanout-{fanout}");
+        customers.insert(
+            key.clone(),
+            json!({
+                "_key": key,
+                "id": "c-00000000",
+                "name": format!("Customer 0 fanout {fanout}"),
+                "tier": "fanout",
+            }),
+        );
     }
 
     let mut collections = BTreeMap::new();
@@ -132,30 +195,6 @@ fn distinct_count(n: u64, card: CardinalityClass) -> u64 {
     let r = card.distinct_ratio();
     let d = ((n as f64) * r).round() as u64;
     d.clamp(2, n.max(2))
-}
-
-fn pick_status(
-    rng: &mut SplitMix64,
-    statuses: &[String],
-    hot: &str,
-    dist: DistributionKind,
-    i: u64,
-    _n: u64,
-) -> String {
-    match dist {
-        DistributionKind::Uniform | DistributionKind::TimeOrdered => {
-            statuses[(i as usize) % statuses.len()].clone()
-        }
-        DistributionKind::ZipfHotKey => {
-            // ~80% hot key for Zipf-ish skew on smoke sizes.
-            if rng.next_u32() % 100 < 80 {
-                hot.to_string()
-            } else {
-                let idx = rng.gen_range(0, statuses.len() as u64) as usize;
-                statuses[idx].clone()
-            }
-        }
-    }
 }
 
 fn base_doc(
@@ -194,12 +233,7 @@ pub fn s0_01_target_hits(n: u64) -> u64 {
     t.clamp(1, n)
 }
 
-fn selectivity_bucket(
-    i: u64,
-    n: u64,
-    sel: SelectivityClass,
-    rng: &mut SplitMix64,
-) -> String {
+fn selectivity_bucket(i: u64, n: u64, sel: SelectivityClass, rng: &mut SplitMix64) -> String {
     match sel {
         SelectivityClass::Point => {
             // Exactly one document; literal "POINT" (not HIT) — plans must match (F3).
@@ -371,6 +405,16 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn enrich_fixture_contains_genuine_one_to_many_join_value() {
+        let ds = generate_dataset(&DatasetSpec::smoke_default(7));
+        let matches = ds.collections["customers"]
+            .values()
+            .filter(|v| v.get("id").and_then(Value::as_str) == Some("c-00000000"))
+            .count();
+        assert_eq!(matches, 3, "base customer plus two fanout rows");
     }
 
     fn count_hits_materialised(n: u64, sel: SelectivityClass) -> u64 {

@@ -464,6 +464,8 @@ pub struct ClientInspection {
     pub queued: usize,
     /// Currently executing jobs.
     pub running: usize,
+    /// Peak simultaneously executing jobs since connection open.
+    pub peak_running: usize,
     /// Completed jobs.
     pub completed: u64,
     /// Admission refusals.
@@ -676,6 +678,46 @@ impl HeapClient {
                         })
                         .collect()
                 })
+            })
+            .await
+    }
+
+    /// Execute bounded Full RQL across any collections authorized by this Heap.
+    ///
+    /// The work is admitted by the connection's shared bounded scheduler; it
+    /// does not create another writer, runtime, or scheduling domain.
+    pub async fn rql_full(
+        &self,
+        source: &str,
+        parameters: &crate::Parameters,
+        options: crate::RqlFullExecuteOptions,
+    ) -> Result<crate::RqlFullPage, Error> {
+        let source = source.to_string();
+        let parameters = parameters.clone();
+        let deadline = options
+            .query
+            .deadline
+            .and_then(|duration| Instant::now().checked_add(duration));
+        let request_id = mint_request_id()?;
+        let heap = Arc::clone(&self.heap);
+        self.connection
+            .scheduler
+            .dispatch(request_id, None, deadline, move || {
+                let infos = heap.list_collections()?;
+                let mut bindings = crate::CollectionBindings::default();
+                for info in infos {
+                    bindings.bind(&info.name, info.collection_id);
+                }
+                let heap_id = heap.id();
+                let mut host = DriverHeapHost { heap };
+                crate::execute_rql_full_on_host_with(
+                    &mut host,
+                    heap_id,
+                    &source,
+                    &bindings,
+                    &parameters,
+                    options,
+                )
             })
             .await
     }
@@ -904,9 +946,7 @@ where
             return Err(Error::local(
                 ErrorCode::Validation,
                 ErrorClass::Request,
-                format!(
-                    "scan page_size must be between 1 and {MAX_SCAN_PAGE_SIZE}"
-                ),
+                format!("scan page_size must be between 1 and {MAX_SCAN_PAGE_SIZE}"),
             ));
         }
         if options.context.operation_id.is_some() {
@@ -973,6 +1013,46 @@ where
             .await
     }
 
+    /// Execute bounded Application Core RQL on this collection.
+    ///
+    /// Clone the collection handle to issue concurrent queries through the one
+    /// physical connection and its bounded scheduler.
+    pub async fn rql(
+        &self,
+        source: &str,
+        parameters: &crate::Parameters,
+        options: crate::QueryRunOptions,
+    ) -> Result<crate::QueryPage, Error> {
+        let request_id = mint_request_id()?;
+        crate::refuse_full_language_on_core_wire(source)
+            .map_err(|source| Error::from_sdk(source, request_id, None))?;
+        let source = source.to_string();
+        let parameters = parameters.clone();
+        let deadline = options
+            .deadline
+            .and_then(|duration| Instant::now().checked_add(duration));
+        let heap = Arc::clone(&self.heap_client.heap);
+        let heap_id = self.heap_id();
+        let collection_id = self.id();
+        let collection_name = self.name().to_string();
+        self.heap_client
+            .connection
+            .scheduler
+            .dispatch(request_id, None, deadline, move || {
+                let mut host = DriverHeapHost { heap };
+                crate::execute_core_rql(
+                    &mut host,
+                    &source,
+                    &parameters,
+                    &options,
+                    heap_id,
+                    collection_id,
+                    &collection_name,
+                )
+            })
+            .await
+    }
+
     /// Delete a present key idempotently. Absence is a typed conflict.
     pub async fn delete(
         &self,
@@ -1025,6 +1105,78 @@ where
                 })
             })
             .await
+    }
+}
+
+struct DriverHeapHost {
+    heap: Arc<Heap>,
+}
+
+impl crate::HostCapabilities for DriverHeapHost {
+    fn list_keys(
+        &mut self,
+        collection_id: CollectionId,
+        limit: Option<usize>,
+        after_key: Option<&str>,
+    ) -> Result<Vec<String>, SdkError> {
+        self.heap
+            .collection_by_id(collection_id)?
+            .list_keys(limit.unwrap_or(4_096), after_key)
+    }
+
+    fn get_json(
+        &mut self,
+        collection_id: CollectionId,
+        key: &str,
+    ) -> Result<Option<serde_json::Value>, SdkError> {
+        self.heap.collection_by_id(collection_id)?.get(key)
+    }
+
+    fn get_json_covered(
+        &mut self,
+        collection_id: CollectionId,
+        key: &str,
+    ) -> Result<crate::query_bytecode_v1::HostDocument, SdkError> {
+        use residiuum_store::CollectionScanHoleReason;
+        use crate::query_bytecode_v1::HostDocument;
+
+        match self.heap.collection_by_id(collection_id)?.get(key) {
+            Ok(Some(value)) => Ok(HostDocument::Present(value)),
+            Ok(None) => Ok(HostDocument::Absent),
+            Err(SdkError::Store(store_error)) => {
+                if let Some(reason) = CollectionScanHoleReason::from_store_error(&store_error) {
+                    Ok(HostDocument::Hole {
+                        code: reason.as_str().to_string(),
+                    })
+                } else {
+                    Err(SdkError::Store(store_error))
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.code(),
+                    crate::ErrorCode::DataDamaged
+                        | crate::ErrorCode::PayloadPartial
+                        | crate::ErrorCode::CoverageIncomplete
+                        | crate::ErrorCode::TypeMismatch
+                ) =>
+            {
+                Ok(HostDocument::Hole {
+                    code: error.code().as_str().to_string(),
+                })
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn lookup_index_keys(
+        &mut self,
+        collection_id: CollectionId,
+        equalities: &[(String, serde_json::Value)],
+    ) -> Result<Option<Vec<String>>, SdkError> {
+        self.heap
+            .collection_by_id(collection_id)?
+            .lookup_index_keys(equalities)
     }
 }
 
@@ -1128,6 +1280,7 @@ enum Message {
 struct Counters {
     queued: AtomicUsize,
     running: AtomicUsize,
+    peak_running: AtomicUsize,
     completed: AtomicU64,
     refused: AtomicU64,
     cancelled_before_dispatch: AtomicU64,
@@ -1378,7 +1531,8 @@ impl Scheduler {
                 return;
             }
             task_stage.store(1, Ordering::Release);
-            counters.running.fetch_add(1, Ordering::AcqRel);
+            let running = counters.running.fetch_add(1, Ordering::AcqRel) + 1;
+            counters.peak_running.fetch_max(running, Ordering::AcqRel);
             let result = operation().map_err(|e| Error::from_sdk(e, request_id, operation_id));
             counters.running.fetch_sub(1, Ordering::AcqRel);
             task_stage.store(2, Ordering::Release);
@@ -1544,6 +1698,7 @@ impl Scheduler {
             queue_capacity: self.queue_capacity,
             queued: self.counters.queued.load(Ordering::Acquire),
             running: self.counters.running.load(Ordering::Acquire),
+            peak_running: self.counters.peak_running.load(Ordering::Acquire),
             completed: self.counters.completed.load(Ordering::Relaxed),
             refused: self.counters.refused.load(Ordering::Relaxed),
             cancelled_before_dispatch: self

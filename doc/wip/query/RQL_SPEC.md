@@ -111,7 +111,8 @@ RQL v1 deliberately excludes:
 - SQL-style flattening joins;
 - SQL-style offset execution that silently enumerates and discards a prefix;
 - window functions;
-- arbitrary computed projection expressions (except the Tier-A aggregate forms in §9a);
+- arbitrary computed projection expressions beyond the bounded Tier-A
+  conditional form in §9 and aggregate forms in §9a;
 - aggregation beyond the §9a Gate-1 subset (`count` / `sum` / `min` / `max` / `avg`);
 - text, vector, and geospatial clauses until their dedicated specifications
   are promoted from [FUTURE_ROADMAP.md](../../todo/deferred/FUTURE_ROADMAP.md).
@@ -127,7 +128,7 @@ The first ordinary application release implements the monotonic
 
 - one root collection;
 - root `where` predicates and named parameters;
-- projection;
+- path projection and the §9a aggregate projection subset;
 - deterministic scalar ordering with the immutable-key tie-break;
 - total limit, bounded page size, and authenticated continuation;
 - available/current consistency;
@@ -135,8 +136,9 @@ The first ordinary application release implements the monotonic
 - document, byte, and result-memory budgets; and
 - explain.
 
-Its grammar is the v1 grammar with `enrich`, `within`, `at rank`, `access`, and
-`rank domain` removed. It adds no syntax and changes no semantics. Those
+Its grammar is the v1 grammar with `enrich`, `within`, bounded computed
+projection (§9), `at rank`, `access`, and `rank domain` removed. It adds no
+syntax and changes no semantics. Those
 constructs fail with `QueryInvalid` and diagnostic code
 `rql_feature_unavailable`; they are never ignored or weakened.
 
@@ -226,9 +228,14 @@ group-clause      = "group", "by", path, { ",", path } ;
 project-flat-clause = "project", [ "[" ], project-flat-item,
                       { ",", project-flat-item }, [ "]" ] ;
 project-flat-item = path
+                  | identifier, "=", project-expression
                   | "count", "(", ")", "as", identifier
                   | ( "sum" | "min" | "max" | "avg" ), "(", path, ")",
                     "as", identifier ;
+
+project-expression = literal | path | conditional-expression ;
+conditional-expression = "if", predicate, "then", project-expression,
+                         "else", project-expression ;
 
 enrich-clause     = "enrich", identifier,
                     "using", source-ref, [ "as", identifier ],
@@ -563,8 +570,19 @@ over a product projects that product. A block over an optional maps through the
 optional. A block over a sequence or bag maps over its members. Any other value
 fails with `rql_project_type`.
 
-Arbitrary calculated fields are outside v1. Use a subsequent SDA reduction
-when required.
+The flat Tier-A form admits bounded calculated fields:
+
+```text
+project _key, band = if amount < 100 then "low"
+                     else if amount < 500 then "mid" else "high"
+```
+
+Conditions use the normative predicate truth rules and execute through the
+same predicate kernel as `where`. Branches may be JSON literals, paths, or
+nested conditionals. Evaluation is per current row, is side-effect free, and
+does not change cardinality. An absent branch path yields Null. Duplicate
+output names are static errors. Arbitrary arithmetic, functions, callbacks,
+and unbounded expression forms remain outside v1.
 
 ## 10. Ordering
 
@@ -705,8 +723,15 @@ QueryPage {
   remaining_limit?
   coverage
   frontiers
+  logical_bytes_examined
 }
 ```
+
+`logical_bytes_examined` is the serialized JSON payload size of every
+successful document load performed by the QVM for that page. It includes Core
+and Full foreign/nested sources and counts repeated loads as repeated work;
+absent or damaged bodies contribute no bytes and remain visible through
+coverage evidence.
 
 `next_cursor = None` and `complete = true` mean that no further page exists
 within the query's total limit and covered state.

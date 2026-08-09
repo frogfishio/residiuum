@@ -62,7 +62,7 @@ These answer: *is there one product semantic executor?*
 | A7 | Raw SDA only via explicit SDA APIs | **labor_closed** | `Collection::sda`; dialect `sda`; custom dialects portable-only |
 | A8 | Architecture gate green (Decision 0 honesty + C1 forbid text) | **labor_closed** | `bash scripts/check_query_runtime_architecture.sh` → OK |
 | A9 | Opcode **bodies** are pure stack micro-ops (no large Rust phase interpreters) | **out_of_scope_for_D0_close** (Q0.A7) | Principal review: Rust phase helpers inside QVM opcodes are normal; **not** a second executor. IR residual = optional tech-debt. Close test = one product QVM path (A1–A8), not micro-op purity. See D0.1 §1 |
-| A10 | Full language on same **wire** as Core (op 118) | **open** | Full refused on Core wire (RQL-F2); local `execute_rql_full` only until dedicated wire |
+| A10 | Full language on same **wire** as Core (op 118) | **labor_closed** | Explicit `profile: "full"`; server Full QVM host; `HeapClient::rql_full`; qualified TLS parity/refusal/isolation coverage. Core profile still refuses Full constructs. |
 | A11 | Portable dialect path uses durable host identity (not free name-only synthetic) | **labor_closed** (store-scoped, Q0.A6) | DX: `store_id` + name; Heap catalog ids remain `CollectionClient`. Residual: not Heap-catalog UUID on flat Collection |
 | A12 | Principal accepts residual inventory + this checklist | **principal_only** | D0.1 + this file; board Feature `019fda4c-a6f2-…` |
 | A13 | Principal Decision 0 close / RQL-C1 | **principal_only** | **Do not mark closed in docs without principal** |
@@ -77,7 +77,8 @@ Labor must not pick these. For principal use only:
    one `run_vm` + QVM authority, not pure stack purity. Requires dated principal note.
 3. **Close Decision 0 / accept C1** — only if A1–A8 hold *and* principal accepts
    residual inventory (A12). **A9 pure micro-op purity is not required** (Q0.A7).
-   A10 Full-wire remains programme Q2-BLOCK-FULL-WIRE honesty, not a D0 micro-op bar.
+   A10 Full-wire is labor-closed; it remains evidence rather than a substitute
+   for the principal A12/A13 disposition.
    Record profile, exclusions, evidence digest.
 
 ---
@@ -91,7 +92,8 @@ Labor must not pick these. For principal use only:
 | App Core compile | `cargo test -p residiuum-sdk --lib rql_app_core` | pass (APP-5 labor; not C1) |
 | App Core integration | `cargo test -p residiuum-sdk --test app5_rql_app_core` | pass |
 | Dual pack / APB-7 query | `cargo test -p residiuum-sdk --test apb7_query_dual_pack` | pass (product path evidence; package accept separate) |
-| Full corpus (local Full, not C1) | `cargo test -p residiuum-sdk --test rql_full_corpus` | pass where admitted |
+| Full corpus (embedded Full, not C1) | `cargo test -p residiuum-sdk --test rql_full_corpus` | pass where admitted |
+| Full product wire | `cargo test -p residiuum-server --features dangerous-key-export --test hp007_connect_heap apb7_query_from_remote_collection_plane` | qualified TLS Full parity/refusal/isolation pass |
 | Dialect portable path | `cargo test -p residiuum-sdk --test dialects_query` | pass |
 | Labor evidence logs | `doc/todo/rql/evidence/rql_{r1,qvm1,vm1r,*}.log` | present; historical labor |
 | Residual inventory | [RQL_D0_RESIDUAL_INVENTORY.md](./RQL_D0_RESIDUAL_INVENTORY.md) | current honesty |
@@ -105,7 +107,7 @@ Labor must not pick these. For principal use only:
 | Artefact | Role | Decision 0? | Programme |
 |---|---|---|---|
 | `spec/app/v1/rql_app_core_corpus_v1.json` + APP-5 tests | Application Core compile surface | Supports QVM lower path; **not** D0 close | APP-5 labor |
-| `rql_full_*` tests / phase3 evidence | Full language local execute via QVM | Proves Full → `run_vm`; **not** wire parity | Phase 3 / Full residual |
+| `rql_full_*` + qualified TLS op-118 scenario | Full language embedded and remote execute via QVM | Proves Full → `run_vm` plus bounded wire parity; package accept remains separate | Phase 3 / APP-7 |
 | `apb7_query_dual_pack` | Embedded + remote Core query | Product dual-pack evidence; package accept open | APB-7 / APP-7 |
 | `apb7_multipage_oracle_matrix` | Page / oracle matrix | Test honesty; not Q3 independent oracle | APB-7 |
 | Tier-A practical corpus (Q1) | ~100–150 intentions | **Not landed** | **out_of_scope_for_D0** until Q0 accept → Q1 |
@@ -147,11 +149,9 @@ Kanban Feature (blocks Q2 exit claim): `019fda4c-a6f2-7932-a9d7-6e04400fd3df`
 ## E. Explicit open residuals (do not paper over)
 
 1. **IR residual** — opcode dispatch is real; phase bodies are still Rust (D0.1 §1).
-2. **Full ≠ Core wire** — Full local QVM path; op 118 Core only / Full refuse.
-3. **Dialect identity** — name-derived ids on comfort `Collection` dialect path.
-4. **Prior principal rejects** — VM1, P1c, prior D0/C1 closure claims stay rejected.
-5. **Q0 principal accept open** — amendment package Q0.A1–Q0.A9 in flight; accept pack re-issue (A9) then §5; blocks Q1 until post-amendment ACCEPT.
-6. **No Tier-A Q1 corpus yet** — separate from D0; required for Q2/Q3/Gate-1.
+2. **Dialect identity** — name-derived ids on comfort `Collection` dialect path.
+3. **Prior principal rejects** — VM1, P1c, prior D0/C1 closure claims stay rejected.
+4. **Principal disposition remains open** — A10 labor closure does not close D0/C1.
 
 ---
 

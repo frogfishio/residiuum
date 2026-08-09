@@ -61,7 +61,7 @@
       "execute": {
         "coverage_complete": true,
         "path": "execute_rql_full",
-        "row_count": 0,
+        "row_count": 1,
         "status": "ok"
       },
       "expected_kind": "oracle_rule",
@@ -519,22 +519,27 @@
       ],
       "case_id": "commerce.orders.project_computed_amount_band",
       "compile": {
-        "error_code": "QueryInvalid",
-        "message": "invalid query: unexpected token near `= if amount < 100 then \"`",
-        "status": "error"
+        "base_source": "from orders ",
+        "has_project": true,
+        "pipeline_len": 0,
+        "profile": "rql-full-v1",
+        "status": "ok"
       },
       "domain": "commerce",
       "execute": {
-        "reason": "compile_failed",
-        "status": "skipped"
+        "coverage_complete": true,
+        "path": "execute_rql_full",
+        "row_count": 32,
+        "status": "ok"
       },
       "expected_kind": "deferred_q2",
-      "failure_class": "semantic",
+      "failure_class": null,
       "family_tags": [
         "projection_computed_conditional"
       ],
-      "gap_package": "pkg_computed_conditional_project",
-      "product_expressible": false,
+      "gap_package": null,
+      "notes": "compile+execute ok; result correctness deferred to Q3",
+      "product_expressible": true,
       "rql_status": "pending",
       "source": "from orders project _key, amount_band = if amount < 100 then \"low\" else if amount < 500 then \"mid\" else \"high\"",
       "tier": "A"
@@ -638,22 +643,27 @@
       ],
       "case_id": "commerce.orders.page_resume",
       "compile": {
-        "error_code": "QueryInvalid",
-        "message": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
-        "status": "error"
+        "base_source": "from orders order by created_at desc, _key asc page size 8 after $cursor",
+        "has_project": false,
+        "pipeline_len": 0,
+        "profile": "rql-full-v1",
+        "status": "ok"
       },
       "domain": "commerce",
       "execute": {
-        "reason": "compile_failed",
-        "status": "skipped"
+        "coverage_complete": true,
+        "path": "execute_rql_full",
+        "row_count": 8,
+        "status": "ok"
       },
       "expected_kind": "oracle_rule",
-      "failure_class": "semantic",
+      "failure_class": null,
       "family_tags": [
         "order_topk_cursor"
       ],
-      "gap_package": "pkg_cursor_after_clause",
-      "product_expressible": false,
+      "gap_package": null,
+      "notes": "compile+execute ok; result correctness deferred to Q3",
+      "product_expressible": true,
       "rql_status": "source",
       "source": "from orders order by created_at desc, _key asc page size 8 after $cursor",
       "tier": "A"
@@ -1229,22 +1239,27 @@
       ],
       "case_id": "messaging.messages.conversation_history_resume",
       "compile": {
-        "error_code": "QueryInvalid",
-        "message": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
-        "status": "error"
+        "base_source": "from messages where conversation_id = \"cv-0001\" order by sent_at asc, _key asc page size 16 after $cursor",
+        "has_project": false,
+        "pipeline_len": 0,
+        "profile": "rql-full-v1",
+        "status": "ok"
       },
       "domain": "messaging",
       "execute": {
-        "reason": "compile_failed",
-        "status": "skipped"
+        "coverage_complete": true,
+        "path": "execute_rql_full",
+        "row_count": 6,
+        "status": "ok"
       },
       "expected_kind": "oracle_rule",
-      "failure_class": "semantic",
+      "failure_class": null,
       "family_tags": [
         "order_topk_cursor"
       ],
-      "gap_package": "pkg_cursor_after_clause",
-      "product_expressible": false,
+      "gap_package": null,
+      "notes": "compile+execute ok; result correctness deferred to Q3",
+      "product_expressible": true,
       "rql_status": "source",
       "source": "from messages where conversation_id = \"cv-0001\" order by sent_at asc, _key asc page size 16 after $cursor",
       "tier": "A"
@@ -1579,7 +1594,7 @@
       "execute": {
         "coverage_complete": false,
         "path": "execute_rql_full",
-        "row_count": 25,
+        "row_count": 22,
         "status": "ok"
       },
       "expected_kind": "oracle_rule",
@@ -1735,7 +1750,7 @@
       "execute": {
         "coverage_complete": true,
         "path": "execute_rql_full",
-        "row_count": 0,
+        "row_count": 1,
         "status": "ok"
       },
       "expected_kind": "oracle_rule",
@@ -2129,22 +2144,27 @@
       ],
       "case_id": "directory.entries.project_computed_kind_label",
       "compile": {
-        "error_code": "QueryInvalid",
-        "message": "invalid query: unexpected token near `= if kind = \"person\" the`",
-        "status": "error"
+        "base_source": "from entries ",
+        "has_project": true,
+        "pipeline_len": 0,
+        "profile": "rql-full-v1",
+        "status": "ok"
       },
       "domain": "directory",
       "execute": {
-        "reason": "compile_failed",
-        "status": "skipped"
+        "coverage_complete": true,
+        "path": "execute_rql_full",
+        "row_count": 40,
+        "status": "ok"
       },
       "expected_kind": "deferred_q2",
-      "failure_class": "semantic",
+      "failure_class": null,
       "family_tags": [
         "projection_computed_conditional"
       ],
-      "gap_package": "pkg_computed_conditional_project",
-      "product_expressible": false,
+      "gap_package": null,
+      "notes": "compile+execute ok; result correctness deferred to Q3",
+      "product_expressible": true,
       "rql_status": "pending",
       "source": "from entries project _key, kind_label = if kind = \"person\" then \"Person\" else \"Org\"",
       "tier": "A"
@@ -2248,22 +2268,27 @@
       ],
       "case_id": "directory.entries.page_resume",
       "compile": {
-        "error_code": "QueryInvalid",
-        "message": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
-        "status": "error"
+        "base_source": "from entries order by name asc, _key asc page size 8 after $cursor",
+        "has_project": false,
+        "pipeline_len": 0,
+        "profile": "rql-full-v1",
+        "status": "ok"
       },
       "domain": "directory",
       "execute": {
-        "reason": "compile_failed",
-        "status": "skipped"
+        "coverage_complete": true,
+        "path": "execute_rql_full",
+        "row_count": 8,
+        "status": "ok"
       },
       "expected_kind": "oracle_rule",
-      "failure_class": "semantic",
+      "failure_class": null,
       "family_tags": [
         "order_topk_cursor"
       ],
-      "gap_package": "pkg_cursor_after_clause",
-      "product_expressible": false,
+      "gap_package": null,
+      "notes": "compile+execute ok; result correctness deferred to Q3",
+      "product_expressible": true,
       "rql_status": "source",
       "source": "from entries order by name asc, _key asc page size 8 after $cursor",
       "tier": "A"
@@ -2596,7 +2621,7 @@
       "execute": {
         "coverage_complete": true,
         "path": "execute_rql_full",
-        "row_count": 0,
+        "row_count": 1,
         "status": "ok"
       },
       "expected_kind": "oracle_rule",
@@ -2927,22 +2952,27 @@
       ],
       "case_id": "telemetry.events.project_computed_sev_band",
       "compile": {
-        "error_code": "QueryInvalid",
-        "message": "invalid query: unexpected token near `= if severity in [\"error`",
-        "status": "error"
+        "base_source": "from events ",
+        "has_project": true,
+        "pipeline_len": 0,
+        "profile": "rql-full-v1",
+        "status": "ok"
       },
       "domain": "telemetry",
       "execute": {
-        "reason": "compile_failed",
-        "status": "skipped"
+        "coverage_complete": true,
+        "path": "execute_rql_full",
+        "row_count": 64,
+        "status": "ok"
       },
       "expected_kind": "deferred_q2",
-      "failure_class": "semantic",
+      "failure_class": null,
       "family_tags": [
         "projection_computed_conditional"
       ],
-      "gap_package": "pkg_computed_conditional_project",
-      "product_expressible": false,
+      "gap_package": null,
+      "notes": "compile+execute ok; result correctness deferred to Q3",
+      "product_expressible": true,
       "rql_status": "pending",
       "source": "from events project _key, sev_band = if severity in [\"error\",\"critical\"] then \"high\" else \"low\"",
       "tier": "A"
@@ -2953,22 +2983,27 @@
       ],
       "case_id": "telemetry.metrics.project_value_rounded_band",
       "compile": {
-        "error_code": "QueryInvalid",
-        "message": "invalid query: unexpected token near `= if value < 33 then \"lo`",
-        "status": "error"
+        "base_source": "from metrics ",
+        "has_project": true,
+        "pipeline_len": 0,
+        "profile": "rql-full-v1",
+        "status": "ok"
       },
       "domain": "telemetry",
       "execute": {
-        "reason": "compile_failed",
-        "status": "skipped"
+        "coverage_complete": true,
+        "path": "execute_rql_full",
+        "row_count": 64,
+        "status": "ok"
       },
       "expected_kind": "deferred_q2",
-      "failure_class": "semantic",
+      "failure_class": null,
       "family_tags": [
         "projection_computed_conditional"
       ],
-      "gap_package": "pkg_computed_conditional_project",
-      "product_expressible": false,
+      "gap_package": null,
+      "notes": "compile+execute ok; result correctness deferred to Q3",
+      "product_expressible": true,
       "rql_status": "pending",
       "source": "from metrics project _key, value_band = if value < 33 then \"low\" else if value < 66 then \"mid\" else \"high\"",
       "tier": "A"
@@ -3043,22 +3078,27 @@
       ],
       "case_id": "telemetry.events.device_history_resume",
       "compile": {
-        "error_code": "QueryInvalid",
-        "message": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
-        "status": "error"
+        "base_source": "from events where device_id = \"d-0001\" order by ts desc, _key asc page size 8 after $cursor",
+        "has_project": false,
+        "pipeline_len": 0,
+        "profile": "rql-full-v1",
+        "status": "ok"
       },
       "domain": "telemetry",
       "execute": {
-        "reason": "compile_failed",
-        "status": "skipped"
+        "coverage_complete": true,
+        "path": "execute_rql_full",
+        "row_count": 8,
+        "status": "ok"
       },
       "expected_kind": "oracle_rule",
-      "failure_class": "semantic",
+      "failure_class": null,
       "family_tags": [
         "order_topk_cursor"
       ],
-      "gap_package": "pkg_cursor_after_clause",
-      "product_expressible": false,
+      "gap_package": null,
+      "notes": "compile+execute ok; result correctness deferred to Q3",
+      "product_expressible": true,
       "rql_status": "source",
       "source": "from events where device_id = \"d-0001\" order by ts desc, _key asc page size 8 after $cursor",
       "tier": "A"
@@ -3300,7 +3340,7 @@
       "execute": {
         "coverage_complete": false,
         "path": "execute_rql_full",
-        "row_count": 26,
+        "row_count": 23,
         "status": "ok"
       },
       "expected_kind": "oracle_rule",
@@ -3848,22 +3888,27 @@
       ],
       "case_id": "project_management.tasks.project_computed_overdue_flag",
       "compile": {
-        "error_code": "QueryInvalid",
-        "message": "invalid query: unexpected token near `= if due_at < \"2024-03-0`",
-        "status": "error"
+        "base_source": "from tasks ",
+        "has_project": true,
+        "pipeline_len": 0,
+        "profile": "rql-full-v1",
+        "status": "ok"
       },
       "domain": "project_management",
       "execute": {
-        "reason": "compile_failed",
-        "status": "skipped"
+        "coverage_complete": true,
+        "path": "execute_rql_full",
+        "row_count": 64,
+        "status": "ok"
       },
       "expected_kind": "deferred_q2",
-      "failure_class": "semantic",
+      "failure_class": null,
       "family_tags": [
         "projection_computed_conditional"
       ],
-      "gap_package": "pkg_computed_conditional_project",
-      "product_expressible": false,
+      "gap_package": null,
+      "notes": "compile+execute ok; result correctness deferred to Q3",
+      "product_expressible": true,
       "rql_status": "pending",
       "source": "from tasks project _key, overdue = if due_at < \"2024-03-01T00:00:00Z+100m\" then true else false",
       "tier": "A"
@@ -3969,22 +4014,27 @@
       ],
       "case_id": "project_management.tasks.page_resume_by_updated",
       "compile": {
-        "error_code": "QueryInvalid",
-        "message": "invalid query: rql_feature_unavailable: after / continuation clause (APP-6)",
-        "status": "error"
+        "base_source": "from tasks order by updated_at desc, _key asc page size 10 after $cursor",
+        "has_project": false,
+        "pipeline_len": 0,
+        "profile": "rql-full-v1",
+        "status": "ok"
       },
       "domain": "project_management",
       "execute": {
-        "reason": "compile_failed",
-        "status": "skipped"
+        "coverage_complete": true,
+        "path": "execute_rql_full",
+        "row_count": 10,
+        "status": "ok"
       },
       "expected_kind": "oracle_rule",
-      "failure_class": "semantic",
+      "failure_class": null,
       "family_tags": [
         "order_topk_cursor"
       ],
-      "gap_package": "pkg_cursor_after_clause",
-      "product_expressible": false,
+      "gap_package": null,
+      "notes": "compile+execute ok; result correctness deferred to Q3",
+      "product_expressible": true,
       "rql_status": "source",
       "source": "from tasks order by updated_at desc, _key asc page size 10 after $cursor",
       "tier": "A"
@@ -4466,25 +4516,30 @@
       ],
       "case_id": "messaging.messages.within_conversation_unread",
       "compile": {
-        "error_code": "QueryInvalid",
-        "message": "invalid query: within: expected `{` after path",
-        "status": "error"
+        "base_source": "from conversations",
+        "has_project": true,
+        "pipeline_len": 2,
+        "profile": "rql-full-v1",
+        "status": "ok"
       },
       "domain": "messaging",
       "execute": {
-        "reason": "compile_failed",
-        "status": "skipped"
+        "coverage_complete": true,
+        "path": "execute_rql_full",
+        "row_count": 16,
+        "status": "ok"
       },
       "expected_kind": "deferred_q2",
-      "failure_class": "syntax",
+      "failure_class": null,
       "family_tags": [
         "predicate_missing_null_type_nested_array",
         "enrichment_cardinality"
       ],
-      "gap_package": "pkg_enrich_semantics",
-      "product_expressible": false,
+      "gap_package": null,
+      "notes": "compile+execute ok; result correctness deferred to Q3",
+      "product_expressible": true,
       "rql_status": "pending",
-      "source": "from conversations within messages where read = false project conversation_id, message_id",
+      "source": "from conversations enrich messages using messages matching _key = conversation_id expect many within messages { where read = false } project { conversation_id: _key, messages { message_id } }",
       "tier": "A"
     },
     {
@@ -4551,58 +4606,22 @@
       "tier": "A"
     }
   ],
-  "corpus_version": "rql-q1-corpus-v0.4.1",
+  "corpus_version": "rql-q1-corpus-v0.4.2",
   "format": "residiuum-rql-q2-1-capability-audit-v1",
-  "generated_unix_s": 1786158085,
-  "git_sha": "7fdf156caabb49d51c0b120b2e5bb2082d5c289c",
-  "packages": [
-    {
-      "blocked_case_count": 5,
-      "case_ids": [
-        "commerce.orders.project_computed_amount_band",
-        "directory.entries.project_computed_kind_label",
-        "telemetry.events.project_computed_sev_band",
-        "telemetry.metrics.project_value_rounded_band",
-        "project_management.tasks.project_computed_overdue_flag"
-      ],
-      "package_id": "pkg_computed_conditional_project"
-    },
-    {
-      "blocked_case_count": 5,
-      "case_ids": [
-        "commerce.orders.page_resume",
-        "messaging.messages.conversation_history_resume",
-        "directory.entries.page_resume",
-        "telemetry.events.device_history_resume",
-        "project_management.tasks.page_resume_by_updated"
-      ],
-      "package_id": "pkg_cursor_after_clause"
-    },
-    {
-      "blocked_case_count": 1,
-      "case_ids": [
-        "messaging.messages.within_conversation_unread"
-      ],
-      "package_id": "pkg_enrich_semantics"
-    }
-  ],
+  "generated_unix_s": 1786239775,
+  "git_sha": "985271766780f24dda682e65db7c12d5e5fcdf3d",
+  "packages": [],
   "profile": "rql-gate1-practical-corpus-v1",
-  "recommended_implementation_package_order": [
-    "pkg_computed_conditional_project",
-    "pkg_cursor_after_clause",
-    "pkg_enrich_semantics"
-  ],
+  "recommended_implementation_package_order": [],
   "summary": {
-    "compile_ok": 134,
-    "execute_ok": 134,
+    "compile_ok": 145,
+    "execute_ok": 145,
     "expected_refusal_ok": 2,
     "failure_class_counts": {
-      "expected_refusal": 2,
-      "semantic": 10,
-      "syntax": 1
+      "expected_refusal": 2
     },
-    "gap_case_count": 11,
-    "product_expressible": 134,
+    "gap_case_count": 0,
+    "product_expressible": 145,
     "tier_a_cases": 147
   }
 }

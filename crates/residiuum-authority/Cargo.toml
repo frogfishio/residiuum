@@ -1,6 +1,6 @@
 [package]
 name = "residiuum-authority"
-version.workspace = true
+version = "0.2.5"
 edition.workspace = true
 rust-version.workspace = true
 license = "AGPL-3.0-or-later"

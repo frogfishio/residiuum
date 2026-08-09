@@ -10,6 +10,7 @@
     "concurrency",
     "side_a",
     "side_b",
+    "raw_repetitions",
     "scaffold_only"
   ],
   "properties": {
@@ -40,7 +41,7 @@
     },
     "side_a": {
       "type": "object",
-      "description": "EngineRunOutcome; must include engine + execution_kind (product|logical_simulator|not_configured)"
+      "description": "EngineRunOutcome; must include engine + execution_kind and status (ready|not_configured|feature_disabled|refused|unsupported)"
     },
     "side_b": {
       "type": "object",
@@ -50,6 +51,23 @@
     "equivalence_detail": { "type": ["string", "null"] },
     "metrics_a": { "type": ["object", "null"] },
     "metrics_b": { "type": ["object", "null"] },
+    "raw_repetitions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "repetition",
+          "engine",
+          "operations",
+          "duration_ns",
+          "valid",
+          "result_digest",
+          "query_hash",
+          "index_config_hash",
+          "cache_state"
+        ]
+      }
+    },
     "scaffold_only": { "type": "boolean" }
   },
   "additionalProperties": true

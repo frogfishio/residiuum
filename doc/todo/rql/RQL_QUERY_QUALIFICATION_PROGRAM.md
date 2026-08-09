@@ -312,7 +312,9 @@ against MongoDB TCP latency as one undifferentiated contest.
 
 - flat, deeply nested, sparse heterogeneous and array-heavy shapes;
 - approximately 1 KiB, 8 KiB and 64 KiB payloads plus a seeded heavy tail;
-- working sets near 25%, 100% and 400% of available memory;
+- working sets near 25%, 100% and 400% of the controlled host's fixed memory
+  capacity (physical RAM on bare metal, or an evidenced container/VM limit),
+  never a transient free/available-memory reading;
 - uniform, Zipf/hot-key and time-ordered distributions;
 - low, medium and high cardinality; and
 - point, 0.01%, 1%, 10% and broad selectivity.
@@ -450,13 +452,18 @@ does Atomics become the active critical-path programme.
 
 ## 11. Package scoreboard
 
+Recovery note (2026-08-09): the lost Kanban state is reconstructed in
+[RQL_RECOVERY_BASELINE_2026_08_09.md](./RQL_RECOVERY_BASELINE_2026_08_09.md).
+Where the older delivery rows below conflict with that dated baseline, the
+baseline records current delivery truth; this programme remains target authority.
+
 | Package | State | Principal exit decision |
 |---|---|---|
 | RQL-Q0 Target freeze | **`accept`** (2026-08-07; SHA e1f5c670…) | Tier and comparator profile accepted |
-| RQL-Q1 Practical corpus | `active` (Q1.2 Commerce+Messaging bulk; Q1.3–Q1.4 open) | Immutable corpus accepted |
-| RQL-Q2 Capability closure | `backlog` | Tier A 100%; one QVM runtime |
-| RQL-Q3 Semantic qualification | Q3.1–Q3.4 `in_review` | principal package accept; source `after $cursor` residual |
-| RQL-Q4 Harness | Q4.1–Q4.3 `in_review` (scaffold) | **pre-accept F1–F9 todo** (block Q5+); principal accept after P1 |
+| RQL-Q1 Practical corpus | `active`; Q1.1–Q1.4 labor landed; not frozen | Immutable corpus accepted |
+| RQL-Q2 Capability closure | `in_review`; 147/147 explicit closed outcomes (145 execute + 2 stable refusals) | principal accept; Decision 0 remains separate |
+| RQL-Q3 Semantic qualification | Q3.1–Q3.4 labor exit ready; 147/147 green denominator | principal accept |
+| RQL-Q4 Harness | Q4.1–Q4.3 `in_review`; product scaling/repetition/maintenance/damage rehearsals verifier-green | R400 memory + resource probes + real comparator/server campaign + principal accept |
 | RQL-Q5 Baseline | `backlog` | Baseline accepted; gates frozen |
 | RQL-Q6 Optimisation | `backlog` | Bottlenecks closed or accepted |
 | RQL-Q7 Final qualification | `backlog` | Gate 1 pass/fail |

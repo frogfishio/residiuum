@@ -70,6 +70,10 @@ page_size / R/W mix where relevant:
 
 Device-cold claims require `attempted_page_cache_drop` only.
 
+Memory ratios bind to a fixed, evidenced controlled-host capacity. Transient
+free-memory readings are forbidden because memory pressure could otherwise make
+a fixture smaller than physical RAM falsely satisfy R400.
+
 ## 6. Evidence
 
 | Artefact | Path |
@@ -81,8 +85,10 @@ Device-cold claims require `attempted_page_cache_drop` only.
 ## 7. Non-claims
 
 - Not Gate-1; not RQL-Q4 package accept; not competitive Q5 baseline.
-- Plans + logical datasets only — **execute residual** (product adapters / metrics → Q4.3).
-- Some Core RQL intentions (enrich Full, group/avg) may refuse on product path until Q2 residual closes; plans still freeze the measured intention.
+- Product execution and metrics live in Q4.3; this task owns plans and logical datasets.
+- Enrich uses the explicit Full profile. Group and aggregate plans use the current
+  Core grammar (`group by … project … count() as …`) and are exercised by the
+  embedded product concurrency smoke.
 
 ## 8. Exit checklist (Q4.2)
 
@@ -101,6 +107,10 @@ Logical harness now runs **genuine** multipage cursor (first+deep, full concat),
 mixed R/W with writes (90/10 and 70/30), conditional `high_band`, agg **avg**,
 enrich optional/exactly_one/many, and **executes** concurrency matrix in
 `section_7_2_expanded_portfolio` / `run_section_7_2_expanded`.
+
+Product rehearsal now exercises all mandatory cells at 256 documents (4× the
+64-document smoke fixture). This proves larger-fixture plumbing only; it does
+not satisfy the R400/larger-than-host-memory lifecycle class.
 
 ## 10. Next
 

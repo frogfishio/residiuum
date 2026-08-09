@@ -7,23 +7,22 @@ mod apb1_facade_parity;
 mod apb7_query_parity;
 
 use ed25519_dalek::{Signer, SigningKey};
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose, SanType};
 use residiuum_format::{encode_deterministic_uint_map, CborValue};
 use residiuum_heap::{
-    sig_structure_for, verify_certificate, AUDIENCE_DATA_V1, CONTENT_TYPE_CERTIFICATE,
-    EXTERNAL_AAD_CERTIFICATE, HEAP_PROFILE, PROFILE_VERSION, HeapAdministrativeState,
-    HeapSecuritySnapshot, HeapSlot, SecurityRevision,
+    sig_structure_for, verify_certificate, HeapAdministrativeState, HeapSecuritySnapshot, HeapSlot,
+    SecurityRevision, AUDIENCE_DATA_V1, CONTENT_TYPE_CERTIFICATE, EXTERNAL_AAD_CERTIFICATE,
+    HEAP_PROFILE, PROFILE_VERSION,
 };
 use residiuum_sdk::{
-    HeapCredential, InMemoryHolderKey, RemoteHeapOptions, Residiuum, TlsClientOptions,
-    TlsServerOptions, HeapClient,
+    explain_rql_full_on_heap, AppQueryBudget, ErrorCode, HeapClient, HeapCredential,
+    InMemoryHolderKey, Parameters, QueryRunOptions, RemoteHeapOptions, Residiuum, TlsClientOptions,
+    TlsServerOptions, RQL_FULL_PROFILE,
 };
 use residiuum_server::{
     serve_store_with, HeapAuthAuditLog, ResidentHeap, ResidentHeapRegistry, ServeOptions,
 };
 use residiuum_store::Store;
-use rcgen::{
-    BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose, SanType,
-};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::net::{TcpListener, TcpStream};
@@ -111,7 +110,9 @@ fn hex32(s: &str) -> [u8; 32] {
 ///
 /// Does **not** rewrite `vectors-v1.json` — test-local only so product vectors
 /// stay at Read|Write|IndexAdmin (13) unless deliberately regenerated.
-fn mint_vector_cose_with_rights(rights_mask: u64) -> (Vec<u8>, residiuum_heap::VerifiedCertificate) {
+fn mint_vector_cose_with_rights(
+    rights_mask: u64,
+) -> (Vec<u8>, residiuum_heap::VerifiedCertificate) {
     let doc = vectors();
     let inputs = &doc["inputs"];
     let master_seed = hex32(inputs["master_seed"].as_str().unwrap());
@@ -253,7 +254,8 @@ fn connect_heap_welcome_and_process_ops() {
     let bind = format!("127.0.0.1:{port}");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .tls(TlsServerOptions::new(&cert_path, &key_path))
         .qualified_heap_key(true)
         .heap_registry(Arc::clone(&registry))
@@ -294,10 +296,10 @@ fn connect_heap_welcome_and_process_ops() {
     thread::sleep(Duration::from_millis(50));
 
     assert!(
-        audit.snapshot().iter().any(|e| matches!(
-            e,
-            residiuum_server::HeapAuthAuditEvent::Welcome { .. }
-        )),
+        audit
+            .snapshot()
+            .iter()
+            .any(|e| matches!(e, residiuum_server::HeapAuthAuditEvent::Welcome { .. })),
         "audit must record welcome"
     );
 }
@@ -349,7 +351,8 @@ fn connect_heap_wrong_name_rejects() {
     let bind = format!("127.0.0.1:{port}");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .tls(TlsServerOptions::new(&cert_path, &key_path))
         .qualified_heap_key(true)
         .heap_registry(Arc::clone(&registry))
@@ -437,7 +440,9 @@ fn connect_heap_put_get_delete_subject_v2() {
     let layout = HeapMetaLayout::new(&store_path);
     let dep = *verified.deployment_id.as_bytes();
     let heap = *verified.heap_id.as_bytes();
-    let coll = *residiuum_heap::CollectionId::new_random().unwrap().as_bytes();
+    let coll = *residiuum_heap::CollectionId::new_random()
+        .unwrap()
+        .as_bytes();
     let staged = stage_heap_genesis(&layout, dep, heap, [9u8; 16], "accounts").unwrap();
     publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
     create_object(
@@ -455,7 +460,8 @@ fn connect_heap_put_get_delete_subject_v2() {
     let bind = format!("127.0.0.1:{port}");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .tls(TlsServerOptions::new(&cert_path, &key_path))
         .qualified_heap_key(true)
         .heap_registry(Arc::clone(&registry))
@@ -478,20 +484,25 @@ fn connect_heap_put_get_delete_subject_v2() {
     .expected_heap_name("accounts")
     .now_unix_s(now_unix);
 
-    let mut heap = Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
-        .expect("connect_heap");
+    let mut heap =
+        Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
+            .expect("connect_heap");
     let cid = heap.collection_open("users").expect("collection_open");
     heap.put_json(&cid, "user-1", &serde_json::json!({"name": "Alice"}))
         .expect("put");
     let got = heap.get_json(&cid, "user-1").expect("get").expect("found");
     assert_eq!(got["name"], "Alice");
-    heap.put_bytes(&cid, "blob-1", b"\x00\xff").expect("put_bytes");
+    heap.put_bytes(&cid, "blob-1", b"\x00\xff")
+        .expect("put_bytes");
     assert_eq!(
         heap.get_bytes(&cid, "blob-1").expect("get_bytes").unwrap(),
         b"\x00\xff"
     );
     assert!(heap.delete(&cid, "user-1").expect("delete"));
-    assert!(heap.get_json(&cid, "user-1").expect("get after delete").is_none());
+    assert!(heap
+        .get_json(&cid, "user-1")
+        .expect("get after delete")
+        .is_none());
 
     drop(heap);
     flag.store(true, Ordering::SeqCst);
@@ -550,7 +561,9 @@ fn apb1_heap_client_from_remote_open_put_get_delete() {
     let layout = HeapMetaLayout::new(&store_path);
     let dep = *verified.deployment_id.as_bytes();
     let heap_bytes = *verified.heap_id.as_bytes();
-    let coll = *residiuum_heap::CollectionId::new_random().unwrap().as_bytes();
+    let coll = *residiuum_heap::CollectionId::new_random()
+        .unwrap()
+        .as_bytes();
     let staged = stage_heap_genesis(&layout, dep, heap_bytes, [9u8; 16], "accounts").unwrap();
     publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
     create_object(
@@ -568,7 +581,8 @@ fn apb1_heap_client_from_remote_open_put_get_delete() {
     let bind = format!("127.0.0.1:{port}");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .tls(TlsServerOptions::new(&cert_path, &key_path))
         .qualified_heap_key(true)
         .heap_registry(Arc::clone(&registry))
@@ -591,11 +605,8 @@ fn apb1_heap_client_from_remote_open_put_get_delete() {
     .expected_heap_name("accounts")
     .now_unix_s(now_unix);
 
-    let remote = Residiuum::connect_heap(
-        format!("residiuum://127.0.0.1:{port}/accounts"),
-        options,
-    )
-    .expect("connect_heap");
+    let remote = Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
+        .expect("connect_heap");
 
     let mut client = HeapClient::from(remote);
     assert!(client.is_bound());
@@ -684,7 +695,8 @@ fn apb1_heap_client_from_remote_full_parity_heap_admin() {
     let bind = format!("127.0.0.1:{port}");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .tls(TlsServerOptions::new(&cert_path, &key_path))
         .qualified_heap_key(true)
         .heap_registry(Arc::clone(&registry))
@@ -707,11 +719,8 @@ fn apb1_heap_client_from_remote_full_parity_heap_admin() {
     .expected_heap_name("accounts")
     .now_unix_s(now_unix);
 
-    let remote = Residiuum::connect_heap(
-        format!("residiuum://127.0.0.1:{port}/accounts"),
-        options,
-    )
-    .expect("connect_heap admin");
+    let remote = Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
+        .expect("connect_heap admin");
 
     let mut client = HeapClient::from(remote);
     assert!(client.is_bound());
@@ -794,7 +803,8 @@ fn apb7_query_from_remote_collection_plane() {
     let bind = format!("127.0.0.1:{port}");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .tls(TlsServerOptions::new(&cert_path, &key_path))
         .qualified_heap_key(true)
         .heap_registry(Arc::clone(&registry))
@@ -817,11 +827,8 @@ fn apb7_query_from_remote_collection_plane() {
     .expected_heap_name("accounts")
     .now_unix_s(now_unix);
 
-    let remote = Residiuum::connect_heap(
-        format!("residiuum://127.0.0.1:{port}/accounts"),
-        options,
-    )
-    .expect("connect_heap admin");
+    let remote = Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
+        .expect("connect_heap admin");
 
     let mut client = HeapClient::from(remote);
     assert!(client.is_bound());
@@ -840,6 +847,145 @@ fn apb7_query_from_remote_collection_plane() {
     );
     // APP-7 T6: remote rql uses op 118 wire (not collection-plane scan only).
     apb7_query_parity::run_full_query_parity(&mut client, "orders_t7");
+
+    // Full profile uses one Heap-bound op 118 request: the server, not the
+    // client, performs the foreign collection scan and QVM attachment.
+    let mut orders = client
+        .create_collection("full_wire_orders")
+        .expect("create Full wire orders")
+        .collection;
+    let mut customers = client
+        .create_collection("full_wire_customers")
+        .expect("create Full wire customers")
+        .collection;
+    customers
+        .put("c1", &serde_json::json!({"id": "c1", "name": "Ada"}))
+        .unwrap();
+    customers
+        .put("c2", &serde_json::json!({"id": "c2", "name": "Bob"}))
+        .unwrap();
+    orders
+        .put(
+            "o1",
+            &serde_json::json!({"customer_id": "c1", "amount": 50}),
+        )
+        .unwrap();
+    orders
+        .put(
+            "o2",
+            &serde_json::json!({"customer_id": "c2", "amount": 150}),
+        )
+        .unwrap();
+
+    let source = r#"from full_wire_orders
+        enrich customer using full_wire_customers
+          matching customer_id = id expect exactly_one
+        project { customer { name }, amount }
+        page size 1"#;
+    let first = client
+        .rql_full(source, &Parameters::default(), QueryRunOptions::default())
+        .expect("remote Full page one");
+    assert_eq!(first.profile, RQL_FULL_PROFILE);
+    assert_eq!(first.rows.len(), 1);
+    assert_eq!(first.base.rows.len(), 1);
+    assert_eq!(first.enrich_loads.len(), 1);
+    assert!(first.rows[0].1["customer"]["name"].is_string());
+    assert!(first.rows[0].1.get("customer_id").is_none());
+    assert!(!first.base.exhausted);
+    let explained = explain_rql_full_on_heap(&mut client, source).expect("Full explain");
+    assert_eq!(
+        explained.plan_hash, first.base.plan_hash,
+        "Full explain must identify the QVM programme actually executed"
+    );
+
+    let mut next_options = QueryRunOptions::default();
+    next_options.after = first.base.next.clone();
+    let second = client
+        .rql_full(source, &Parameters::default(), next_options)
+        .expect("remote Full page two");
+    assert_eq!(second.rows.len(), 1);
+    assert_ne!(first.rows[0].0, second.rows[0].0);
+    assert!(second.base.exhausted);
+
+    let computed = client
+        .rql_full(
+            "from full_wire_orders project _key, amount_band = if amount < 100 then \"low\" else \"high\"",
+            &Parameters::default(),
+            QueryRunOptions::default(),
+        )
+        .expect("remote Full computed project");
+    let computed_by_key: std::collections::BTreeMap<_, _> = computed.rows.into_iter().collect();
+    assert_eq!(computed_by_key["o1"]["amount_band"], "low");
+    assert_eq!(computed_by_key["o2"]["amount_band"], "high");
+
+    let mut lines = client
+        .create_collection("full_wire_lines")
+        .expect("create Full wire lines")
+        .collection;
+    lines
+        .put("l1", &serde_json::json!({"order_id": "o1", "qty": 2}))
+        .unwrap();
+    lines
+        .put("l2", &serde_json::json!({"order_id": "o1", "qty": 0}))
+        .unwrap();
+    lines
+        .put("l3", &serde_json::json!({"order_id": "o2", "qty": 3}))
+        .unwrap();
+    let within = client
+        .rql_full(
+            r#"from full_wire_orders
+                enrich items using full_wire_lines matching _key = order_id expect many
+                within items { where qty > 0 }
+                project { items { qty } }"#,
+            &Parameters::default(),
+            QueryRunOptions::default(),
+        )
+        .expect("remote Full within");
+    let within_by_key: std::collections::BTreeMap<_, _> = within.rows.into_iter().collect();
+    assert_eq!(within_by_key["o1"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(within_by_key["o1"]["items"][0]["qty"], 2);
+    assert_eq!(within_by_key["o2"]["items"][0]["qty"], 3);
+
+    let isolation = client.rql_full(
+        "from collection_not_in_authorised_heap project _key",
+        &Parameters::default(),
+        QueryRunOptions::default(),
+    );
+    assert!(
+        isolation.is_err(),
+        "Full binding must stay inside the Heap catalogue"
+    );
+
+    customers
+        .put(
+            "c1",
+            &serde_json::json!({"id": "c1", "name": "x".repeat(16 * 1024)}),
+        )
+        .unwrap();
+    let mut bounded = QueryRunOptions::default();
+    bounded.budget = Some(AppQueryBudget {
+        max_documents: None,
+        max_bytes: None,
+        max_result_bytes: Some(2 * 1024),
+    });
+    let bounded_err = client
+        .rql_full(source, &Parameters::default(), bounded)
+        .expect_err("remote Full attachment must enforce result budget");
+    assert_eq!(bounded_err.code(), ErrorCode::QueryBudgetRequired);
+
+    let mut bad_orders = client
+        .create_collection("full_wire_bad_orders")
+        .expect("create Full wire refusal collection")
+        .collection;
+    bad_orders
+        .put("bad", &serde_json::json!({"customer_id": "missing"}))
+        .unwrap();
+    let refusal = client.rql_full(
+        "from full_wire_bad_orders enrich customer using full_wire_customers matching customer_id = id expect exactly_one",
+        &Parameters::default(),
+        QueryRunOptions::default(),
+    );
+    assert!(refusal.is_err(), "remote Full cardinality must fail closed");
 
     drop(client);
     flag.store(true, Ordering::SeqCst);
@@ -894,7 +1040,9 @@ fn connect_heap_list_and_scan_json() {
     let layout = HeapMetaLayout::new(&store_path);
     let dep = *verified.deployment_id.as_bytes();
     let heap_b = *verified.heap_id.as_bytes();
-    let coll = *residiuum_heap::CollectionId::new_random().unwrap().as_bytes();
+    let coll = *residiuum_heap::CollectionId::new_random()
+        .unwrap()
+        .as_bytes();
     let staged = stage_heap_genesis(&layout, dep, heap_b, [9u8; 16], "accounts").unwrap();
     publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
     create_object(
@@ -912,7 +1060,8 @@ fn connect_heap_list_and_scan_json() {
     let bind = format!("127.0.0.1:{port}");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .tls(TlsServerOptions::new(&cert_path, &key_path))
         .qualified_heap_key(true)
         .heap_registry(Arc::clone(&registry))
@@ -935,8 +1084,9 @@ fn connect_heap_list_and_scan_json() {
     .expected_heap_name("accounts")
     .now_unix_s(now_unix);
 
-    let mut remote = Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
-        .expect("connect_heap");
+    let mut remote =
+        Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
+            .expect("connect_heap");
     let listed = remote.list_collections().expect("list_collections");
     assert!(
         listed.iter().any(|(_, n)| n == "users"),
@@ -1022,7 +1172,9 @@ fn connect_heap_history() {
     let layout = HeapMetaLayout::new(&store_path);
     let dep = *verified.deployment_id.as_bytes();
     let heap_b = *verified.heap_id.as_bytes();
-    let coll = *residiuum_heap::CollectionId::new_random().unwrap().as_bytes();
+    let coll = *residiuum_heap::CollectionId::new_random()
+        .unwrap()
+        .as_bytes();
     let staged = stage_heap_genesis(&layout, dep, heap_b, [9u8; 16], "accounts").unwrap();
     publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
     create_object(
@@ -1040,7 +1192,8 @@ fn connect_heap_history() {
     let bind = format!("127.0.0.1:{port}");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .tls(TlsServerOptions::new(&cert_path, &key_path))
         .qualified_heap_key(true)
         .heap_registry(Arc::clone(&registry))
@@ -1063,8 +1216,9 @@ fn connect_heap_history() {
     .expected_heap_name("accounts")
     .now_unix_s(now_unix);
 
-    let mut remote = Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
-        .expect("connect_heap");
+    let mut remote =
+        Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
+            .expect("connect_heap");
     let cid = remote.collection_open("users").unwrap();
     remote
         .put_json(&cid, "k1", &serde_json::json!({"v": 1}))
@@ -1150,7 +1304,9 @@ fn connect_heap_find_filter() {
     let layout = HeapMetaLayout::new(&store_path);
     let dep = *verified.deployment_id.as_bytes();
     let heap_b = *verified.heap_id.as_bytes();
-    let coll = *residiuum_heap::CollectionId::new_random().unwrap().as_bytes();
+    let coll = *residiuum_heap::CollectionId::new_random()
+        .unwrap()
+        .as_bytes();
     let staged = stage_heap_genesis(&layout, dep, heap_b, [9u8; 16], "accounts").unwrap();
     publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
     create_object(
@@ -1168,7 +1324,8 @@ fn connect_heap_find_filter() {
     let bind = format!("127.0.0.1:{port}");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .tls(TlsServerOptions::new(&cert_path, &key_path))
         .qualified_heap_key(true)
         .heap_registry(Arc::clone(&registry))
@@ -1191,8 +1348,9 @@ fn connect_heap_find_filter() {
     .expected_heap_name("accounts")
     .now_unix_s(now_unix);
 
-    let mut remote = Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
-        .expect("connect_heap");
+    let mut remote =
+        Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
+            .expect("connect_heap");
     let cid = remote.collection_open("users").unwrap();
     remote
         .put_json(&cid, "a", &serde_json::json!({"status": "active", "n": 1}))
@@ -1272,7 +1430,9 @@ fn connect_heap_indexes() {
     let layout = HeapMetaLayout::new(&store_path);
     let dep = *verified.deployment_id.as_bytes();
     let heap_b = *verified.heap_id.as_bytes();
-    let coll = *residiuum_heap::CollectionId::new_random().unwrap().as_bytes();
+    let coll = *residiuum_heap::CollectionId::new_random()
+        .unwrap()
+        .as_bytes();
     let staged = stage_heap_genesis(&layout, dep, heap_b, [9u8; 16], "accounts").unwrap();
     publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
     create_object(
@@ -1290,7 +1450,8 @@ fn connect_heap_indexes() {
     let bind = format!("127.0.0.1:{port}");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .tls(TlsServerOptions::new(&cert_path, &key_path))
         .qualified_heap_key(true)
         .heap_registry(Arc::clone(&registry))
@@ -1313,8 +1474,9 @@ fn connect_heap_indexes() {
     .expected_heap_name("accounts")
     .now_unix_s(now_unix);
 
-    let mut remote = Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
-        .expect("connect_heap");
+    let mut remote =
+        Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
+            .expect("connect_heap");
     let cid = remote.collection_open("users").unwrap();
     remote
         .put_json(&cid, "a", &serde_json::json!({"status": "active", "n": 1}))
@@ -1329,7 +1491,10 @@ fn connect_heap_indexes() {
     let created = remote
         .index_create(&cid, "by-status", &["status"])
         .expect("index_create");
-    assert_eq!(created.get("name").and_then(|v| v.as_str()), Some("by-status"));
+    assert_eq!(
+        created.get("name").and_then(|v| v.as_str()),
+        Some("by-status")
+    );
     assert_eq!(created.get("state").and_then(|v| v.as_str()), Some("ready"));
     assert_eq!(created.get("entry_count").and_then(|v| v.as_u64()), Some(2));
     assert_eq!(
@@ -1344,8 +1509,13 @@ fn connect_heap_indexes() {
         Some("by-status")
     );
 
-    let rebuilt = remote.index_rebuild(&cid, "by-status").expect("index_rebuild");
-    assert_eq!(rebuilt.get("name").and_then(|v| v.as_str()), Some("by-status"));
+    let rebuilt = remote
+        .index_rebuild(&cid, "by-status")
+        .expect("index_rebuild");
+    assert_eq!(
+        rebuilt.get("name").and_then(|v| v.as_str()),
+        Some("by-status")
+    );
     assert_eq!(rebuilt.get("state").and_then(|v| v.as_str()), Some("ready"));
     assert_eq!(rebuilt.get("entry_count").and_then(|v| v.as_u64()), Some(2));
 
@@ -1412,7 +1582,9 @@ fn connect_heap_find_via_index() {
     let layout = HeapMetaLayout::new(&store_path);
     let dep = *verified.deployment_id.as_bytes();
     let heap_b = *verified.heap_id.as_bytes();
-    let coll = *residiuum_heap::CollectionId::new_random().unwrap().as_bytes();
+    let coll = *residiuum_heap::CollectionId::new_random()
+        .unwrap()
+        .as_bytes();
     let staged = stage_heap_genesis(&layout, dep, heap_b, [9u8; 16], "accounts").unwrap();
     publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
     create_object(
@@ -1430,7 +1602,8 @@ fn connect_heap_find_via_index() {
     let bind = format!("127.0.0.1:{port}");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .tls(TlsServerOptions::new(&cert_path, &key_path))
         .qualified_heap_key(true)
         .heap_registry(Arc::clone(&registry))
@@ -1453,8 +1626,9 @@ fn connect_heap_find_via_index() {
     .expected_heap_name("accounts")
     .now_unix_s(now_unix);
 
-    let mut remote = Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
-        .expect("connect_heap");
+    let mut remote =
+        Residiuum::connect_heap(format!("residiuum://127.0.0.1:{port}/accounts"), options)
+            .expect("connect_heap");
     let cid = remote.collection_open("users").unwrap();
     remote
         .put_json(&cid, "a", &serde_json::json!({"status": "active", "n": 1}))

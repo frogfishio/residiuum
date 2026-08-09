@@ -24,9 +24,7 @@ pub const PAGE_IR_PROFILE: &str = "residiuum-query-ir-page-v1";
 
 /// Effective page size: run option overrides plan, clamped to `[1, 4096]`.
 pub(crate) fn resolve_page_size(plan_page_size: u32, options_page_size: Option<u32>) -> usize {
-    options_page_size
-        .unwrap_or(plan_page_size)
-        .clamp(1, 4_096) as usize
+    options_page_size.unwrap_or(plan_page_size).clamp(1, 4_096) as usize
 }
 
 /// Rows needed this page given remaining limit and page size.
@@ -216,10 +214,7 @@ mod tests {
     #[test]
     fn coverage_plan_incomplete_honored() {
         assert_eq!(
-            resolve_coverage_mode(
-                CoveragePolicy::IncompleteAllowed,
-                CoveragePolicy::Complete
-            ),
+            resolve_coverage_mode(CoveragePolicy::IncompleteAllowed, CoveragePolicy::Complete),
             CoveragePolicy::IncompleteAllowed
         );
         assert_eq!(

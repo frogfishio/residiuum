@@ -90,7 +90,10 @@ fn core_wire_refuses_enrich_within_brace_project() {
     .unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains(DIAG_RQL_FEATURE_UNAVAILABLE), "{msg}");
-    assert!(msg.contains("execute_rql_full"), "{msg}");
+    assert!(msg.contains("HeapClient::rql_full"), "{msg}");
 
     refuse_full_language_on_core_wire("from orders where true page size 4").unwrap();
+    let computed = "from orders project band = if amount < 100 then \"low\" else \"high\"";
+    assert!(source_uses_rql_full_constructs(computed));
+    assert!(refuse_full_language_on_core_wire(computed).is_err());
 }

@@ -45,11 +45,8 @@ pub enum PayloadClass {
 }
 
 impl PayloadClass {
-    pub const PRIMARY: &'static [PayloadClass] = &[
-        Self::Approx1KiB,
-        Self::Approx8KiB,
-        Self::Approx64KiB,
-    ];
+    pub const PRIMARY: &'static [PayloadClass] =
+        &[Self::Approx1KiB, Self::Approx8KiB, Self::Approx64KiB];
 
     pub fn target_bytes(self) -> usize {
         match self {
@@ -70,7 +67,7 @@ impl PayloadClass {
     }
 }
 
-/// Working-set size relative to host available memory (ratio identity is stable).
+/// Working-set size relative to controlled-host memory capacity (ratio identity is stable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryRatio {
@@ -163,13 +160,8 @@ pub enum SelectivityClass {
 }
 
 impl SelectivityClass {
-    pub const ALL: &'static [SelectivityClass] = &[
-        Self::Point,
-        Self::S0_01,
-        Self::S1,
-        Self::S10,
-        Self::Broad,
-    ];
+    pub const ALL: &'static [SelectivityClass] =
+        &[Self::Point, Self::S0_01, Self::S1, Self::S10, Self::Broad];
 
     /// Approximate fraction of documents matching (point ≈ 1/n).
     pub fn approx_fraction(self) -> f64 {
@@ -265,8 +257,7 @@ mod tests {
 
     #[test]
     fn memory_ratio_scales_docs() {
-        let s = DatasetSpec::smoke_default(1)
-            .with_scaled_docs(1000);
+        let s = DatasetSpec::smoke_default(1).with_scaled_docs(1000);
         // smoke_default has R25 → 250
         assert_eq!(s.doc_count, 250);
         let mut s2 = DatasetSpec::smoke_default(1);

@@ -1,0 +1,28 @@
+{
+  "authority": "doc/todo/rql/RQL_QUERY_QUALIFICATION_PROGRAM.md#73-cache-and-lifecycle-classes",
+  "device_cold": {
+    "claims_device_cold": false,
+    "cold_method": "attempted_page_cache_drop",
+    "executed": false,
+    "exit_status": 1,
+    "status": "refused_page_cache_drop_failed",
+    "stderr": "Unable to purge disk buffers: Operation not permitted"
+  },
+  "format": "residiuum-rql-q4-product-r400-cold-report-v1",
+  "harness_profile": "residiuum-rql-qual-harness-v1",
+  "r400": {
+    "campaign_cap_bytes": 268435456,
+    "claims_larger_than_memory": false,
+    "executed": false,
+    "filesystem_available_bytes_at_admission": 3154485248,
+    "filesystem_floor_bytes": 2147483648,
+    "filesystem_sufficient": false,
+    "host_memory_capacity_bytes": 17179869184,
+    "memory_cap_sufficient": false,
+    "planned_filesystem_bytes": 154618822656,
+    "required_r400_bytes": 68719476736,
+    "status": "refused_resource_admission",
+    "streaming_loader": true
+  },
+  "seed": 1096
+}

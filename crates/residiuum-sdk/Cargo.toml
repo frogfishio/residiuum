@@ -57,6 +57,7 @@ x509-parser = "0.16"
 # No residiuum-server here: server → sdk is a normal dep, so a crates.io cycle
 # would block publish. TCP/serve integration tests live in `residiuum-server/tests/`.
 residiuum-cluster = { workspace = true }
+residiuum-authority.workspace = true
 tempfile.workspace = true
 rcgen = "0.13"
 ed25519-dalek = { version = "2.1.1", default-features = false, features = [

@@ -26,10 +26,13 @@ use residiuum_heap::{
 };
 use residiuum_sdk::predicate::resolve_path;
 use residiuum_sdk::{
-    compile_app_core, compile_sql_to_rql, execute_bytecode, field, param, AggFn, CollectionBindings,
-    CoveragePolicy, Error, HostCapabilities, NullsOrder, OrderDir, OrderTerm, Parameters,
-    PlanBuilder, PredPath as Path, Predicate, QueryBytecodeV1, QueryPage, QueryRunOptions,
-    ResidiuumDeployment, Resolve, RqlPlanV1, SqlToRqlResult, APP_CORE_PROFILE,
+    compile_app_core, compile_rql_full, compile_sql_to_rql, execute_bytecode,
+    execute_rql_full_on_host_with, explain_core_source, field, param,
+    source_uses_rql_full_constructs, AggFn, CollectionBindings, CoveragePolicy, EnrichCardinality,
+    EnrichStepV1, Error, FullPipelineStepV1, HostCapabilities, NullsOrder, OrderDir, OrderTerm,
+    Parameters, PlanBuilder, PredPath as Path, Predicate, ProjectExprV1, ProjectItemV1,
+    QueryBytecodeV1, QueryPage, QueryRunOptions, ResidiuumDeployment, Resolve,
+    RqlFullExecuteOptions, RqlPlanV1, SqlToRqlResult, WithinStepV1, APP_CORE_PROFILE,
 };
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
 use serde_json::{json, Map, Value};
@@ -210,9 +213,7 @@ fn load_logical_db(
     }
     let mut db = LogicalDb::new();
     for (name, docs) in cols {
-        let arr = docs
-            .as_array()
-            .ok_or_else(|| format!("{name} not array"))?;
+        let arr = docs.as_array().ok_or_else(|| format!("{name} not array"))?;
         let mut map = BTreeMap::new();
         for doc in arr {
             let key = doc
@@ -288,6 +289,234 @@ fn apply_project_paths_oracle(key: &str, doc: &Value, paths: Option<&Vec<Path>>)
         }
     }
     Value::Object(out)
+}
+
+fn eval_project_expr_oracle(
+    key: &str,
+    doc: &Value,
+    expr: &ProjectExprV1,
+    params: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
+    match expr {
+        ProjectExprV1::Literal(v) => Ok(v.clone()),
+        ProjectExprV1::Path(path) => Ok(match path_resolve_with_key(key, doc, path) {
+            Resolve::Present(v) => v,
+            Resolve::Absent => Value::Null,
+        }),
+        ProjectExprV1::Conditional {
+            when,
+            then_expr,
+            else_expr,
+        } => {
+            let selected = if eval_pred_with_key(when, key, doc, params)? {
+                then_expr
+            } else {
+                else_expr
+            };
+            eval_project_expr_oracle(key, doc, selected, params)
+        }
+    }
+}
+
+fn apply_computed_project_oracle(
+    rows: &mut [OracleRow],
+    fields: &[ProjectItemV1],
+    params: &BTreeMap<String, Value>,
+) -> Result<(), String> {
+    for row in rows {
+        let mut out = Map::new();
+        for field in fields {
+            match field {
+                ProjectItemV1::Leaf { output, source } => {
+                    if let Resolve::Present(v) = path_resolve_with_key(&row.key, &row.value, source)
+                    {
+                        out.insert(output.clone(), v);
+                    }
+                }
+                ProjectItemV1::Computed { output, expression } => {
+                    out.insert(
+                        output.clone(),
+                        eval_project_expr_oracle(&row.key, &row.value, expression, params)?,
+                    );
+                }
+                ProjectItemV1::Nested { output, fields } => {
+                    let source = Path(vec![output.clone()]);
+                    let projected = match path_resolve_with_key(&row.key, &row.value, &source) {
+                        Resolve::Absent => continue,
+                        Resolve::Present(Value::Object(obj)) => {
+                            project_value_oracle(&row.key, Value::Object(obj), fields, params)?
+                        }
+                        Resolve::Present(Value::Array(items)) => Value::Array(
+                            items
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, item)| {
+                                    project_value_oracle(
+                                        &format!("{}#{i}", row.key),
+                                        item,
+                                        fields,
+                                        params,
+                                    )
+                                })
+                                .collect::<Result<Vec<_>, _>>()?,
+                        ),
+                        Resolve::Present(Value::Null) => Value::Null,
+                        Resolve::Present(_) => {
+                            return Err(format!("nested project `{output}` requires object/array"));
+                        }
+                    };
+                    out.insert(output.clone(), projected);
+                }
+            }
+        }
+        row.value = Value::Object(out);
+    }
+    Ok(())
+}
+
+fn project_value_oracle(
+    key: &str,
+    value: Value,
+    fields: &[ProjectItemV1],
+    params: &BTreeMap<String, Value>,
+) -> Result<Value, String> {
+    let mut rows = vec![OracleRow {
+        key: key.into(),
+        value,
+    }];
+    apply_computed_project_oracle(&mut rows, fields, params)?;
+    Ok(rows.pop().expect("one row").value)
+}
+
+fn strip_logical_key(mut value: Value) -> Value {
+    if let Value::Object(map) = &mut value {
+        map.remove("_key");
+    }
+    value
+}
+
+fn attach_enrich_oracle(
+    rows: Vec<OracleRow>,
+    db: &LogicalDb,
+    step: &EnrichStepV1,
+    params: &BTreeMap<String, Value>,
+) -> Result<Vec<OracleRow>, String> {
+    let foreign = db
+        .get(&step.using_name)
+        .ok_or_else(|| format!("missing foreign collection {}", step.using_name))?;
+    let mut out = Vec::with_capacity(rows.len());
+    for mut row in rows {
+        let left = path_resolve_with_key(&row.key, &row.value, &step.left);
+        let mut matches = Vec::new();
+        if let Resolve::Present(left_value) = left {
+            for (foreign_key, foreign_doc) in foreign {
+                if let Some(pred) = &step.candidate_where {
+                    if !eval_pred_with_key(pred, foreign_key, foreign_doc, params)? {
+                        continue;
+                    }
+                }
+                if let Resolve::Present(right_value) =
+                    path_resolve_with_key(foreign_key, foreign_doc, &step.right)
+                {
+                    if right_value == left_value {
+                        matches.push(strip_logical_key(foreign_doc.clone()));
+                    }
+                }
+            }
+        }
+        let attached = match (step.expect, matches.len()) {
+            (EnrichCardinality::ExactlyOne, 1) => matches.remove(0),
+            (EnrichCardinality::ExactlyOne, n) => {
+                return Err(format!("exactly_one expected 1 match, got {n}"));
+            }
+            (EnrichCardinality::Optional, 0) => Value::Null,
+            (EnrichCardinality::Optional, 1) => matches.remove(0),
+            (EnrichCardinality::Optional, n) => {
+                return Err(format!("optional expected at most 1 match, got {n}"));
+            }
+            (EnrichCardinality::Many, _) => Value::Array(matches),
+        };
+        row.value
+            .as_object_mut()
+            .ok_or_else(|| "enrich root must be object".to_string())?
+            .insert(step.output.clone(), attached);
+        out.push(row);
+    }
+    Ok(out)
+}
+
+fn set_path_oracle(doc: &mut Value, path: &Path, value: Value) -> Result<(), String> {
+    let (last, parents) = path
+        .0
+        .split_last()
+        .ok_or_else(|| "empty within carrier".to_string())?;
+    let mut current = doc;
+    for segment in parents {
+        current = current
+            .as_object_mut()
+            .and_then(|map| map.get_mut(segment))
+            .ok_or_else(|| format!("missing within carrier parent `{segment}`"))?;
+    }
+    current
+        .as_object_mut()
+        .ok_or_else(|| "within carrier parent must be object".to_string())?
+        .insert(last.clone(), value);
+    Ok(())
+}
+
+fn apply_within_oracle(
+    rows: Vec<OracleRow>,
+    db: &LogicalDb,
+    step: &WithinStepV1,
+    params: &BTreeMap<String, Value>,
+) -> Result<Vec<OracleRow>, String> {
+    let mut out = Vec::with_capacity(rows.len());
+    for mut parent in rows {
+        let items = match path_resolve_with_key(&parent.key, &parent.value, &step.carrier) {
+            Resolve::Present(Value::Array(items)) => items,
+            _ => return Err(format!("within `{}` requires array", step.carrier.dotted())),
+        };
+        let elements = items
+            .into_iter()
+            .enumerate()
+            .map(|(i, value)| OracleRow {
+                key: format!("{}#{i}", parent.key),
+                value,
+            })
+            .collect();
+        let elements = apply_pipeline_oracle(elements, db, &step.steps, params)?;
+        set_path_oracle(
+            &mut parent.value,
+            &step.carrier,
+            Value::Array(elements.into_iter().map(|row| row.value).collect()),
+        )?;
+        out.push(parent);
+    }
+    Ok(out)
+}
+
+fn apply_pipeline_oracle(
+    mut rows: Vec<OracleRow>,
+    db: &LogicalDb,
+    steps: &[FullPipelineStepV1],
+    params: &BTreeMap<String, Value>,
+) -> Result<Vec<OracleRow>, String> {
+    for step in steps {
+        rows = match step {
+            FullPipelineStepV1::Enrich(step) => attach_enrich_oracle(rows, db, step, params)?,
+            FullPipelineStepV1::Within(step) => apply_within_oracle(rows, db, step, params)?,
+            FullPipelineStepV1::Filter(pred) => {
+                let mut kept = Vec::new();
+                for row in rows {
+                    if eval_pred_with_key(pred, &row.key, &row.value, params)? {
+                        kept.push(row);
+                    }
+                }
+                kept
+            }
+        };
+    }
+    Ok(rows)
 }
 
 fn json_ord(a: &Value, b: &Value) -> Ordering {
@@ -475,9 +704,14 @@ fn oracle_eval(
 ) -> Result<(RqlPlanV1, OracleResult), String> {
     let names = extract_collection_names(source);
     let bindings = compile_bindings_for(&names);
-    let compiled = compile_app_core(source, &bindings).map_err(|e| e.to_string())?;
-    assert_eq!(compiled.profile, APP_CORE_PROFILE);
-    let plan = compiled.plan;
+    let (plan, pipeline, full_project) = if source_uses_rql_full_constructs(source) {
+        let compiled = compile_rql_full(source, &bindings).map_err(|e| e.to_string())?;
+        (compiled.base.plan, compiled.pipeline, compiled.project)
+    } else {
+        let compiled = compile_app_core(source, &bindings).map_err(|e| e.to_string())?;
+        assert_eq!(compiled.profile, APP_CORE_PROFILE);
+        (compiled.plan, Vec::new(), None)
+    };
     let coll = db
         .get(&plan.from.source_name)
         .ok_or_else(|| format!("missing collection {}", plan.from.source_name))?;
@@ -501,7 +735,7 @@ fn oracle_eval(
     if working.len() > page_size {
         working.truncate(page_size);
     }
-    let rows = working
+    let mut rows: Vec<OracleRow> = working
         .into_iter()
         .map(|(k, v)| {
             let value = if plan.group_agg.is_active() {
@@ -512,6 +746,10 @@ fn oracle_eval(
             OracleRow { key: k, value }
         })
         .collect();
+    rows = apply_pipeline_oracle(rows, db, &pipeline, &params.values)?;
+    if let Some(fields) = &full_project {
+        apply_computed_project_oracle(&mut rows, fields, &params.values)?;
+    }
     Ok((
         plan,
         OracleResult {
@@ -529,16 +767,18 @@ struct DiffHost {
     /// collection_id → (key → body without required _key; may still have fields)
     by_id: BTreeMap<CollectionId, BTreeMap<String, Value>>,
     /// field → (canonical value json → keys)
-    eq_index: BTreeMap<String, BTreeMap<String, Vec<String>>>,
+    eq_index: BTreeMap<CollectionId, BTreeMap<String, BTreeMap<String, Vec<String>>>>,
     index_enabled: bool,
 }
 
 impl DiffHost {
     fn from_logical(db: &LogicalDb, root_name: &str, root_id: CollectionId, index: bool) -> Self {
         let mut by_id = BTreeMap::new();
-        let mut eq_index: BTreeMap<String, BTreeMap<String, Vec<String>>> = BTreeMap::new();
+        let mut eq_index = BTreeMap::new();
         if let Some(coll) = db.get(root_name) {
             let mut map = BTreeMap::new();
+            let mut collection_index: BTreeMap<String, BTreeMap<String, Vec<String>>> =
+                BTreeMap::new();
             for (k, doc) in coll {
                 let mut body = doc.clone();
                 if let Value::Object(ref mut m) = body {
@@ -553,7 +793,7 @@ impl DiffHost {
                                 continue;
                             }
                             let ck = serde_json::to_string(val).unwrap_or_default();
-                            eq_index
+                            collection_index
                                 .entry(field.clone())
                                 .or_default()
                                 .entry(ck)
@@ -565,12 +805,35 @@ impl DiffHost {
                 map.insert(k.clone(), body);
             }
             by_id.insert(root_id, map);
+            eq_index.insert(root_id, collection_index);
         }
         Self {
             by_id,
             eq_index,
             index_enabled: index,
         }
+    }
+
+    fn from_logical_full(
+        db: &LogicalDb,
+        names: &BTreeSet<String>,
+        bindings: &CollectionBindings,
+        index: bool,
+    ) -> Self {
+        let mut host = Self {
+            by_id: BTreeMap::new(),
+            eq_index: BTreeMap::new(),
+            index_enabled: index,
+        };
+        for name in names {
+            let Ok(cid) = bindings.resolve(name) else {
+                continue;
+            };
+            let one = Self::from_logical(db, name, cid, index);
+            host.by_id.extend(one.by_id);
+            host.eq_index.extend(one.eq_index);
+        }
+        host
     }
 }
 
@@ -595,11 +858,7 @@ impl HostCapabilities for DiffHost {
         Ok(keys)
     }
 
-    fn get_json(
-        &mut self,
-        collection_id: CollectionId,
-        key: &str,
-    ) -> Result<Option<Value>, Error> {
+    fn get_json(&mut self, collection_id: CollectionId, key: &str) -> Result<Option<Value>, Error> {
         Ok(self
             .by_id
             .get(&collection_id)
@@ -608,7 +867,7 @@ impl HostCapabilities for DiffHost {
 
     fn lookup_index_keys(
         &mut self,
-        _collection_id: CollectionId,
+        collection_id: CollectionId,
         equalities: &[(String, Value)],
     ) -> Result<Option<Vec<String>>, Error> {
         if !self.index_enabled || equalities.is_empty() {
@@ -622,7 +881,11 @@ impl HostCapabilities for DiffHost {
         if field.contains('.') {
             return Ok(None);
         }
-        let Some(by_val) = self.eq_index.get(field) else {
+        let Some(by_val) = self
+            .eq_index
+            .get(&collection_id)
+            .and_then(|fields| fields.get(field))
+        else {
             return Ok(None);
         };
         let ck = serde_json::to_string(val).unwrap_or_default();
@@ -653,15 +916,8 @@ fn product_force_scan(
         .map_err(|e| e.to_string())?;
     let mut opts = QueryRunOptions::default();
     opts.page_size = Some(plan.page_size);
-    execute_bytecode(
-        &mut host,
-        &bc,
-        &params.values,
-        &opts,
-        heap_id_fake(),
-        cid,
-    )
-    .map_err(|e| e.to_string())
+    execute_bytecode(&mut host, &bc, &params.values, &opts, heap_id_fake(), cid)
+        .map_err(|e| e.to_string())
 }
 
 fn product_index_plan(
@@ -677,15 +933,43 @@ fn product_index_plan(
         .map_err(|e| e.to_string())?;
     let mut opts = QueryRunOptions::default();
     opts.page_size = Some(plan.page_size);
-    execute_bytecode(
+    execute_bytecode(&mut host, &bc, &params.values, &opts, heap_id_fake(), cid)
+        .map_err(|e| e.to_string())
+}
+
+fn product_full_plan(
+    db: &LogicalDb,
+    source: &str,
+    params: &Parameters,
+    force_scan: bool,
+) -> Result<(Vec<OracleRow>, QueryPage), String> {
+    let names = extract_collection_names(source);
+    let bindings = compile_bindings_for(&names);
+    let compiled = compile_rql_full(source, &bindings).map_err(|e| e.to_string())?;
+    let mut host = DiffHost::from_logical_full(db, &names, &bindings, !force_scan);
+    let mut query = QueryRunOptions::default();
+    query.page_size = Some(compiled.base.plan.page_size);
+    let page = execute_rql_full_on_host_with(
         &mut host,
-        &bc,
-        &params.values,
-        &opts,
         heap_id_fake(),
-        cid,
+        source,
+        &bindings,
+        params,
+        RqlFullExecuteOptions {
+            query,
+            force_enrich_scan: force_scan,
+        },
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+    let rows = page
+        .rows
+        .iter()
+        .map(|(key, value)| OracleRow {
+            key: key.clone(),
+            value: normalize_row_value(value),
+        })
+        .collect();
+    Ok((rows, page.base))
 }
 
 // ---------------------------------------------------------------------------
@@ -730,6 +1014,7 @@ fn compare_shapes(
     left: &[OracleRow],
     right: &[OracleRow],
     ordered: bool,
+    ignore_row_keys: bool,
     left_cov: bool,
     right_cov: bool,
 ) -> Result<(), ShapeDiff> {
@@ -749,7 +1034,7 @@ fn compare_shapes(
     }
     if ordered {
         for (i, (a, b)) in left.iter().zip(right.iter()).enumerate() {
-            if a.key != b.key {
+            if !ignore_row_keys && a.key != b.key {
                 return Err(ShapeDiff {
                     reason: format!("order key diverge at {i}: {} vs {}", a.key, b.key),
                 });
@@ -766,11 +1051,21 @@ fn compare_shapes(
         let mut ra: BTreeMap<(String, String), u32> = BTreeMap::new();
         for r in left {
             let v = serde_json::to_string(&normalize_row_value(&r.value)).unwrap_or_default();
-            *la.entry((r.key.clone(), v)).or_default() += 1;
+            let key = if ignore_row_keys {
+                String::new()
+            } else {
+                r.key.clone()
+            };
+            *la.entry((key, v)).or_default() += 1;
         }
         for r in right {
             let v = serde_json::to_string(&normalize_row_value(&r.value)).unwrap_or_default();
-            *ra.entry((r.key.clone(), v)).or_default() += 1;
+            let key = if ignore_row_keys {
+                String::new()
+            } else {
+                r.key.clone()
+            };
+            *ra.entry((key, v)).or_default() += 1;
         }
         if la != ra {
             return Err(ShapeDiff {
@@ -786,6 +1081,25 @@ fn ordering_is_sensitive(meta: &Value) -> bool {
         Some("unordered_multiset") | Some("unordered_set") | None => false,
         Some(_) => true,
     }
+}
+
+fn semantic_oracle_eligible(case: &Value) -> bool {
+    if case["expected"]["kind"].as_str() == Some("oracle_rule") {
+        return true;
+    }
+    case["expected"]["kind"].as_str() == Some("deferred_q2")
+        && case["family_tags"].as_array().is_some_and(|tags| {
+            tags.iter().any(|tag| {
+                matches!(
+                    tag.as_str(),
+                    Some(
+                        "group_aggregate"
+                            | "projection_computed_conditional"
+                            | "enrichment_cardinality"
+                    )
+                )
+            })
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -824,7 +1138,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid_bytes() -> [u8; 16] {
@@ -848,7 +1169,8 @@ fn product_reopen_store(
         .map_err(|e| e.to_string())?;
     let heap_id = HeapId::from_bytes_unchecked_nonzero(heap_bytes).unwrap();
     let dep_id = DeploymentId::from_bytes_unchecked_nonzero(dep).unwrap();
-    let mut client = residiuum_sdk::HeapClient::from(deployment.open_heap(mint_cap_for(heap_id, dep_id)));
+    let mut client =
+        residiuum_sdk::HeapClient::from(deployment.open_heap(mint_cap_for(heap_id, dep_id)));
 
     // Seed all collections in logical db.
     for (name, docs) in db {
@@ -867,7 +1189,11 @@ fn product_reopen_store(
     }
 
     let names = extract_collection_names(source);
-    let root_name = names.iter().next().cloned().unwrap_or_else(|| "orders".into());
+    let root_name = names
+        .iter()
+        .next()
+        .cloned()
+        .unwrap_or_else(|| "orders".into());
     // First query
     let mut col = client
         .open_collection(&root_name)
@@ -894,8 +1220,15 @@ fn product_reopen_store(
         .map_err(|e| format!("rql2: {e}"))?;
     let rows2 = page_to_rows(&page2);
 
-    compare_shapes(&rows1, &rows2, true, page1.coverage.complete, page2.coverage.complete)
-        .map_err(|d| format!("reopen self-diverge: {}", d.reason))?;
+    compare_shapes(
+        &rows1,
+        &rows2,
+        true,
+        false,
+        page1.coverage.complete,
+        page2.coverage.complete,
+    )
+    .map_err(|d| format!("reopen self-diverge: {}", d.reason))?;
     Ok(rows1)
 }
 
@@ -920,16 +1253,8 @@ fn q32_law_filter_and_commutes() {
         );
         x
     };
-    let a = compile_app_core(
-        r#"from orders where status = "paid" and region = "us""#,
-        &b,
-    )
-    .unwrap();
-    let c = compile_app_core(
-        r#"from orders where region = "us" and status = "paid""#,
-        &b,
-    )
-    .unwrap();
+    let a = compile_app_core(r#"from orders where status = "paid" and region = "us""#, &b).unwrap();
+    let c = compile_app_core(r#"from orders where region = "us" and status = "paid""#, &b).unwrap();
     // Plan where canonical form may differ in tree shape; QVM must match after
     // normalisation via Predicate::And args order — product may not sort AND.
     // Law: oracle eval equal (not necessarily plan hash equal).
@@ -940,10 +1265,7 @@ fn q32_law_filter_and_commutes() {
         ("o3", "open", "us"),
         ("o4", "paid", "us"),
     ] {
-        orders.insert(
-            k.into(),
-            json!({"_key": k, "status": st, "region": reg}),
-        );
+        orders.insert(k.into(), json!({"_key": k, "status": st, "region": reg}));
     }
     let mut db = LogicalDb::new();
     db.insert("orders".into(), orders);
@@ -963,6 +1285,7 @@ fn q32_law_filter_and_commutes() {
     compare_shapes(
         &r1.rows,
         &r2.rows,
+        false,
         false,
         r1.coverage_complete,
         r2.coverage_complete,
@@ -1028,21 +1351,16 @@ fn q32_law_sql_and_rql_qvm_identity_when_sql_compiles() {
     .unwrap();
     b.bind("orders", cid);
     let rql = r#"from orders where status = "paid""#;
-    let q_rql = QueryBytecodeV1::from_core_plan(
-        compile_app_core(rql, &b).unwrap().plan,
-        None,
-    )
-    .unwrap()
-    .qvm_hash();
+    let q_rql = QueryBytecodeV1::from_core_plan(compile_app_core(rql, &b).unwrap().plan, None)
+        .unwrap()
+        .qvm_hash();
     // SQL-ish+ may refuse; if it compiles, QVM must match.
     match compile_sql_to_rql("SELECT * FROM orders WHERE status = 'paid'", Some(&b)) {
         Ok(SqlToRqlResult::Emit(sql)) => {
-            let q_sql = QueryBytecodeV1::from_core_plan(
-                compile_app_core(&sql.rql, &b).unwrap().plan,
-                None,
-            )
-            .unwrap()
-            .qvm_hash();
+            let q_sql =
+                QueryBytecodeV1::from_core_plan(compile_app_core(&sql.rql, &b).unwrap().plan, None)
+                    .unwrap()
+                    .qvm_hash();
             assert_eq!(q_rql, q_sql);
         }
         Ok(SqlToRqlResult::Refuse { .. }) | Err(_) => {
@@ -1057,10 +1375,7 @@ fn q32_law_force_scan_equals_index_on_eq_predicate() {
     for i in 0..20 {
         let st = if i % 3 == 0 { "paid" } else { "open" };
         let k = format!("o-{i:04}");
-        orders.insert(
-            k.clone(),
-            json!({"_key": k, "status": st, "region": "us"}),
-        );
+        orders.insert(k.clone(), json!({"_key": k, "status": st, "region": "us"}));
     }
     let mut db = LogicalDb::new();
     db.insert("orders".into(), orders);
@@ -1075,6 +1390,7 @@ fn q32_law_force_scan_equals_index_on_eq_predicate() {
         &oracle.rows,
         &scan_rows,
         false,
+        false,
         oracle.coverage_complete,
         scan.coverage.complete,
     )
@@ -1082,6 +1398,7 @@ fn q32_law_force_scan_equals_index_on_eq_predicate() {
     compare_shapes(
         &scan_rows,
         &idx_rows,
+        false,
         false,
         scan.coverage.complete,
         indexed.coverage.complete,
@@ -1120,6 +1437,10 @@ fn rql_q3_2_corpus_differential_matrix() {
     let doc: Value = serde_json::from_str(&fs::read_to_string(&corpus_path).unwrap()).unwrap();
     let corpus_version = doc["corpus_version"].as_str().unwrap_or("?").to_string();
     let cases = doc["cases"].as_array().unwrap();
+    let tier_a_total = cases
+        .iter()
+        .filter(|case| case["tier"].as_str() == Some("A"))
+        .count() as u64;
 
     let mut case_results = Vec::new();
     let mut equal_all = 0u64;
@@ -1129,6 +1450,9 @@ fn rql_q3_2_corpus_differential_matrix() {
     let mut reopen_checked = 0u64;
     let mut reopen_fail = 0u64;
     let mut considered = 0u64;
+    let mut stable_refusal_ok = 0u64;
+    let mut explain_identity_ok = 0u64;
+    let mut non_row_fail = 0u64;
 
     // Cap reopen path cost: first N green equal cases also check reopen.
     const REOPEN_BUDGET: u64 = 12;
@@ -1137,15 +1461,125 @@ fn rql_q3_2_corpus_differential_matrix() {
         if case["tier"].as_str() != Some("A") {
             continue;
         }
-        if case["expected"]["kind"].as_str() != Some("oracle_rule") {
-            continue;
-        }
         let rql = &case["implementations"]["rql"];
-        if rql["status"].as_str() != Some("source") {
-            continue;
-        }
         let source = rql["source"].as_str().unwrap_or("").to_string();
         let case_id = case["case_id"].as_str().unwrap_or("?").to_string();
+        let expected_kind = case["expected"]["kind"].as_str().unwrap_or("");
+
+        if expected_kind == "stable_refusal" {
+            considered += 1;
+            let expected_code = rql["refusal_code"].as_str().unwrap_or("");
+            let bindings = compile_bindings_for(&extract_collection_names(&source));
+            let first = compile_rql_full(&source, &bindings);
+            let second = compile_rql_full(&source, &bindings);
+            let observed = match (&first, &second) {
+                (Err(a), Err(b)) => Some((a.to_string(), b.to_string())),
+                _ => None,
+            };
+            if observed.as_ref().is_some_and(|(a, b)| {
+                !expected_code.is_empty()
+                    && a.contains(expected_code)
+                    && b.contains(expected_code)
+                    && a == b
+            }) {
+                equal_all += 1;
+                stable_refusal_ok += 1;
+                case_results.push(json!({
+                    "case_id": case_id,
+                    "status": "matrix_equal",
+                    "outcome": "stable_refusal",
+                    "refusal_code": expected_code,
+                    "arms": {
+                        "compile_a_vs_compile_b": "equal",
+                        "required_refusal": "equal",
+                        "comparator_mongo_cbl": "deferred_q4"
+                    },
+                    "source": source,
+                }));
+            } else {
+                non_row_fail += 1;
+                product_err += 1;
+                case_results.push(json!({
+                    "case_id": case_id,
+                    "status": "stable_refusal_fail",
+                    "expected_code": expected_code,
+                    "observed": format!("first={first:?}; second={second:?}"),
+                    "source": source,
+                }));
+            }
+            continue;
+        }
+
+        if source.to_ascii_lowercase().starts_with("explain ") {
+            considered += 1;
+            let names = extract_collection_names(&source);
+            let bindings = compile_bindings_for(&names);
+            let compiled = compile_app_core(&source, &bindings);
+            let outcome = compiled.and_then(|compiled| {
+                if !compiled.explain {
+                    return Err(Error::QueryInvalid("explain flag was not retained".into()));
+                }
+                let cid = compiled.plan.from.collection_id;
+                let name = compiled.plan.from.source_name.clone();
+                let explanation = explain_core_source(&source, cid, &name)?;
+                let empty = LogicalDb::new();
+                let scan = product_force_scan(&empty, &compiled.plan, &Parameters::default())
+                    .map_err(Error::QueryInvalid)?;
+                let indexed = product_index_plan(&empty, &compiled.plan, &Parameters::default())
+                    .map_err(Error::QueryInvalid)?;
+                if explanation.tree != compiled.plan.to_canonical_json()
+                    || indexed.plan_hash != explanation.plan_hash
+                {
+                    return Err(Error::QueryInvalid(format!(
+                        "explain/default-QVM identity mismatch: explain={} logical={} forced_scan={} default={} tree_equal={}",
+                        hex::encode(explanation.plan_hash),
+                        hex::encode(compiled.plan.plan_hash()),
+                        hex::encode(scan.plan_hash),
+                        hex::encode(indexed.plan_hash),
+                        explanation.tree == compiled.plan.to_canonical_json(),
+                    )));
+                }
+                Ok(explanation.plan_hash)
+            });
+            match outcome {
+                Ok(plan_hash) => {
+                    equal_all += 1;
+                    explain_identity_ok += 1;
+                    case_results.push(json!({
+                        "case_id": case_id,
+                        "status": "matrix_equal",
+                        "outcome": "explain_identity",
+                        "plan_hash": hex::encode(plan_hash),
+                        "row_materialization": false,
+                        "arms": {
+                            "explain_vs_compiled": "equal",
+                            "explain_vs_default_qvm": "equal",
+                            "forced_scan_qvm": "deliberately_distinct_program",
+                            "comparator_mongo_cbl": "deferred_q4"
+                        },
+                        "source": source,
+                    }));
+                }
+                Err(error) => {
+                    non_row_fail += 1;
+                    product_err += 1;
+                    case_results.push(json!({
+                        "case_id": case_id,
+                        "status": "explain_identity_fail",
+                        "reason": error.to_string(),
+                        "source": source,
+                    }));
+                }
+            }
+            continue;
+        }
+
+        if !semantic_oracle_eligible(case) {
+            continue;
+        }
+        if !matches!(rql["status"].as_str(), Some("source" | "pending")) {
+            continue;
+        }
         let ordered = ordering_is_sensitive(&case["ordering_and_multiplicity"]);
         let fixture = &case["fixture"];
         let generator_id = fixture["generator_id"].as_str().unwrap_or("");
@@ -1191,39 +1625,73 @@ fn rql_q3_2_corpus_differential_matrix() {
             }
         };
 
-        let scan = match product_force_scan(&db, &plan, &params) {
-            Ok(p) => p,
-            Err(e) => {
-                product_err += 1;
-                case_results.push(json!({
-                    "case_id": case_id,
-                    "status": "force_scan_fail",
-                    "reason": e,
-                }));
-                continue;
-            }
+        let full_computed = source_uses_rql_full_constructs(&source);
+        let (scan_rows, scan, idx_rows, indexed) = if full_computed {
+            let (scan_rows, scan) = match product_full_plan(&db, &source, &params, true) {
+                Ok(v) => v,
+                Err(e) => {
+                    product_err += 1;
+                    case_results.push(json!({
+                        "case_id": case_id,
+                        "status": "force_scan_fail",
+                        "reason": e,
+                    }));
+                    continue;
+                }
+            };
+            let (idx_rows, indexed) = match product_full_plan(&db, &source, &params, false) {
+                Ok(v) => v,
+                Err(e) => {
+                    product_err += 1;
+                    case_results.push(json!({
+                        "case_id": case_id,
+                        "status": "index_plan_fail",
+                        "reason": e,
+                    }));
+                    continue;
+                }
+            };
+            (scan_rows, scan, idx_rows, indexed)
+        } else {
+            let scan = match product_force_scan(&db, &plan, &params) {
+                Ok(p) => p,
+                Err(e) => {
+                    product_err += 1;
+                    case_results.push(json!({
+                        "case_id": case_id,
+                        "status": "force_scan_fail",
+                        "reason": e,
+                    }));
+                    continue;
+                }
+            };
+            let indexed = match product_index_plan(&db, &plan, &params) {
+                Ok(p) => p,
+                Err(e) => {
+                    product_err += 1;
+                    case_results.push(json!({
+                        "case_id": case_id,
+                        "status": "index_plan_fail",
+                        "reason": e,
+                    }));
+                    continue;
+                }
+            };
+            let scan_rows = page_to_rows(&scan);
+            let idx_rows = page_to_rows(&indexed);
+            (scan_rows, scan, idx_rows, indexed)
         };
-        let indexed = match product_index_plan(&db, &plan, &params) {
-            Ok(p) => p,
-            Err(e) => {
-                product_err += 1;
-                case_results.push(json!({
-                    "case_id": case_id,
-                    "status": "index_plan_fail",
-                    "reason": e,
-                }));
-                continue;
-            }
-        };
-
-        let scan_rows = page_to_rows(&scan);
-        let idx_rows = page_to_rows(&indexed);
+        // Group result keys are executor-internal synthetic identities. Q0
+        // equivalence compares the aggregate rows, not the spelling of those
+        // non-document keys (`__group_N` in oracle vs `g:<hash>` in product).
+        let ignore_row_keys = plan.group_agg.is_active();
 
         let mut arms = BTreeMap::new();
         let c1 = compare_shapes(
             &oracle.rows,
             &scan_rows,
             ordered,
+            ignore_row_keys,
             oracle.coverage_complete,
             scan.coverage.complete,
         );
@@ -1231,6 +1699,7 @@ fn rql_q3_2_corpus_differential_matrix() {
             &scan_rows,
             &idx_rows,
             ordered,
+            ignore_row_keys,
             scan.coverage.complete,
             indexed.coverage.complete,
         );
@@ -1273,7 +1742,10 @@ fn rql_q3_2_corpus_differential_matrix() {
         }
 
         let mut reopen_status = json!("skipped");
-        if ok && reopen_checked < REOPEN_BUDGET && !source.to_ascii_lowercase().contains(" after ")
+        if ok
+            && !full_computed
+            && reopen_checked < REOPEN_BUDGET
+            && !source.to_ascii_lowercase().contains(" after ")
         {
             match product_reopen_store(&db, &source, &params) {
                 Ok(rows) => {
@@ -1282,6 +1754,7 @@ fn rql_q3_2_corpus_differential_matrix() {
                         &oracle.rows,
                         &rows,
                         ordered,
+                        ignore_row_keys,
                         oracle.coverage_complete,
                         true,
                     ) {
@@ -1340,12 +1813,22 @@ fn rql_q3_2_corpus_differential_matrix() {
             "reference_oracle": true,
             "forced_scan_qvm": true,
             "admitted_index_plan": true,
+            "full_computed_projection": true,
+            "stable_refusal_contract": true,
+            "explain_execution_identity": true,
             "reopened_store": true,
             "comparator_result": "deferred_q4",
         },
         "summary": {
+            "tier_a_total": tier_a_total,
+            "qualification_green": equal_all,
+            "qualification_residual": tier_a_total.saturating_sub(equal_all),
+            "package_exit_ready": equal_all == tier_a_total,
             "considered": considered,
             "matrix_equal": equal_all,
+            "stable_refusal_ok": stable_refusal_ok,
+            "explain_identity_ok": explain_identity_ok,
+            "non_row_fail": non_row_fail,
             "matrix_diverge": diverge,
             "unsupported": unsupported,
             "errors": product_err,
@@ -1371,6 +1854,10 @@ fn rql_q3_2_corpus_differential_matrix() {
     assert_eq!(diverge, 0, "differential divergences are defects");
     assert_eq!(product_err, 0, "product/oracle errors are defects");
     assert_eq!(reopen_fail, 0, "reopen divergences are defects");
+    assert_eq!(
+        non_row_fail, 0,
+        "non-row qualification failures are defects"
+    );
     assert!(
         equal_all >= 90,
         "expected ≥90 matrix_equal cases, got {equal_all}"

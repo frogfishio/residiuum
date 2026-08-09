@@ -15,14 +15,14 @@
 //! Decision 0 remains OPEN; RQL-C1 must not be accepted.
 
 use super::vm_exec::{CoreOperands, VmPool};
+use crate::app_v1::CoveragePolicy;
 use crate::app_v1::{
     ConsistencyEvidence, HoleEvidence, QueryBudget, QueryId, QueryPage, QueryRow, QueryRunOptions,
 };
-use crate::app_v1::CoveragePolicy;
 use crate::cursor_v1::parameter_hash as cursor_parameter_hash;
 use crate::error::Error;
 use crate::plan_v1::OrderTerm;
-use crate::predicate::{Path, Predicate};
+use crate::predicate::Predicate;
 use crate::rql_app_core::merge_budgets;
 use residiuum_heap::{CollectionId, HeapId};
 use serde_json::Value as JsonValue;
@@ -31,7 +31,7 @@ use std::time::Instant;
 
 use super::core_page::{equality_constraints, DocScan};
 use super::kernel::CompiledKernelWhere;
-
+use super::HostDocument;
 
 /// Bind the immutable document key for RQL `_key` path predicates and projects.
 ///
@@ -72,6 +72,7 @@ fn has_later_match<S: DocScan>(
     budget: Option<QueryBudget>,
     mut examined_docs: u64,
     mut examined_bytes: u64,
+    known_holes: &mut Vec<HoleEvidence>,
 ) -> Result<bool, Error> {
     let mut after = Some(after_key.to_string());
     let mut probes = 0usize;
@@ -83,33 +84,47 @@ fn has_later_match<S: DocScan>(
         for key in batch {
             after = Some(key.clone());
             probes += 1;
-            if let Some(doc) = scan.get_json(&key)? {
-                examined_docs += 1;
-                examined_bytes = examined_bytes.saturating_add(json_byte_len(&doc));
-                if budget
-                    .and_then(|b| b.max_documents)
-                    .is_some_and(|m| examined_docs > m)
-                {
-                    return Ok(false);
+            match scan.get_json_covered(&key)? {
+                HostDocument::Present(doc) => {
+                    examined_docs += 1;
+                    examined_bytes = examined_bytes.saturating_add(json_byte_len(&doc));
+                    if budget
+                        .and_then(|b| b.max_documents)
+                        .is_some_and(|m| examined_docs > m)
+                    {
+                        return Ok(false);
+                    }
+                    if budget
+                        .and_then(|b| b.max_bytes)
+                        .is_some_and(|m| examined_bytes > m)
+                    {
+                        return Ok(false);
+                    }
+                    let doc = with_logical_key(&key, doc);
+                    if where_k.eval_doc(&doc)? {
+                        return Ok(true);
+                    }
                 }
-                if budget
-                    .and_then(|b| b.max_bytes)
-                    .is_some_and(|m| examined_bytes > m)
-                {
-                    return Ok(false);
+                HostDocument::Absent => {
+                    examined_docs += 1;
+                    known_holes.push(HoleEvidence {
+                        code: "key_listed_absent".into(),
+                        key: Some(key),
+                    });
                 }
-                let doc = with_logical_key(&key, doc);
-                if where_k.eval_doc(&doc)? {
-                    return Ok(true);
+                HostDocument::Hole { code } => {
+                    examined_docs += 1;
+                    known_holes.push(HoleEvidence {
+                        code,
+                        key: Some(key),
+                    });
                 }
-            } else {
-                examined_docs += 1;
-                if budget
-                    .and_then(|b| b.max_documents)
-                    .is_some_and(|m| examined_docs > m)
-                {
-                    return Ok(false);
-                }
+            }
+            if budget
+                .and_then(|b| b.max_documents)
+                .is_some_and(|m| examined_docs > m)
+            {
+                return Ok(false);
             }
             if probes >= 64 {
                 return Ok(true);
@@ -220,9 +235,7 @@ impl<'a> CoreFrame<'a> {
             if next > max {
                 return self.hit_budget(
                     "bytes",
-                    format!(
-                        "query budget max_bytes={max} exceeded (examined_bytes={next})"
-                    ),
+                    format!("query budget max_bytes={max} exceeded (examined_bytes={next})"),
                 );
             }
         }
@@ -376,20 +389,30 @@ impl<'a> CoreFrame<'a> {
             if self.stop_if_doc_budget_full()? {
                 return Ok(());
             }
-            if let Some(doc) = scan.get_json(&key)? {
-                let blen = json_byte_len(&doc);
-                if self.stop_if_bytes_would_exceed(blen)? {
-                    return Ok(());
+            match scan.get_json_covered(&key)? {
+                HostDocument::Present(doc) => {
+                    let blen = json_byte_len(&doc);
+                    if self.stop_if_bytes_would_exceed(blen)? {
+                        return Ok(());
+                    }
+                    self.examined_docs += 1;
+                    self.examined_bytes = self.examined_bytes.saturating_add(blen);
+                    self.working.push((key, doc));
                 }
-                self.examined_docs += 1;
-                self.examined_bytes = self.examined_bytes.saturating_add(blen);
-                self.working.push((key, doc));
-            } else {
-                self.examined_docs += 1;
-                self.known_holes.push(HoleEvidence {
-                    code: "index_key_absent".into(),
-                    key: Some(key),
-                });
+                HostDocument::Absent => {
+                    self.examined_docs += 1;
+                    self.known_holes.push(HoleEvidence {
+                        code: "index_key_absent".into(),
+                        key: Some(key),
+                    });
+                }
+                HostDocument::Hole { code } => {
+                    self.examined_docs += 1;
+                    self.known_holes.push(HoleEvidence {
+                        code,
+                        key: Some(key),
+                    });
+                }
             }
         }
         Ok(())
@@ -412,20 +435,30 @@ impl<'a> CoreFrame<'a> {
                     return Ok(());
                 }
                 after = Some(key.clone());
-                if let Some(doc) = scan.get_json(&key)? {
-                    let blen = json_byte_len(&doc);
-                    if self.stop_if_bytes_would_exceed(blen)? {
-                        return Ok(());
+                match scan.get_json_covered(&key)? {
+                    HostDocument::Present(doc) => {
+                        let blen = json_byte_len(&doc);
+                        if self.stop_if_bytes_would_exceed(blen)? {
+                            return Ok(());
+                        }
+                        self.examined_docs += 1;
+                        self.examined_bytes = self.examined_bytes.saturating_add(blen);
+                        self.working.push((key, doc));
                     }
-                    self.examined_docs += 1;
-                    self.examined_bytes = self.examined_bytes.saturating_add(blen);
-                    self.working.push((key, doc));
-                } else {
-                    self.examined_docs += 1;
-                    self.known_holes.push(HoleEvidence {
-                        code: "key_listed_absent".into(),
-                        key: Some(key),
-                    });
+                    HostDocument::Absent => {
+                        self.examined_docs += 1;
+                        self.known_holes.push(HoleEvidence {
+                            code: "key_listed_absent".into(),
+                            key: Some(key),
+                        });
+                    }
+                    HostDocument::Hole { code } => {
+                        self.examined_docs += 1;
+                        self.known_holes.push(HoleEvidence {
+                            code,
+                            key: Some(key),
+                        });
+                    }
                 }
             }
         }
@@ -482,15 +515,22 @@ impl<'a> CoreFrame<'a> {
             if self.stop_if_doc_budget_full()? {
                 return Ok(());
             }
-            match scan.get_json(&key)? {
-                None => {
+            match scan.get_json_covered(&key)? {
+                HostDocument::Absent => {
                     self.examined_docs += 1;
                     self.known_holes.push(HoleEvidence {
                         code: "index_key_absent".into(),
                         key: Some(key),
                     });
                 }
-                Some(doc) => {
+                HostDocument::Hole { code } => {
+                    self.examined_docs += 1;
+                    self.known_holes.push(HoleEvidence {
+                        code,
+                        key: Some(key),
+                    });
+                }
+                HostDocument::Present(doc) => {
                     let doc = with_logical_key(&key, doc);
                     let blen = json_byte_len(&doc);
                     if self.stop_if_bytes_would_exceed(blen)? {
@@ -533,15 +573,22 @@ impl<'a> CoreFrame<'a> {
                     return Ok(());
                 }
                 after = Some(key.clone());
-                match scan.get_json(&key)? {
-                    None => {
+                match scan.get_json_covered(&key)? {
+                    HostDocument::Absent => {
                         self.known_holes.push(HoleEvidence {
                             code: "key_listed_absent".into(),
                             key: Some(key),
                         });
                         self.examined_docs += 1;
                     }
-                    Some(doc) => {
+                    HostDocument::Hole { code } => {
+                        self.known_holes.push(HoleEvidence {
+                            code,
+                            key: Some(key),
+                        });
+                        self.examined_docs += 1;
+                    }
+                    HostDocument::Present(doc) => {
                         let doc = with_logical_key(&key, doc);
                         let blen = json_byte_len(&doc);
                         if self.stop_if_bytes_would_exceed(blen)? {
@@ -682,6 +729,7 @@ impl<'a> CoreFrame<'a> {
                         self.budget,
                         self.examined_docs,
                         self.examined_bytes,
+                        &mut self.known_holes,
                     )?
                 }
             } else {
@@ -757,6 +805,9 @@ impl<'a> CoreFrame<'a> {
             },
             remaining_limit: remaining_after,
             known_holes: std::mem::take(&mut self.known_holes),
+            // Filled by the VM-wide counting HostCapabilities wrapper after
+            // Core and any Full attach opcodes have completed.
+            logical_bytes_examined: 0,
         })
     }
 }

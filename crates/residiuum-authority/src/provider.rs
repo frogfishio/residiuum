@@ -30,11 +30,11 @@ impl EphemeralMasterKeyProvider {
         Ok(Self { signing })
     }
 
-    /// From exact 32-byte seed (tests).
-    pub fn from_seed(seed: [u8; 32]) -> Self {
-        Self {
-            signing: SigningKey::from_bytes(&seed),
-        }
+    /// From an exact 32-byte seed (tests / development-file ceremony).
+    pub fn from_seed(mut seed: [u8; 32]) -> Self {
+        let signing = SigningKey::from_bytes(&seed);
+        seed.zeroize();
+        Self { signing }
     }
 }
 

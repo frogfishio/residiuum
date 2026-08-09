@@ -4,14 +4,14 @@
   "env": {
     "format": "residiuum-rql-qual-env-fingerprint-v1",
     "harness_profile": "residiuum-rql-qual-harness-v1",
-    "git_sha": "f3b04c7aef4fb8330f04019fb415837af7e04e1c",
+    "git_sha": "985271766780f24dda682e65db7c12d5e5fcdf3d",
     "dirty": true,
     "residiuum_version": "0.2.2",
     "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
     "os": "macos",
     "arch": "aarch64",
     "hostname_class": "controlled_host_unspecified",
-    "recorded_unix_s": 1786171469,
+    "recorded_unix_s": 1786246775,
     "mongo_pin": "8.2.12",
     "cbl_pin": "4.1.0",
     "cbl_full_sync": true,
@@ -22,12 +22,21 @@
     }
   },
   "campaign_id": "q4-3-unit",
+  "protocol": {
+    "class": "scaffold",
+    "seed": 1091,
+    "warmup_operations": 0,
+    "minimum_repetitions": 1,
+    "minimum_duration_ms": 0,
+    "minimum_operations": 1,
+    "engine_order_policy": "fixed_scaffold_not_competitive"
+  },
   "notes": [
     "Q4.1 scaffold — not Gate-1; not competitive",
     "Mongo/CBL adapters not configured until Q4.3",
     "Q4.3 smoke — not competitive / not Gate-1",
     "side_a=logical_harness digests; side_b=CBL NotConfigured with shared_work",
-    "lane_s_fixture_identity ok=true hash=3e3cf40abbd8c1320c99245d36817ea699ca357fece9981ffba2e67a8dd3cb5e"
+    "lane_s_fixture_identity ok=true hash=6ceee18d58f8e92fe18325221bc23a927eef65577bfa9b25da7aa9d01f87e1e2"
   ],
   "cells": [
     {
@@ -40,6 +49,7 @@
         "side_b": "couchbase_lite_embedded"
       },
       "concurrency": 1,
+      "achieved_concurrency": 1,
       "side_a": {
         "engine": "logical_harness",
         "execution_kind": "logical_simulator",
@@ -53,12 +63,12 @@
           "row_count": 1
         },
         "metrics": {
-          "queries_per_s": 155836.06046439146,
+          "queries_per_s": 104351.45570280706,
           "latency": {
-            "p50": 6417,
-            "p95": 6417,
-            "p99": 6417,
-            "max": 6417,
+            "p50": 9583,
+            "p95": 9583,
+            "p99": 9583,
+            "max": 9583,
             "samples": 1
           },
           "resource": {
@@ -75,7 +85,7 @@
             "index_size_bytes": null,
             "index_build_ns": null,
             "indexed_write_penalty_ns": null,
-            "explain_plan_digest": "logical:c1f76517600b12f64088bf801f47809aabb8a1b84d0e1f26d22e1c86441310e2"
+            "explain_plan_digest": "logical_plan:36313b794607a8b67683d5da5f9b5f52d7ddfa4be73d9aa3e33b04be62108821"
           },
           "lifecycle": "warm_steady",
           "cold_method": "not_cold_warm_steady",
@@ -86,8 +96,8 @@
           "validity_ok": true
         },
         "refuse_code": null,
-        "detail": "logical_harness plan=cell_key_get_smoke_c1 examined=64 ",
-        "shared_work_hash": "3e3cf40abbd8c1320c99245d36817ea699ca357fece9981ffba2e67a8dd3cb5e"
+        "detail": "logical_harness plan=cell_key_get_smoke_c1 examined=64  concurrency_requested=1 concurrency_achieved=1 workers=1",
+        "shared_work_hash": "6ceee18d58f8e92fe18325221bc23a927eef65577bfa9b25da7aa9d01f87e1e2"
       },
       "side_b": {
         "engine": "couchbase_lite_embedded",
@@ -97,17 +107,17 @@
         "metrics": null,
         "refuse_code": "adapter_not_configured:cbl_embedded",
         "detail": "shared logical work loaded=true; plan=cell_key_get_smoke_c1 (CBL native residual)",
-        "shared_work_hash": "3e3cf40abbd8c1320c99245d36817ea699ca357fece9981ffba2e67a8dd3cb5e"
+        "shared_work_hash": "6ceee18d58f8e92fe18325221bc23a927eef65577bfa9b25da7aa9d01f87e1e2"
       },
       "equivalent": null,
       "equivalence_detail": "one or both sides missing canonical result",
       "metrics_a": {
-        "queries_per_s": 155836.06046439146,
+        "queries_per_s": 104351.45570280706,
         "latency": {
-          "p50": 6417,
-          "p95": 6417,
-          "p99": 6417,
-          "max": 6417,
+          "p50": 9583,
+          "p95": 9583,
+          "p99": 9583,
+          "max": 9583,
           "samples": 1
         },
         "resource": {
@@ -124,7 +134,7 @@
           "index_size_bytes": null,
           "index_build_ns": null,
           "indexed_write_penalty_ns": null,
-          "explain_plan_digest": "logical:c1f76517600b12f64088bf801f47809aabb8a1b84d0e1f26d22e1c86441310e2"
+          "explain_plan_digest": "logical_plan:36313b794607a8b67683d5da5f9b5f52d7ddfa4be73d9aa3e33b04be62108821"
         },
         "lifecycle": "warm_steady",
         "cold_method": "not_cold_warm_steady",
@@ -135,6 +145,7 @@
         "validity_ok": true
       },
       "metrics_b": null,
+      "raw_repetitions": [],
       "scaffold_only": true
     },
     {
@@ -147,6 +158,7 @@
         "side_b": "couchbase_lite_embedded"
       },
       "concurrency": 1,
+      "achieved_concurrency": 1,
       "side_a": {
         "engine": "logical_harness",
         "execution_kind": "logical_simulator",
@@ -160,12 +172,12 @@
           "row_count": 7
         },
         "metrics": {
-          "queries_per_s": 34384.34824467902,
+          "queries_per_s": 24665.778698633516,
           "latency": {
-            "p50": 29083,
-            "p95": 29083,
-            "p99": 29083,
-            "max": 29083,
+            "p50": 40542,
+            "p95": 40542,
+            "p99": 40542,
+            "max": 40542,
             "samples": 1
           },
           "resource": {
@@ -182,7 +194,7 @@
             "index_size_bytes": null,
             "index_build_ns": null,
             "indexed_write_penalty_ns": null,
-            "explain_plan_digest": "logical:de466d71416fe3d6fe66f50fb321099e4282229608175e540e24f45b7a913350"
+            "explain_plan_digest": "logical_plan:b56778a1faebb11c63e86eee6c1bd07c7e6cedb33e05f6f8f8c4d9cd9d331743"
           },
           "lifecycle": "warm_steady",
           "cold_method": "not_cold_warm_steady",
@@ -193,8 +205,8 @@
           "validity_ok": true
         },
         "refuse_code": null,
-        "detail": "logical_harness plan=cell_indexed_eq_multi_sel_smoke_c1 examined=64 sel_bucket=HIT",
-        "shared_work_hash": "70da77022cd2fdba5f601d7b86e22f1ff7cf52b327f34715b15ad3fe293cb89d"
+        "detail": "logical_harness plan=cell_indexed_eq_multi_sel_smoke_c1 examined=64 sel_bucket=HIT concurrency_requested=1 concurrency_achieved=1 workers=1",
+        "shared_work_hash": "92088254cf2092ba166fc0ab0f07db2e5b9cbc8498aa62765f11c2ba1987faae"
       },
       "side_b": {
         "engine": "couchbase_lite_embedded",
@@ -204,17 +216,17 @@
         "metrics": null,
         "refuse_code": "adapter_not_configured:cbl_embedded",
         "detail": "shared logical work loaded=true; plan=cell_indexed_eq_multi_sel_smoke_c1 (CBL native residual)",
-        "shared_work_hash": "70da77022cd2fdba5f601d7b86e22f1ff7cf52b327f34715b15ad3fe293cb89d"
+        "shared_work_hash": "92088254cf2092ba166fc0ab0f07db2e5b9cbc8498aa62765f11c2ba1987faae"
       },
       "equivalent": null,
       "equivalence_detail": "one or both sides missing canonical result",
       "metrics_a": {
-        "queries_per_s": 34384.34824467902,
+        "queries_per_s": 24665.778698633516,
         "latency": {
-          "p50": 29083,
-          "p95": 29083,
-          "p99": 29083,
-          "max": 29083,
+          "p50": 40542,
+          "p95": 40542,
+          "p99": 40542,
+          "max": 40542,
           "samples": 1
         },
         "resource": {
@@ -231,7 +243,7 @@
           "index_size_bytes": null,
           "index_build_ns": null,
           "indexed_write_penalty_ns": null,
-          "explain_plan_digest": "logical:de466d71416fe3d6fe66f50fb321099e4282229608175e540e24f45b7a913350"
+          "explain_plan_digest": "logical_plan:b56778a1faebb11c63e86eee6c1bd07c7e6cedb33e05f6f8f8c4d9cd9d331743"
         },
         "lifecycle": "warm_steady",
         "cold_method": "not_cold_warm_steady",
@@ -242,6 +254,7 @@
         "validity_ok": true
       },
       "metrics_b": null,
+      "raw_repetitions": [],
       "scaffold_only": true
     },
     {
@@ -254,6 +267,7 @@
         "side_b": "couchbase_lite_embedded"
       },
       "concurrency": 1,
+      "achieved_concurrency": 1,
       "side_a": {
         "engine": "logical_harness",
         "execution_kind": "logical_simulator",
@@ -267,12 +281,12 @@
           "row_count": 8
         },
         "metrics": {
-          "queries_per_s": 30495.242742132228,
+          "queries_per_s": 33103.813559322036,
           "latency": {
-            "p50": 32792,
-            "p95": 32792,
-            "p99": 32792,
-            "max": 32792,
+            "p50": 30208,
+            "p95": 30208,
+            "p99": 30208,
+            "max": 30208,
             "samples": 1
           },
           "resource": {
@@ -289,7 +303,7 @@
             "index_size_bytes": null,
             "index_build_ns": null,
             "indexed_write_penalty_ns": null,
-            "explain_plan_digest": "logical:cf72aa884077e08e21d859d3a9252898c2b85a64ade2735f71719ed191d36e21"
+            "explain_plan_digest": "logical_plan:2fc37d5ff3d8ee302c2af0b74d2209a27e9555c27286bacaa76901b5f34a2bb2"
           },
           "lifecycle": "warm_steady",
           "cold_method": "not_cold_warm_steady",
@@ -300,8 +314,8 @@
           "validity_ok": true
         },
         "refuse_code": null,
-        "detail": "logical_harness plan=cell_range_compound_smoke_c1 examined=64 ",
-        "shared_work_hash": "2aae15176388f7b1e8b9fc5532b5979191f99dd4909955eb7f46e6dc0c608cc5"
+        "detail": "logical_harness plan=cell_range_compound_smoke_c1 examined=64  concurrency_requested=1 concurrency_achieved=1 workers=1",
+        "shared_work_hash": "1549c884ed018eebfc9a11765195bc46c7c826f1ef0f4d028224fc919cec736d"
       },
       "side_b": {
         "engine": "couchbase_lite_embedded",
@@ -311,17 +325,17 @@
         "metrics": null,
         "refuse_code": "adapter_not_configured:cbl_embedded",
         "detail": "shared logical work loaded=true; plan=cell_range_compound_smoke_c1 (CBL native residual)",
-        "shared_work_hash": "2aae15176388f7b1e8b9fc5532b5979191f99dd4909955eb7f46e6dc0c608cc5"
+        "shared_work_hash": "1549c884ed018eebfc9a11765195bc46c7c826f1ef0f4d028224fc919cec736d"
       },
       "equivalent": null,
       "equivalence_detail": "one or both sides missing canonical result",
       "metrics_a": {
-        "queries_per_s": 30495.242742132228,
+        "queries_per_s": 33103.813559322036,
         "latency": {
-          "p50": 32792,
-          "p95": 32792,
-          "p99": 32792,
-          "max": 32792,
+          "p50": 30208,
+          "p95": 30208,
+          "p99": 30208,
+          "max": 30208,
           "samples": 1
         },
         "resource": {
@@ -338,7 +352,7 @@
           "index_size_bytes": null,
           "index_build_ns": null,
           "indexed_write_penalty_ns": null,
-          "explain_plan_digest": "logical:cf72aa884077e08e21d859d3a9252898c2b85a64ade2735f71719ed191d36e21"
+          "explain_plan_digest": "logical_plan:2fc37d5ff3d8ee302c2af0b74d2209a27e9555c27286bacaa76901b5f34a2bb2"
         },
         "lifecycle": "warm_steady",
         "cold_method": "not_cold_warm_steady",
@@ -349,6 +363,7 @@
         "validity_ok": true
       },
       "metrics_b": null,
+      "raw_repetitions": [],
       "scaffold_only": true
     },
     {
@@ -361,25 +376,26 @@
         "side_b": "couchbase_lite_embedded"
       },
       "concurrency": 1,
+      "achieved_concurrency": 1,
       "side_a": {
         "engine": "logical_harness",
         "execution_kind": "logical_simulator",
         "status": "ready",
         "result": {
-          "keys_digest": "e68a650db70f28f66a3b099684df8de9f0854324c3267b6acbc3448b0fbb2880",
-          "values_digest": "fac43a3938b4d1526927f0fe8518e297a85a6af304b7e436cc49c61854fbe66d",
+          "keys_digest": "0659bba9c3c777209e74a425248d1d416ac0785ea1c2e7c33d70ed73beee4d44",
+          "values_digest": "bad766c0e8288d34580da08cbd3c0c9b66cb15619f1c264bc1a91394348dc1b4",
           "multiplicity": "multiset",
           "order_sensitive": false,
           "coverage_complete": true,
-          "row_count": 11
+          "row_count": 32
         },
         "metrics": {
-          "queries_per_s": 13172.280253434672,
+          "queries_per_s": 5598.320503848845,
           "latency": {
-            "p50": 75917,
-            "p95": 75917,
-            "p99": 75917,
-            "max": 75917,
+            "p50": 178625,
+            "p95": 178625,
+            "p99": 178625,
+            "max": 178625,
             "samples": 1
           },
           "resource": {
@@ -396,19 +412,19 @@
             "index_size_bytes": null,
             "index_build_ns": null,
             "indexed_write_penalty_ns": null,
-            "explain_plan_digest": "logical:fac43a3938b4d1526927f0fe8518e297a85a6af304b7e436cc49c61854fbe66d"
+            "explain_plan_digest": "logical_plan:6c3d3589d2d2b9b886f3c4ed086ea3ad998230f3c2b86a14bed1b6983d86f1cc"
           },
           "lifecycle": "warm_steady",
           "cold_method": "not_cold_warm_steady",
           "deferred_work_units": 0,
           "deferred_drained": true,
-          "result_digest_echo": "fac43a3938b4d1526927f0fe8518e297a85a6af304b7e436cc49c61854fbe66d",
+          "result_digest_echo": "bad766c0e8288d34580da08cbd3c0c9b66cb15619f1c264bc1a91394348dc1b4",
           "coverage_complete": true,
           "validity_ok": true
         },
         "refuse_code": null,
-        "detail": "logical_harness plan=cell_nested_array_pred_smoke_c1 examined=64 ",
-        "shared_work_hash": "28916a517bdedb79380ead9b4494bfe4aab9ec856426fb97047d7ecbc4f120d1"
+        "detail": "logical_harness plan=cell_nested_array_pred_smoke_c1 examined=64 nested_array_focus=nested_only shape=deeply_nested concurrency_requested=1 concurrency_achieved=1 workers=1",
+        "shared_work_hash": "2cf2abc1fbf93fc552005b5bbbb686218977c4c110e824a704c0a2a3722cfe04"
       },
       "side_b": {
         "engine": "couchbase_lite_embedded",
@@ -418,17 +434,17 @@
         "metrics": null,
         "refuse_code": "adapter_not_configured:cbl_embedded",
         "detail": "shared logical work loaded=true; plan=cell_nested_array_pred_smoke_c1 (CBL native residual)",
-        "shared_work_hash": "28916a517bdedb79380ead9b4494bfe4aab9ec856426fb97047d7ecbc4f120d1"
+        "shared_work_hash": "2cf2abc1fbf93fc552005b5bbbb686218977c4c110e824a704c0a2a3722cfe04"
       },
       "equivalent": null,
       "equivalence_detail": "one or both sides missing canonical result",
       "metrics_a": {
-        "queries_per_s": 13172.280253434672,
+        "queries_per_s": 5598.320503848845,
         "latency": {
-          "p50": 75917,
-          "p95": 75917,
-          "p99": 75917,
-          "max": 75917,
+          "p50": 178625,
+          "p95": 178625,
+          "p99": 178625,
+          "max": 178625,
           "samples": 1
         },
         "resource": {
@@ -445,17 +461,18 @@
           "index_size_bytes": null,
           "index_build_ns": null,
           "indexed_write_penalty_ns": null,
-          "explain_plan_digest": "logical:fac43a3938b4d1526927f0fe8518e297a85a6af304b7e436cc49c61854fbe66d"
+          "explain_plan_digest": "logical_plan:6c3d3589d2d2b9b886f3c4ed086ea3ad998230f3c2b86a14bed1b6983d86f1cc"
         },
         "lifecycle": "warm_steady",
         "cold_method": "not_cold_warm_steady",
         "deferred_work_units": 0,
         "deferred_drained": true,
-        "result_digest_echo": "fac43a3938b4d1526927f0fe8518e297a85a6af304b7e436cc49c61854fbe66d",
+        "result_digest_echo": "bad766c0e8288d34580da08cbd3c0c9b66cb15619f1c264bc1a91394348dc1b4",
         "coverage_complete": true,
         "validity_ok": true
       },
       "metrics_b": null,
+      "raw_repetitions": [],
       "scaffold_only": true
     },
     {
@@ -468,25 +485,26 @@
         "side_b": "couchbase_lite_embedded"
       },
       "concurrency": 1,
+      "achieved_concurrency": 1,
       "side_a": {
         "engine": "logical_harness",
         "execution_kind": "logical_simulator",
         "status": "ready",
         "result": {
-          "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
-          "values_digest": "cf19689827e0826723758783f551df0963c3fce8693ec47c49fd863cd75ea7fb",
+          "keys_digest": "0659bba9c3c777209e74a425248d1d416ac0785ea1c2e7c33d70ed73beee4d44",
+          "values_digest": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
           "multiplicity": "multiset",
           "order_sensitive": false,
           "coverage_complete": true,
-          "row_count": 64
+          "row_count": 32
         },
         "metrics": {
-          "queries_per_s": 19785.524909975862,
+          "queries_per_s": 18140.589569161,
           "latency": {
-            "p50": 50542,
-            "p95": 50542,
-            "p99": 50542,
-            "max": 50542,
+            "p50": 55125,
+            "p95": 55125,
+            "p99": 55125,
+            "max": 55125,
             "samples": 1
           },
           "resource": {
@@ -503,19 +521,19 @@
             "index_size_bytes": null,
             "index_build_ns": null,
             "indexed_write_penalty_ns": null,
-            "explain_plan_digest": "logical:cf19689827e0826723758783f551df0963c3fce8693ec47c49fd863cd75ea7fb"
+            "explain_plan_digest": "logical_plan:1d43418fbf9cb65071f7ac6e0ee35af3c9026b5bd9ab62dfc156ef2db732fc2b"
           },
           "lifecycle": "warm_steady",
           "cold_method": "not_cold_warm_steady",
           "deferred_work_units": 0,
           "deferred_drained": true,
-          "result_digest_echo": "cf19689827e0826723758783f551df0963c3fce8693ec47c49fd863cd75ea7fb",
+          "result_digest_echo": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
           "coverage_complete": true,
           "validity_ok": true
         },
         "refuse_code": null,
-        "detail": "logical_harness plan=cell_project_covered_smoke_c1 examined=64 ",
-        "shared_work_hash": "14bb5229d4ebb0fdc10741010d12b51c37aa95a0f7565dadc8a0c9ae2fa011f9"
+        "detail": "logical_harness plan=cell_project_covered_smoke_c1 examined=64 projection_cover=covered index_fields=[\"region\", \"status\"] project_fields=[\"status\", \"region\"] concurrency_requested=1 concurrency_achieved=1 workers=1",
+        "shared_work_hash": "01b9e0035db54f59b6f01fc9707c7813c4e3b947669ef428c0d04b293edb95f2"
       },
       "side_b": {
         "engine": "couchbase_lite_embedded",
@@ -525,17 +543,17 @@
         "metrics": null,
         "refuse_code": "adapter_not_configured:cbl_embedded",
         "detail": "shared logical work loaded=true; plan=cell_project_covered_smoke_c1 (CBL native residual)",
-        "shared_work_hash": "14bb5229d4ebb0fdc10741010d12b51c37aa95a0f7565dadc8a0c9ae2fa011f9"
+        "shared_work_hash": "01b9e0035db54f59b6f01fc9707c7813c4e3b947669ef428c0d04b293edb95f2"
       },
       "equivalent": null,
       "equivalence_detail": "one or both sides missing canonical result",
       "metrics_a": {
-        "queries_per_s": 19785.524909975862,
+        "queries_per_s": 18140.589569161,
         "latency": {
-          "p50": 50542,
-          "p95": 50542,
-          "p99": 50542,
-          "max": 50542,
+          "p50": 55125,
+          "p95": 55125,
+          "p99": 55125,
+          "max": 55125,
           "samples": 1
         },
         "resource": {
@@ -552,17 +570,18 @@
           "index_size_bytes": null,
           "index_build_ns": null,
           "indexed_write_penalty_ns": null,
-          "explain_plan_digest": "logical:cf19689827e0826723758783f551df0963c3fce8693ec47c49fd863cd75ea7fb"
+          "explain_plan_digest": "logical_plan:1d43418fbf9cb65071f7ac6e0ee35af3c9026b5bd9ab62dfc156ef2db732fc2b"
         },
         "lifecycle": "warm_steady",
         "cold_method": "not_cold_warm_steady",
         "deferred_work_units": 0,
         "deferred_drained": true,
-        "result_digest_echo": "cf19689827e0826723758783f551df0963c3fce8693ec47c49fd863cd75ea7fb",
+        "result_digest_echo": "57d6d30fcf801fc0b5555faca8f8dfdb81b71bbc4d30ea871e59ed7a395afa0e",
         "coverage_complete": true,
         "validity_ok": true
       },
       "metrics_b": null,
+      "raw_repetitions": [],
       "scaffold_only": true
     },
     {
@@ -575,6 +594,7 @@
         "side_b": "couchbase_lite_embedded"
       },
       "concurrency": 1,
+      "achieved_concurrency": 1,
       "side_a": {
         "engine": "logical_harness",
         "execution_kind": "logical_simulator",
@@ -588,12 +608,12 @@
           "row_count": 10
         },
         "metrics": {
-          "queries_per_s": 5976.0718084788505,
+          "queries_per_s": 6056.018168054504,
           "latency": {
-            "p50": 167334,
-            "p95": 167334,
-            "p99": 167334,
-            "max": 167334,
+            "p50": 165125,
+            "p95": 165125,
+            "p99": 165125,
+            "max": 165125,
             "samples": 1
           },
           "resource": {
@@ -610,7 +630,7 @@
             "index_size_bytes": null,
             "index_build_ns": null,
             "indexed_write_penalty_ns": null,
-            "explain_plan_digest": "logical:b3a4975854a7467435ec308c612eb317a89b29a535be5fc4a7829b246ea0ed3d"
+            "explain_plan_digest": "logical_plan:43516e30e0927db236adaee9792e7043958237eb9d7810ec6154ba1673d5f9c0"
           },
           "lifecycle": "warm_steady",
           "cold_method": "not_cold_warm_steady",
@@ -621,8 +641,8 @@
           "validity_ok": true
         },
         "refuse_code": null,
-        "detail": "logical_harness plan=cell_top_k_smoke_c1 examined=64 ",
-        "shared_work_hash": "58612c2c3e88815a891d041077a2b06d988c398a6f5e6762c106007e6d326648"
+        "detail": "logical_harness plan=cell_top_k_smoke_c1 examined=64  concurrency_requested=1 concurrency_achieved=1 workers=1",
+        "shared_work_hash": "117fab713e28d09ab17e3fc62375175005dfbcb13984d373848ec4aa9f4d388a"
       },
       "side_b": {
         "engine": "couchbase_lite_embedded",
@@ -632,17 +652,17 @@
         "metrics": null,
         "refuse_code": "adapter_not_configured:cbl_embedded",
         "detail": "shared logical work loaded=true; plan=cell_top_k_smoke_c1 (CBL native residual)",
-        "shared_work_hash": "58612c2c3e88815a891d041077a2b06d988c398a6f5e6762c106007e6d326648"
+        "shared_work_hash": "117fab713e28d09ab17e3fc62375175005dfbcb13984d373848ec4aa9f4d388a"
       },
       "equivalent": null,
       "equivalence_detail": "one or both sides missing canonical result",
       "metrics_a": {
-        "queries_per_s": 5976.0718084788505,
+        "queries_per_s": 6056.018168054504,
         "latency": {
-          "p50": 167334,
-          "p95": 167334,
-          "p99": 167334,
-          "max": 167334,
+          "p50": 165125,
+          "p95": 165125,
+          "p99": 165125,
+          "max": 165125,
           "samples": 1
         },
         "resource": {
@@ -659,7 +679,7 @@
           "index_size_bytes": null,
           "index_build_ns": null,
           "indexed_write_penalty_ns": null,
-          "explain_plan_digest": "logical:b3a4975854a7467435ec308c612eb317a89b29a535be5fc4a7829b246ea0ed3d"
+          "explain_plan_digest": "logical_plan:43516e30e0927db236adaee9792e7043958237eb9d7810ec6154ba1673d5f9c0"
         },
         "lifecycle": "warm_steady",
         "cold_method": "not_cold_warm_steady",
@@ -670,6 +690,7 @@
         "validity_ok": true
       },
       "metrics_b": null,
+      "raw_repetitions": [],
       "scaffold_only": true
     },
     {
@@ -682,6 +703,7 @@
         "side_b": "couchbase_lite_embedded"
       },
       "concurrency": 1,
+      "achieved_concurrency": 1,
       "side_a": {
         "engine": "logical_harness",
         "execution_kind": "logical_simulator",
@@ -695,12 +717,12 @@
           "row_count": 64
         },
         "metrics": {
-          "queries_per_s": 11100.87363875537,
+          "queries_per_s": 9913.258983890953,
           "latency": {
-            "p50": 90083,
-            "p95": 90083,
-            "p99": 90083,
-            "max": 90083,
+            "p50": 100875,
+            "p95": 100875,
+            "p99": 100875,
+            "max": 100875,
             "samples": 1
           },
           "resource": {
@@ -717,7 +739,7 @@
             "index_size_bytes": null,
             "index_build_ns": null,
             "indexed_write_penalty_ns": null,
-            "explain_plan_digest": "logical:308415c642c59ee61d587c5c7facb1e35a1aea54b09af1abe5d4f697f74c590a"
+            "explain_plan_digest": "logical_plan:09706da88f68c87f63506f7cd4e49b7aee8dee97f22e0de1bad80afbe9a3de1b"
           },
           "lifecycle": "warm_steady",
           "cold_method": "not_cold_warm_steady",
@@ -728,8 +750,8 @@
           "validity_ok": true
         },
         "refuse_code": null,
-        "detail": "logical_harness plan=cell_cursor_first_deep_smoke_c1 examined=64 cursor pages=8 page_sz=8 first_keys=8 deep_start=56 deep_keys=8",
-        "shared_work_hash": "a06735daeddc9e834ca8bf58591e70d0c6d345a84ab92057a685e9c3fd1366ce"
+        "detail": "logical_harness plan=cell_cursor_first_deep_smoke_c1 examined=64 cursor pages=8 page_sz=8 first_keys=8 deep_start=56 deep_keys=8 concurrency_requested=1 concurrency_achieved=1 workers=1",
+        "shared_work_hash": "84ffd6cfda591bd6f0c80d406d4c33f1489611dc17b92078cf7d8ee2374e734a"
       },
       "side_b": {
         "engine": "couchbase_lite_embedded",
@@ -739,17 +761,17 @@
         "metrics": null,
         "refuse_code": "adapter_not_configured:cbl_embedded",
         "detail": "shared logical work loaded=true; plan=cell_cursor_first_deep_smoke_c1 (CBL native residual)",
-        "shared_work_hash": "a06735daeddc9e834ca8bf58591e70d0c6d345a84ab92057a685e9c3fd1366ce"
+        "shared_work_hash": "84ffd6cfda591bd6f0c80d406d4c33f1489611dc17b92078cf7d8ee2374e734a"
       },
       "equivalent": null,
       "equivalence_detail": "one or both sides missing canonical result",
       "metrics_a": {
-        "queries_per_s": 11100.87363875537,
+        "queries_per_s": 9913.258983890953,
         "latency": {
-          "p50": 90083,
-          "p95": 90083,
-          "p99": 90083,
-          "max": 90083,
+          "p50": 100875,
+          "p95": 100875,
+          "p99": 100875,
+          "max": 100875,
           "samples": 1
         },
         "resource": {
@@ -766,7 +788,7 @@
           "index_size_bytes": null,
           "index_build_ns": null,
           "indexed_write_penalty_ns": null,
-          "explain_plan_digest": "logical:308415c642c59ee61d587c5c7facb1e35a1aea54b09af1abe5d4f697f74c590a"
+          "explain_plan_digest": "logical_plan:09706da88f68c87f63506f7cd4e49b7aee8dee97f22e0de1bad80afbe9a3de1b"
         },
         "lifecycle": "warm_steady",
         "cold_method": "not_cold_warm_steady",
@@ -777,6 +799,7 @@
         "validity_ok": true
       },
       "metrics_b": null,
+      "raw_repetitions": [],
       "scaffold_only": true
     },
     {
@@ -789,25 +812,26 @@
         "side_b": "couchbase_lite_embedded"
       },
       "concurrency": 1,
+      "achieved_concurrency": 1,
       "side_a": {
         "engine": "logical_harness",
         "execution_kind": "logical_simulator",
         "status": "ready",
         "result": {
           "keys_digest": "1c45b196073766995adb10865b34a9908940c3f93f235140e6c8fb639dee7623",
-          "values_digest": "2bb53b1a7e287ffbd2f6fefdbff01889a6ded8a4d30fb0101c9f5f5b2fc303f0",
+          "values_digest": "fb8c561578e345cee2ad78e9ba9645d50b1cecb06e4a56d633bd0e3915ca4381",
           "multiplicity": "multiset",
           "order_sensitive": false,
           "coverage_complete": true,
           "row_count": 64
         },
         "metrics": {
-          "queries_per_s": 4508.728899148752,
+          "queries_per_s": 3539.3093391755533,
           "latency": {
-            "p50": 221792,
-            "p95": 221792,
-            "p99": 221792,
-            "max": 221792,
+            "p50": 282541,
+            "p95": 282541,
+            "p99": 282541,
+            "max": 282541,
             "samples": 1
           },
           "resource": {
@@ -824,19 +848,19 @@
             "index_size_bytes": null,
             "index_build_ns": null,
             "indexed_write_penalty_ns": null,
-            "explain_plan_digest": "logical:2bb53b1a7e287ffbd2f6fefdbff01889a6ded8a4d30fb0101c9f5f5b2fc303f0"
+            "explain_plan_digest": "logical_plan:8db3b71188299bf090d97b75cc75ac429fcfbc801ca9d4602ee89afd25d96077"
           },
           "lifecycle": "warm_steady",
           "cold_method": "not_cold_warm_steady",
           "deferred_work_units": 0,
           "deferred_drained": true,
-          "result_digest_echo": "2bb53b1a7e287ffbd2f6fefdbff01889a6ded8a4d30fb0101c9f5f5b2fc303f0",
+          "result_digest_echo": "fb8c561578e345cee2ad78e9ba9645d50b1cecb06e4a56d633bd0e3915ca4381",
           "coverage_complete": true,
           "validity_ok": true
         },
         "refuse_code": null,
-        "detail": "logical_harness plan=cell_enrich_card_smoke_c1 examined=64 enrich_expect=optional",
-        "shared_work_hash": "f26d0e800b06e3765a9769995c938d1fbb554ad57843f7e2a1f6ed63296681be"
+        "detail": "logical_harness plan=cell_enrich_card_smoke_c1 examined=64 enrich_expect=optional concurrency_requested=1 concurrency_achieved=1 workers=1",
+        "shared_work_hash": "d154bc79884d92f1ea4b81607bdae5b6f82b5110f4065a9057e10501da4cfc18"
       },
       "side_b": {
         "engine": "couchbase_lite_embedded",
@@ -846,17 +870,17 @@
         "metrics": null,
         "refuse_code": "adapter_not_configured:cbl_embedded",
         "detail": "shared logical work loaded=true; plan=cell_enrich_card_smoke_c1 (CBL native residual)",
-        "shared_work_hash": "f26d0e800b06e3765a9769995c938d1fbb554ad57843f7e2a1f6ed63296681be"
+        "shared_work_hash": "d154bc79884d92f1ea4b81607bdae5b6f82b5110f4065a9057e10501da4cfc18"
       },
       "equivalent": null,
       "equivalence_detail": "one or both sides missing canonical result",
       "metrics_a": {
-        "queries_per_s": 4508.728899148752,
+        "queries_per_s": 3539.3093391755533,
         "latency": {
-          "p50": 221792,
-          "p95": 221792,
-          "p99": 221792,
-          "max": 221792,
+          "p50": 282541,
+          "p95": 282541,
+          "p99": 282541,
+          "max": 282541,
           "samples": 1
         },
         "resource": {
@@ -873,17 +897,18 @@
           "index_size_bytes": null,
           "index_build_ns": null,
           "indexed_write_penalty_ns": null,
-          "explain_plan_digest": "logical:2bb53b1a7e287ffbd2f6fefdbff01889a6ded8a4d30fb0101c9f5f5b2fc303f0"
+          "explain_plan_digest": "logical_plan:8db3b71188299bf090d97b75cc75ac429fcfbc801ca9d4602ee89afd25d96077"
         },
         "lifecycle": "warm_steady",
         "cold_method": "not_cold_warm_steady",
         "deferred_work_units": 0,
         "deferred_drained": true,
-        "result_digest_echo": "2bb53b1a7e287ffbd2f6fefdbff01889a6ded8a4d30fb0101c9f5f5b2fc303f0",
+        "result_digest_echo": "fb8c561578e345cee2ad78e9ba9645d50b1cecb06e4a56d633bd0e3915ca4381",
         "coverage_complete": true,
         "validity_ok": true
       },
       "metrics_b": null,
+      "raw_repetitions": [],
       "scaffold_only": true
     },
     {
@@ -896,6 +921,7 @@
         "side_b": "couchbase_lite_embedded"
       },
       "concurrency": 1,
+      "achieved_concurrency": 1,
       "side_a": {
         "engine": "logical_harness",
         "execution_kind": "logical_simulator",
@@ -909,12 +935,12 @@
           "row_count": 2
         },
         "metrics": {
-          "queries_per_s": 32921.81069958848,
+          "queries_per_s": 33057.85123966942,
           "latency": {
-            "p50": 30375,
-            "p95": 30375,
-            "p99": 30375,
-            "max": 30375,
+            "p50": 30250,
+            "p95": 30250,
+            "p99": 30250,
+            "max": 30250,
             "samples": 1
           },
           "resource": {
@@ -931,7 +957,7 @@
             "index_size_bytes": null,
             "index_build_ns": null,
             "indexed_write_penalty_ns": null,
-            "explain_plan_digest": "logical:9fc8e97fc3d757edbf1dbe03b28284be34e928f7c6d541b816c5e08250feeb11"
+            "explain_plan_digest": "logical_plan:437c6e4037fc4e9ab88596ca411567c2594c0c3558a4064cf5a99ea78cc1ee6f"
           },
           "lifecycle": "warm_steady",
           "cold_method": "not_cold_warm_steady",
@@ -942,8 +968,8 @@
           "validity_ok": true
         },
         "refuse_code": null,
-        "detail": "logical_harness plan=cell_group_card_smoke_c1 examined=64 ",
-        "shared_work_hash": "9da1c37eaccbe96c078059cf5a35e168eb8e7182ca833e6168d8219cf98ceb07"
+        "detail": "logical_harness plan=cell_group_card_smoke_c1 examined=64 group_card=card_low distinct_groups=2 concurrency_requested=1 concurrency_achieved=1 workers=1",
+        "shared_work_hash": "e767c2cf1e0e5c698182946100cf3d6c00c8bb6b6020e278bfab3398cac39d81"
       },
       "side_b": {
         "engine": "couchbase_lite_embedded",
@@ -953,17 +979,17 @@
         "metrics": null,
         "refuse_code": "adapter_not_configured:cbl_embedded",
         "detail": "shared logical work loaded=true; plan=cell_group_card_smoke_c1 (CBL native residual)",
-        "shared_work_hash": "9da1c37eaccbe96c078059cf5a35e168eb8e7182ca833e6168d8219cf98ceb07"
+        "shared_work_hash": "e767c2cf1e0e5c698182946100cf3d6c00c8bb6b6020e278bfab3398cac39d81"
       },
       "equivalent": null,
       "equivalence_detail": "one or both sides missing canonical result",
       "metrics_a": {
-        "queries_per_s": 32921.81069958848,
+        "queries_per_s": 33057.85123966942,
         "latency": {
-          "p50": 30375,
-          "p95": 30375,
-          "p99": 30375,
-          "max": 30375,
+          "p50": 30250,
+          "p95": 30250,
+          "p99": 30250,
+          "max": 30250,
           "samples": 1
         },
         "resource": {
@@ -980,7 +1006,7 @@
           "index_size_bytes": null,
           "index_build_ns": null,
           "indexed_write_penalty_ns": null,
-          "explain_plan_digest": "logical:9fc8e97fc3d757edbf1dbe03b28284be34e928f7c6d541b816c5e08250feeb11"
+          "explain_plan_digest": "logical_plan:437c6e4037fc4e9ab88596ca411567c2594c0c3558a4064cf5a99ea78cc1ee6f"
         },
         "lifecycle": "warm_steady",
         "cold_method": "not_cold_warm_steady",
@@ -991,6 +1017,7 @@
         "validity_ok": true
       },
       "metrics_b": null,
+      "raw_repetitions": [],
       "scaffold_only": true
     },
     {
@@ -1003,6 +1030,7 @@
         "side_b": "couchbase_lite_embedded"
       },
       "concurrency": 1,
+      "achieved_concurrency": 1,
       "side_a": {
         "engine": "logical_harness",
         "execution_kind": "logical_simulator",
@@ -1016,12 +1044,12 @@
           "row_count": 5
         },
         "metrics": {
-          "queries_per_s": 24947.610018960182,
+          "queries_per_s": 25051.982864443722,
           "latency": {
-            "p50": 40084,
-            "p95": 40084,
-            "p99": 40084,
-            "max": 40084,
+            "p50": 39917,
+            "p95": 39917,
+            "p99": 39917,
+            "max": 39917,
             "samples": 1
           },
           "resource": {
@@ -1038,7 +1066,7 @@
             "index_size_bytes": null,
             "index_build_ns": null,
             "indexed_write_penalty_ns": null,
-            "explain_plan_digest": "logical:578d8cb8d72988d93a4f3aef9537690e94f14f031b5e9650b94182b014509b1e"
+            "explain_plan_digest": "logical_plan:f15cf48e345a8c8726ae56ae650d2e15aa0d49144b2b98b55c0025a51dba4178"
           },
           "lifecycle": "warm_steady",
           "cold_method": "not_cold_warm_steady",
@@ -1049,8 +1077,8 @@
           "validity_ok": true
         },
         "refuse_code": null,
-        "detail": "logical_harness plan=cell_agg_stats_smoke_c1 examined=64 agg includes avg_amount",
-        "shared_work_hash": "244aed4952224b9f2f736409b24be4c339cb3276f3b574ce03b64344bc13132e"
+        "detail": "logical_harness plan=cell_agg_stats_smoke_c1 examined=64 agg includes avg_amount concurrency_requested=1 concurrency_achieved=1 workers=1",
+        "shared_work_hash": "ddc2b5c2655a450ae0d4b9b39969d8e008b94b60e19418fb499d0bf54b3837b1"
       },
       "side_b": {
         "engine": "couchbase_lite_embedded",
@@ -1060,17 +1088,17 @@
         "metrics": null,
         "refuse_code": "adapter_not_configured:cbl_embedded",
         "detail": "shared logical work loaded=true; plan=cell_agg_stats_smoke_c1 (CBL native residual)",
-        "shared_work_hash": "244aed4952224b9f2f736409b24be4c339cb3276f3b574ce03b64344bc13132e"
+        "shared_work_hash": "ddc2b5c2655a450ae0d4b9b39969d8e008b94b60e19418fb499d0bf54b3837b1"
       },
       "equivalent": null,
       "equivalence_detail": "one or both sides missing canonical result",
       "metrics_a": {
-        "queries_per_s": 24947.610018960182,
+        "queries_per_s": 25051.982864443722,
         "latency": {
-          "p50": 40084,
-          "p95": 40084,
-          "p99": 40084,
-          "max": 40084,
+          "p50": 39917,
+          "p95": 39917,
+          "p99": 39917,
+          "max": 39917,
           "samples": 1
         },
         "resource": {
@@ -1087,7 +1115,7 @@
           "index_size_bytes": null,
           "index_build_ns": null,
           "indexed_write_penalty_ns": null,
-          "explain_plan_digest": "logical:578d8cb8d72988d93a4f3aef9537690e94f14f031b5e9650b94182b014509b1e"
+          "explain_plan_digest": "logical_plan:f15cf48e345a8c8726ae56ae650d2e15aa0d49144b2b98b55c0025a51dba4178"
         },
         "lifecycle": "warm_steady",
         "cold_method": "not_cold_warm_steady",
@@ -1098,6 +1126,7 @@
         "validity_ok": true
       },
       "metrics_b": null,
+      "raw_repetitions": [],
       "scaffold_only": true
     },
     {
@@ -1110,6 +1139,7 @@
         "side_b": "couchbase_lite_embedded"
       },
       "concurrency": 1,
+      "achieved_concurrency": 1,
       "side_a": {
         "engine": "logical_harness",
         "execution_kind": "logical_simulator",
@@ -1123,12 +1153,12 @@
           "row_count": 64
         },
         "metrics": {
-          "queries_per_s": 16913.319238900633,
+          "queries_per_s": 16249.32971514925,
           "latency": {
-            "p50": 59125,
-            "p95": 59125,
-            "p99": 59125,
-            "max": 59125,
+            "p50": 61541,
+            "p95": 61541,
+            "p99": 61541,
+            "max": 61541,
             "samples": 1
           },
           "resource": {
@@ -1145,7 +1175,7 @@
             "index_size_bytes": null,
             "index_build_ns": null,
             "indexed_write_penalty_ns": null,
-            "explain_plan_digest": "logical:96c50fb82f2a4ef32090b09c5d2b203926374dd68f885335e9d0b024794c8d82"
+            "explain_plan_digest": "logical_plan:60f4990960495d0472bab7c2d3eefbff087ec816c2bb092decd070d49d633402"
           },
           "lifecycle": "warm_steady",
           "cold_method": "not_cold_warm_steady",
@@ -1156,8 +1186,8 @@
           "validity_ok": true
         },
         "refuse_code": null,
-        "detail": "logical_harness plan=cell_conditional_computed_smoke_c1 examined=64 conditional high_band computed",
-        "shared_work_hash": "27fd0df6dffa25c353364cec2bd5c4ec17c075149de69ed8297c082d180eb6a8"
+        "detail": "logical_harness plan=cell_conditional_computed_smoke_c1 examined=64 conditional high_band computed concurrency_requested=1 concurrency_achieved=1 workers=1",
+        "shared_work_hash": "98c2855fa3246f34efe22512bd04dc8ba2e0d6ae5dc35c9f1e3a58136e8e3319"
       },
       "side_b": {
         "engine": "couchbase_lite_embedded",
@@ -1167,17 +1197,17 @@
         "metrics": null,
         "refuse_code": "adapter_not_configured:cbl_embedded",
         "detail": "shared logical work loaded=true; plan=cell_conditional_computed_smoke_c1 (CBL native residual)",
-        "shared_work_hash": "27fd0df6dffa25c353364cec2bd5c4ec17c075149de69ed8297c082d180eb6a8"
+        "shared_work_hash": "98c2855fa3246f34efe22512bd04dc8ba2e0d6ae5dc35c9f1e3a58136e8e3319"
       },
       "equivalent": null,
       "equivalence_detail": "one or both sides missing canonical result",
       "metrics_a": {
-        "queries_per_s": 16913.319238900633,
+        "queries_per_s": 16249.32971514925,
         "latency": {
-          "p50": 59125,
-          "p95": 59125,
-          "p99": 59125,
-          "max": 59125,
+          "p50": 61541,
+          "p95": 61541,
+          "p99": 61541,
+          "max": 61541,
           "samples": 1
         },
         "resource": {
@@ -1194,7 +1224,7 @@
           "index_size_bytes": null,
           "index_build_ns": null,
           "indexed_write_penalty_ns": null,
-          "explain_plan_digest": "logical:96c50fb82f2a4ef32090b09c5d2b203926374dd68f885335e9d0b024794c8d82"
+          "explain_plan_digest": "logical_plan:60f4990960495d0472bab7c2d3eefbff087ec816c2bb092decd070d49d633402"
         },
         "lifecycle": "warm_steady",
         "cold_method": "not_cold_warm_steady",
@@ -1205,6 +1235,7 @@
         "validity_ok": true
       },
       "metrics_b": null,
+      "raw_repetitions": [],
       "scaffold_only": true
     },
     {
@@ -1217,6 +1248,7 @@
         "side_b": "couchbase_lite_embedded"
       },
       "concurrency": 1,
+      "achieved_concurrency": 1,
       "side_a": {
         "engine": "logical_harness",
         "execution_kind": "logical_simulator",
@@ -1230,12 +1262,12 @@
           "row_count": 7
         },
         "metrics": {
-          "queries_per_s": 620.989571722122,
+          "queries_per_s": 620.6041829963142,
           "latency": {
-            "p50": 1610333,
-            "p95": 1610333,
-            "p99": 1610333,
-            "max": 1610333,
+            "p50": 1611333,
+            "p95": 1611333,
+            "p99": 1611333,
+            "max": 1611333,
             "samples": 1
           },
           "resource": {
@@ -1252,7 +1284,7 @@
             "index_size_bytes": null,
             "index_build_ns": null,
             "indexed_write_penalty_ns": null,
-            "explain_plan_digest": "logical:12f969d817fee0600dd6988f919c0e26065c16fa931ecd5558baa1d5b80527b6"
+            "explain_plan_digest": "logical_plan:8e702e7a7805936adfdd580164c1b7089e4da69683501d947e7c68c2e1f203ed"
           },
           "lifecycle": "warm_steady",
           "cold_method": "not_cold_warm_steady",
@@ -1263,8 +1295,8 @@
           "validity_ok": true
         },
         "refuse_code": null,
-        "detail": "logical_harness plan=cell_mixed_rw_smoke_c1 examined=6146 mixed_rw mix=rw_90_10 reads=88 writes=12 final_docs=76",
-        "shared_work_hash": "1429f10d7aabe580304c9eef2668e5583b0665e16d44c5339e1de6d5f1ca6fad"
+        "detail": "logical_harness plan=cell_mixed_rw_smoke_c1 examined=6146 mixed_rw mix=rw_90_10 reads=88 writes=12 final_docs=76 concurrency_requested=1 concurrency_achieved=1 workers=1",
+        "shared_work_hash": "61cb795470efae7207327318f26fb9cc3da04e94c22ea3f555747cc7a1556b8f"
       },
       "side_b": {
         "engine": "couchbase_lite_embedded",
@@ -1274,17 +1306,17 @@
         "metrics": null,
         "refuse_code": "adapter_not_configured:cbl_embedded",
         "detail": "shared logical work loaded=true; plan=cell_mixed_rw_smoke_c1 (CBL native residual)",
-        "shared_work_hash": "1429f10d7aabe580304c9eef2668e5583b0665e16d44c5339e1de6d5f1ca6fad"
+        "shared_work_hash": "61cb795470efae7207327318f26fb9cc3da04e94c22ea3f555747cc7a1556b8f"
       },
       "equivalent": null,
       "equivalence_detail": "one or both sides missing canonical result",
       "metrics_a": {
-        "queries_per_s": 620.989571722122,
+        "queries_per_s": 620.6041829963142,
         "latency": {
-          "p50": 1610333,
-          "p95": 1610333,
-          "p99": 1610333,
-          "max": 1610333,
+          "p50": 1611333,
+          "p95": 1611333,
+          "p99": 1611333,
+          "max": 1611333,
           "samples": 1
         },
         "resource": {
@@ -1301,7 +1333,7 @@
           "index_size_bytes": null,
           "index_build_ns": null,
           "indexed_write_penalty_ns": null,
-          "explain_plan_digest": "logical:12f969d817fee0600dd6988f919c0e26065c16fa931ecd5558baa1d5b80527b6"
+          "explain_plan_digest": "logical_plan:8e702e7a7805936adfdd580164c1b7089e4da69683501d947e7c68c2e1f203ed"
         },
         "lifecycle": "warm_steady",
         "cold_method": "not_cold_warm_steady",
@@ -1312,8 +1344,9 @@
         "validity_ok": true
       },
       "metrics_b": null,
+      "raw_repetitions": [],
       "scaffold_only": true
     }
   ],
-  "content_hash": "4996f52c71544f9b97c13fe471a52a3d842674c9862c12b08d23fce882403a9f"
+  "content_hash": "0fd423b1da0b9f1a24b50ad962fbb2dd41f2aa71adc245cd1f9f133ac940c052"
 }

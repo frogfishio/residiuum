@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use super::full_attach::{
-    EnrichCardinality, EnrichStepV1, FullPipelineStepV1, ProjectItemV1, WithinStepV1,
+    EnrichCardinality, EnrichStepV1, FullPipelineStepV1, ProjectExprV1, ProjectItemV1, WithinStepV1,
 };
 
 pub(crate) fn pipeline_step_json(step: &FullPipelineStepV1) -> Result<JsonValue, Error> {
@@ -18,16 +18,10 @@ pub(crate) fn pipeline_step_json(step: &FullPipelineStepV1) -> Result<JsonValue,
             m.insert("kind".into(), JsonValue::String("enrich".into()));
             m.insert("output".into(), JsonValue::String(e.output.clone()));
             m.insert("using_name".into(), JsonValue::String(e.using_name.clone()));
-            m.insert(
-                "using_id".into(),
-                JsonValue::String(e.using_id.to_string()),
-            );
+            m.insert("using_id".into(), JsonValue::String(e.using_id.to_string()));
             m.insert("left".into(), path_json(&e.left));
             m.insert("right".into(), path_json(&e.right));
-            m.insert(
-                "expect".into(),
-                JsonValue::String(e.expect.as_str().into()),
-            );
+            m.insert("expect".into(), JsonValue::String(e.expect.as_str().into()));
             match &e.candidate_where {
                 None => m.insert("candidate_where".into(), JsonValue::Null),
                 Some(p) => m.insert("candidate_where".into(), p.to_canonical_json()),
@@ -145,6 +139,13 @@ pub(crate) fn project_item_json(item: &ProjectItemV1) -> Result<JsonValue, Error
             );
             Ok(btree_to_obj(m))
         }
+        ProjectItemV1::Computed { output, expression } => {
+            let mut m = BTreeMap::new();
+            m.insert("kind".into(), JsonValue::String("computed".into()));
+            m.insert("output".into(), JsonValue::String(output.clone()));
+            m.insert("expression".into(), project_expr_json(expression)?);
+            Ok(btree_to_obj(m))
+        }
     }
 }
 
@@ -170,8 +171,69 @@ pub(crate) fn parse_project_item(v: &JsonValue) -> Result<ProjectItemV1, Error> 
                 fields,
             })
         }
+        Some("computed") => Ok(ProjectItemV1::Computed {
+            output: req_str(obj, "output")?.to_string(),
+            expression: parse_project_expr(
+                obj.get("expression")
+                    .ok_or_else(|| Error::QueryInvalid("computed.expression".into()))?,
+            )?,
+        }),
         other => Err(Error::QueryInvalid(format!(
             "unknown project kind `{other:?}`"
+        ))),
+    }
+}
+
+fn project_expr_json(expr: &ProjectExprV1) -> Result<JsonValue, Error> {
+    let mut m = BTreeMap::new();
+    match expr {
+        ProjectExprV1::Literal(value) => {
+            m.insert("kind".into(), JsonValue::String("literal".into()));
+            m.insert("value".into(), value.clone());
+        }
+        ProjectExprV1::Path(path) => {
+            m.insert("kind".into(), JsonValue::String("path".into()));
+            m.insert("path".into(), path_json(path));
+        }
+        ProjectExprV1::Conditional {
+            when,
+            then_expr,
+            else_expr,
+        } => {
+            m.insert("kind".into(), JsonValue::String("conditional".into()));
+            m.insert("when".into(), when.to_canonical_json());
+            m.insert("then".into(), project_expr_json(then_expr)?);
+            m.insert("else".into(), project_expr_json(else_expr)?);
+        }
+    }
+    Ok(btree_to_obj(m))
+}
+
+fn parse_project_expr(v: &JsonValue) -> Result<ProjectExprV1, Error> {
+    let obj = v
+        .as_object()
+        .ok_or_else(|| Error::QueryInvalid("project expression object".into()))?;
+    match obj.get("kind").and_then(|k| k.as_str()) {
+        Some("literal") => Ok(ProjectExprV1::Literal(
+            obj.get("value").cloned().unwrap_or(JsonValue::Null),
+        )),
+        Some("path") => Ok(ProjectExprV1::Path(parse_path(obj.get("path"))?)),
+        Some("conditional") => Ok(ProjectExprV1::Conditional {
+            when: Predicate::from_plan_json(
+                obj.get("when")
+                    .ok_or_else(|| Error::QueryInvalid("conditional.when".into()))?,
+            )?,
+            then_expr: Box::new(parse_project_expr(
+                obj.get("then")
+                    .ok_or_else(|| Error::QueryInvalid("conditional.then".into()))?,
+            )?),
+            else_expr: Box::new(parse_project_expr(
+                obj.get("else")
+                    .ok_or_else(|| Error::QueryInvalid("conditional.else".into()))?,
+            )?),
+        }),
+        other => Err(Error::QueryInvalid(format!(
+            "unknown project expression kind `{other:?}`"
         ))),
     }
 }
