@@ -210,6 +210,29 @@ pub struct RotationStageTotals {
     pub catalog_apply_ns: u64,
 }
 
+/// Constant-time, redacted snapshot of sustained-write lifecycle activity.
+///
+/// This contains only cumulative counters and configuration state. It does not
+/// enumerate media, keys, heaps, or records, so callers may sample it while a
+/// workload is running without turning inspection into a store scan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StoreWritePathStats {
+    /// Cumulative authoritative auto-rotation stages.
+    pub rotation: RotationStageTotals,
+    /// Cumulative derived Hydra/Chimera enrichment stages.
+    pub enrichment: EnrichmentStageTotals,
+    /// Derived enrichment jobs submitted but not yet applied.
+    pub enrichment_backlog: usize,
+    /// Whether asynchronous authoritative seal lifecycle is active.
+    pub async_lifecycle_enabled: bool,
+    /// Whether write-time Recovery Shadow dual streaming is active.
+    pub shadow_dual_stream: bool,
+    /// Recovery Shadows published since this store was opened.
+    pub shadow_dual_published: u64,
+    /// Cumulative Recovery Shadow finalize time.
+    pub shadow_dual_finalize_ns: u64,
+}
+
 impl RotationStageTotals {
     /// Sum of timed stages (excludes put-path work between rotations).
     pub fn total_ns(self) -> u64 {
@@ -7029,6 +7052,19 @@ impl Store {
     /// Cumulative mid-run auto-rotation stage timings.
     pub fn rotation_stage_totals(&self) -> RotationStageTotals {
         self.rotation_stage_totals
+    }
+
+    /// Redacted constant-time snapshot for sustained-write diagnostics.
+    pub fn write_path_stats(&self) -> StoreWritePathStats {
+        StoreWritePathStats {
+            rotation: self.rotation_stage_totals,
+            enrichment: self.enrichment_stage_totals,
+            enrichment_backlog: self.enrichment_backlog(),
+            async_lifecycle_enabled: self.async_lifecycle_enabled(),
+            shadow_dual_stream: self.shadow_dual_stream,
+            shadow_dual_published: self.shadow_dual_published,
+            shadow_dual_finalize_ns: self.shadow_dual_finalize_ns,
+        }
     }
 
     /// Cumulative derived enrichment stage timings (ETQ-0 measurement).

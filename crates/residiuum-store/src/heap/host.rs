@@ -176,6 +176,14 @@ impl StoreHost {
         self.commits.stats()
     }
 
+    /// Redacted sustained-write lifecycle counters; performs no store scan.
+    pub fn write_path_stats(&self) -> Result<crate::StoreWritePathStats, StoreError> {
+        self.physical
+            .lock()
+            .map(|store| store.write_path_stats())
+            .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))
+    }
+
     /// Drain authoritative lifecycle work and persist a clean restart boundary.
     pub fn prepare_orderly_close(&self) -> Result<(), StoreError> {
         self.physical

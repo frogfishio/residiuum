@@ -153,7 +153,7 @@ pub use token_keys::{
 /// Extent map types used by [`PayloadResult::Partial`] (FORMAT_SPEC §8).
 pub use residiuum_format::{ByteRange, LogicalExtent};
 pub use durability::DurabilityMode;
-pub use store::{DiagnosticIoSink, WriteCondition};
+pub use store::{DiagnosticIoSink, StoreWritePathStats, WriteCondition};
 pub use envelope::{
     decode_item_envelope, encode_item_envelope, EventKind, ItemEnvelope, MAX_SUBJECT_LEN,
 };

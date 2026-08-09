@@ -553,6 +553,9 @@ pub struct ClientInspection {
     pub closed: bool,
     /// Deployment-wide durable group-commit counters.
     pub operation_commits: residiuum_store::OperationCommitStats,
+    /// Constant-time physical-store lifecycle counters. `None` only when the
+    /// store mutex was poisoned and its state could not be inspected safely.
+    pub write_path: Option<residiuum_store::StoreWritePathStats>,
 }
 
 /// Async connection to one physical Residiuum deployment.
@@ -657,6 +660,7 @@ impl Client {
     pub fn inspect(&self) -> ClientInspection {
         let mut inspection = self.scheduler.inspect();
         inspection.operation_commits = self.deployment.operation_commit_stats();
+        inspection.write_path = self.deployment.write_path_stats().ok();
         inspection
     }
 
@@ -2171,6 +2175,7 @@ impl Scheduler {
                 .load(Ordering::Relaxed),
             closed: self.closed.load(Ordering::Acquire),
             operation_commits: residiuum_store::OperationCommitStats::default(),
+            write_path: None,
         }
     }
 

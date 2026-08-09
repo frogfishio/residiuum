@@ -95,6 +95,11 @@ impl ResidiuumDeployment {
         self.host.operation_commit_stats()
     }
 
+    /// Redacted sustained-write lifecycle counters; performs no store scan.
+    pub fn write_path_stats(&self) -> Result<residiuum_store::StoreWritePathStats, Error> {
+        Ok(self.host.write_path_stats()?)
+    }
+
     /// Establish the deployment's durable clean-restart boundary.
     pub(crate) fn prepare_orderly_close(&self) -> Result<(), Error> {
         Ok(self.host.prepare_orderly_close()?)

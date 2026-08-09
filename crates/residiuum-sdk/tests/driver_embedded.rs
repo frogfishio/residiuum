@@ -413,6 +413,11 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
     assert!(commits.admitted_byte_capacity > 0);
     assert!(commits.peak_admitted_bytes > 0);
     assert!(commits.peak_admitted_bytes <= commits.admitted_byte_capacity);
+    let write_path = inspection
+        .write_path
+        .expect("healthy embedded store must expose write-path counters");
+    assert!(write_path.async_lifecycle_enabled);
+    assert!(write_path.shadow_dual_stream);
     assert_eq!(commits.successful_media_sync_cohorts, commits.cohorts);
     assert_eq!(commits.successful_journal_sync_cohorts, 0);
     assert_eq!(commits.successful_journal_append_cohorts, commits.cohorts);

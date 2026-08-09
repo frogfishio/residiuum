@@ -47,7 +47,7 @@ fn elapsed_ns(t0: Instant) -> u64 {
 }
 
 /// Per-segment derived enrichment stage timings (ETQ-0 measurement).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EnrichmentStageTiming {
     /// Sleep for [`ENRICHMENT_MIN_GAP`] before this job (resource isolation).
     pub gap_wait_ns: u64,
@@ -102,7 +102,7 @@ impl EnrichmentStageTiming {
 }
 
 /// Cumulative enrichment stage timings (sums + sample count).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EnrichmentStageTotals {
     /// Number of EnrichDone samples accumulated.
     pub samples: u64,

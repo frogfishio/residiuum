@@ -10,18 +10,18 @@ use residiuum_authority::{
 };
 use residiuum_heap::Rights;
 use residiuum_sdk::driver::{
-    Client, Collection, CreateCollectionOptions, EmbeddedOptions, PutManyEntry, ScanOptions,
-    DEFAULT_EMBEDDED_QUEUE_CAPACITY, MAX_SCAN_PAGE_SIZE,
+    Client, ClientInspection, Collection, CreateCollectionOptions, EmbeddedOptions, PutManyEntry,
+    ScanOptions, DEFAULT_EMBEDDED_QUEUE_CAPACITY, MAX_SCAN_PAGE_SIZE,
 };
 use residiuum_sdk::ResidiuumDeployment;
 use serde_json::{json, Value};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::task::{Context, Poll, Wake, Waker};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -161,6 +161,180 @@ fn directory_sizes(path: &Path) -> (u64, u64) {
     (logical, allocated)
 }
 
+fn delta(after: u64, before: u64) -> u64 {
+    after.saturating_sub(before)
+}
+
+fn sustained_sample(
+    milestone_payload_bytes: u64,
+    observed_payload_bytes: u64,
+    elapsed_ns: u64,
+    previous_payload_bytes: u64,
+    previous_elapsed_ns: u64,
+    free_bytes: u64,
+    previous: &ClientInspection,
+    current: &ClientInspection,
+) -> Value {
+    let interval_bytes = observed_payload_bytes.saturating_sub(previous_payload_bytes);
+    let interval_ns = elapsed_ns.saturating_sub(previous_elapsed_ns);
+    let interval_seconds = interval_ns as f64 / 1_000_000_000.0;
+    let commits = current.operation_commits;
+    let prior_commits = previous.operation_commits;
+    let write_path = current.write_path;
+    let prior_write_path = previous.write_path;
+    json!({
+        "milestone_payload_bytes": milestone_payload_bytes,
+        "observed_payload_bytes": observed_payload_bytes,
+        "elapsed_ns": elapsed_ns,
+        "interval_payload_bytes": interval_bytes,
+        "interval_ns": interval_ns,
+        "interval_payload_mib_per_second": if interval_seconds > 0.0 {
+            interval_bytes as f64 / interval_seconds / (1024.0 * 1024.0)
+        } else { 0.0 },
+        "cumulative_payload_mib_per_second": if elapsed_ns > 0 {
+            observed_payload_bytes as f64 / (elapsed_ns as f64 / 1_000_000_000.0)
+                / (1024.0 * 1024.0)
+        } else { 0.0 },
+        "free_bytes": free_bytes,
+        "scheduler": {
+            "queued": current.queued,
+            "running": current.running,
+            "inflight_mutations": current.inflight_mutations,
+            "admitted_bytes": current.admitted_bytes,
+            "refused_delta": delta(current.refused, previous.refused),
+            "byte_refused_delta": delta(current.byte_refused, previous.byte_refused),
+        },
+        "group_commit_delta": {
+            "submitted": delta(commits.submitted, prior_commits.submitted),
+            "submitted_bytes": delta(commits.submitted_bytes, prior_commits.submitted_bytes),
+            "cohorts": delta(commits.cohorts, prior_commits.cohorts),
+            "committed": delta(commits.committed, prior_commits.committed),
+            "failed": delta(commits.failed, prior_commits.failed),
+            "byte_admission_waits": delta(
+                commits.byte_admission_waits,
+                prior_commits.byte_admission_waits,
+            ),
+            "reserved_cooked_cohorts": delta(
+                commits.reserved_cooked_cohorts,
+                prior_commits.reserved_cooked_cohorts,
+            ),
+            "reserved_cooked_operations": delta(
+                commits.reserved_cooked_operations,
+                prior_commits.reserved_cooked_operations,
+            ),
+            "overlapped_cooked_cohorts": delta(
+                commits.overlapped_cooked_cohorts,
+                prior_commits.overlapped_cooked_cohorts,
+            ),
+            "overlapped_cooked_operations": delta(
+                commits.overlapped_cooked_operations,
+                prior_commits.overlapped_cooked_operations,
+            ),
+            "phase_ns": {
+                "total": delta(commits.cohort_total_ns, prior_commits.cohort_total_ns),
+                "prepare": delta(commits.cohort_prepare_ns, prior_commits.cohort_prepare_ns),
+                "cook_install_publish": delta(
+                    commits.cohort_cook_install_publish_ns,
+                    prior_commits.cohort_cook_install_publish_ns,
+                ),
+                "media_boundary": delta(
+                    commits.cohort_media_boundary_ns,
+                    prior_commits.cohort_media_boundary_ns,
+                ),
+                "rotation": delta(commits.cohort_rotation_ns, prior_commits.cohort_rotation_ns),
+                "outcome_journal": delta(
+                    commits.cohort_outcome_journal_ns,
+                    prior_commits.cohort_outcome_journal_ns,
+                ),
+            },
+        },
+        "write_path": write_path.map(|path| {
+            let prior = prior_write_path.unwrap_or_default();
+            json!({
+                "current": {
+                    "enrichment_backlog": path.enrichment_backlog,
+                    "async_lifecycle_enabled": path.async_lifecycle_enabled,
+                    "shadow_dual_stream": path.shadow_dual_stream,
+                },
+                "rotation_delta": {
+                    "rotations": delta(path.rotation.rotations, prior.rotation.rotations),
+                    "flush_ns": delta(path.rotation.flush_ns, prior.rotation.flush_ns),
+                    "rename_pending_ns": delta(
+                        path.rotation.rename_pending_ns,
+                        prior.rotation.rename_pending_ns,
+                    ),
+                    "start_active_ns": delta(
+                        path.rotation.start_active_ns,
+                        prior.rotation.start_active_ns,
+                    ),
+                    "backpressure_wait_ns": delta(
+                        path.rotation.backpressure_wait_ns,
+                        prior.rotation.backpressure_wait_ns,
+                    ),
+                    "auth_publish_ns": delta(
+                        path.rotation.auth_publish_ns,
+                        prior.rotation.auth_publish_ns,
+                    ),
+                    "catalog_apply_ns": delta(
+                        path.rotation.catalog_apply_ns,
+                        prior.rotation.catalog_apply_ns,
+                    ),
+                },
+                "shadow_delta": {
+                    "published": delta(
+                        path.shadow_dual_published,
+                        prior.shadow_dual_published,
+                    ),
+                    "finalize_ns": delta(
+                        path.shadow_dual_finalize_ns,
+                        prior.shadow_dual_finalize_ns,
+                    ),
+                },
+                "enrichment_delta": {
+                    "samples": delta(path.enrichment.samples, prior.enrichment.samples),
+                    "gap_wait_ns": delta(
+                        path.enrichment.gap_wait_ns,
+                        prior.enrichment.gap_wait_ns,
+                    ),
+                    "read_ns": delta(path.enrichment.read_ns, prior.enrichment.read_ns),
+                    "decode_ns": delta(path.enrichment.decode_ns, prior.enrichment.decode_ns),
+                    "blake3_ns": delta(path.enrichment.blake3_ns, prior.enrichment.blake3_ns),
+                    "hydra_construct_ns": delta(
+                        path.enrichment.hydra_construct_ns,
+                        prior.enrichment.hydra_construct_ns,
+                    ),
+                    "hydra_persist_ns": delta(
+                        path.enrichment.hydra_persist_ns,
+                        prior.enrichment.hydra_persist_ns,
+                    ),
+                    "chimera_construct_ns": delta(
+                        path.enrichment.chimera_construct_ns,
+                        prior.enrichment.chimera_construct_ns,
+                    ),
+                    "chimera_persist_ns": delta(
+                        path.enrichment.chimera_persist_ns,
+                        prior.enrichment.chimera_persist_ns,
+                    ),
+                    "catalog_ns": delta(
+                        path.enrichment.catalog_ns,
+                        prior.enrichment.catalog_ns,
+                    ),
+                    "wall_ns": delta(path.enrichment.wall_ns, prior.enrichment.wall_ns),
+                    "cpu_ns": delta(path.enrichment.cpu_ns, prior.enrichment.cpu_ns),
+                    "bytes_read": delta(
+                        path.enrichment.bytes_read,
+                        prior.enrichment.bytes_read,
+                    ),
+                    "bytes_written": delta(
+                        path.enrichment.bytes_written,
+                        prior.enrichment.bytes_written,
+                    ),
+                },
+            })
+        }),
+    })
+}
+
 #[test]
 #[ignore = "explicit retained-media campaign; requires dedicated root and byte target"]
 fn smart_client_durable_retained_media_campaign() {
@@ -237,7 +411,8 @@ fn smart_client_durable_retained_media_campaign() {
         .saturating_add(payload_bytes as u64 - 1)
         .saturating_div(payload_bytes as u64);
     let acknowledged_payload = Arc::new(AtomicU64::new(0));
-    let barrier = Arc::new(Barrier::new(concurrency + 1));
+    let monitor_stop = Arc::new(AtomicBool::new(false));
+    let barrier = Arc::new(Barrier::new(concurrency + 2));
     let mut handles = Vec::with_capacity(concurrency);
     for worker in 0..concurrency {
         let records = records.clone();
@@ -294,6 +469,66 @@ fn smart_client_durable_retained_media_campaign() {
     }
 
     let acknowledgement_started = Instant::now();
+    let monitor = {
+        let client = client.clone();
+        let root = root.clone();
+        let acknowledged_payload = Arc::clone(&acknowledged_payload);
+        let monitor_stop = Arc::clone(&monitor_stop);
+        let barrier = Arc::clone(&barrier);
+        let mut previous = client.inspect();
+        std::thread::spawn(move || {
+            let mut samples = Vec::new();
+            let mut next_milestone = GIB;
+            let mut previous_payload = 0u64;
+            let mut previous_elapsed_ns = 0u64;
+            barrier.wait();
+            loop {
+                let observed = acknowledged_payload.load(Ordering::Acquire);
+                let stopping = monitor_stop.load(Ordering::Acquire);
+                let reached_milestone = observed >= next_milestone;
+                let needs_final_sample = stopping && observed > previous_payload;
+                if reached_milestone || needs_final_sample {
+                    let milestone = if reached_milestone {
+                        next_milestone
+                    } else {
+                        observed
+                    };
+                    let elapsed_ns = acknowledgement_started
+                        .elapsed()
+                        .as_nanos()
+                        .min(u64::MAX as u128) as u64;
+                    let current = client.inspect();
+                    let sample = sustained_sample(
+                        milestone,
+                        observed,
+                        elapsed_ns,
+                        previous_payload,
+                        previous_elapsed_ns,
+                        available_bytes(&root),
+                        &previous,
+                        &current,
+                    );
+                    eprintln!(
+                        "sustained_sample={}",
+                        serde_json::to_string(&sample).unwrap()
+                    );
+                    samples.push(sample);
+                    previous = current;
+                    previous_payload = observed;
+                    previous_elapsed_ns = elapsed_ns;
+                    next_milestone = observed
+                        .saturating_div(GIB)
+                        .saturating_add(1)
+                        .saturating_mul(GIB);
+                }
+                if stopping && observed <= previous_payload {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            samples
+        })
+    };
     barrier.wait();
     let mut latencies = Vec::with_capacity(total_operations.min(usize::MAX as u64) as usize);
     for handle in handles {
@@ -304,6 +539,8 @@ fn smart_client_durable_retained_media_campaign() {
                 .expect("write failed"),
         );
     }
+    monitor_stop.store(true, Ordering::Release);
+    let sustained_samples = monitor.join().expect("monitor thread panicked");
     let acknowledgement_ns = acknowledgement_started
         .elapsed()
         .as_nanos()
@@ -393,6 +630,7 @@ fn smart_client_durable_retained_media_campaign() {
         "full_validation_scan_ns": scan_ns,
         "operations_per_second": total_operations as f64 / seconds,
         "payload_mib_per_second": acknowledged_payload.load(Ordering::Relaxed) as f64 / seconds / (1024.0 * 1024.0),
+        "sustained_samples": sustained_samples,
         "latency_ns": {
             "min": latencies.first().copied().unwrap_or(0),
             "p50": percentile(&latencies, 50),
