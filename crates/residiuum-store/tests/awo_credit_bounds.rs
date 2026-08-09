@@ -84,6 +84,8 @@ fn cooker_frame_equivalence_vs_serial_encode() {
         writer_sequence: 42,
         created_ns: 9_001,
         event_kind: EventKind::Put,
+        operation_id: None,
+        operation_content_hash: None,
     };
     let serial_a = cook_item_frame(&task).unwrap();
     let serial_b = cook_item_frame(&task).unwrap();
@@ -137,6 +139,8 @@ fn ordered_ready_preserves_ticket_order_under_parallel_cook() {
             writer_sequence: i,
             created_ns: i * 10,
             event_kind: EventKind::Put,
+            operation_id: None,
+            operation_content_hash: None,
         };
         pool.try_submit(task).unwrap();
     }

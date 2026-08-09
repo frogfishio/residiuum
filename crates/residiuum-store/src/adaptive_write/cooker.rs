@@ -45,6 +45,10 @@ pub struct CookTask {
     pub created_ns: u64,
     /// Put or Delete.
     pub event_kind: EventKind,
+    /// Stable product-operation identity embedded in authoritative media.
+    pub operation_id: Option<[u8; 16]>,
+    /// Canonical content identity paired with [`Self::operation_id`].
+    pub operation_content_hash: Option<[u8; 32]>,
 }
 
 /// Successful cook product (encoded frame only — no store touch).
@@ -96,6 +100,9 @@ pub fn cook_item_frame(task: &CookTask) -> Result<Vec<u8>, String> {
     if task.subject.len() > MAX_SUBJECT_LEN {
         return Err("subject too long".into());
     }
+    if task.operation_id.is_some() != task.operation_content_hash.is_some() {
+        return Err("operation identity requires both id and content hash".into());
+    }
     let _ = crate::failpoint::hit("awo.cook.before").map_err(|e| e.to_string())?;
     let env = ItemEnvelope {
         store_id: task.store_id,
@@ -104,8 +111,8 @@ pub fn cook_item_frame(task: &CookTask) -> Result<Vec<u8>, String> {
         event_kind: task.event_kind,
         created_ns: task.created_ns,
         subject: task.subject.as_ref().to_vec(),
-        operation_id: None,
-        operation_content_hash: None,
+        operation_id: task.operation_id,
+        operation_content_hash: task.operation_content_hash,
     };
     let envelope = encode_item_envelope(&env).map_err(|e| e.to_string())?;
     let header = FrameHeader {
@@ -388,6 +395,8 @@ mod tests {
             writer_sequence: ticket,
             created_ns: 1_000_000,
             event_kind: EventKind::Put,
+            operation_id: None,
+            operation_content_hash: None,
         }
     }
 
@@ -399,5 +408,29 @@ mod tests {
         let b = cook_item_frame(&t).unwrap();
         assert_eq!(a, b);
         assert!(a.len() > t.body.len());
+    }
+
+    #[test]
+    fn operation_identity_is_embedded_and_must_be_complete() {
+        let mut task = sample_task(7, "operation/key", b"value");
+        task.operation_id = Some([0x31; 16]);
+        task.operation_content_hash = Some([0x42; 32]);
+        let frame = cook_item_frame(&task).unwrap();
+        let (_, envelope, _, _, _) = residiuum_format::verify_frame_at(
+            &frame,
+            residiuum_format::SafetyLimits::default(),
+        )
+        .unwrap();
+        let decoded = crate::envelope::decode_item_envelope(envelope).unwrap();
+        assert_eq!(decoded.operation_id, task.operation_id);
+        assert_eq!(
+            decoded.operation_content_hash,
+            task.operation_content_hash
+        );
+
+        task.operation_content_hash = None;
+        assert!(cook_item_frame(&task)
+            .unwrap_err()
+            .contains("requires both"));
     }
 }
