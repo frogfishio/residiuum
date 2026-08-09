@@ -196,6 +196,24 @@ pub struct RotationStageTotals {
     pub catalog_apply_ns: u64,
 }
 
+/// Cumulative logical file-I/O submissions made by one write-path lane.
+///
+/// A `write_operations` count describes calls into Residiuum's exact-write
+/// helper, not kernel-level short-write retries inside that helper.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteIoTotals {
+    /// Exact-write operations submitted.
+    pub write_operations: u64,
+    /// Bytes successfully submitted by those operations.
+    pub write_bytes: u64,
+    /// Wall time spent in exact-write operations.
+    pub write_ns: u64,
+    /// Durability barriers completed.
+    pub sync_operations: u64,
+    /// Wall time spent in durability barriers.
+    pub sync_ns: u64,
+}
+
 /// Constant-time, redacted snapshot of sustained-write lifecycle activity.
 ///
 /// This contains only cumulative counters and configuration state. It does not
@@ -209,6 +227,12 @@ pub struct StoreWritePathStats {
     pub durable_index_entries: usize,
     /// Operation identities retained for retry/outcome resolution.
     pub write_dedup_entries: usize,
+    /// Current allocation capacity of the operation-dedup hash table.
+    pub write_dedup_capacity: usize,
+    /// Active authoritative file write/sync activity.
+    pub authoritative_io: WriteIoTotals,
+    /// Recovery Shadow staging write/sync activity.
+    pub shadow_io: WriteIoTotals,
     /// Durable operations since the last complete primary checkpoint.
     pub derived_ops_since_checkpoint: u64,
     /// Cumulative authoritative auto-rotation stages.
@@ -695,6 +719,10 @@ pub struct Store {
     shadow_dual_finalize_ns: u64,
     /// Dual-stream Shadows successfully published this process (measurement).
     shadow_dual_published: u64,
+    /// Active authoritative file write/sync activity.
+    authoritative_io_totals: WriteIoTotals,
+    /// Recovery Shadow staging write/sync activity.
+    shadow_io_totals: WriteIoTotals,
     /// Durable recovery-mode marker (Step 8 flip). Default Materialized dual-run.
     recovery_mode: crate::recovery_shadow::RecoveryMode,
     /// When true, resume/inventory accept foreign-store segment descriptors
@@ -973,6 +1001,8 @@ impl Store {
             shadow_dual_stream: false,
             shadow_dual_finalize_ns: 0,
             shadow_dual_published: 0,
+            authoritative_io_totals: WriteIoTotals::default(),
+            shadow_io_totals: WriteIoTotals::default(),
             recovery_mode: crate::recovery_shadow::RecoveryMode::Materialized,
             accept_foreign_store_id: false,
             rotation_stage_totals: RotationStageTotals::default(),
@@ -1103,6 +1133,8 @@ impl Store {
             shadow_dual_stream: false,
             shadow_dual_finalize_ns: 0,
             shadow_dual_published: 0,
+            authoritative_io_totals: WriteIoTotals::default(),
+            shadow_io_totals: WriteIoTotals::default(),
             recovery_mode: crate::recovery_shadow::RecoveryMode::Materialized,
             accept_foreign_store_id: false,
             rotation_stage_totals: RotationStageTotals::default(),
@@ -1344,6 +1376,8 @@ impl Store {
             shadow_dual_stream: false,
             shadow_dual_finalize_ns: 0,
             shadow_dual_published: 0,
+            authoritative_io_totals: WriteIoTotals::default(),
+            shadow_io_totals: WriteIoTotals::default(),
             recovery_mode: crate::recovery_shadow::RecoveryMode::Materialized,
             accept_foreign_store_id: false,
             rotation_stage_totals: RotationStageTotals::default(),
@@ -6931,6 +6965,26 @@ impl Store {
                     .saturating_add(timing.dir_sync_ns),
             );
             self.shadow_dual_published = self.shadow_dual_published.saturating_add(1);
+            self.shadow_io_totals.write_operations = self
+                .shadow_io_totals
+                .write_operations
+                .saturating_add(timing.staging_write_operations);
+            self.shadow_io_totals.write_bytes = self
+                .shadow_io_totals
+                .write_bytes
+                .saturating_add(timing.staging_write_bytes);
+            self.shadow_io_totals.write_ns = self
+                .shadow_io_totals
+                .write_ns
+                .saturating_add(timing.staging_write_ns);
+            self.shadow_io_totals.sync_operations = self
+                .shadow_io_totals
+                .sync_operations
+                .saturating_add(1);
+            self.shadow_io_totals.sync_ns = self
+                .shadow_io_totals
+                .sync_ns
+                .saturating_add(timing.file_sync_ns);
             let _ = crate::recovery_shadow::note_segment_sealed(
                 &self.paths,
                 self.store_id,
@@ -7036,6 +7090,9 @@ impl Store {
             primary_index_entries: self.index.len(),
             durable_index_entries: self.durable_index.len(),
             write_dedup_entries: self.write_dedup.len(),
+            write_dedup_capacity: self.write_dedup.capacity(),
+            authoritative_io: self.authoritative_io_totals,
+            shadow_io: self.shadow_io_totals,
             derived_ops_since_checkpoint: self.derived_ops_since_checkpoint,
             rotation: self.rotation_stage_totals,
             enrichment: self.enrichment_stage_totals,
@@ -7401,6 +7458,10 @@ impl Store {
                 summary,
                 auth_publish_ns,
                 shadow_publish_ns,
+                shadow_staging_write_operations,
+                shadow_staging_write_bytes,
+                shadow_staging_write_ns,
+                shadow_sync_ns,
             } => {
                 if let Some(p) = self.seal_pipeline.as_mut() {
                     p.inflight_seals = p.inflight_seals.saturating_sub(1);
@@ -7409,6 +7470,26 @@ impl Store {
                 self.shadow_dual_finalize_ns = self
                     .shadow_dual_finalize_ns
                     .saturating_add(shadow_publish_ns);
+                self.shadow_io_totals.write_operations = self
+                    .shadow_io_totals
+                    .write_operations
+                    .saturating_add(shadow_staging_write_operations);
+                self.shadow_io_totals.write_bytes = self
+                    .shadow_io_totals
+                    .write_bytes
+                    .saturating_add(shadow_staging_write_bytes);
+                self.shadow_io_totals.write_ns = self
+                    .shadow_io_totals
+                    .write_ns
+                    .saturating_add(shadow_staging_write_ns);
+                self.shadow_io_totals.sync_operations = self
+                    .shadow_io_totals
+                    .sync_operations
+                    .saturating_add(1);
+                self.shadow_io_totals.sync_ns = self
+                    .shadow_io_totals
+                    .sync_ns
+                    .saturating_add(shadow_sync_ns);
                 self.rotation_stage_totals.rotations =
                     self.rotation_stage_totals.rotations.saturating_add(1);
                 self.rotation_stage_totals.auth_publish_ns = self
@@ -9212,6 +9293,30 @@ impl Store {
         mode: DurabilityMode,
         shard: u32,
     ) -> Result<(), StoreError> {
+        if stats.write_completed > 0 {
+            self.authoritative_io_totals.write_operations = self
+                .authoritative_io_totals
+                .write_operations
+                .saturating_add(1);
+            self.authoritative_io_totals.write_bytes = self
+                .authoritative_io_totals
+                .write_bytes
+                .saturating_add(stats.write_completed);
+            self.authoritative_io_totals.write_ns = self
+                .authoritative_io_totals
+                .write_ns
+                .saturating_add(stats.write_duration_ns);
+        }
+        if stats.synced {
+            self.authoritative_io_totals.sync_operations = self
+                .authoritative_io_totals
+                .sync_operations
+                .saturating_add(1);
+            self.authoritative_io_totals.sync_ns = self
+                .authoritative_io_totals
+                .sync_ns
+                .saturating_add(stats.sync_duration_ns);
+        }
         if stats.write_requested > 0 || stats.write_completed > 0 {
             self.boundary_probe.record_file_write(
                 stats.write_requested,

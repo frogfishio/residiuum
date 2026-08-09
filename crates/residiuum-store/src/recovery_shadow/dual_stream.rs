@@ -49,6 +49,12 @@ pub struct FrameCommitMeta {
 /// Stage timings for dual-stream finalize (qualification).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DualStreamFinalizeTiming {
+    /// Buffered staging-file write operations performed before publication.
+    pub staging_write_operations: u64,
+    /// Image bytes submitted to the staging file before publication.
+    pub staging_write_bytes: u64,
+    /// Wall time spent in staging-file writes.
+    pub staging_write_ns: u64,
     /// Summary append + buffered flush into staging.
     pub append_summary_ns: u64,
     /// Envelope patch + commitment write.
@@ -225,6 +231,9 @@ pub struct ShadowDualStream {
     buf: Vec<u8>,
     /// Wall time spent appending image bytes (put path; no sync).
     pub append_ns: u64,
+    staging_write_operations: u64,
+    staging_write_bytes: u64,
+    staging_write_ns: u64,
     /// Set when a staging append failed after authoritative bytes landed.
     poisoned: bool,
 }
@@ -245,6 +254,12 @@ pub struct PreparedShadowPublish {
     pub tmp_path: PathBuf,
     /// Image length (excluding envelope + commitment).
     pub encoded_len: u64,
+    /// Staging write telemetry transferred from the foreground assembler.
+    pub staging_write_operations: u64,
+    /// Staging bytes written before durable publication.
+    pub staging_write_bytes: u64,
+    /// Time spent writing staging bytes.
+    pub staging_write_ns: u64,
 }
 
 impl PreparedShadowPublish {
@@ -296,6 +311,9 @@ pub fn publish_prepared_shadow(
     paths: &StorePaths,
 ) -> Result<DualStreamFinalizeTiming, StoreError> {
     let mut timing = DualStreamFinalizeTiming::default();
+    timing.staging_write_operations = prepared.staging_write_operations;
+    timing.staging_write_bytes = prepared.staging_write_bytes;
+    timing.staging_write_ns = prepared.staging_write_ns;
     let tmp_path = prepared.tmp_path.clone();
     let segment_id = prepared.segment_id;
     let result = (|| -> Result<DualStreamFinalizeTiming, StoreError> {
@@ -368,6 +386,9 @@ impl ShadowDualStream {
             metas: Vec::new(),
             buf: Vec::with_capacity(SHADOW_BUF),
             append_ns: 0,
+            staging_write_operations: 0,
+            staging_write_bytes: 0,
+            staging_write_ns: 0,
             poisoned: false,
         })
     }
@@ -423,7 +444,15 @@ impl ShadowDualStream {
         crate::failpoint::hit("rshd4.shadow.flush")?;
         // Image follows the envelope placeholder.
         let pos = DUAL_ENVELOPE_LEN as u64 + self.image_len - self.buf.len() as u64;
+        let started = Instant::now();
         crate::positioned_io::write_all_at(&mut self.file, pos, &self.buf)?;
+        self.staging_write_operations = self.staging_write_operations.saturating_add(1);
+        self.staging_write_bytes = self
+            .staging_write_bytes
+            .saturating_add(self.buf.len() as u64);
+        self.staging_write_ns = self
+            .staging_write_ns
+            .saturating_add(started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64);
         self.buf.clear();
         Ok(())
     }
@@ -473,6 +502,9 @@ impl ShadowDualStream {
             shard,
             tmp_path: self.tmp_path.clone(),
             encoded_len,
+            staging_write_operations: self.staging_write_operations,
+            staging_write_bytes: self.staging_write_bytes,
+            staging_write_ns: self.staging_write_ns,
         };
         // Prevent Drop from deleting the staging file we just transferred.
         self.tmp_path = PathBuf::new();
@@ -514,6 +546,9 @@ impl ShadowDualStream {
         }
         self.flush_buf()?;
         timing.append_summary_ns = t_sum.elapsed().as_nanos() as u64;
+        timing.staging_write_operations = self.staging_write_operations;
+        timing.staging_write_bytes = self.staging_write_bytes;
+        timing.staging_write_ns = self.staging_write_ns;
 
         let encoded_len = self.image_len;
         let commit = dual_commitment(
@@ -630,6 +665,9 @@ mod tests {
         // Seal: summary would be appended here; use empty for unit test of items-only.
         let timing = dual.finalize_publish(&paths, &[]).unwrap();
         assert!(timing.bytes_written > DUAL_ENVELOPE_LEN as u64);
+        assert_eq!(timing.staging_write_operations, 1);
+        assert_eq!(timing.staging_write_bytes, active.as_bytes().len() as u64);
+        assert!(timing.staging_write_ns > 0);
 
         let bytes = fs::read(shadow_path(&paths, &seg)).unwrap();
         assert!(is_dual_magic(&bytes));

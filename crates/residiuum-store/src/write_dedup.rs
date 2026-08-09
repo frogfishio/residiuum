@@ -80,6 +80,14 @@ impl WriteDedupTable {
         self.map.len()
     }
 
+    /// Current allocation capacity of the retained operation map.
+    ///
+    /// Exposed for constant-time qualification telemetry so campaigns can
+    /// correlate latency/RSS discontinuities with monolithic table growth.
+    pub fn capacity(&self) -> usize {
+        self.map.capacity()
+    }
+
     /// Whether empty.
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()

@@ -322,7 +322,7 @@ pub use store::{
     IndexOpenDisposition, LiveIncomplete, LiveLogicalScan, OperationMutation,
     OperationMutationKind, OperationPut, OperationPutOutcome,
     RotationStageTotals, SalvageCopyReport, SalvageReport, SealStageBreakdown, StoreOpenMetrics,
-    StoreOpenReport, WriteReceipt, MAX_WRITER_SHARDS,
+    StoreOpenReport, WriteIoTotals, WriteReceipt, MAX_WRITER_SHARDS,
 };
 /// Legacy unscoped store API. Prefer [`StoreHost`] / [`HeapStore`] on the
 /// qualified heap path (`--no-default-features` hides this export).

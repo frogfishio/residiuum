@@ -74,6 +74,9 @@ pub fn recover_protected_pairs(
             shard,
             tmp_path: tmp,
             encoded_len: meta.len().saturating_sub(40 + 32), // best-effort; publish reopens
+            staging_write_operations: 0,
+            staging_write_bytes: 0,
+            staging_write_ns: 0,
         };
         // encoded_len is only for telemetry in publish_prepared_shadow.
         publish_prepared_shadow(prepared, paths)?;

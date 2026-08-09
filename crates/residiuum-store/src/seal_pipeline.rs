@@ -418,6 +418,14 @@ pub enum LifecycleResult {
         auth_publish_ns: u64,
         /// Shadow durable publish nanoseconds.
         shadow_publish_ns: u64,
+        /// Buffered Shadow staging writes completed for this segment.
+        shadow_staging_write_operations: u64,
+        /// Shadow staging bytes written for this segment.
+        shadow_staging_write_bytes: u64,
+        /// Wall time in Shadow staging writes.
+        shadow_staging_write_ns: u64,
+        /// Shadow file durability-barrier time.
+        shadow_sync_ns: u64,
     },
 }
 
@@ -847,13 +855,16 @@ fn seal_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<LifecycleR
                 let shadow_res =
                     crate::recovery_shadow::publish_prepared_shadow(prepared_shadow, &paths);
                 let shadow_publish_ns = elapsed_ns(t_shadow);
-                if let Err(e) = shadow_res {
-                    let _ = result_tx.send(LifecycleResult::SealFailed {
-                        segment_id,
-                        error: format!("shadow publish: {e}"),
-                    });
-                    continue;
-                }
+                let shadow_timing = match shadow_res {
+                    Ok(timing) => timing,
+                    Err(e) => {
+                        let _ = result_tx.send(LifecycleResult::SealFailed {
+                            segment_id,
+                            error: format!("shadow publish: {e}"),
+                        });
+                        continue;
+                    }
+                };
                 // P★ only after both sides durable.
                 let frontier_ok = (|| -> Result<(), StoreError> {
                     let _ = crate::recovery_shadow::note_segment_sealed(
@@ -884,6 +895,10 @@ fn seal_worker_loop(job_rx: Receiver<LifecycleJob>, result_tx: Sender<LifecycleR
                     summary,
                     auth_publish_ns,
                     shadow_publish_ns,
+                    shadow_staging_write_operations: shadow_timing.staging_write_operations,
+                    shadow_staging_write_bytes: shadow_timing.staging_write_bytes,
+                    shadow_staging_write_ns: shadow_timing.staging_write_ns,
+                    shadow_sync_ns: shadow_timing.file_sync_ns,
                 });
             }
             LifecycleJob::EnrichDerived { segment_id, .. } => {

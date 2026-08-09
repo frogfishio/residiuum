@@ -284,10 +284,55 @@ fn sustained_sample(
                     "primary_index_entries": path.primary_index_entries,
                     "durable_index_entries": path.durable_index_entries,
                     "write_dedup_entries": path.write_dedup_entries,
+                    "write_dedup_capacity": path.write_dedup_capacity,
                     "derived_ops_since_checkpoint": path.derived_ops_since_checkpoint,
                     "enrichment_backlog": path.enrichment_backlog,
                     "async_lifecycle_enabled": path.async_lifecycle_enabled,
                     "shadow_dual_stream": path.shadow_dual_stream,
+                },
+                "authoritative_io_delta": {
+                    "write_operations": delta(
+                        path.authoritative_io.write_operations,
+                        prior.authoritative_io.write_operations,
+                    ),
+                    "write_bytes": delta(
+                        path.authoritative_io.write_bytes,
+                        prior.authoritative_io.write_bytes,
+                    ),
+                    "write_ns": delta(
+                        path.authoritative_io.write_ns,
+                        prior.authoritative_io.write_ns,
+                    ),
+                    "sync_operations": delta(
+                        path.authoritative_io.sync_operations,
+                        prior.authoritative_io.sync_operations,
+                    ),
+                    "sync_ns": delta(
+                        path.authoritative_io.sync_ns,
+                        prior.authoritative_io.sync_ns,
+                    ),
+                },
+                "shadow_io_delta": {
+                    "write_operations": delta(
+                        path.shadow_io.write_operations,
+                        prior.shadow_io.write_operations,
+                    ),
+                    "write_bytes": delta(
+                        path.shadow_io.write_bytes,
+                        prior.shadow_io.write_bytes,
+                    ),
+                    "write_ns": delta(
+                        path.shadow_io.write_ns,
+                        prior.shadow_io.write_ns,
+                    ),
+                    "sync_operations": delta(
+                        path.shadow_io.sync_operations,
+                        prior.shadow_io.sync_operations,
+                    ),
+                    "sync_ns": delta(
+                        path.shadow_io.sync_ns,
+                        prior.shadow_io.sync_ns,
+                    ),
                 },
                 "rotation_delta": {
                     "rotations": delta(path.rotation.rotations, prior.rotation.rotations),
