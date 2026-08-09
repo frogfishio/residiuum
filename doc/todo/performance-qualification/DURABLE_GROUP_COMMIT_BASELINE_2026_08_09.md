@@ -495,3 +495,48 @@ already-designed persistent cooker/pipeline machinery so cooking and admission
 for cohort N+1 overlap stable I/O for cohort N, without changing the per-entry
 durable acknowledgement boundary. Another 10 GiB campaign is justified only
 after that pipeline changes the 1 GiB phase split.
+
+## Rejected pre-hash approximation (2026-08-10)
+
+An initial candidate moved only payload BLAKE3 calculation into four persistent
+workers at admission. The immutable body and its bound digest were then consumed
+by the existing full-frame cooker after event, segment and sequence identities
+were assigned under the store lock. The full store suite, SDK bulk/CAS/retry
+tests and fresh-reopen validation all passed.
+
+This was intentionally rejected rather than merged. It was not the pipeline
+specified in `ADAPTIVE_WRITE_OPTIMISER_IMPLEMENTATION_PLAN.md`: it overlapped a
+body-hash substage, not complete frame cooking from a real reservation. Bonzo
+did not show an end-to-end gain:
+
+| Shape | Cohorts | MiB/s | Result |
+|---|---:|---:|---|
+| bulk four, first isolated run | 139 | 303.72 | equal to 305.13 baseline |
+| bulk four, repeat under lower free space | 145 | 199.26 | device state dominated |
+| bulk eight / two cohorts outstanding | 128 | 267.69 | more media-boundary time and latency |
+
+The first bulk-four run did show that moving digest work reduced aggregate
+`cook_install_publish` time from 0.7104 s to 0.5499 s and total store-cohort time
+from 2.7177 s to 2.4499 s. That saving did not reach client throughput. Bulk
+eight filled the intended 128 cohorts, but p99 rose to 138.75 ms and aggregate
+media-boundary time rose to 1.9530 s.
+
+Bonzo free space also fell from 15.84 GB before the first retained run to 13.55
+GB before bulk eight. The large run-to-run media variance means no further
+performance decision or 10 GiB campaign is valid until old retained campaign
+media is deliberately reclaimed.
+
+The next admissible implementation is the actual AWO reservation boundary:
+
+1. reserve conditions, operation identity, segment/event/item identity, writer
+   sequence and an exact active checkpoint under the sole writer;
+2. release the store lock and cook the **complete** operation-bearing frames in
+   the existing bounded `PersistentCookerPool`;
+3. install ready frames strictly by lane ticket;
+4. cross the stable boundary, publish visibility and then resolve each
+   acknowledgement; and
+5. permit depth two only when rotation and duplicate-subject rules prove that
+   batch B cannot invalidate batch A.
+
+Pre-hashing alone must not be reintroduced as a production optimisation without
+new evidence.
