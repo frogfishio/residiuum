@@ -319,7 +319,8 @@ pub use segment_growth::{
 pub use incremental_seal::ContentHashState;
 pub use store::{
     subject_writer_shard, IncompleteReason, IndexBuildPage, IndexCacheDecision,
-    IndexOpenDisposition, LiveIncomplete, LiveLogicalScan, OperationPut, OperationPutOutcome,
+    IndexOpenDisposition, LiveIncomplete, LiveLogicalScan, OperationMutation,
+    OperationMutationKind, OperationPut, OperationPutOutcome,
     RotationStageTotals, SalvageCopyReport, SalvageReport, SealStageBreakdown, StoreOpenMetrics,
     StoreOpenReport, WriteReceipt, MAX_WRITER_SHARDS,
 };

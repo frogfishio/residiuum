@@ -375,10 +375,13 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
     .unwrap();
     assert_eq!(block_on(client.list_collections()).unwrap().len(), 1);
 
+    let barrier = Arc::new(std::sync::Barrier::new(8));
     let mut threads = Vec::new();
     for index in 0..8u8 {
         let collection = collection.clone();
+        let barrier = Arc::clone(&barrier);
         threads.push(std::thread::spawn(move || {
+            barrier.wait();
             block_on(collection.put(format!("k-{index}"), &json!({ "n": index }))).unwrap()
         }));
     }
@@ -392,6 +395,11 @@ fn embedded_driver_is_bounded_concurrent_idempotent_and_shared_close() {
     assert_eq!(inspection.admitted_bytes, 0);
     assert!(inspection.peak_admitted_bytes > 0);
     assert_eq!(inspection.byte_refused, 0);
+    assert_eq!(inspection.inflight_mutations, 0);
+    assert!(
+        inspection.peak_inflight_mutations > inspection.workers,
+        "durable writes must not be limited by read/query worker occupancy: {inspection:?}"
+    );
     let commits = inspection.operation_commits;
     assert_eq!(commits.submitted, 8);
     assert_eq!(commits.committed, 8);

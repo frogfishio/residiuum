@@ -171,6 +171,10 @@ fn smart_client_durable_retained_media_campaign() {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(20);
+    let read_workers = std::env::var("RESIDIUUM_SMART_DURABLE_READ_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(4);
     let minimum_free = std::env::var("RESIDIUUM_SMART_DURABLE_MIN_FREE_BYTES")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -178,6 +182,7 @@ fn smart_client_durable_retained_media_campaign() {
     assert!(logical_target > 0);
     assert!(payload_bytes > 0);
     assert!(concurrency > 0);
+    assert!(read_workers > 0);
     let free_at_start = available_bytes(&root);
     assert!(
         free_at_start >= minimum_free,
@@ -202,16 +207,14 @@ fn smart_client_durable_retained_media_campaign() {
     let open_started = Instant::now();
     let client = block_on(Client::open_embedded(
         EmbeddedOptions::new(&store)
-            .workers(concurrency)
+            .workers(read_workers)
             .queue_capacity(concurrency.saturating_mul(4)),
     ))
     .unwrap();
     let open_ns = open_started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
     let heap = block_on(client.open_named_heap("campaign", capability)).unwrap();
-    let records: Collection<Value> = block_on(
-        heap.create_collection("records", CreateCollectionOptions::default()),
-    )
-    .unwrap();
+    let records: Collection<Value> =
+        block_on(heap.create_collection("records", CreateCollectionOptions::default())).unwrap();
 
     let documents = payload_pool(payload_bytes);
     let total_operations = logical_target
@@ -276,7 +279,9 @@ fn smart_client_durable_retained_media_campaign() {
     let capability = restarted.heaps[0].capability.clone();
     drop(restarted);
     let reopened = block_on(Client::open_embedded(
-        EmbeddedOptions::new(&store).workers(concurrency).queue_capacity(concurrency * 4),
+        EmbeddedOptions::new(&store)
+            .workers(read_workers)
+            .queue_capacity(concurrency.saturating_mul(4)),
     ))
     .unwrap();
     let reopened_heap = block_on(reopened.open_named_heap("campaign", capability)).unwrap();
@@ -326,6 +331,7 @@ fn smart_client_durable_retained_media_campaign() {
         "payload_bytes_per_operation": payload_bytes,
         "operations": total_operations,
         "concurrency": concurrency,
+        "read_query_workers": read_workers,
         "free_bytes_at_start": free_at_start,
         "file_logical_bytes_after_close": file_logical_bytes_after_close,
         "allocated_bytes_after_close": allocated_bytes_after_close,
@@ -350,6 +356,8 @@ fn smart_client_durable_retained_media_campaign() {
             "admitted_bytes": inspection.admitted_bytes,
             "peak_admitted_bytes": inspection.peak_admitted_bytes,
             "byte_refused": inspection.byte_refused,
+            "inflight_mutations": inspection.inflight_mutations,
+            "peak_inflight_mutations": inspection.peak_inflight_mutations,
             "peak_running": inspection.peak_running,
             "refused": inspection.refused,
         },

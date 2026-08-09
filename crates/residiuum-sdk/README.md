@@ -52,8 +52,11 @@ dependency of this SDK.
 ### Bounded embedded client
 
 Use one shared deployment connection per process. It owns the physical writer,
-bounded blocking workers, and admission queue. Bind any number of authorized
-Heaps through it; connection, Heap, and collection handles are cheap to clone.
+bounded mutation admission, and dedicated workers for reads, queries, and
+administration. Durable mutations do not occupy those workers while awaiting
+group commit; each async operation completes from its own durability result.
+Bind any number of authorized Heaps through the connection; connection, Heap,
+and collection handles are cheap to clone.
 
 ```rust,no_run
 use residiuum_sdk::driver::{

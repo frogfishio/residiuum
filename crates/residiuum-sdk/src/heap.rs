@@ -414,48 +414,65 @@ impl HeapCollection {
         self.put_raw_body_if(key, body, residiuum_store::WriteCondition::Unconditional)
     }
 
-    pub(crate) fn put_raw_body_with_operation(
+    pub(crate) fn submit_raw_body_with_operation<F>(
         &self,
-        key: &str,
-        body: &[u8],
+        key: String,
+        body: Vec<u8>,
         condition: residiuum_store::WriteCondition,
         operation_id: [u8; 16],
         content_hash: [u8; 32],
-    ) -> Result<(WriteReceipt, bool), Error> {
-        validate_key(key)?;
-        let (receipt, deduplicated) = self.store.put_collection_with_operation(
+        completion: F,
+    ) -> Result<(), Error>
+    where
+        F: FnOnce(Result<(WriteReceipt, bool), Error>) + Send + 'static,
+    {
+        validate_key(&key)?;
+        let receipt_key = key.clone();
+        self.store.submit_collection_put_with_operation(
             self.id.as_bytes(),
             key.as_bytes(),
             body,
             condition,
             operation_id,
             content_hash,
+            move |result| {
+                completion(result.map_err(Error::from).map(|(receipt, deduplicated)| {
+                    (WriteReceipt::from_store(receipt_key, receipt), deduplicated)
+                }));
+            },
         )?;
-        Ok((
-            WriteReceipt::from_store(key.to_string(), receipt),
-            deduplicated,
-        ))
+        Ok(())
     }
 
-    pub(crate) fn delete_with_operation(
+    pub(crate) fn submit_delete_with_operation<F>(
         &self,
-        key: &str,
+        key: String,
         condition: residiuum_store::WriteCondition,
         operation_id: [u8; 16],
         content_hash: [u8; 32],
-    ) -> Result<(DeleteReceipt, bool), Error> {
-        validate_key(key)?;
-        let (receipt, deduplicated) = self.store.delete_collection_with_operation(
+        completion: F,
+    ) -> Result<(), Error>
+    where
+        F: FnOnce(Result<(DeleteReceipt, bool), Error>) + Send + 'static,
+    {
+        validate_key(&key)?;
+        let receipt_key = key.clone();
+        self.store.submit_collection_delete_with_operation(
             self.id.as_bytes(),
             key.as_bytes(),
             condition,
             operation_id,
             content_hash,
+            move |result| {
+                completion(result.map_err(Error::from).map(|(receipt, deduplicated)| {
+                    (
+                        DeleteReceipt::from_store(receipt_key, true, receipt),
+                        deduplicated,
+                    )
+                }));
+            },
         )?;
-        Ok((
-            DeleteReceipt::from_store(key.to_string(), true, receipt),
-            deduplicated,
-        ))
+        Ok(())
     }
 
     /// Conditional put of a raw body under Key Atomic store CAS (APB-2).

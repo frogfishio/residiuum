@@ -308,6 +308,31 @@ pub struct OperationPut<'a> {
     pub content_hash: [u8; 32],
 }
 
+/// Physical operation kind retained as an independent framed mutation inside
+/// a shared durability cohort.
+#[derive(Debug, Clone, Copy)]
+pub enum OperationMutationKind<'a> {
+    /// Establish a new live value.
+    Put(&'a [u8]),
+    /// Establish a tombstone.
+    Delete,
+}
+
+/// One independently identified mutation admitted to a shared physical cohort.
+#[derive(Debug, Clone, Copy)]
+pub struct OperationMutation<'a> {
+    /// Fully encoded storage subject.
+    pub subject: &'a [u8],
+    /// Put body or tombstone operation.
+    pub kind: OperationMutationKind<'a>,
+    /// Key-atomic condition evaluated in cohort order.
+    pub condition: WriteCondition,
+    /// Stable client mutation identity.
+    pub operation_id: [u8; 16],
+    /// Canonical identity of the complete logical mutation.
+    pub content_hash: [u8; 32],
+}
+
 /// Individual result from a durable operation cohort.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationPutOutcome {
@@ -3320,6 +3345,24 @@ impl Store {
         &mut self,
         items: &[OperationPut<'_>],
     ) -> Result<Vec<Result<OperationPutOutcome, StoreError>>, StoreError> {
+        let mutations: Vec<_> = items
+            .iter()
+            .map(|item| OperationMutation {
+                subject: item.subject,
+                kind: OperationMutationKind::Put(item.body),
+                condition: item.condition,
+                operation_id: item.operation_id,
+                content_hash: item.content_hash,
+            })
+            .collect();
+        self.operation_cohort_awo_owned(&mutations)
+    }
+
+    /// Commit independent puts and deletes behind shared stable boundaries.
+    pub fn operation_cohort_awo_owned(
+        &mut self,
+        items: &[OperationMutation<'_>],
+    ) -> Result<Vec<Result<OperationPutOutcome, StoreError>>, StoreError> {
         if self.awo_writer_poisoned {
             return Err(StoreError::AdaptiveWriterPoisoned);
         }
@@ -3372,13 +3415,24 @@ impl Store {
         self.operation_cohort_gathering = true;
         for index in new_indexes {
             let item = &items[index];
-            match self.put_subject_bytes_if_awo_owned_with_identity(
-                item.subject,
-                item.body,
-                DurabilityMode::Buffered,
-                item.condition,
-                Some((item.operation_id, item.content_hash)),
-            ) {
+            let result = match item.kind {
+                OperationMutationKind::Put(body) => self
+                    .put_subject_bytes_if_awo_owned_with_identity(
+                        item.subject,
+                        body,
+                        DurabilityMode::Buffered,
+                        item.condition,
+                        Some((item.operation_id, item.content_hash)),
+                    ),
+                OperationMutationKind::Delete => self
+                    .delete_subject_bytes_if_awo_owned_with_identity(
+                        item.subject,
+                        DurabilityMode::Buffered,
+                        item.condition,
+                        Some((item.operation_id, item.content_hash)),
+                    ),
+            };
+            match result {
                 Ok(receipt) => {
                     outcomes[index] = Some(Ok(OperationPutOutcome {
                         receipt,

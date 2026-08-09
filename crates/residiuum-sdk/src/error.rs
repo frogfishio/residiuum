@@ -297,6 +297,7 @@ fn map_store(e: &StoreError) -> ErrorCode {
         StoreError::NotAStore(_) => ErrorCode::ValidationFailed,
         StoreError::SubjectTooLong { .. } => ErrorCode::ValidationFailed,
         StoreError::PayloadTooLarge => ErrorCode::ResourceLimit,
+        StoreError::WriteAdmissionFull => ErrorCode::ResourceLimit,
         StoreError::BadEnvelope(_)
         | StoreError::CorruptMeta(_)
         | StoreError::CorruptControl { .. } => ErrorCode::DataDamaged,

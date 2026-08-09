@@ -2,7 +2,9 @@
 
 use crate::error::StoreError;
 use crate::kernel::PhysicalStore;
-use crate::store::{OperationPut, OperationPutOutcome, WriteCondition, WriteReceipt};
+use crate::store::{
+    OperationMutation, OperationMutationKind, OperationPutOutcome, WriteCondition, WriteReceipt,
+};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender};
@@ -103,12 +105,36 @@ impl CoordinatorCounters {
 
 struct PendingOperation {
     subject: Vec<u8>,
-    body: Vec<u8>,
+    kind: PendingOperationKind,
     condition: WriteCondition,
     operation_id: [u8; 16],
     content_hash: [u8; 32],
     credit_bytes: usize,
-    reply: SyncSender<Result<(WriteReceipt, bool), StoreError>>,
+    reply: PendingReply,
+}
+
+enum PendingOperationKind {
+    Put(Vec<u8>),
+    Delete,
+}
+
+type CommitResult = Result<(WriteReceipt, bool), StoreError>;
+type CommitCallback = Box<dyn FnOnce(CommitResult) + Send + 'static>;
+
+enum PendingReply {
+    Blocking(SyncSender<CommitResult>),
+    Callback(CommitCallback),
+}
+
+impl PendingReply {
+    fn complete(self, result: CommitResult) {
+        match self {
+            Self::Blocking(reply) => {
+                let _ = reply.send(result);
+            }
+            Self::Callback(callback) => callback(result),
+        }
+    }
 }
 
 struct CoordinatorState {
@@ -164,7 +190,77 @@ impl OperationCommitCoordinator {
         content_hash: [u8; 32],
     ) -> Result<(WriteReceipt, bool), StoreError> {
         let (reply, result) = mpsc::sync_channel(1);
-        let bytes = subject.len().saturating_add(body.len());
+        self.admit(
+            subject,
+            PendingOperationKind::Put(body),
+            condition,
+            operation_id,
+            content_hash,
+            PendingReply::Blocking(reply),
+            true,
+        )?;
+        result.recv().unwrap_or_else(|_| {
+            Err(StoreError::CorruptMeta(
+                "commit coordinator dropped mutation outcome",
+            ))
+        })
+    }
+
+    pub(super) fn try_submit_put(
+        &self,
+        subject: Vec<u8>,
+        body: Vec<u8>,
+        condition: WriteCondition,
+        operation_id: [u8; 16],
+        content_hash: [u8; 32],
+        callback: CommitCallback,
+    ) -> Result<(), StoreError> {
+        self.admit(
+            subject,
+            PendingOperationKind::Put(body),
+            condition,
+            operation_id,
+            content_hash,
+            PendingReply::Callback(callback),
+            false,
+        )
+    }
+
+    pub(super) fn try_submit_delete(
+        &self,
+        subject: Vec<u8>,
+        condition: WriteCondition,
+        operation_id: [u8; 16],
+        content_hash: [u8; 32],
+        callback: CommitCallback,
+    ) -> Result<(), StoreError> {
+        self.admit(
+            subject,
+            PendingOperationKind::Delete,
+            condition,
+            operation_id,
+            content_hash,
+            PendingReply::Callback(callback),
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn admit(
+        &self,
+        subject: Vec<u8>,
+        kind: PendingOperationKind,
+        condition: WriteCondition,
+        operation_id: [u8; 16],
+        content_hash: [u8; 32],
+        reply: PendingReply,
+        wait_for_credits: bool,
+    ) -> Result<(), StoreError> {
+        let body_len = match &kind {
+            PendingOperationKind::Put(body) => body.len(),
+            PendingOperationKind::Delete => 0,
+        };
+        let bytes = subject.len().saturating_add(body_len);
         let credit_bytes = bytes.min(MAX_ADMITTED_BYTES);
         {
             let mut state = self
@@ -176,6 +272,9 @@ impl OperationCommitCoordinator {
             while !state.shutdown
                 && state.admitted_credit_bytes > MAX_ADMITTED_BYTES.saturating_sub(credit_bytes)
             {
+                if !wait_for_credits {
+                    return Err(StoreError::WriteAdmissionFull);
+                }
                 if !waited {
                     waited = true;
                     self.inner
@@ -210,7 +309,7 @@ impl OperationCommitCoordinator {
             state.queued_bytes = state.queued_bytes.saturating_add(bytes);
             state.queue.push_back(PendingOperation {
                 subject,
-                body,
+                kind,
                 condition,
                 operation_id,
                 content_hash,
@@ -227,11 +326,7 @@ impl OperationCommitCoordinator {
                 .fetch_add(bytes.min(u64::MAX as usize) as u64, Ordering::Relaxed);
         }
         self.inner.wake.notify_one();
-        result.recv().unwrap_or_else(|_| {
-            Err(StoreError::CorruptMeta(
-                "commit coordinator dropped mutation outcome",
-            ))
-        })
+        Ok(())
     }
 
     pub(super) fn stats(&self) -> OperationCommitStats {
@@ -293,7 +388,10 @@ fn coordinator_loop(inner: Arc<CoordinatorInner>) {
                 let Some(next) = state.queue.front() else {
                     break;
                 };
-                let next_bytes = next.subject.len().saturating_add(next.body.len());
+                let next_bytes = next.subject.len().saturating_add(match &next.kind {
+                    PendingOperationKind::Put(body) => body.len(),
+                    PendingOperationKind::Delete => 0,
+                });
                 if !batch.is_empty() && bytes.saturating_add(next_bytes) > MAX_COHORT_BYTES {
                     break;
                 }
@@ -316,7 +414,10 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
     let batch_bytes = batch.iter().fold(0usize, |total, pending| {
         total
             .saturating_add(pending.subject.len())
-            .saturating_add(pending.body.len())
+            .saturating_add(match &pending.kind {
+                PendingOperationKind::Put(body) => body.len(),
+                PendingOperationKind::Delete => 0,
+            })
     });
     let batch_credits = batch.iter().fold(0usize, |total, pending| {
         total.saturating_add(pending.credit_bytes)
@@ -332,9 +433,12 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
         .fetch_max(batch_bytes, Ordering::Relaxed);
     let requests: Vec<_> = batch
         .iter()
-        .map(|pending| OperationPut {
+        .map(|pending| OperationMutation {
             subject: pending.subject.as_slice(),
-            body: pending.body.as_slice(),
+            kind: match &pending.kind {
+                PendingOperationKind::Put(body) => OperationMutationKind::Put(body.as_slice()),
+                PendingOperationKind::Delete => OperationMutationKind::Delete,
+            },
             condition: pending.condition,
             operation_id: pending.operation_id,
             content_hash: pending.content_hash,
@@ -344,7 +448,7 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
         .physical
         .lock()
         .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))
-        .and_then(|mut store| store.put_operation_cohort_awo_owned(&requests));
+        .and_then(|mut store| store.operation_cohort_awo_owned(&requests));
     // The byte window covers queued data plus physical installation. Outcome
     // delivery retains no subject/body ownership requirement for admission.
     release_byte_credits(inner, batch_credits);
@@ -383,7 +487,7 @@ fn install_batch(inner: &CoordinatorInner, batch: Vec<PendingOperation>) {
                          deduplicated,
                      }| (receipt, deduplicated),
                 );
-                let _ = pending.reply.send(result);
+                pending.reply.complete(result);
             }
         }
         Ok(_) => {
@@ -416,9 +520,11 @@ fn release_byte_credits(inner: &CoordinatorInner, credits: usize) {
 
 fn fail_batch(batch: Vec<PendingOperation>, detail: &str) {
     for pending in batch {
-        let _ = pending.reply.send(Err(StoreError::Io(std::io::Error::other(
-            detail.to_string(),
-        ))));
+        pending
+            .reply
+            .complete(Err(StoreError::Io(std::io::Error::other(
+                detail.to_string(),
+            ))));
     }
 }
 

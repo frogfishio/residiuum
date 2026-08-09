@@ -1,6 +1,6 @@
 # Durable group commit baseline — 2026-08-09
 
-Status: **10 GiB correctness PASS; single-boundary gathered-WAL correction implemented and locally verified**
+Status: **10 GiB correctness PASS; single-boundary gathered-WAL and asynchronous smart-client mutation submission implemented and locally verified**
 
 This note records the product write-path baseline created after the Bonzo run
 showed approximately 5,500 durable writes/s and an implausibly high stable
@@ -94,8 +94,8 @@ The 10 GiB result below predates the gathered-WAL correction. At that baseline:
    logical document; and
 2. the authoritative media and outcome journal required two stable boundaries
    per cohort.
-3. Operation-bearing puts use the coordinator. Operation-bearing deletes still
-   use the single-operation durable path.
+3. Superseded: operation-bearing puts and deletes now share the same
+   coordinator and mixed cohorts retain individual receipts.
 4. Secondary-index stale markers are updated after individual completions and
    are not yet coalesced per collection/cohort.
 5. The R400 fixture loader's legacy synchronous writes do not exercise this
@@ -257,3 +257,49 @@ The preceding local gathered-write smoke was 3,419 ops/s and 26.71 MiB/s, so
 this observation is about 8.6% higher. It is a small, non-isolated local run:
 it proves the path remains healthy and the new bounds are not constraining this
 workload, but does not attribute the difference solely to positioned I/O.
+
+## Asynchronous smart-client mutation follow-up
+
+The smart client's former mutation path submitted every durable write to a
+bounded worker and occupied that worker until group commit returned its
+receipt. That made the read/query worker count an accidental hard ceiling on
+the number of operations available to a cohort. It was an asynchronous API
+over a synchronous wait, not an asynchronous mutation pipeline.
+
+The corrected path now:
+
+- validates and admits each mutation without blocking;
+- retains count and byte credits until its real commit result arrives;
+- submits directly to the deployment commit coordinator;
+- completes each future from its individual cohort result;
+- reports `CommitOutcomeUnknown` if an admitted write crosses its deadline,
+  while retaining OperationId recovery;
+- drains admitted mutations before client close returns; and
+- reserves the bounded worker pool for reads, queries, and administration.
+
+Deletes use the same coordinator, so a cohort may contain puts and tombstones
+without weakening independent CAS, OperationId, receipt, or recovery
+semantics.
+
+Two release-mode 64 MiB runs on the local development machine used identical
+8 KiB documents and four read/query workers:
+
+| Callers | Durable throughput | Cohorts / media syncs | Maximum cohort | Peak admitted mutations |
+|---:|---:|---:|---:|---:|
+| 20 | 2,342.9 ops/s; 18.30 MiB/s | 412 / 412 | 20; 165,320 bytes | 20 |
+| 256 | 23,047.8 ops/s; 180.06 MiB/s | 32 / 32 | 256; 2,116,096 bytes | 256 |
+
+Both runs acknowledged and recovered all 8,192 operations after a fresh reopen,
+with zero failures, refusals, byte waits, or derived-journal syncs. At 256
+callers, p50/p95/p99 acknowledgement latency was 10.08/14.11/15.85 ms and the
+complete validation scan took 59.70 ms. The scheduler's mutation peak reached
+256 while its synchronous running-work peak was one, directly demonstrating
+that durable writes no longer consume read/query workers.
+
+These remain local smoke measurements, not Bonzo qualification. They establish
+the architectural effect: increasing mutation concurrency grows useful cohorts
+without growing the blocking-worker pool, reduces one stable boundary to every
+256 acknowledged operations in this workload, and restores the earlier
+approximately 21–25k writes/s range. The remaining gap to a 500 MiB/s target is
+inside cohort/storage execution and payload amplification, not a reason to
+reintroduce synchronous mutation clients.

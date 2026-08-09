@@ -40,7 +40,8 @@ the authoritative dialogue commit.
   `&self` operations;
 - simultaneous authorized multi-Heap bindings sharing one physical writer,
   bounded scheduler, inspection surface, and shutdown domain;
-- bounded embedded admission and dedicated synchronous-kernel workers;
+- bounded asynchronous mutation admission plus dedicated synchronous-kernel
+  workers used only for reads, queries, and administration;
 - overload, queued cancellation, pre-dispatch deadline, and shared-close behavior;
 - collection create/open/list plus get, put, create-if-absent,
   version-conditional replace, and version/presence-conditional delete;
@@ -65,15 +66,20 @@ the authoritative dialogue commit.
   ergonomic lazy `QueryCursor<T>` / `Stream` surface is not yet claimed.
 - `Capabilities::atomics` is false. No multi-record transaction or Atomic
   behavior is implemented; applications must not infer it from key-level CAS.
-- Queued deadlines actively wake through one bounded scheduler timer. An
-  already-running synchronous kernel call continues to completion; a mutation
-  crossing its deadline reports `CommitOutcomeUnknown` and preserves its
-  operation identity for exact replay/outcome resolution.
+- Queued read/query deadlines actively wake through one bounded scheduler
+  timer. An already-running synchronous read/query kernel call continues to
+  completion. Mutations never wait on those workers: after admission they
+  complete from the group-commit durability callback. A mutation crossing its
+  deadline reports `CommitOutcomeUnknown` and preserves its operation identity
+  for exact replay/outcome resolution.
 - New idempotent put/delete frames carry their operation identity and canonical
   request hash in authoritative media. If the derived dedup update is
   interrupted, retry reconstructs the original receipt without another append.
 - Receipt-stable idempotent delete currently requires `if_present=true`.
-- The existing synchronous façade remains unchanged and legacy-only.
+- The product `driver::Client` has no synchronous mutation counterpart. Older
+  synchronous heap/application façades remain qualification scaffolding only;
+  they are not an application-client option and must be retired as their RQL
+  and server harness consumers migrate.
 - No second RQL executor is introduced.
 
 ## Recommended driver order

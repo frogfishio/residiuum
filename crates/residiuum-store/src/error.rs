@@ -189,6 +189,10 @@ pub enum StoreError {
     #[error("payload too large for configured safety limits")]
     PayloadTooLarge,
 
+    /// Non-blocking durable mutation admission exhausted its bounded window.
+    #[error("durable mutation admission window is full")]
+    WriteAdmissionFull,
+
     /// Adaptive write lease owns mutation; direct `Store` mutation is refused (AWO-3).
     #[error("adaptive writer active; direct mutation refused")]
     AdaptiveWriterActive,

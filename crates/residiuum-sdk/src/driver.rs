@@ -1,7 +1,8 @@
 //! Bounded embedded application driver (DRV-1 / DRV-5 foundation).
 //!
 //! The synchronous storage kernel remains authoritative. This module owns the
-//! async boundary: bounded admission, dedicated workers, cloneable handles,
+//! async boundary: bounded admission, non-blocking mutation completion,
+//! dedicated read/query workers, cloneable handles,
 //! request identity, cancellation-before-dispatch, deadlines, telemetry, and
 //! orderly shared shutdown. It intentionally contains no second query engine.
 
@@ -31,7 +32,8 @@ const DEFAULT_QUEUE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
 pub struct EmbeddedOptions {
     /// Existing Residiuum deployment root.
     pub path: PathBuf,
-    /// Dedicated synchronous-kernel workers.
+    /// Dedicated workers for reads, queries, and administrative operations.
+    /// Durable mutations do not occupy these workers while awaiting media.
     pub workers: usize,
     /// Hard bound on queued operations, in addition to running workers.
     pub queue_capacity: usize,
@@ -365,6 +367,11 @@ impl Error {
                 ErrorClass::Request,
                 RetryDisposition::Never,
             ),
+            SdkError::Store(residiuum_store::StoreError::WriteAdmissionFull) => (
+                ErrorCode::Overloaded,
+                ErrorClass::Admission,
+                RetryDisposition::After(Duration::from_millis(1)),
+            ),
             _ => match source.code() {
                 crate::ErrorCode::ValidationFailed | crate::ErrorCode::QueryInvalid => (
                     ErrorCode::Validation,
@@ -492,6 +499,10 @@ pub struct ClientInspection {
     pub running: usize,
     /// Peak simultaneously executing jobs since connection open.
     pub peak_running: usize,
+    /// Durable mutations admitted and awaiting their individual completion.
+    pub inflight_mutations: usize,
+    /// Peak durable mutations awaiting completion since connection open.
+    pub peak_inflight_mutations: usize,
     /// Completed jobs.
     pub completed: u64,
     /// Admission refusals.
@@ -833,27 +844,29 @@ where
         self.heap_client
             .connection
             .scheduler
-            .dispatch_weighted(
+            .dispatch_mutation(
                 request_id,
-                Some(operation_id),
+                operation_id,
                 deadline,
                 admission_bytes,
-                move || {
-                    let (storage, deduplicated) = collection.put_raw_body_with_operation(
-                        &key,
-                        &body,
+                move |completion| {
+                    collection.submit_raw_body_with_operation(
+                        key,
+                        body,
                         residiuum_store::WriteCondition::Unconditional,
                         operation_id.0,
                         content_hash,
-                    )?;
-                    Ok(WriteReceipt {
-                        request_id,
-                        operation_id,
-                        heap_id,
-                        collection_id,
-                        deduplicated,
-                        storage,
-                    })
+                        move |result| {
+                            completion(result.map(|(storage, deduplicated)| WriteReceipt {
+                                request_id,
+                                operation_id,
+                                heap_id,
+                                collection_id,
+                                deduplicated,
+                                storage,
+                            }))
+                        },
+                    )
                 },
             )
             .await
@@ -923,27 +936,29 @@ where
         self.heap_client
             .connection
             .scheduler
-            .dispatch_weighted(
+            .dispatch_mutation(
                 request_id,
-                Some(operation_id),
+                operation_id,
                 deadline,
                 admission_bytes,
-                move || {
-                    let (storage, deduplicated) = collection.put_raw_body_with_operation(
-                        &key,
-                        &body,
+                move |completion| {
+                    collection.submit_raw_body_with_operation(
+                        key,
+                        body,
                         condition,
                         operation_id.0,
                         content_hash,
-                    )?;
-                    Ok(WriteReceipt {
-                        request_id,
-                        operation_id,
-                        heap_id,
-                        collection_id,
-                        deduplicated,
-                        storage,
-                    })
+                        move |result| {
+                            completion(result.map(|(storage, deduplicated)| WriteReceipt {
+                                request_id,
+                                operation_id,
+                                heap_id,
+                                collection_id,
+                                deduplicated,
+                                storage,
+                            }))
+                        },
+                    )
                 },
             )
             .await
@@ -1138,26 +1153,28 @@ where
         self.heap_client
             .connection
             .scheduler
-            .dispatch_weighted(
+            .dispatch_mutation(
                 request_id,
-                Some(operation_id),
+                operation_id,
                 deadline,
                 admission_bytes,
-                move || {
-                    let (storage, deduplicated) = collection.delete_with_operation(
-                        &key,
+                move |completion| {
+                    collection.submit_delete_with_operation(
+                        key,
                         condition,
                         operation_id.0,
                         content_hash,
-                    )?;
-                    Ok(DeleteReceipt {
-                        request_id,
-                        operation_id,
-                        heap_id,
-                        collection_id,
-                        deduplicated,
-                        storage,
-                    })
+                        move |result| {
+                            completion(result.map(|(storage, deduplicated)| DeleteReceipt {
+                                request_id,
+                                operation_id,
+                                heap_id,
+                                collection_id,
+                                deduplicated,
+                                storage,
+                            }))
+                        },
+                    )
                 },
             )
             .await
@@ -1193,8 +1210,8 @@ impl crate::HostCapabilities for DriverHeapHost {
         collection_id: CollectionId,
         key: &str,
     ) -> Result<crate::query_bytecode_v1::HostDocument, SdkError> {
-        use residiuum_store::CollectionScanHoleReason;
         use crate::query_bytecode_v1::HostDocument;
+        use residiuum_store::CollectionScanHoleReason;
 
         match self.heap.collection_by_id(collection_id)?.get(key) {
             Ok(Some(value)) => Ok(HostDocument::Present(value)),
@@ -1339,6 +1356,8 @@ struct Counters {
     peak_admitted_bytes: AtomicUsize,
     running: AtomicUsize,
     peak_running: AtomicUsize,
+    inflight_mutations: AtomicUsize,
+    peak_inflight_mutations: AtomicUsize,
     completed: AtomicU64,
     refused: AtomicU64,
     byte_refused: AtomicU64,
@@ -1486,20 +1505,21 @@ struct Scheduler {
     worker_count: usize,
     queue_capacity: usize,
     queue_byte_capacity: usize,
+    mutation_drain: Arc<(Mutex<usize>, Condvar)>,
     closed: AtomicBool,
 }
 
-struct AdmissionByteRelease {
+struct MutationCompletion<T> {
+    shared: Arc<ResponseShared<T>>,
     counters: Arc<Counters>,
-    bytes: usize,
-}
-
-impl Drop for AdmissionByteRelease {
-    fn drop(&mut self) {
-        self.counters
-            .admitted_bytes
-            .fetch_sub(self.bytes, Ordering::AcqRel);
-    }
+    deadlines: Arc<DeadlineService>,
+    deadline_registration: Arc<AtomicU64>,
+    stage: Arc<AtomicU8>,
+    drain: Arc<(Mutex<usize>, Condvar)>,
+    request_id: RequestId,
+    operation_id: OperationId,
+    admission_bytes: usize,
+    released: AtomicBool,
 }
 
 impl Scheduler {
@@ -1512,6 +1532,7 @@ impl Scheduler {
         let receiver = Arc::new(Mutex::new(receiver));
         let counters = Arc::new(Counters::default());
         let deadlines = Arc::new(DeadlineService::new()?);
+        let mutation_drain = Arc::new((Mutex::new(0), Condvar::new()));
         let mut workers = Vec::with_capacity(worker_count);
         for index in 0..worker_count {
             let receiver = Arc::clone(&receiver);
@@ -1540,6 +1561,7 @@ impl Scheduler {
             worker_count,
             queue_capacity,
             queue_byte_capacity,
+            mutation_drain,
             closed: AtomicBool::new(false),
         })
     }
@@ -1555,15 +1577,14 @@ impl Scheduler {
         T: Send + 'static,
         F: FnOnce() -> Result<T, SdkError> + Send + 'static,
     {
-        self.dispatch_weighted(request_id, operation_id, deadline, 0, operation)
+        self.dispatch_worker(request_id, operation_id, deadline, operation)
     }
 
-    fn dispatch_weighted<T, F>(
+    fn dispatch_worker<T, F>(
         &self,
         request_id: RequestId,
         operation_id: Option<OperationId>,
         deadline: Option<Instant>,
-        admission_bytes: usize,
         operation: F,
     ) -> ResponseFuture<T>
     where
@@ -1591,10 +1612,6 @@ impl Scheduler {
         let task_registration = Arc::clone(&deadline_registration);
         let deadlines = Arc::clone(&self.deadlines);
         let task = Box::new(move || {
-            let _byte_release = AdmissionByteRelease {
-                counters: Arc::clone(&counters),
-                bytes: admission_bytes,
-            };
             counters.queued.fetch_sub(1, Ordering::AcqRel);
             if deadline.map(|at| Instant::now() >= at).unwrap_or(false) {
                 task_stage.store(2, Ordering::Release);
@@ -1689,50 +1706,6 @@ impl Scheduler {
             );
             return future;
         }
-        if admission_bytes > self.queue_byte_capacity {
-            self.counters.queued.fetch_sub(1, Ordering::AcqRel);
-            self.counters.refused.fetch_add(1, Ordering::Relaxed);
-            self.counters.byte_refused.fetch_add(1, Ordering::Relaxed);
-            responder_error(
-                &future,
-                Error::for_request(
-                    ErrorCode::ResourceLimit,
-                    ErrorClass::Admission,
-                    "mutation exceeds embedded driver byte capacity",
-                    request_id,
-                    operation_id,
-                    TerminalOutcome::Refused,
-                    RetryDisposition::Never,
-                ),
-            );
-            return future;
-        }
-        if !reserve_bounded_by(
-            &self.counters.admitted_bytes,
-            self.queue_byte_capacity,
-            admission_bytes,
-        ) {
-            self.counters.queued.fetch_sub(1, Ordering::AcqRel);
-            self.counters.refused.fetch_add(1, Ordering::Relaxed);
-            self.counters.byte_refused.fetch_add(1, Ordering::Relaxed);
-            responder_error(
-                &future,
-                Error::for_request(
-                    ErrorCode::Overloaded,
-                    ErrorClass::Admission,
-                    "embedded driver byte capacity is full",
-                    request_id,
-                    operation_id,
-                    TerminalOutcome::Refused,
-                    RetryDisposition::After(Duration::from_millis(1)),
-                ),
-            );
-            return future;
-        }
-        self.counters.peak_admitted_bytes.fetch_max(
-            self.counters.admitted_bytes.load(Ordering::Acquire),
-            Ordering::Relaxed,
-        );
         // Register before enqueue. Otherwise a fast worker can complete, load
         // registration id 0, and race with a late callback registration.
         let registration = deadline.map(|at| {
@@ -1797,9 +1770,6 @@ impl Scheduler {
                     self.deadlines.cancel(registration);
                 }
                 self.counters.queued.fetch_sub(1, Ordering::AcqRel);
-                self.counters
-                    .admitted_bytes
-                    .fetch_sub(admission_bytes, Ordering::AcqRel);
                 self.counters.refused.fetch_add(1, Ordering::Relaxed);
                 responder_error(
                     &future,
@@ -1819,9 +1789,6 @@ impl Scheduler {
                     self.deadlines.cancel(registration);
                 }
                 self.counters.queued.fetch_sub(1, Ordering::AcqRel);
-                self.counters
-                    .admitted_bytes
-                    .fetch_sub(admission_bytes, Ordering::AcqRel);
                 responder_error(
                     &future,
                     Error::for_request(
@@ -1839,6 +1806,217 @@ impl Scheduler {
         future
     }
 
+    fn dispatch_mutation<T, F>(
+        &self,
+        request_id: RequestId,
+        operation_id: OperationId,
+        deadline: Option<Instant>,
+        admission_bytes: usize,
+        start: F,
+    ) -> ResponseFuture<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(Box<dyn FnOnce(Result<T, SdkError>) + Send + 'static>) -> Result<(), SdkError>,
+    {
+        let (future, _responder) = response_pair();
+        if deadline.map(|at| Instant::now() >= at).unwrap_or(false) {
+            responder_error(
+                &future,
+                Error::for_request(
+                    ErrorCode::DeadlineExceeded,
+                    ErrorClass::Cancellation,
+                    "deadline exceeded before admission",
+                    request_id,
+                    Some(operation_id),
+                    TerminalOutcome::DeadlineExceeded,
+                    RetryDisposition::Never,
+                ),
+            );
+            return future;
+        }
+
+        let guard = match self.sender.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                responder_error(
+                    &future,
+                    Error::for_request(
+                        ErrorCode::Internal,
+                        ErrorClass::Internal,
+                        "driver admission lock poisoned",
+                        request_id,
+                        Some(operation_id),
+                        TerminalOutcome::Refused,
+                        RetryDisposition::Never,
+                    ),
+                );
+                return future;
+            }
+        };
+        if self.closed.load(Ordering::Acquire) {
+            responder_error(
+                &future,
+                Error::for_request(
+                    ErrorCode::Closed,
+                    ErrorClass::Admission,
+                    "client is closed",
+                    request_id,
+                    Some(operation_id),
+                    TerminalOutcome::Refused,
+                    RetryDisposition::Never,
+                ),
+            );
+            return future;
+        }
+        if !reserve_bounded(&self.counters.inflight_mutations, self.queue_capacity) {
+            self.counters.refused.fetch_add(1, Ordering::Relaxed);
+            responder_error(
+                &future,
+                Error::for_request(
+                    ErrorCode::Overloaded,
+                    ErrorClass::Admission,
+                    "embedded mutation window is full",
+                    request_id,
+                    Some(operation_id),
+                    TerminalOutcome::Refused,
+                    RetryDisposition::After(Duration::from_millis(1)),
+                ),
+            );
+            return future;
+        }
+        if admission_bytes > self.queue_byte_capacity {
+            self.counters
+                .inflight_mutations
+                .fetch_sub(1, Ordering::AcqRel);
+            self.counters.refused.fetch_add(1, Ordering::Relaxed);
+            self.counters.byte_refused.fetch_add(1, Ordering::Relaxed);
+            responder_error(
+                &future,
+                Error::for_request(
+                    ErrorCode::ResourceLimit,
+                    ErrorClass::Admission,
+                    "mutation exceeds embedded driver byte capacity",
+                    request_id,
+                    Some(operation_id),
+                    TerminalOutcome::Refused,
+                    RetryDisposition::Never,
+                ),
+            );
+            return future;
+        }
+        if !reserve_bounded_by(
+            &self.counters.admitted_bytes,
+            self.queue_byte_capacity,
+            admission_bytes,
+        ) {
+            self.counters
+                .inflight_mutations
+                .fetch_sub(1, Ordering::AcqRel);
+            self.counters.refused.fetch_add(1, Ordering::Relaxed);
+            self.counters.byte_refused.fetch_add(1, Ordering::Relaxed);
+            responder_error(
+                &future,
+                Error::for_request(
+                    ErrorCode::Overloaded,
+                    ErrorClass::Admission,
+                    "embedded driver byte capacity is full",
+                    request_id,
+                    Some(operation_id),
+                    TerminalOutcome::Refused,
+                    RetryDisposition::After(Duration::from_millis(1)),
+                ),
+            );
+            return future;
+        }
+        self.counters.peak_admitted_bytes.fetch_max(
+            self.counters.admitted_bytes.load(Ordering::Acquire),
+            Ordering::Relaxed,
+        );
+        self.counters.peak_inflight_mutations.fetch_max(
+            self.counters.inflight_mutations.load(Ordering::Acquire),
+            Ordering::Relaxed,
+        );
+        let (drain_lock, _) = &*self.mutation_drain;
+        let mut drain_count = match drain_lock.lock() {
+            Ok(count) => count,
+            Err(_) => {
+                self.counters
+                    .admitted_bytes
+                    .fetch_sub(admission_bytes, Ordering::AcqRel);
+                self.counters
+                    .inflight_mutations
+                    .fetch_sub(1, Ordering::AcqRel);
+                responder_error(
+                    &future,
+                    Error::for_request(
+                        ErrorCode::Internal,
+                        ErrorClass::Internal,
+                        "driver mutation drain lock poisoned",
+                        request_id,
+                        Some(operation_id),
+                        TerminalOutcome::Refused,
+                        RetryDisposition::Never,
+                    ),
+                );
+                return future;
+            }
+        };
+        *drain_count = drain_count.saturating_add(1);
+        drop(drain_count);
+        drop(guard);
+
+        let stage = Arc::new(AtomicU8::new(1));
+        let deadline_registration = Arc::new(AtomicU64::new(0));
+        let completion = Arc::new(MutationCompletion {
+            shared: Arc::clone(&future.shared),
+            counters: Arc::clone(&self.counters),
+            deadlines: Arc::clone(&self.deadlines),
+            deadline_registration: Arc::clone(&deadline_registration),
+            stage: Arc::clone(&stage),
+            drain: Arc::clone(&self.mutation_drain),
+            request_id,
+            operation_id,
+            admission_bytes,
+            released: AtomicBool::new(false),
+        });
+        let callback_completion = Arc::clone(&completion);
+        let started = start(Box::new(move |result| callback_completion.complete(result)));
+        if let Err(error) = started {
+            completion.complete(Err(error));
+            return future;
+        }
+
+        if let Some(at) = deadline {
+            let callback_shared = Arc::clone(&future.shared);
+            let callback_stage = Arc::clone(&stage);
+            let registration = self.deadlines.register(
+                at,
+                Box::new(move || {
+                    if callback_stage.load(Ordering::Acquire) >= 2 {
+                        return;
+                    }
+                    complete_response_shared(
+                        &callback_shared,
+                        Err(Error::for_request(
+                            ErrorCode::CommitOutcomeUnknown,
+                            ErrorClass::Cancellation,
+                            "mutation deadline exceeded after admission; resolve by operation id",
+                            request_id,
+                            Some(operation_id),
+                            TerminalOutcome::CommitOutcomeUnknown,
+                            RetryDisposition::OutcomeLookupRequired,
+                        )),
+                    );
+                }),
+            );
+            deadline_registration.store(registration, Ordering::Release);
+            if stage.load(Ordering::Acquire) >= 2 {
+                self.deadlines.cancel(registration);
+            }
+        }
+        future
+    }
+
     fn inspect(&self) -> ClientInspection {
         ClientInspection {
             workers: self.worker_count,
@@ -1850,6 +2028,11 @@ impl Scheduler {
             queued: self.counters.queued.load(Ordering::Acquire),
             running: self.counters.running.load(Ordering::Acquire),
             peak_running: self.counters.peak_running.load(Ordering::Acquire),
+            inflight_mutations: self.counters.inflight_mutations.load(Ordering::Acquire),
+            peak_inflight_mutations: self
+                .counters
+                .peak_inflight_mutations
+                .load(Ordering::Acquire),
             completed: self.counters.completed.load(Ordering::Relaxed),
             refused: self.counters.refused.load(Ordering::Relaxed),
             cancelled_before_dispatch: self
@@ -1873,6 +2056,7 @@ impl Scheduler {
             .unwrap_or_default();
         let worker_count = self.worker_count;
         let deadlines = Arc::clone(&self.deadlines);
+        let mutation_drain = Arc::clone(&self.mutation_drain);
         run_join(move || {
             if let Some(sender) = sender {
                 for _ in 0..worker_count {
@@ -1881,6 +2065,15 @@ impl Scheduler {
             }
             for handle in handles {
                 let _ = handle.join();
+            }
+            let (lock, wake) = &*mutation_drain;
+            if let Ok(mut count) = lock.lock() {
+                while *count != 0 {
+                    count = match wake.wait(count) {
+                        Ok(count) => count,
+                        Err(_) => break,
+                    };
+                }
             }
             deadlines.stop();
         })
@@ -1937,6 +2130,15 @@ impl Drop for Scheduler {
                 let _ = worker.join();
             }
         }
+        let (lock, wake) = &*self.mutation_drain;
+        if let Ok(mut count) = lock.lock() {
+            while *count != 0 {
+                count = match wake.wait(count) {
+                    Ok(count) => count,
+                    Err(_) => break,
+                };
+            }
+        }
         self.deadlines.stop();
     }
 }
@@ -1969,6 +2171,34 @@ fn complete_response_shared<T>(shared: &ResponseShared<T>, result: Result<T, Err
         if let Some(waker) = state.waker.take() {
             waker.wake();
         }
+    }
+}
+
+impl<T> MutationCompletion<T> {
+    fn complete(&self, result: Result<T, SdkError>) {
+        if self.released.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.stage.store(2, Ordering::Release);
+        self.deadlines
+            .cancel(self.deadline_registration.load(Ordering::Acquire));
+        self.counters
+            .admitted_bytes
+            .fetch_sub(self.admission_bytes, Ordering::AcqRel);
+        self.counters
+            .inflight_mutations
+            .fetch_sub(1, Ordering::AcqRel);
+        self.counters.completed.fetch_add(1, Ordering::Release);
+        let (lock, wake) = &*self.drain;
+        if let Ok(mut count) = lock.lock() {
+            *count = count.saturating_sub(1);
+            wake.notify_all();
+        }
+        complete_response_shared(
+            &self.shared,
+            result
+                .map_err(|error| Error::from_sdk(error, self.request_id, Some(self.operation_id))),
+        );
     }
 }
 
@@ -2080,6 +2310,30 @@ where
 mod tests {
     use super::*;
 
+    struct TestThreadWake(thread::Thread);
+
+    impl std::task::Wake for TestThreadWake {
+        fn wake(self: Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    fn test_block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(TestThreadWake(thread::current())));
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => thread::park(),
+            }
+        }
+    }
+
     fn assert_send_sync<T: Send + Sync>() {}
 
     #[test]
@@ -2150,31 +2404,24 @@ mod tests {
     #[test]
     fn scheduler_byte_credits_cover_queued_and_running_mutations() {
         let scheduler = Scheduler::new(1, 8, 8).unwrap();
-        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
-        let first_gate = Arc::clone(&gate);
-        let first = scheduler.dispatch_weighted(
+        let completion = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&completion);
+        let first = scheduler.dispatch_mutation::<(), _>(
             RequestId([1; 16]),
-            Some(OperationId([1; 16])),
+            OperationId([1; 16]),
             None,
             6,
-            move || {
-                let (lock, cv) = &*first_gate;
-                let mut open = lock.lock().unwrap();
-                while !*open {
-                    open = cv.wait(open).unwrap();
-                }
+            move |callback| {
+                *captured.lock().unwrap() = Some(callback);
                 Ok(())
             },
         );
-        while scheduler.inspect().running == 0 {
-            thread::yield_now();
-        }
-        let refused = scheduler.dispatch_weighted(
+        let refused = scheduler.dispatch_mutation::<(), _>(
             RequestId([2; 16]),
-            Some(OperationId([2; 16])),
+            OperationId([2; 16]),
             None,
             3,
-            || Ok(()),
+            |_| Ok(()),
         );
         let state = refused.shared.state.lock().unwrap();
         assert!(matches!(
@@ -2190,12 +2437,12 @@ mod tests {
         assert_eq!(blocked.peak_admitted_bytes, 6);
         assert_eq!(blocked.byte_refused, 1);
 
-        let oversized = scheduler.dispatch_weighted(
+        let oversized = scheduler.dispatch_mutation::<(), _>(
             RequestId([3; 16]),
-            Some(OperationId([3; 16])),
+            OperationId([3; 16]),
             None,
             9,
-            || Ok(()),
+            |_| Ok(()),
         );
         let state = oversized.shared.state.lock().unwrap();
         let error = state
@@ -2208,9 +2455,11 @@ mod tests {
         drop(state);
         assert_eq!(scheduler.inspect().byte_refused, 2);
 
-        let (lock, cv) = &*gate;
-        *lock.lock().unwrap() = true;
-        cv.notify_all();
+        completion
+            .lock()
+            .unwrap()
+            .take()
+            .expect("mutation completion")(Ok(()));
         while scheduler.inspect().admitted_bytes != 0 {
             thread::yield_now();
         }
@@ -2316,24 +2565,20 @@ mod tests {
     #[test]
     fn dispatched_mutation_deadline_reports_unknown_outcome() {
         let scheduler = Scheduler::new(1, 1, DEFAULT_QUEUE_BYTE_CAPACITY).unwrap();
-        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
-        let mutation_gate = Arc::clone(&gate);
-        let mutation = scheduler.dispatch(
+        let completion = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&completion);
+        let mutation = scheduler.dispatch_mutation(
             RequestId([1; 16]),
-            Some(OperationId([2; 16])),
+            OperationId([2; 16]),
             Some(Instant::now() + Duration::from_millis(20)),
-            move || {
-                let (lock, wake) = &*mutation_gate;
-                let mut open = lock.lock().unwrap();
-                while !*open {
-                    open = wake.wait(open).unwrap();
-                }
+            16,
+            move |callback| {
+                *captured.lock().unwrap() = Some(callback);
                 Ok(())
             },
         );
-        while scheduler.inspect().running == 0 {
-            thread::yield_now();
-        }
+        assert_eq!(scheduler.inspect().running, 0);
+        assert_eq!(scheduler.inspect().inflight_mutations, 1);
         thread::sleep(Duration::from_millis(60));
         let state = mutation.shared.state.lock().unwrap();
         let error = state.result.as_ref().unwrap().as_ref().unwrap_err();
@@ -2342,10 +2587,12 @@ mod tests {
         assert_eq!(error.retry, RetryDisposition::OutcomeLookupRequired);
         drop(state);
 
-        let (lock, wake) = &*gate;
-        *lock.lock().unwrap() = true;
-        wake.notify_all();
-        while scheduler.inspect().running != 0 {
+        completion
+            .lock()
+            .unwrap()
+            .take()
+            .expect("mutation completion")(Ok(()));
+        while scheduler.inspect().inflight_mutations != 0 {
             thread::yield_now();
         }
         let state = mutation.shared.state.lock().unwrap();
@@ -2356,6 +2603,80 @@ mod tests {
                 .map(|result| result.as_ref().err().map(|error| error.code)),
             Some(Some(ErrorCode::CommitOutcomeUnknown))
         ));
+    }
+
+    #[test]
+    fn async_mutations_do_not_consume_read_query_workers() {
+        type Callback = Box<dyn FnOnce(Result<(), SdkError>) + Send + 'static>;
+        let scheduler = Scheduler::new(1, 8, DEFAULT_QUEUE_BYTE_CAPACITY).unwrap();
+        let completions = Arc::new(Mutex::new(Vec::<Callback>::new()));
+        let mut futures = Vec::new();
+        for byte in 1..=8u8 {
+            let captured = Arc::clone(&completions);
+            futures.push(scheduler.dispatch_mutation(
+                RequestId([byte; 16]),
+                OperationId([byte; 16]),
+                None,
+                8,
+                move |callback| {
+                    captured.lock().unwrap().push(callback);
+                    Ok(())
+                },
+            ));
+        }
+        let inspection = scheduler.inspect();
+        assert_eq!(inspection.running, 0);
+        assert_eq!(inspection.inflight_mutations, 8);
+        assert_eq!(inspection.peak_inflight_mutations, 8);
+        assert_eq!(inspection.admitted_bytes, 64);
+
+        for callback in completions.lock().unwrap().drain(..) {
+            callback(Ok(()));
+        }
+        while scheduler.inspect().inflight_mutations != 0 {
+            thread::yield_now();
+        }
+        assert_eq!(scheduler.inspect().admitted_bytes, 0);
+        drop(futures);
+    }
+
+    #[test]
+    fn close_drains_admitted_async_mutations() {
+        type Callback = Box<dyn FnOnce(Result<(), SdkError>) + Send + 'static>;
+        let scheduler = Arc::new(Scheduler::new(1, 8, DEFAULT_QUEUE_BYTE_CAPACITY).unwrap());
+        let completion = Arc::new(Mutex::new(None::<Callback>));
+        let captured = Arc::clone(&completion);
+        let mutation = scheduler.dispatch_mutation(
+            RequestId([1; 16]),
+            OperationId([2; 16]),
+            None,
+            8,
+            move |callback| {
+                *captured.lock().unwrap() = Some(callback);
+                Ok(())
+            },
+        );
+        assert_eq!(scheduler.inspect().inflight_mutations, 1);
+
+        let closing_scheduler = Arc::clone(&scheduler);
+        let closing = thread::spawn(move || test_block_on(closing_scheduler.close()));
+        while !scheduler.inspect().closed {
+            thread::yield_now();
+        }
+        thread::sleep(Duration::from_millis(20));
+        assert!(
+            !closing.is_finished(),
+            "close returned before the admitted mutation completed"
+        );
+
+        completion
+            .lock()
+            .unwrap()
+            .take()
+            .expect("mutation completion")(Ok(()));
+        closing.join().expect("close thread panicked").unwrap();
+        assert_eq!(scheduler.inspect().inflight_mutations, 0);
+        drop(mutation);
     }
 
     #[test]

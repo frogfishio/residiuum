@@ -31,8 +31,12 @@ Applications MUST NOT need a database mutex, semaphore, `spawn_blocking`,
 socket manager, retry loop, or pagination loop merely to use Residiuum safely
 from an async runtime.
 
-The synchronous storage kernel remains synchronous. Async is a boundary and
-scheduling concern; it SHALL NOT fork or infect verified storage semantics.
+The storage kernel may retain synchronous read/query primitives. Async is a
+boundary and scheduling concern; it SHALL NOT fork or infect verified storage
+semantics. Mutations are different: the smart driver SHALL submit them to the
+bounded commit coordinator and complete their futures from the resulting
+durability callbacks. It SHALL NOT occupy a driver worker while waiting for a
+mutation's media barrier.
 
 ```text
 application futures / streams
@@ -52,7 +56,7 @@ driver: pool | admission | deadline | cancellation | retry | telemetry
 remote async transport      embedded bounded scheduler
           |                         |
           v                         v
-server execution            synchronous storage kernel
+server execution       read workers + async mutation admission
           +------------+------------+
                        v
               one semantic engine
@@ -436,8 +440,12 @@ Applications never parse error text.
 
 ## 9. Embedded adapter
 
-Embedded mode dispatches the synchronous kernel through dedicated bounded
-workers, not a global unbounded blocking pool.
+Embedded reads, queries, and administrative operations dispatch synchronous
+kernel calls through dedicated bounded workers, not a global unbounded
+blocking pool. Mutations do not use those workers: they enter a bounded
+count-and-byte admission window, are combined by the durable commit
+coordinator, and complete each caller's future from its individual durable
+result.
 
 | Setting | v1 default |
 |---|---:|
@@ -445,10 +453,14 @@ workers, not a global unbounded blocking pool.
 | queue | 1024 operations |
 | cursor prefetch | 1 page |
 
-Queued cancellation removes work. Once kernel work begins it completes to a
-safe boundary; mutation outcome stays resolvable by OperationId. Worker count
-does not imply storage parallelism: qualification records queue, lock wait,
-kernel time, and actual overlap.
+Queued read/query cancellation removes work. Once kernel work begins it
+completes to a safe boundary. An admitted mutation completes to its durability
+boundary even if its caller drops the future or its deadline expires; its
+outcome remains resolvable by OperationId. Client close refuses new work and
+drains all admitted mutations before returning. Worker count does not limit or
+describe mutation concurrency. Qualification records read/query queueing,
+mutation admission count and bytes, cohort formation, durability latency, and
+actual overlap separately.
 
 ## 10. Server execution contract
 

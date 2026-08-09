@@ -509,6 +509,48 @@ impl HeapStore {
         Ok(result)
     }
 
+    /// Non-blocking idempotent collection put admission. Completion runs only
+    /// after the individual operation has a durable outcome or a typed error.
+    pub fn submit_collection_put_with_operation<F>(
+        self: &Arc<Self>,
+        collection_id: &[u8; 16],
+        key: &[u8],
+        value: Vec<u8>,
+        condition: crate::WriteCondition,
+        operation_id: [u8; 16],
+        content_hash: [u8; 32],
+        completion: F,
+    ) -> Result<(), StoreError>
+    where
+        F: FnOnce(Result<(WriteReceipt, bool), StoreError>) + Send + 'static,
+    {
+        self.gate()?;
+        self.require_right(Rights::WRITE)?;
+        let subject = encode_subject_v2(
+            self.cap.heap_id().as_bytes(),
+            SubjectObjectKind::Collection,
+            collection_id,
+            key,
+        )
+        .map_err(|e| StoreError::HeapAdmit(format!("subject v2 encode: {e}")))?;
+        let store = Arc::clone(self);
+        let collection_id = *collection_id;
+        self.commits.try_submit_put(
+            subject,
+            value,
+            condition,
+            operation_id,
+            content_hash,
+            Box::new(move |result| {
+                let result = result.and_then(|value| {
+                    store.mark_indexes_stale(&collection_id)?;
+                    Ok(value)
+                });
+                completion(result);
+            }),
+        )
+    }
+
     /// Get a collection-scoped SubjectV2 value.
     pub fn get_collection(
         &self,
@@ -598,6 +640,45 @@ impl HeapStore {
             )?;
         self.mark_indexes_stale(collection_id)?;
         Ok(result)
+    }
+
+    /// Non-blocking idempotent collection delete admission.
+    pub fn submit_collection_delete_with_operation<F>(
+        self: &Arc<Self>,
+        collection_id: &[u8; 16],
+        key: &[u8],
+        condition: crate::WriteCondition,
+        operation_id: [u8; 16],
+        content_hash: [u8; 32],
+        completion: F,
+    ) -> Result<(), StoreError>
+    where
+        F: FnOnce(Result<(WriteReceipt, bool), StoreError>) + Send + 'static,
+    {
+        self.gate()?;
+        self.require_right(Rights::WRITE)?;
+        let subject = encode_subject_v2(
+            self.cap.heap_id().as_bytes(),
+            SubjectObjectKind::Collection,
+            collection_id,
+            key,
+        )
+        .map_err(|e| StoreError::HeapAdmit(format!("subject v2 encode: {e}")))?;
+        let store = Arc::clone(self);
+        let collection_id = *collection_id;
+        self.commits.try_submit_delete(
+            subject,
+            condition,
+            operation_id,
+            content_hash,
+            Box::new(move |result| {
+                let result = result.and_then(|value| {
+                    store.mark_indexes_stale(&collection_id)?;
+                    Ok(value)
+                });
+                completion(result);
+            }),
+        )
     }
 
     /// Mark usable secondary indexes for a collection as stale after a write.
