@@ -53,6 +53,24 @@ impl StoreHost {
         })
     }
 
+    /// Create with an explicit recovery representation for qualification and
+    /// migration baselines. Product callers should use [`Self::create`].
+    pub fn create_with_recovery_mode(
+        path: impl AsRef<Path>,
+        recovery_mode: crate::RecoveryMode,
+    ) -> Result<Self, StoreError> {
+        let path = path.as_ref();
+        let mut store = PhysicalStore::create_with_shards_mode(path, 1, recovery_mode)?;
+        store.set_cook_parallelism(product_cook_parallelism());
+        let physical = Arc::new(Mutex::new(store));
+        Ok(Self {
+            commits: OperationCommitCoordinator::start(Arc::clone(&physical)),
+            physical,
+            root: path.to_path_buf(),
+            adaptive: None,
+        })
+    }
+
     /// Create with an adaptive-write policy (plan §5).
     ///
     /// **Default product posture:** [`AdaptiveWriteMode::Disabled`] — identical

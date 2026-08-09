@@ -14,6 +14,7 @@ use residiuum_sdk::driver::{
     ScanOptions, DEFAULT_EMBEDDED_QUEUE_CAPACITY, MAX_SCAN_PAGE_SIZE,
 };
 use residiuum_sdk::ResidiuumDeployment;
+use residiuum_store::{RecoveryMode, StoreHost};
 use serde_json::{json, Value};
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -367,6 +368,16 @@ fn smart_client_durable_retained_media_campaign() {
         .unwrap_or(1);
     let enrichment_enabled =
         optional_bool("RESIDIUUM_SMART_DURABLE_ENRICHMENT_ENABLED", true);
+    let recovery_mode = match std::env::var("RESIDIUUM_SMART_DURABLE_RECOVERY_MODE")
+        .as_deref()
+        .unwrap_or("compact_shadow")
+    {
+        "compact_shadow" => RecoveryMode::CompactShadow,
+        "materialized" => RecoveryMode::Materialized,
+        _ => panic!(
+            "RESIDIUUM_SMART_DURABLE_RECOVERY_MODE must be compact_shadow or materialized"
+        ),
+    };
     let minimum_free = std::env::var("RESIDIUUM_SMART_DURABLE_MIN_FREE_BYTES")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
@@ -393,7 +404,16 @@ fn smart_client_durable_retained_media_campaign() {
     let store = root.join("store");
     let authority = root.join("authority");
     let credentials = root.join("credentials/smart-durable.v1.cbor");
-    drop(ResidiuumDeployment::create(&store).unwrap());
+    match recovery_mode {
+        RecoveryMode::CompactShadow => drop(ResidiuumDeployment::create(&store).unwrap()),
+        RecoveryMode::Materialized => {
+            drop(StoreHost::create_with_recovery_mode(
+                &store,
+                RecoveryMode::Materialized,
+            ).unwrap())
+        }
+        RecoveryMode::Transitioning => unreachable!("campaign never creates transitioning mode"),
+    }
     let bootstrap_config = DevelopmentFileProductBootstrap::new(
         &store,
         &authority,
@@ -631,6 +651,11 @@ fn smart_client_durable_retained_media_campaign() {
         "concurrency": concurrency,
         "client_batch": client_batch,
         "enrichment_enabled": enrichment_enabled,
+        "recovery_mode": match recovery_mode {
+            RecoveryMode::CompactShadow => "compact_shadow",
+            RecoveryMode::Materialized => "materialized",
+            RecoveryMode::Transitioning => "transitioning",
+        },
         "read_query_workers": read_workers,
         "scheduler_queue_capacity": scheduler_queue_capacity,
         "free_bytes_at_start": free_at_start,
