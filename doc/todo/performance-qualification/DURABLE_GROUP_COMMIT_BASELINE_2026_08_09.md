@@ -704,3 +704,87 @@ checkpoint lag. Before another comparison, the retained diagnostic stores must
 be archived/reclaimed so both candidates begin with equivalent free space and
 the device is not tested back-to-back under an exhausted cache/thermal state.
 The 10 GiB gate remains blocked.
+
+## Clean-device enrichment isolation and 10 GiB gate (2026-08-10)
+
+All retained diagnostic stores were removed from Bonzo after their reports were
+archived. Each comparison below consequently began with 88 GiB free on the same
+APFS volume. The workload was held constant at 8 KiB documents, 512 callers,
+four operations per client submission, durable acknowledgement, and 32 MiB of
+writer byte admission.
+
+### Clean 4 GiB matched controls
+
+Clean reruns at commit `ceff7cf` removed the earlier low-free-space ambiguity:
+
+| CompactShadow mode | GiB 1 | GiB 2 | GiB 3 | GiB 4 | Total | Peak sampled RSS |
+|---|---:|---:|---:|---:|---:|---:|
+| enrichment enabled | 349 | 329 | 325 | 198 | 286 MiB/s | 1.05 GB |
+| enrichment disabled | 364 | 375 | 376 | 353 | 367 MiB/s | 745 MB |
+
+Both runs recovered all 524,288 records. The enabled run's fourth interval
+coincided with derived enrichment catching up aggressively: 19 segments and
+1.32 GB of segment reads in that interval. The disabled control stayed flat.
+This proves that foreground-unaware enrichment, rather than the removed primary
+checkpoint alone, caused the remaining 4 GiB cliff. On this full logical scan,
+enrichment also did not compensate for its write cost: validation was 50.9 s
+enabled versus 42.3 s disabled.
+
+Commit `f038ef5` changed derived work to yield until 250 ms of foreground quiet,
+with at most one job admitted per two seconds under uninterrupted ingestion.
+The same 4 GiB default-product run then produced 368, 358, 352 and 360 MiB/s,
+359.5 MiB/s overall, while still completing five enrichment jobs during the
+write phase. All records recovered and reopen took 0.44 s. This passes the
+4 GiB sustained-shape gate.
+
+That run also exposed an avoidable 10.9 s close: shutdown synchronously drained
+59 rebuildable derived jobs. Commit `0392d84` now abandons queued derived work
+after any currently executing job completes; authoritative seal work still
+drains. A 1 GiB retained-media verification closed with 14 derived jobs queued
+in 0.312 s, reopened in 0.153 s, and recovered all 131,072 records. Throughput
+remained 363 MiB/s. Store and SDK suites passed (268 and 9 tests respectively).
+
+### 10 GiB: two independent remaining boundaries
+
+The final scheduler commit was then exercised at 10 GiB. Every run below
+recovered all 1,310,720 records with no admission failure or swap:
+
+| Recovery / enrichment | GiB 1–3 | GiB 4 | GiB 5 | GiB 6 | GiB 7 | GiB 8 | GiB 9 | GiB 10 | Total |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| CompactShadow / enabled | 372–376 | 212 | 178 | 174 | 178 | 177 | 177 | 221 | 219 MiB/s |
+| CompactShadow / disabled | 341–359 | 375 | 351 | 353 | 305 | 255 | 179 | 179 | 283 MiB/s |
+| Materialized / disabled | 453–460 | 442 | 466 | 305 | 287 | 239 | 277 | 285 | 345 MiB/s |
+
+The enabled CompactShadow run accumulated 139 derived jobs while allowing only
+21 to run. Its time-based bounded progress nevertheless creates positive
+feedback after the media path slows: slower GiB intervals admit more derived
+jobs, increasing segment reads from about 69 MB to 139–209 MB per interval.
+The scheduler fixes the 4 GiB foreground competition defect, but a two-second
+maximum deferral remains too aggressive for a continuously saturated store.
+
+The disabled CompactShadow control proves enrichment is not the only 10 GiB
+limit. It remains flat through 6 GiB, then its terminal rate reaches 179 MiB/s;
+both `cook_install_publish` and `media_boundary` rise. The Materialized control
+proves Recovery Shadow amplification is substantial: its first five intervals
+are 442–466 MiB/s, its overall rate is 345 MiB/s and its terminal rate is about
+285 MiB/s. It still changes regime between 5 and 7 GiB. Both disabled runs show
+a marked RSS increase near the seventh GiB, consistent with (but not yet proof
+of) a capacity transition in the retained operation-dedup `HashMap`. The next
+campaign must expose table capacity and resize duration rather than inferring
+them from RSS.
+
+The exhaustive full logical scans are also a separate failed read-path signal:
+168.9 s with sparse enrichment, 234.4 s with enrichment disabled, and 173.7 s
+for Materialized without enrichment. Clean reopen itself remained about 1.05 s
+and close was 0.50–1.02 s; the long duration belongs to row validation, not
+startup or durability shutdown.
+
+Accordingly, the current result is:
+
+1. foreground-priority derived scheduling and non-blocking close are accepted;
+2. the 10 GiB correctness gate passes;
+3. the 10 GiB sustained-performance gate remains open;
+4. next instrument and audit the retention-size/capacity transition in the
+   primary and dedup projections, then reduce CompactShadow's physical write
+   amplification;
+5. do not quote cache-assisted GiB 1–5 rates as sustained device throughput.
