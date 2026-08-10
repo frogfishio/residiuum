@@ -16,11 +16,11 @@ use std::time::{Duration, Instant};
 
 // Two logical batches may be gathered into one physical durability cohort.
 // Each half stays bounded; saturated bulk clients can fill both from the same
-// asynchronous request window. The gathered write remains at most 32 MiB.
+// asynchronous request window. The gathered write remains at most 64 MiB.
 // Record frames remain independently checksummed and recoverable: this changes
 // group-commit width, not record atomicity or the acknowledgement boundary.
-const MAX_COHORT_ENTRIES: usize = 2_048;
-const MAX_COHORT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_COHORT_ENTRIES: usize = 4_096;
+const MAX_COHORT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_GATHERED_COHORT_ENTRIES: usize = 2 * MAX_COHORT_ENTRIES;
 const MAX_GATHERED_COHORT_BYTES: usize = 2 * MAX_COHORT_BYTES;
 const MAX_ADMITTED_BYTES: usize = 2 * MAX_GATHERED_COHORT_BYTES;
@@ -674,7 +674,7 @@ fn install_batch_pair(
     }
 
     // Oversized singleton/edge shapes retain the qualified depth-two path;
-    // never exceed the physical 32 MiB gathered-cohort bound merely to merge.
+    // never exceed the physical 64 MiB gathered-cohort bound merely to merge.
     note_batch_attempt(inner, &first);
     note_batch_attempt(inner, &second);
     let (first_result, second_result) = commit_batch_pair(inner, &first, &second);
@@ -1212,8 +1212,9 @@ mod tests {
         let physical_guard = physical.lock().unwrap();
         let body_bytes = 16 * 1024 * 1024;
 
+        let initial_admissions = MAX_ADMITTED_BYTES / body_bytes - 1;
         let mut admitted = Vec::new();
-        for index in 0..3u8 {
+        for index in 0..initial_admissions as u8 {
             let coordinator = Arc::clone(&coordinator);
             admitted.push(thread::spawn(move || {
                 coordinator.submit(
@@ -1227,7 +1228,7 @@ mod tests {
         }
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        while coordinator.stats().admitted_bytes < body_bytes * 3 {
+        while coordinator.stats().admitted_bytes < body_bytes * initial_admissions {
             assert!(
                 Instant::now() < deadline,
                 "initial operations were not admitted"
@@ -1240,10 +1241,10 @@ mod tests {
             thread::spawn(move || {
                 coordinator.submit(
                     b"credit/blocked".to_vec(),
-                    vec![0x44; body_bytes],
+                    vec![0x7F; body_bytes],
                     WriteCondition::Unconditional,
-                    [0x14; 16],
-                    [0x24; 32],
+                    [0x7F; 16],
+                    [0x7F; 32],
                 )
             })
         };
@@ -1251,7 +1252,7 @@ mod tests {
         while coordinator.stats().byte_admission_waits == 0 {
             assert!(
                 Instant::now() < deadline,
-                "fourth operation did not wait for credits"
+                "operation beyond the bounded window did not wait for credits"
             );
             thread::yield_now();
         }
