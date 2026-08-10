@@ -26,6 +26,8 @@ use std::path::{Path, PathBuf};
 
 /// Filename under `indexes/` for the primary current-state cache.
 pub const PRIMARY_CACHE_FILE: &str = "primary.idx";
+/// Sealed-media membership bound to the exact primary checkpoint bytes.
+pub const PRIMARY_SEALED_MANIFEST_FILE: &str = "primary.sealed.v1";
 
 const MAGIC_V1: &[u8; 8] = b"RIDX0001";
 const MAGIC_V2: &[u8; 8] = b"RIDX0002";
@@ -35,6 +37,9 @@ const VERSION_V1: u32 = 1;
 const VERSION_V2: u32 = 2;
 const VERSION_V3: u32 = 3;
 const VERSION_V4: u32 = 4;
+const SEALED_MANIFEST_MAGIC: &[u8; 8] = b"RIDXSM01";
+const SEALED_MANIFEST_VERSION: u32 = 1;
+const MAX_SEALED_MANIFEST_ENTRIES: usize = 1_000_000;
 
 const CHUNK_LOCATOR_ENCODED_LEN: usize = 16 + 16 + 8 + 16 + 4 + 4 + 8 + 32;
 
@@ -71,6 +76,13 @@ pub(crate) struct ChunkFrameLocator {
 
 pub(crate) type ChunkLocatorMap = HashMap<[u8; 16], Vec<ChunkFrameLocator>>;
 
+/// One immutable sealed object covered by an exact primary checkpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SealedCheckpointEntry {
+    pub(crate) segment_id: [u8; 16],
+    pub(crate) byte_len: u64,
+}
+
 /// Successfully decoded frontier checkpoint and optional locator section.
 pub(crate) struct LoadedIndexFrontier {
     pub(crate) index: PrimaryIndex,
@@ -83,6 +95,77 @@ pub(crate) struct LoadedIndexFrontier {
 /// Absolute path of the primary index cache file.
 pub fn primary_cache_path(indexes_dir: &Path) -> PathBuf {
     indexes_dir.join(PRIMARY_CACHE_FILE)
+}
+
+pub(crate) fn primary_sealed_manifest_path(indexes_dir: &Path) -> PathBuf {
+    indexes_dir.join(PRIMARY_SEALED_MANIFEST_FILE)
+}
+
+/// Publish sealed membership for one exact primary checkpoint.
+pub(crate) fn write_primary_sealed_manifest(
+    path: &Path,
+    store_id: [u8; 16],
+    primary_bytes: &[u8],
+    entries: &[SealedCheckpointEntry],
+) -> Result<(), StoreError> {
+    let mut entries = entries.to_vec();
+    entries.sort_by_key(|entry| entry.segment_id);
+    let mut out = Vec::with_capacity(8 + 4 + 16 + 32 + 8 + entries.len() * 24 + 32);
+    out.extend_from_slice(SEALED_MANIFEST_MAGIC);
+    out.extend_from_slice(&SEALED_MANIFEST_VERSION.to_le_bytes());
+    out.extend_from_slice(&store_id);
+    out.extend_from_slice(blake3::hash(primary_bytes).as_bytes());
+    out.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+    for entry in entries {
+        out.extend_from_slice(&entry.segment_id);
+        out.extend_from_slice(&entry.byte_len.to_le_bytes());
+    }
+    let checksum = blake3::hash(&out);
+    out.extend_from_slice(checksum.as_bytes());
+    crate::atomic_file::write_atomic(path, &out)
+}
+
+/// Load membership only when it is checksummed and bound to `primary_bytes`.
+pub(crate) fn try_load_primary_sealed_manifest(
+    path: &Path,
+    store_id: [u8; 16],
+    primary_bytes: &[u8],
+) -> Option<Vec<SealedCheckpointEntry>> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() < 8 + 4 + 16 + 32 + 8 + 32 || &bytes[..8] != SEALED_MANIFEST_MAGIC.as_slice() {
+        return None;
+    }
+    let version = u32::from_le_bytes(bytes[8..12].try_into().ok()?);
+    let file_store: [u8; 16] = bytes[12..28].try_into().ok()?;
+    let primary_hash: [u8; 32] = bytes[28..60].try_into().ok()?;
+    if version != SEALED_MANIFEST_VERSION
+        || file_store != store_id
+        || primary_hash != *blake3::hash(primary_bytes).as_bytes()
+    {
+        return None;
+    }
+    let count = u64::from_le_bytes(bytes[60..68].try_into().ok()?);
+    let count = usize::try_from(count).ok()?;
+    if count > MAX_SEALED_MANIFEST_ENTRIES {
+        return None;
+    }
+    let records_len = count.checked_mul(24)?;
+    let checksum_offset = 68usize.checked_add(records_len)?;
+    if checksum_offset.checked_add(32)? != bytes.len()
+        || blake3::hash(&bytes[..checksum_offset]).as_bytes() != &bytes[checksum_offset..]
+    {
+        return None;
+    }
+    let mut entries = Vec::with_capacity(count);
+    let mut offset = 68;
+    for _ in 0..count {
+        entries.push(SealedCheckpointEntry {
+            segment_id: bytes[offset..offset + 16].try_into().ok()?,
+            byte_len: u64::from_le_bytes(bytes[offset + 16..offset + 24].try_into().ok()?),
+        });
+        offset += 24;
+    }
+    Some(entries)
 }
 
 /// Fingerprint of authoritative segment files used to invalidate a cache.
@@ -1159,6 +1242,34 @@ mod tests {
             200,
         );
         index
+    }
+
+    #[test]
+    fn sealed_manifest_is_bound_to_exact_primary_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(PRIMARY_SEALED_MANIFEST_FILE);
+        let store_id = [0x31; 16];
+        let primary = b"primary-checkpoint-a";
+        let entries = vec![
+            SealedCheckpointEntry {
+                segment_id: [2; 16],
+                byte_len: 200,
+            },
+            SealedCheckpointEntry {
+                segment_id: [1; 16],
+                byte_len: 100,
+            },
+        ];
+        write_primary_sealed_manifest(&path, store_id, primary, &entries).unwrap();
+        let loaded = try_load_primary_sealed_manifest(&path, store_id, primary).unwrap();
+        assert_eq!(loaded[0].segment_id, [1; 16]);
+        assert_eq!(loaded[1].segment_id, [2; 16]);
+        assert!(try_load_primary_sealed_manifest(
+            &path,
+            store_id,
+            b"different-primary-checkpoint"
+        )
+        .is_none());
     }
 
     #[test]

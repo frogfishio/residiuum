@@ -29,9 +29,10 @@ use crate::history::{
 use crate::ids::{random_id, segment_seq_from_id, subject_item_id};
 use crate::index::{slim_put_body_for_index, IndexEntry, PrimaryIndex};
 use crate::index_cache::{
-    diagnose_primary_cache, primary_cache_path, segment_fingerprint, try_load_primary_index,
-    try_load_primary_index_frontier, write_primary_index_frontier, ChunkFrameLocator,
-    ChunkLocatorMap, IndexFrontier, LifecycleDiag, PrimaryCacheDiag,
+    diagnose_primary_cache, primary_cache_path, primary_sealed_manifest_path, segment_fingerprint,
+    try_load_primary_index, try_load_primary_index_frontier, try_load_primary_sealed_manifest,
+    write_primary_index_frontier, write_primary_sealed_manifest, ChunkFrameLocator,
+    ChunkLocatorMap, IndexFrontier, LifecycleDiag, PrimaryCacheDiag, SealedCheckpointEntry,
 };
 use crate::layout::{list_residiuum_files, segment_id_from_filename, StorePaths};
 use crate::seal_pipeline::{
@@ -62,9 +63,9 @@ use crate::write_dedup::{
 };
 use crate::writer_lock::{StoreOpenOptions, WriterLock, WriterLockObservation};
 use residiuum_format::{
-    decode_store_descriptor_body, encode_frame_into, encode_store_descriptor_frame, scan_forward,
-    ActiveSegment, FrameFlags, FrameHeader, FrameKind, FrameParts, SafetyLimits, SegmentId,
-    WIRE_MAJOR, WIRE_MINOR,
+    decode_descriptor_body, decode_store_descriptor_body, encode_frame_into,
+    encode_store_descriptor_frame, scan_forward, ActiveSegment, FrameFlags, FrameHeader, FrameKind,
+    FrameParts, SafetyLimits, SegmentId, WIRE_MAJOR, WIRE_MINOR,
 };
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -539,6 +540,8 @@ pub struct StoreOpenMetrics {
     pub index_full_scan_bytes: u64,
     /// Active-segment bytes decoded after the checkpoint frontier.
     pub index_active_replay_bytes: u64,
+    /// Newly sealed suffix bytes decoded beyond the accepted checkpoint.
+    pub index_sealed_replay_bytes: u64,
     /// True when chunk locators came from a validated v4 checkpoint.
     pub chunk_locators_from_checkpoint: bool,
     /// Observable primary-index startup path.
@@ -620,6 +623,7 @@ pub enum IndexCacheDecision {
 struct IndexOpenStats {
     full_scan_bytes: u64,
     active_replay_bytes: u64,
+    sealed_replay_bytes: u64,
     chunk_locators_from_checkpoint: bool,
     disposition: IndexOpenDisposition,
     cache_decision: IndexCacheDecision,
@@ -1231,6 +1235,7 @@ impl Store {
         open_metrics.index_ns = elapsed_ns(phase);
         open_metrics.index_full_scan_bytes = index_stats.full_scan_bytes;
         open_metrics.index_active_replay_bytes = index_stats.active_replay_bytes;
+        open_metrics.index_sealed_replay_bytes = index_stats.sealed_replay_bytes;
         open_metrics.chunk_locators_from_checkpoint = index_stats.chunk_locators_from_checkpoint;
         open_metrics.index_disposition = index_stats.disposition;
         open_metrics.index_cache_decision = index_stats.cache_decision;
@@ -5946,6 +5951,7 @@ impl Store {
                     return Ok(IndexLoadAttempt::Loaded(IndexOpenStats {
                         full_scan_bytes,
                         active_replay_bytes,
+                        sealed_replay_bytes: 0,
                         chunk_locators_from_checkpoint: false,
                         disposition: IndexOpenDisposition::LegacyUpgraded,
                         cache_decision: if format_version >= 4 {
@@ -5962,6 +5968,22 @@ impl Store {
                         segments_examined,
                     }));
                 }
+            } else if format_version >= 4 {
+                if let Some(locators) = chunk_locators {
+                    if let Some(stats) = self.try_replay_sealed_checkpoint_suffix(
+                        &cache_path,
+                        &sealed_paths,
+                        &all_paths,
+                        index,
+                        locators,
+                        frontier,
+                        cache_bytes,
+                        cache_decode_ns,
+                    )? {
+                        return Ok(IndexLoadAttempt::Loaded(stats));
+                    }
+                }
+                miss = IndexCacheDecision::SealedFingerprintMismatch;
             } else {
                 miss = IndexCacheDecision::SealedFingerprintMismatch;
             }
@@ -5995,6 +6017,123 @@ impl Store {
             }));
         }
         Ok(IndexLoadAttempt::Miss(miss))
+    }
+
+    /// Accept an exact v4 checkpoint when its sealed membership is an immutable
+    /// subset of current media, then replay only newly sealed objects plus the
+    /// bounded active tail. The sidecar is bound to the checkpoint bytes, so a
+    /// torn or mismatched pair falls back to the ordinary full rebuild.
+    #[allow(clippy::too_many_arguments)]
+    fn try_replay_sealed_checkpoint_suffix(
+        &mut self,
+        cache_path: &Path,
+        sealed_paths: &[PathBuf],
+        all_paths: &[PathBuf],
+        mut index: PrimaryIndex,
+        mut chunk_locators: ChunkLocatorMap,
+        frontier: IndexFrontier,
+        cache_bytes: u64,
+        cache_decode_ns: u64,
+    ) -> Result<Option<IndexOpenStats>, StoreError> {
+        let primary_bytes = match fs::read(cache_path) {
+            Ok(bytes) => bytes,
+            Err(_) => return Ok(None),
+        };
+        let Some(checkpoint_entries) = try_load_primary_sealed_manifest(
+            &primary_sealed_manifest_path(&self.paths.indexes_dir()),
+            self.store_id,
+            &primary_bytes,
+        ) else {
+            return Ok(None);
+        };
+
+        let mut current = HashMap::<[u8; 16], (&Path, u64)>::new();
+        for path in sealed_paths {
+            let Some(segment_id) = segment_id_from_filename(path) else {
+                return Ok(None);
+            };
+            let byte_len = fs::metadata(path)?.len();
+            if current
+                .insert(segment_id, (path.as_path(), byte_len))
+                .is_some()
+            {
+                return Ok(None);
+            }
+        }
+        let mut covered = HashSet::with_capacity(checkpoint_entries.len());
+        for entry in checkpoint_entries {
+            if !covered.insert(entry.segment_id)
+                || !matches!(
+                    current.get(&entry.segment_id),
+                    Some((_, byte_len)) if *byte_len == entry.byte_len
+                )
+            {
+                return Ok(None);
+            }
+        }
+
+        let mut sealed_replay_bytes = 0u64;
+        for (segment_id, (path, _)) in &current {
+            if covered.contains(segment_id) {
+                continue;
+            }
+            let start = if *segment_id == frontier.active_segment_id {
+                frontier.active_covered_len
+            } else {
+                0
+            };
+            sealed_replay_bytes = sealed_replay_bytes.saturating_add(apply_active_tail(
+                &mut index,
+                Some(&mut chunk_locators),
+                path,
+                start,
+                self.limits,
+            )?);
+        }
+
+        let mut active_replay_bytes = 0u64;
+        for path in self.paths.list_active_segment_paths(self.writer_shards()) {
+            if !path.is_file() {
+                continue;
+            }
+            let active_id = probe_segment_id(&path, self.limits)?;
+            let start = if active_id == Some(frontier.active_segment_id) {
+                frontier.active_covered_len
+            } else {
+                0
+            };
+            active_replay_bytes = active_replay_bytes.saturating_add(apply_active_tail(
+                &mut index,
+                Some(&mut chunk_locators),
+                &path,
+                start,
+                self.limits,
+            )?);
+        }
+
+        let (install_clone_ns, catalog_derive_ns) = self.install_loaded_index(index, all_paths)?;
+        if !chunk_locator_coverage_complete(&self.durable_index, &chunk_locators) {
+            return Ok(None);
+        }
+        self.chunk_locators = chunk_locators;
+        // Heal the derived checkpoint immediately. Failure is non-fatal because
+        // the accepted index was independently reconstructed from authority.
+        let _ = self.persist_index_cache();
+        Ok(Some(IndexOpenStats {
+            active_replay_bytes,
+            sealed_replay_bytes,
+            chunk_locators_from_checkpoint: true,
+            disposition: IndexOpenDisposition::TailReplayed,
+            cache_decision: IndexCacheDecision::AcceptedV4,
+            cache_bytes,
+            cache_decode_ns,
+            install_clone_ns,
+            catalog_derive_ns,
+            index_entries: self.index.len() as u64,
+            chunk_locator_entries: chunk_locator_count(&self.chunk_locators),
+            segments_examined: all_paths.len() as u64,
+            ..IndexOpenStats::default()
+        }))
     }
 
     fn install_loaded_index(
@@ -6039,12 +6178,29 @@ impl Store {
     pub fn persist_index_cache(&mut self) -> Result<(), StoreError> {
         let frontier = self.current_index_frontier()?;
         let chunk_locators = self.checkpoint_chunk_locators(&frontier);
+        let cache_path = primary_cache_path(&self.paths.indexes_dir());
         write_primary_index_frontier(
-            &primary_cache_path(&self.paths.indexes_dir()),
+            &cache_path,
             self.store_id,
             &frontier,
             &self.durable_index,
             &chunk_locators,
+        )?;
+        let primary_bytes = fs::read(&cache_path)?;
+        let sealed_entries = sealed_segment_paths(&self.paths, Some(&self.tier_placement))?
+            .into_iter()
+            .filter_map(|path| {
+                Some(SealedCheckpointEntry {
+                    segment_id: segment_id_from_filename(&path)?,
+                    byte_len: fs::metadata(path).ok()?.len(),
+                })
+            })
+            .collect::<Vec<_>>();
+        write_primary_sealed_manifest(
+            &primary_sealed_manifest_path(&self.paths.indexes_dir()),
+            self.store_id,
+            &primary_bytes,
+            &sealed_entries,
         )?;
         self.derived_ops_since_checkpoint = 0;
         Ok(())
@@ -10443,6 +10599,19 @@ fn chunk_locator_coverage_complete(index: &PrimaryIndex, locators: &ChunkLocator
     })
 }
 
+/// Read only the descriptor-sized prefix needed to identify an active segment.
+fn probe_segment_id(path: &Path, limits: SafetyLimits) -> Result<Option<[u8; 16]>, StoreError> {
+    let mut prefix = Vec::with_capacity(4096);
+    File::open(path)?.take(4096).read_to_end(&mut prefix)?;
+    let report = scan_forward(&prefix, limits);
+    for (_, frame) in report.verified_frames() {
+        if frame.header.known_kind() == Some(FrameKind::SegmentDescriptor) {
+            return Ok(decode_descriptor_body(&frame.body).map(|(ids, _, _)| ids.segment_id));
+        }
+    }
+    Ok(None)
+}
+
 /// Apply item events from the active segment starting at byte offset `from_offset`.
 ///
 /// Used with a frontier checkpoint so open cost is O(active tail), not O(all data).
@@ -11379,6 +11548,43 @@ mod tests {
         assert_eq!(
             store.get("chunked").unwrap().as_deref(),
             Some(body.as_slice())
+        );
+    }
+
+    #[test]
+    fn v4_checkpoint_replays_newly_sealed_suffix_without_full_rebuild() {
+        let dir = tempdir().unwrap();
+        {
+            let mut store = Store::create(dir.path()).unwrap();
+            store
+                .put("before-sealed-tail", b"before", DurabilityMode::Durable)
+                .unwrap();
+            store.seal_active().unwrap();
+            store.persist_index_cache().unwrap();
+
+            store
+                .put("after-sealed-tail", b"after", DurabilityMode::Durable)
+                .unwrap();
+            store.seal_active().unwrap();
+            // Model SIGKILL after a new sealed object but before orderly close.
+            store.orderly_close_prepared = true;
+        }
+
+        let reopened = Store::open(dir.path()).unwrap();
+        let metrics = reopened.open_report();
+        assert_eq!(metrics.index_full_scan_bytes, 0);
+        assert!(metrics.index_sealed_replay_bytes > 0);
+        assert_eq!(
+            metrics.index_disposition,
+            IndexOpenDisposition::TailReplayed
+        );
+        assert_eq!(
+            reopened.get("before-sealed-tail").unwrap().as_deref(),
+            Some(b"before".as_slice())
+        );
+        assert_eq!(
+            reopened.get("after-sealed-tail").unwrap().as_deref(),
+            Some(b"after".as_slice())
         );
     }
 

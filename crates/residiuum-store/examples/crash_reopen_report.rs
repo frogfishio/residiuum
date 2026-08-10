@@ -61,12 +61,13 @@ fn main() {
     println!(
         "open_ns={open_ns} first_mutation_ns={first_mutation_ns} replayed={replayed} \
          index_disposition={:?} index_cache_decision={:?} \
-         index_full_scan_bytes={} index_active_replay_bytes={} \
+         index_full_scan_bytes={} index_sealed_replay_bytes={} index_active_replay_bytes={} \
          pending_seals_recovered={} protected_pairs_recovered={} \
          dedup_recovery_segments_examined={} dedup_recovery_scan_bytes={}",
         report.index_disposition,
         report.index_cache_decision,
         report.index_full_scan_bytes,
+        report.index_sealed_replay_bytes,
         report.index_active_replay_bytes,
         report.pending_seals_recovered,
         report.protected_pairs_recovered,
