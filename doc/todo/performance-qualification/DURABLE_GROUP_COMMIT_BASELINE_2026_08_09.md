@@ -1062,3 +1062,116 @@ write+barrier and 0.34–0.37 s/GiB on rotation. Reaching 500 MiB/s now requires
 overlapping safe rotation/publication work with the next cohort or otherwise
 reducing those real physical costs. More per-record bookkeeping cleanup or a
 larger logical batch is not supported by the evidence.
+
+### Durable segment-id leases (`83da3ae`)
+
+Rotation still performed an atomic rewrite plus parent-directory durability
+barrier for `store-info/segment_seq.v1` before creating every 64 MiB active
+segment. That tiny transaction was not record durability, but it was required
+by the never-reuse invariant because the active filename does not contain its
+segment sequence.
+
+Commit `83da3ae` reserves 64 segment identities (4 GiB at the default seal
+threshold) in one durable lease and issues them from memory. The durable file
+records the inclusive end of the lease before any identity in it reaches
+media. Reopen intentionally skips an unused lease tail, so a crash can create
+harmless sequence gaps but cannot remint an identity. The allocator failpoint
+campaign now places reservation crash cases explicitly on a lease boundary;
+all 8 never-reuse cases passed. Store unit tests (275/275) and the 11-case
+crash-recovery contract also passed.
+
+The matched 4 GiB Bonzo run sustained **425.83 MiB/s / 54,506 durable ops/s**,
+up 1.81% from the best preceding `3eef0b4` client run and 2.40% from the
+immediately preceding `2dca057` run. Foreground active-start time across 64
+rotations fell from 563–568 ms in the two preceding runs to 225 ms. Total
+rotation time fell from 1.407–1.440 s to 1.173 s. The run retained one
+authoritative write and barrier per each of 260 physical cohorts, had zero
+failures/waits/refusals, and revalidated all 524,288 records and all 4 GiB after
+restart. p50/p95/p99 were 33.49/52.46/55.71 ms. The report is
+`83da3ae-segment-lease-4g.report.json`.
+
+This is accepted as a material hot-path fix: it removes redundant metadata
+durability work without changing the write acknowledgement boundary.
+
+### Deferred protected-seal assembly (`e2873e0`)
+
+After a cohort's authoritative prefix was already stable, auto-rotation still
+waited on the Shadow staging worker, assembled the summary, wrote it to the old
+active and only then detached the segment. Commit `e2873e0` persists the
+shard-tagged recovery intent, moves the stable prefix to the recovery-visible
+pending area, installs the replacement active, and lets the bounded authority
+lifecycle worker finish Shadow staging, summary assembly, sealed publication
+and P★ advancement. A crash before completion still finds an authoritative
+pending prefix plus its recovery intent; no protection frontier advances
+early.
+
+Store unit tests (275/275), RSHD0004 (16/16), activation (1/1), and product-mode
+campaigns (6/6) passed. Two matched Bonzo runs sustained **424.06 and 425.67
+MiB/s**. Both recovered and revalidated every record and byte, with zero
+operation failures, admission waits, scheduler refusals or protection
+backpressure. Foreground rotation fell reproducibly to 0.984 and 1.031 s from
+1.173 s (`83da3ae`), while authoritative media-boundary time rose from 3.352 s
+to 3.608 and 3.496 s. Wall throughput was therefore neutral within device
+variance; the immediate repeat was only 0.04% below `83da3ae`.
+
+The reports are `e2873e0-deferred-protection-4g.report.json` and
+`e2873e0-deferred-protection-repeat-4g.report.json`. The deferral is accepted
+as bounded scheduling/correctness architecture, not claimed as a throughput
+gain. The remaining gap to 500 MiB/s is approximately 74 MiB/s. The dominant
+measured foreground cost is now the real authoritative cohort write+barrier
+(approximately 3.35–3.61 s per 4 GiB), followed by JSON/frame/index publication
+(approximately 2.17 s). Further rotation bookkeeping is no longer the primary
+target.
+
+### The durable-cohort knee: 32 MiB accepted, 64 MiB rejected
+
+Commit `0de0efe` doubled the two bounded logical halves to 2,048 records / 16
+MiB each, permitting one physical cohort of at most 4,096 records / 32 MiB.
+The 4 GiB campaign used 512 asynchronous callers with 8-record bulk requests,
+a 4,096-operation SDK queue, and the corresponding 64 MiB store admission
+window. The first launch deliberately retained the old 2,048-operation queue
+and failed closed with `embedded mutation window is full` before useful media
+was written; no result is claimed from it.
+
+The correctly bounded run sustained **459.18 MiB/s / 58,775 durable ops/s**,
+an improvement of **7.84%** over the accepted `83da3ae` result. Its intervals
+were 449.38, 469.38, 467.26 and 452.46 MiB/s. The accounting again closes:
+
+- 524,288 records formed 130 physical cohorts;
+- exactly 130 authoritative writes and 130 authoritative barriers completed;
+- the largest cohort was 4,058 records / 33,543,428 encoded bytes, below both
+  bounds;
+- peak store admission was 33.86 MiB of the 64 MiB limit and peak SDK admission
+  was 33.71 MiB of its 64 MiB byte limit;
+- all operations used parallel reserved cooking, with zero failures, waits,
+  refusals, swaps or protection backlog;
+- close took 0.267 s, clean reopen 0.469 s, and all 524,288 records / 4 GiB
+  validated after restart.
+
+As expected, saturated bulk-call latency trades against barrier amortization:
+p50/p95/p99 were 73.53/85.58/116.51 ms, versus approximately
+34.07/51.36/55.80 ms in the 16 MiB repeat. These are whole `put_many` call
+latencies assigned to their member records; record framing, recovery and CAS
+atomicity are unchanged. The accepted report is
+`0de0efe-cohort32m-q4k-4g.report.json`.
+
+The next boundary was tested rather than assumed. Commits `7c1985b`/`7cfd502`
+raised the maximum physical cohort to 8,192 records / 64 MiB, store admission
+to 128 MiB, and parameterized the campaign's independent SDK byte window. A
+first attempt with the old 64 MiB SDK byte bound failed closed after 3 GiB;
+the complete matched run used an 8,192-operation / 128 MiB SDK window.
+
+That complete run recovered and validated every record, but sustained only
+**410.17 MiB/s**. The final GiB fell to 362.36 MiB/s and p50/p95/p99 expanded
+to 145.28/196.93/353.35 ms. Although barriers fell again to 65, aggregate
+media-boundary time barely changed (2.177 s versus 2.198 s at 32 MiB), while
+rotation rose from 1.619 s to 2.676 s because nearly every giant cohort met a
+64 MiB segment boundary and contended with rename/start/Shadow work. The
+report is `7cfd502-cohort64m-q8k-b128m-4g.report.json`.
+
+Commit `34e0aad` therefore restores and selects **32 MiB** as the measured
+product knee. The 64 MiB attempt is rejected; fewer barriers alone are not a
+valid optimization when larger writes and segment-boundary contention erase
+their benefit. The remaining gap to 500 MiB/s is approximately 40.8 MiB/s.
+The next work should reduce or overlap the 32 MiB path's segment-boundary I/O,
+or reduce frame/JSON/index CPU, rather than widen cohorts again.
