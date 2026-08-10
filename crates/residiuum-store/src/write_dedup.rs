@@ -23,6 +23,18 @@ pub const WRITE_DEDUP_JOURNAL_FILE: &str = "write_dedup.journal.v1";
 /// Clean/dirty marker for detecting an unjournaled outcome after process loss.
 pub const WRITE_DEDUP_SESSION_FILE: &str = "write_dedup.session.v1";
 
+/// Recovery state carried by the operation-outcome session marker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteDedupSession {
+    /// The prior writer completed an orderly close.
+    Clean,
+    /// Legacy marker: recovery must conservatively inspect all authority.
+    DirtyLegacy,
+    /// Only segments at or above this mint sequence can contain an outcome not
+    /// represented by the durable journal.
+    DirtySince(u64),
+}
+
 const MAGIC: &[u8; 8] = b"RDED0001";
 const VERSION: u32 = 1;
 const JOURNAL_MAGIC: &[u8; 8] = b"RDEJ0001";
@@ -104,32 +116,52 @@ pub fn write_dedup_journal_path(paths: &StorePaths) -> PathBuf {
     paths.store_info().join(WRITE_DEDUP_JOURNAL_FILE)
 }
 
-/// Whether the preceding writer closed after every accepted operation outcome
-/// had crossed the journal boundary.
-pub fn write_dedup_session_clean(paths: &StorePaths) -> bool {
+/// Load the prior outcome-journal recovery boundary.
+pub(crate) fn load_write_dedup_session(paths: &StorePaths) -> WriteDedupSession {
     let Ok(marker) = fs::read_to_string(paths.store_info().join(WRITE_DEDUP_SESSION_FILE)) else {
-        return false;
+        return WriteDedupSession::DirtyLegacy;
     };
     let mut lines = marker.lines();
-    if lines.next() != Some("clean") {
-        return false;
+    match lines.next() {
+        Some("dirty_since") => {
+            let Some(floor) = lines.next().and_then(|value| value.parse::<u64>().ok()) else {
+                return WriteDedupSession::DirtyLegacy;
+            };
+            if lines.next().is_none() {
+                return WriteDedupSession::DirtySince(floor);
+            }
+            WriteDedupSession::DirtyLegacy
+        }
+        Some("dirty") => WriteDedupSession::DirtyLegacy,
+        Some("clean") => {
+            let Some(expected_len) = lines.next().and_then(|value| value.parse::<u64>().ok())
+            else {
+                return WriteDedupSession::DirtyLegacy;
+            };
+            if lines.next().is_some() {
+                return WriteDedupSession::DirtyLegacy;
+            }
+            let journal = write_dedup_journal_path(paths);
+            let observed_len = fs::metadata(journal).map(|meta| meta.len()).unwrap_or(0);
+            if observed_len == expected_len {
+                WriteDedupSession::Clean
+            } else {
+                WriteDedupSession::DirtyLegacy
+            }
+        }
+        _ => WriteDedupSession::DirtyLegacy,
     }
-    let Some(expected_len) = lines.next().and_then(|value| value.parse::<u64>().ok()) else {
-        return false;
-    };
-    if lines.next().is_some() {
-        return false;
-    }
-    let journal = write_dedup_journal_path(paths);
-    let observed_len = fs::metadata(journal).map(|meta| meta.len()).unwrap_or(0);
-    observed_len == expected_len
 }
 
-/// Mark the current writer session dirty before accepting mutations.
-pub fn mark_write_dedup_session_dirty(paths: &StorePaths) -> Result<(), StoreError> {
+/// Mark a live writer dirty while retaining a bounded media-recovery floor.
+pub(crate) fn mark_write_dedup_session_dirty_since(
+    paths: &StorePaths,
+    floor_segment_seq: u64,
+) -> Result<(), StoreError> {
+    let marker = format!("dirty_since\n{floor_segment_seq}\n");
     crate::atomic_file::write_atomic(
         &paths.store_info().join(WRITE_DEDUP_SESSION_FILE),
-        b"dirty\n",
+        marker.as_bytes(),
     )
 }
 
@@ -576,5 +608,28 @@ mod tests {
         let second = fs::metadata(&path).unwrap().len();
         assert_eq!(first, (JOURNAL_HEADER_LEN + JOURNAL_RECORD_LEN) as u64);
         assert_eq!(second - first, JOURNAL_RECORD_LEN as u64);
+    }
+
+    #[test]
+    fn session_marker_preserves_bounded_dirty_floor() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StorePaths::new(dir.path());
+        fs::create_dir_all(paths.store_info()).unwrap();
+
+        mark_write_dedup_session_dirty_since(&paths, 47).unwrap();
+        assert_eq!(
+            load_write_dedup_session(&paths),
+            WriteDedupSession::DirtySince(47)
+        );
+
+        fs::write(
+            paths.store_info().join(WRITE_DEDUP_SESSION_FILE),
+            b"dirty\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_write_dedup_session(&paths),
+            WriteDedupSession::DirtyLegacy
+        );
     }
 }

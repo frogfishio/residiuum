@@ -33,7 +33,7 @@ use crate::index_cache::{
     try_load_primary_index_frontier, write_primary_index_frontier, ChunkFrameLocator,
     ChunkLocatorMap, IndexFrontier, LifecycleDiag, PrimaryCacheDiag,
 };
-use crate::layout::{list_residiuum_files, StorePaths};
+use crate::layout::{list_residiuum_files, segment_id_from_filename, StorePaths};
 use crate::seal_pipeline::{
     list_pending_paths, publish_sealed_from_summary_frame, recover_all_pending,
     EnrichmentStageTotals, LifecycleJob, LifecycleResult, SealPipeline, DEFAULT_MAX_PENDING_SEALS,
@@ -56,9 +56,9 @@ use crate::tier::{
 use crate::token_keys::ContinuationKeyring;
 use crate::write_dedup::{
     append_write_dedup, append_write_dedup_batch_buffered, load_write_dedup_checked,
-    mark_write_dedup_session_clean, mark_write_dedup_session_dirty, rewrite_write_dedup_journal,
-    save_write_dedup, sync_write_dedup_journal, write_dedup_journal_path, write_dedup_path,
-    write_dedup_session_clean, DedupRecord, WriteDedupTable,
+    load_write_dedup_session, mark_write_dedup_session_clean, mark_write_dedup_session_dirty_since,
+    rewrite_write_dedup_journal, save_write_dedup, sync_write_dedup_journal,
+    write_dedup_journal_path, write_dedup_path, DedupRecord, WriteDedupSession, WriteDedupTable,
 };
 use crate::writer_lock::{StoreOpenOptions, WriterLock, WriterLockObservation};
 use residiuum_format::{
@@ -229,6 +229,10 @@ pub struct StoreWritePathStats {
     pub write_dedup_entries: usize,
     /// Current allocation capacity of the operation-dedup hash table.
     pub write_dedup_capacity: usize,
+    /// Authoritative objects examined by unclean-session outcome recovery.
+    pub write_dedup_recovery_segments_examined: u64,
+    /// Authoritative bytes decoded by unclean-session outcome recovery.
+    pub write_dedup_recovery_scan_bytes: u64,
     /// Active authoritative file write/sync activity.
     pub authoritative_io: WriteIoTotals,
     /// Recovery Shadow staging write/sync activity.
@@ -690,6 +694,11 @@ pub struct Store {
     write_dedup: WriteDedupTable,
     /// Previous process ended before certifying its outcome journal complete.
     write_dedup_recovery_required: bool,
+    /// Oldest segment sequence that may contain an unjournaled operation.
+    write_dedup_recovery_floor_seq: u64,
+    /// Per-open evidence for the lazy first-mutation recovery path.
+    write_dedup_recovery_segments_examined: u64,
+    write_dedup_recovery_scan_bytes: u64,
     /// The operation coordinator is cooking a cohort under the exclusive store
     /// lock. Frames stay in the active-segment buffer until one gathered tail
     /// write crosses the cohort boundary.
@@ -1008,6 +1017,9 @@ impl Store {
             writer_lock: Some(writer_lock),
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
+            write_dedup_recovery_floor_seq: 0,
+            write_dedup_recovery_segments_examined: 0,
+            write_dedup_recovery_scan_bytes: 0,
             operation_cohort_gathering: false,
             operation_reservation_chain: Vec::new(),
             last_operation_parallel_cooked: 0,
@@ -1058,7 +1070,8 @@ impl Store {
         // authoritative operation frame whose outcome journal append was
         // interrupted. A brand-new store has no such history, but is marked
         // dirty before it can accept its first mutation.
-        mark_write_dedup_session_dirty(&store.paths)?;
+        store.write_dedup_recovery_floor_seq = store.current_active_floor_seq();
+        mark_write_dedup_session_dirty_since(&store.paths, store.write_dedup_recovery_floor_seq)?;
         store.orderly_close_prepared = false;
         Ok(store)
     }
@@ -1116,7 +1129,7 @@ impl Store {
             ..StoreOpenMetrics::default()
         };
 
-        let preceding_writer_was_clean = write_dedup_session_clean(&paths);
+        let preceding_dedup_session = load_write_dedup_session(&paths);
         let mut store = Self {
             paths,
             store_id,
@@ -1143,6 +1156,9 @@ impl Store {
             writer_lock: Some(writer_lock),
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
+            write_dedup_recovery_floor_seq: 0,
+            write_dedup_recovery_segments_examined: 0,
+            write_dedup_recovery_scan_bytes: 0,
             operation_cohort_gathering: false,
             operation_reservation_chain: Vec::new(),
             last_operation_parallel_cooked: 0,
@@ -1275,11 +1291,21 @@ impl Store {
         open_metrics.total_ns = elapsed_ns(open_started);
         store.open_metrics = open_metrics;
         store.write_dedup_recovery_required =
-            !preceding_writer_was_clean || !write_dedup_journal_complete;
+            !matches!(preceding_dedup_session, WriteDedupSession::Clean)
+                || !write_dedup_journal_complete;
+        store.write_dedup_recovery_floor_seq = match preceding_dedup_session {
+            WriteDedupSession::DirtySince(floor) if write_dedup_journal_complete => floor,
+            WriteDedupSession::Clean if write_dedup_journal_complete => {
+                store.current_active_floor_seq()
+            }
+            WriteDedupSession::Clean
+            | WriteDedupSession::DirtyLegacy
+            | WriteDedupSession::DirtySince(_) => 0,
+        };
         // Establish the crash sentinel before this writer is returned to an
         // application. It is changed back to clean only by an orderly drop
         // after any required reconciliation has completed.
-        mark_write_dedup_session_dirty(&store.paths)?;
+        mark_write_dedup_session_dirty_since(&store.paths, store.write_dedup_recovery_floor_seq)?;
         store.orderly_close_prepared = false;
         Ok(store)
     }
@@ -1392,6 +1418,9 @@ impl Store {
             writer_lock: None,
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
+            write_dedup_recovery_floor_seq: 0,
+            write_dedup_recovery_segments_examined: 0,
+            write_dedup_recovery_scan_bytes: 0,
             operation_cohort_gathering: false,
             operation_reservation_chain: Vec::new(),
             last_operation_parallel_cooked: 0,
@@ -3382,7 +3411,23 @@ impl Store {
             Some(&self.tier_placement),
             self.writer_shards(),
         )? {
+            // Sealed and pending filenames carry their segment id. A durable
+            // journal checkpoint permits recovery to skip every older object;
+            // active filenames do not carry ids and are always examined.
+            if self.write_dedup_recovery_floor_seq > 0 {
+                if let Some(segment_id) = segment_id_from_filename(&path) {
+                    if segment_seq_from_id(&segment_id) < self.write_dedup_recovery_floor_seq {
+                        continue;
+                    }
+                }
+            }
             let bytes = fs::read(path)?;
+            self.write_dedup_recovery_segments_examined = self
+                .write_dedup_recovery_segments_examined
+                .saturating_add(1);
+            self.write_dedup_recovery_scan_bytes = self
+                .write_dedup_recovery_scan_bytes
+                .saturating_add(bytes.len() as u64);
             let report = scan_forward(&bytes, self.limits);
             for (offset, frame) in report.verified_frames() {
                 if frame.header.known_kind() != Some(FrameKind::ItemEvent) {
@@ -3434,7 +3479,28 @@ impl Store {
         if self.write_dedup_recovery_required {
             self.reconcile_write_dedup_from_media()?;
             self.write_dedup_recovery_required = false;
+            self.checkpoint_write_dedup_recovery_floor()?;
         }
+        Ok(())
+    }
+
+    /// Oldest active segment that can receive a future operation outcome.
+    fn current_active_floor_seq(&self) -> u64 {
+        self.actives
+            .iter()
+            .flatten()
+            .map(|writer| segment_seq_from_id(&writer.segment_id))
+            .min()
+            .unwrap_or_else(|| self.segment_seq.saturating_add(1))
+    }
+
+    /// Make every journal record stable before excluding older sealed media
+    /// from a future unclean-session reconciliation.
+    fn checkpoint_write_dedup_recovery_floor(&mut self) -> Result<(), StoreError> {
+        sync_write_dedup_journal(&write_dedup_journal_path(&self.paths))?;
+        let floor = self.current_active_floor_seq();
+        mark_write_dedup_session_dirty_since(&self.paths, floor)?;
+        self.write_dedup_recovery_floor_seq = floor;
         Ok(())
     }
 
@@ -3468,6 +3534,9 @@ impl Store {
             return Err(error);
         }
         self.write_dedup.insert(operation_id, record);
+        if self.current_active_floor_seq() > self.write_dedup_recovery_floor_seq {
+            self.checkpoint_write_dedup_recovery_floor()?;
+        }
         Ok(())
     }
 
@@ -3649,6 +3718,7 @@ impl Store {
                 }))
             )
         });
+        let mut rotated = false;
         if has_new {
             let media_started = Instant::now();
             if let Err(error) = self.persist_all_actives(DurabilityMode::Durable) {
@@ -3666,6 +3736,11 @@ impl Store {
             // log grows without bound and clean restart becomes a full-database
             // scan/rewrite.
             let rotation_started = Instant::now();
+            let active_ids_before: Vec<_> = self
+                .actives
+                .iter()
+                .map(|writer| writer.as_ref().map(|writer| writer.segment_id))
+                .collect();
             for shard in 0..self.writer_shards() {
                 if let Err(error) = self.maybe_auto_seal(shard) {
                     self.awo_writer_poisoned = true;
@@ -3673,6 +3748,11 @@ impl Store {
                 }
             }
             timing.rotation_ns = elapsed_ns(rotation_started);
+            rotated = self
+                .actives
+                .iter()
+                .map(|writer| writer.as_ref().map(|writer| writer.segment_id))
+                .ne(active_ids_before);
         }
 
         let outcome_started = Instant::now();
@@ -3689,8 +3769,10 @@ impl Store {
         }
 
         let refs: Vec<_> = records.iter().map(|(id, record)| (*id, record)).collect();
-        if append_write_dedup_batch_buffered(&write_dedup_journal_path(&self.paths), &refs).is_err()
-        {
+        let journal_appended =
+            append_write_dedup_batch_buffered(&write_dedup_journal_path(&self.paths), &refs)
+                .is_ok();
+        if !journal_appended {
             // The authoritative frames already crossed their stable boundary.
             // Keep exact-retry state in memory and deliberately withhold a
             // clean-session certificate so restart reconciles from media.
@@ -3698,6 +3780,11 @@ impl Store {
         }
         for (operation_id, record) in records {
             self.write_dedup.insert(operation_id, record);
+        }
+        if rotated && journal_appended {
+            if self.checkpoint_write_dedup_recovery_floor().is_err() {
+                self.write_dedup_recovery_required = true;
+            }
         }
 
         for (index, owner) in duplicates {
@@ -4291,20 +4378,30 @@ impl Store {
         }
 
         let rotation_started = Instant::now();
+        let active_segment_before_rotation = self.active_ref(0).map(|writer| writer.segment_id);
         if let Err(error) = self.maybe_auto_seal(0) {
             self.operation_reservation_chain.clear();
             self.awo_writer_poisoned = true;
             return Err(error);
         }
         let rotation_ns = elapsed_ns(rotation_started);
+        let rotated =
+            self.active_ref(0).map(|writer| writer.segment_id) != active_segment_before_rotation;
         let outcome_started = Instant::now();
         let refs: Vec<_> = records.iter().map(|(id, record)| (*id, record)).collect();
-        if append_write_dedup_batch_buffered(&write_dedup_journal_path(&self.paths), &refs).is_err()
-        {
+        let journal_appended =
+            append_write_dedup_batch_buffered(&write_dedup_journal_path(&self.paths), &refs)
+                .is_ok();
+        if !journal_appended {
             self.write_dedup_recovery_required = true;
         }
         for (operation_id, record) in records {
             self.write_dedup.insert(operation_id, record);
+        }
+        if rotated && journal_appended {
+            if self.checkpoint_write_dedup_recovery_floor().is_err() {
+                self.write_dedup_recovery_required = true;
+            }
         }
         if let Err(error) = crate::failpoint::hit("awo.complete.before") {
             self.operation_reservation_chain.clear();
@@ -6114,9 +6211,8 @@ impl Store {
             pipeline.note_foreground_activity();
         }
         let _ = self.poll_lifecycle();
-        self.derived_ops_since_checkpoint = self
-            .derived_ops_since_checkpoint
-            .saturating_add(operations);
+        self.derived_ops_since_checkpoint =
+            self.derived_ops_since_checkpoint.saturating_add(operations);
         Ok(())
     }
 
@@ -7144,6 +7240,8 @@ impl Store {
             durable_index_entries: self.durable_index.len(),
             write_dedup_entries: self.write_dedup.len(),
             write_dedup_capacity: self.write_dedup.capacity(),
+            write_dedup_recovery_segments_examined: self.write_dedup_recovery_segments_examined,
+            write_dedup_recovery_scan_bytes: self.write_dedup_recovery_scan_bytes,
             authoritative_io: self.authoritative_io_totals,
             shadow_io: self.shadow_io_totals,
             derived_ops_since_checkpoint: self.derived_ops_since_checkpoint,
@@ -10813,6 +10911,73 @@ mod tests {
         );
         store.delete("user-42", DurabilityMode::Durable).unwrap();
         assert!(store.get("user-42").unwrap().is_none());
+    }
+
+    #[test]
+    fn unclean_reopen_reconciles_from_last_journaled_segment_floor() {
+        let dir = tempdir().unwrap();
+        let body = vec![0x5a; 16 * 1024];
+        let key = "crash/floor";
+        let operation_id = [0x71; 16];
+        let hash = crate::write_dedup::content_identity("put", "", key, &body);
+        let initial_floor;
+        let advanced_floor;
+        {
+            let mut store = Store::create(dir.path()).unwrap();
+            store.set_seal_threshold(8 * 1024);
+            initial_floor = store.write_dedup_recovery_floor_seq;
+            let (_, replayed) = store
+                .put_subject_bytes_with_operation(
+                    key.as_bytes(),
+                    &body,
+                    DurabilityMode::Durable,
+                    WriteCondition::Unconditional,
+                    operation_id,
+                    hash,
+                )
+                .unwrap();
+            assert!(!replayed);
+            let second_key = "crash/floor-advance";
+            let second_id = [0x72; 16];
+            let second_hash = crate::write_dedup::content_identity("put", "", second_key, &body);
+            store
+                .put_subject_bytes_with_operation(
+                    second_key.as_bytes(),
+                    &body,
+                    DurabilityMode::Durable,
+                    WriteCondition::Unconditional,
+                    second_id,
+                    second_hash,
+                )
+                .unwrap();
+            advanced_floor = store.write_dedup_recovery_floor_seq;
+            assert!(advanced_floor > initial_floor);
+            assert_eq!(
+                load_write_dedup_session(store.paths()),
+                WriteDedupSession::DirtySince(advanced_floor)
+            );
+            // Model SIGKILL: release handles without the orderly-close barrier.
+            store.orderly_close_prepared = true;
+        }
+
+        let mut reopened = Store::open(dir.path()).unwrap();
+        assert!(reopened.write_dedup_recovery_required);
+        assert_eq!(reopened.write_dedup_recovery_floor_seq, advanced_floor);
+        let (_, replayed) = reopened
+            .put_subject_bytes_with_operation(
+                key.as_bytes(),
+                &body,
+                DurabilityMode::Durable,
+                WriteCondition::Unconditional,
+                operation_id,
+                hash,
+            )
+            .unwrap();
+        assert!(replayed);
+        assert!(!reopened.write_dedup_recovery_required);
+        let stats = reopened.write_path_stats();
+        assert_eq!(stats.write_dedup_recovery_segments_examined, 1);
+        assert!(stats.write_dedup_recovery_scan_bytes < 64 * 1024);
     }
 
     #[test]
