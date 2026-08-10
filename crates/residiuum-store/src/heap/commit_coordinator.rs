@@ -16,11 +16,11 @@ use std::time::{Duration, Instant};
 
 // Two logical batches may be gathered into one physical durability cohort.
 // Each half stays bounded; saturated bulk clients can fill both from the same
-// asynchronous request window. The gathered write remains at most 64 MiB.
+// asynchronous request window. The gathered write remains at most 32 MiB.
 // Record frames remain independently checksummed and recoverable: this changes
 // group-commit width, not record atomicity or the acknowledgement boundary.
-const MAX_COHORT_ENTRIES: usize = 4_096;
-const MAX_COHORT_BYTES: usize = 32 * 1024 * 1024;
+const MAX_COHORT_ENTRIES: usize = 2_048;
+const MAX_COHORT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GATHERED_COHORT_ENTRIES: usize = 2 * MAX_COHORT_ENTRIES;
 const MAX_GATHERED_COHORT_BYTES: usize = 2 * MAX_COHORT_BYTES;
 const MAX_ADMITTED_BYTES: usize = 2 * MAX_GATHERED_COHORT_BYTES;
@@ -674,7 +674,7 @@ fn install_batch_pair(
     }
 
     // Oversized singleton/edge shapes retain the qualified depth-two path;
-    // never exceed the physical 64 MiB gathered-cohort bound merely to merge.
+    // never exceed the physical 32 MiB gathered-cohort bound merely to merge.
     note_batch_attempt(inner, &first);
     note_batch_attempt(inner, &second);
     let (first_result, second_result) = commit_batch_pair(inner, &first, &second);
