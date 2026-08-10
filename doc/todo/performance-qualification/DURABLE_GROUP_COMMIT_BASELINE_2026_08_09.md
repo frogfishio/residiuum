@@ -1175,3 +1175,25 @@ valid optimization when larger writes and segment-boundary contention erase
 their benefit. The remaining gap to 500 MiB/s is approximately 40.8 MiB/s.
 The next work should reduce or overlap the 32 MiB path's segment-boundary I/O,
 or reduce frame/JSON/index CPU, rather than widen cohorts again.
+
+### 128 MiB segment threshold rejected (`d84d2fa`)
+
+The accepted 32 MiB cohort was then held constant while only the default
+segment threshold changed from 64 to 128 MiB. This halved rotations from 64 to
+32 over 4 GiB and reduced aggregate foreground rotation from 1.619 s to 1.135
+s, proving the intended mechanical effect.
+
+It did not produce a sustainable system. The first and third GiB reached
+508.34 and 502.25 MiB/s, but the fourth collapsed to 289.98 MiB/s. Overall
+throughput was only **415.67 MiB/s / 53,206 ops/s**. RSS reached 1.19 GiB during
+ingest, authoritative media-boundary time rose from 2.198 s to 3.578 s, and
+the final interval's 1 MiB Shadow staging writes consumed 1.616 s. Deferring a
+128 MiB segment's protection work created a larger periodic media-pressure
+burst instead of eliminating work.
+
+The run still closed, reopened, and validated all 524,288 records / 4 GiB with
+zero operation failures or admission errors. Its report is
+`d84d2fa-segment128m-cohort32m-4g.report.json`. Commit `0aab932` restores the
+qualified **64 MiB segment threshold**. The 128 MiB threshold is rejected on
+sustained-shape and tail-latency grounds; transient >500 MiB/s intervals are
+not a 500 MiB/s qualification result.
