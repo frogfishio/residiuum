@@ -8,7 +8,7 @@
 //! as order/page/project. **Not** RQL-C1 / pure micro-VM.
 
 use crate::error::Error;
-use crate::plan_v1::{AggFn, AggregateSpec, GroupAggSpec};
+use crate::plan_v1::{AggFn, GroupAggSpec};
 use crate::predicate::{resolve_path, Path, Resolve};
 use serde_json::{Map, Number, Value as JsonValue};
 use std::collections::BTreeMap;
@@ -32,49 +32,217 @@ pub(crate) fn apply_group_agg(
         return Ok(working);
     }
 
-    // Bucket: canonical key string → (first-seen key values, rows)
-    let mut buckets: BTreeMap<String, (Vec<JsonValue>, Vec<JsonValue>)> = BTreeMap::new();
-
+    let mut accumulator = GroupAccumulator::new(spec);
     for (_doc_key, doc) in working {
-        let mut key_vals = Vec::with_capacity(spec.group_by.len());
-        for path in &spec.group_by {
-            key_vals.push(match resolve_path(&doc, path) {
-                Resolve::Present(v) => v,
+        accumulator.ingest(&doc)?;
+    }
+    accumulator.finish()
+}
+
+#[derive(Debug, Clone)]
+enum AggregateState {
+    Count(u64),
+    Sum { sum: f64, any: bool },
+    Min(Option<f64>),
+    Max(Option<f64>),
+    Avg { sum: f64, count: u64 },
+}
+
+impl AggregateState {
+    fn new(fun: AggFn) -> Self {
+        match fun {
+            AggFn::Count => Self::Count(0),
+            AggFn::Sum => Self::Sum {
+                sum: 0.0,
+                any: false,
+            },
+            AggFn::Min => Self::Min(None),
+            AggFn::Max => Self::Max(None),
+            AggFn::Avg => Self::Avg { sum: 0.0, count: 0 },
+        }
+    }
+
+    fn ingest(&mut self, value: Option<f64>) {
+        match self {
+            Self::Count(count) => *count = count.saturating_add(1),
+            Self::Sum { sum, any } => {
+                if let Some(value) = value {
+                    *sum += value;
+                    *any = true;
+                }
+            }
+            Self::Min(best) => {
+                if let Some(value) = value {
+                    *best = Some(best.map_or(value, |current| current.min(value)));
+                }
+            }
+            Self::Max(best) => {
+                if let Some(value) = value {
+                    *best = Some(best.map_or(value, |current| current.max(value)));
+                }
+            }
+            Self::Avg { sum, count } => {
+                if let Some(value) = value {
+                    *sum += value;
+                    *count = count.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    fn finish(self) -> Result<JsonValue, Error> {
+        match self {
+            Self::Count(count) => Ok(JsonValue::Number(Number::from(count))),
+            Self::Sum { sum: _, any: false } => Ok(JsonValue::Null),
+            Self::Sum { sum, any: true } => json_number(sum),
+            Self::Min(None) | Self::Max(None) => Ok(JsonValue::Null),
+            Self::Min(Some(value)) | Self::Max(Some(value)) => json_number(value),
+            Self::Avg { count: 0, .. } => Ok(JsonValue::Null),
+            Self::Avg { sum, count } => json_number(sum / count as f64),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct GroupState {
+    key_values: Vec<JsonValue>,
+    aggregates: Vec<AggregateState>,
+}
+
+/// One-pass group accumulator. It retains group keys and scalar accumulator
+/// state only; full input documents are consumed and released immediately.
+pub(crate) struct GroupAccumulator<'a> {
+    spec: &'a GroupAggSpec,
+    groups: BTreeMap<Vec<u8>, GroupState>,
+    numeric_paths: Vec<&'a Path>,
+    aggregate_source_slots: Vec<Option<usize>>,
+}
+
+impl<'a> GroupAccumulator<'a> {
+    pub(crate) fn new(spec: &'a GroupAggSpec) -> Self {
+        let mut numeric_paths = Vec::new();
+        let mut aggregate_source_slots = Vec::with_capacity(spec.aggregates.len());
+        for aggregate in &spec.aggregates {
+            if aggregate.fun == AggFn::Count {
+                aggregate_source_slots.push(None);
+                continue;
+            }
+            let Some(path) = aggregate.source.as_ref() else {
+                aggregate_source_slots.push(None);
+                continue;
+            };
+            let slot = numeric_paths
+                .iter()
+                .position(|existing| *existing == path)
+                .unwrap_or_else(|| {
+                    numeric_paths.push(path);
+                    numeric_paths.len() - 1
+                });
+            aggregate_source_slots.push(Some(slot));
+        }
+        Self {
+            spec,
+            groups: BTreeMap::new(),
+            numeric_paths,
+            aggregate_source_slots,
+        }
+    }
+
+    /// Whether grouping or aggregate inputs can observe the logical key that
+    /// lives outside the stored JSON body.
+    pub(crate) fn requires_logical_key(&self) -> bool {
+        self.spec
+            .group_by
+            .iter()
+            .chain(
+                self.spec
+                    .aggregates
+                    .iter()
+                    .filter_map(|aggregate| aggregate.source.as_ref()),
+            )
+            .any(is_logical_key_path)
+    }
+
+    pub(crate) fn ingest(&mut self, doc: &JsonValue) -> Result<(), Error> {
+        let mut key_values = Vec::with_capacity(self.spec.group_by.len());
+        for path in &self.spec.group_by {
+            key_values.push(match resolve_path(doc, path) {
+                Resolve::Present(value) => value,
                 Resolve::Absent => JsonValue::Null,
             });
         }
-        let canon = canonical_group_key(&key_vals);
-        let entry = buckets
-            .entry(canon)
-            .or_insert_with(|| (key_vals, Vec::new()));
-        entry.1.push(doc);
+        let canonical = canonical_group_key_bytes(&key_values);
+        let group = self.groups.entry(canonical).or_insert_with(|| GroupState {
+            key_values,
+            aggregates: self
+                .spec
+                .aggregates
+                .iter()
+                .map(|aggregate| AggregateState::new(aggregate.fun))
+                .collect(),
+        });
+        let numeric_values = self
+            .numeric_paths
+            .iter()
+            .map(|path| numeric_present(doc, path))
+            .collect::<Result<Vec<_>, _>>()?;
+        for ((aggregate, source_slot), state) in self
+            .spec
+            .aggregates
+            .iter()
+            .zip(&self.aggregate_source_slots)
+            .zip(&mut group.aggregates)
+        {
+            let value = match aggregate.fun {
+                AggFn::Count => None,
+                _ => {
+                    let slot = source_slot.ok_or_else(|| {
+                        Error::QueryInvalid(format!(
+                            "{}() requires a field path",
+                            aggregate.fun.as_str()
+                        ))
+                    })?;
+                    numeric_values[slot]
+                }
+            };
+            state.ingest(value);
+        }
+        Ok(())
     }
 
-    let mut out = Vec::with_capacity(buckets.len());
-    for (canon, (key_vals, rows)) in buckets {
-        let mut obj = Map::new();
-        for (i, path) in spec.group_by.iter().enumerate() {
-            let field = output_field_name(path);
-            obj.insert(field, key_vals[i].clone());
+    pub(crate) fn finish(self) -> Result<Vec<(String, JsonValue)>, Error> {
+        let mut output = Vec::with_capacity(self.groups.len());
+        for (canonical_bytes, group) in self.groups {
+            let mut object = Map::new();
+            for (index, path) in self.spec.group_by.iter().enumerate() {
+                object.insert(output_field_name(path), group.key_values[index].clone());
+            }
+            for (aggregate, state) in self.spec.aggregates.iter().zip(group.aggregates) {
+                object.insert(aggregate.output.clone(), state.finish()?);
+            }
+            output.push((
+                format!("g:{}", canonical_group_key_from_bytes(&canonical_bytes)),
+                JsonValue::Object(object),
+            ));
         }
-        for agg in &spec.aggregates {
-            let v = evaluate_agg(agg, &rows)?;
-            obj.insert(agg.output.clone(), v);
-        }
-        let key = format!("g:{canon}");
-        out.push((key, JsonValue::Object(obj)));
+        Ok(output)
     }
-    Ok(out)
+}
+
+fn is_logical_key_path(path: &Path) -> bool {
+    matches!(path.0.first().map(String::as_str), Some("_key" | "$key"))
 }
 
 fn output_field_name(path: &Path) -> String {
     path.0.last().cloned().unwrap_or_else(|| path.dotted())
 }
 
-fn canonical_group_key(vals: &[JsonValue]) -> String {
-    // Stable, collision-resistant enough for in-memory buckets (BLAKE3 of JSON).
-    let body = serde_json::to_vec(vals).unwrap_or_else(|_| b"[]".to_vec());
-    let hash = blake3::hash(&body);
+fn canonical_group_key_bytes(vals: &[JsonValue]) -> Vec<u8> {
+    serde_json::to_vec(vals).unwrap_or_else(|_| b"[]".to_vec())
+}
+
+fn canonical_group_key_from_bytes(body: &[u8]) -> String {
+    let hash = blake3::hash(body);
     bytes_to_hex(hash.as_bytes())
 }
 
@@ -86,79 +254,6 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
         out.push(HEX[(b & 0xf) as usize] as char);
     }
     out
-}
-
-fn evaluate_agg(agg: &AggregateSpec, rows: &[JsonValue]) -> Result<JsonValue, Error> {
-    match agg.fun {
-        AggFn::Count => Ok(JsonValue::Number(Number::from(rows.len() as u64))),
-        AggFn::Sum => {
-            let path = agg
-                .source
-                .as_ref()
-                .ok_or_else(|| Error::QueryInvalid("sum() requires a field path".into()))?;
-            let mut sum = 0.0f64;
-            let mut any = false;
-            for row in rows {
-                if let Some(n) = numeric_present(row, path)? {
-                    sum += n;
-                    any = true;
-                }
-            }
-            if !any {
-                return Ok(JsonValue::Null);
-            }
-            json_number(sum)
-        }
-        AggFn::Min => {
-            let path = agg
-                .source
-                .as_ref()
-                .ok_or_else(|| Error::QueryInvalid("min() requires a field path".into()))?;
-            extremum(rows, path, true)
-        }
-        AggFn::Max => {
-            let path = agg
-                .source
-                .as_ref()
-                .ok_or_else(|| Error::QueryInvalid("max() requires a field path".into()))?;
-            extremum(rows, path, false)
-        }
-        AggFn::Avg => {
-            let path = agg
-                .source
-                .as_ref()
-                .ok_or_else(|| Error::QueryInvalid("avg() requires a field path".into()))?;
-            let mut sum = 0.0f64;
-            let mut n = 0u64;
-            for row in rows {
-                if let Some(v) = numeric_present(row, path)? {
-                    sum += v;
-                    n += 1;
-                }
-            }
-            if n == 0 {
-                return Ok(JsonValue::Null);
-            }
-            json_number(sum / (n as f64))
-        }
-    }
-}
-
-fn extremum(rows: &[JsonValue], path: &Path, want_min: bool) -> Result<JsonValue, Error> {
-    let mut best: Option<f64> = None;
-    for row in rows {
-        if let Some(v) = numeric_present(row, path)? {
-            best = Some(match best {
-                None => v,
-                Some(b) if want_min => b.min(v),
-                Some(b) => b.max(v),
-            });
-        }
-    }
-    match best {
-        None => Ok(JsonValue::Null),
-        Some(v) => json_number(v),
-    }
 }
 
 fn numeric_present(doc: &JsonValue, path: &Path) -> Result<Option<f64>, Error> {

@@ -69,7 +69,7 @@ use residiuum_format::{
     FrameParts, SafetyLimits, SegmentId, WIRE_MAJOR, WIRE_MINOR,
 };
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -83,6 +83,100 @@ const META_VERSION: &str = "residiuum-store-9\n";
 
 /// Soft max size of the active segment before auto-seal (bytes).
 const DEFAULT_SEAL_THRESHOLD: u64 = 64 * 1024 * 1024;
+/// Maximum resident bytes in the derived cache of previously verified bodies.
+const DEFAULT_VERIFIED_BODY_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Debug)]
+struct CachedVerifiedBody {
+    event_id: [u8; 16],
+    body: Arc<[u8]>,
+    charge: usize,
+}
+
+/// Bounded FIFO cache of immutable, already-verified logical bodies.
+///
+/// Entries are admitted only after normal frame verification. The current
+/// primary-index event id is part of every lookup, so a successful put/delete
+/// makes the previous entry unreachable without making this cache authority.
+#[derive(Debug)]
+struct VerifiedBodyCache {
+    entries: HashMap<Vec<u8>, CachedVerifiedBody>,
+    admission_order: VecDeque<(Vec<u8>, [u8; 16])>,
+    resident_bytes: usize,
+    max_bytes: usize,
+}
+
+impl VerifiedBodyCache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            admission_order: VecDeque::new(),
+            resident_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn get(&self, subject: &[u8], event_id: &[u8; 16]) -> Option<Vec<u8>> {
+        let entry = self.entries.get(subject)?;
+        (entry.event_id == *event_id).then(|| entry.body.as_ref().to_vec())
+    }
+
+    fn insert(&mut self, subject: &[u8], event_id: [u8; 16], body: &[u8]) {
+        if body.len() > self.max_bytes {
+            return;
+        }
+        if self
+            .entries
+            .get(subject)
+            .is_some_and(|entry| entry.event_id == event_id)
+        {
+            return;
+        }
+        if let Some(previous) = self.entries.remove(subject) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(previous.charge);
+        }
+        // Bound payloads and cache bookkeeping together. Without a fixed
+        // per-entry charge, an arbitrary number of empty values could bypass
+        // a nominal byte limit.
+        let charge = body.len().saturating_add(subject.len()).saturating_add(64);
+        if charge > self.max_bytes {
+            return;
+        }
+        let body: Arc<[u8]> = Arc::from(body);
+        self.resident_bytes = self.resident_bytes.saturating_add(charge);
+        self.entries.insert(
+            subject.to_vec(),
+            CachedVerifiedBody {
+                event_id,
+                body,
+                charge,
+            },
+        );
+        self.admission_order.push_back((subject.to_vec(), event_id));
+        if self.admission_order.len() > self.entries.len().saturating_mul(2).saturating_add(1_024) {
+            self.admission_order
+                .retain(|(queued_subject, queued_event)| {
+                    self.entries
+                        .get(queued_subject)
+                        .is_some_and(|entry| entry.event_id == *queued_event)
+                });
+        }
+        while self.resident_bytes > self.max_bytes {
+            let Some((old_subject, old_event)) = self.admission_order.pop_front() else {
+                break;
+            };
+            if self
+                .entries
+                .get(&old_subject)
+                .is_some_and(|entry| entry.event_id == old_event)
+            {
+                if let Some(removed) = self.entries.remove(&old_subject) {
+                    self.resident_bytes = self.resident_bytes.saturating_sub(removed.charge);
+                }
+            }
+        }
+    }
+}
 
 /// Default writer shard count (legacy single-active segment).
 const DEFAULT_WRITER_SHARDS: usize = 1;
@@ -660,6 +754,8 @@ pub struct Store {
     /// Process-local validated order projections for secondary indexes.
     /// Derived only; every secondary-index write/delete invalidates its scope.
     ordered_secondary_cache: Mutex<HashMap<(String, String, bool, bool), Vec<Vec<u8>>>>,
+    /// Bounded derived cache of logical bodies after full frame verification.
+    verified_body_cache: Mutex<VerifiedBodyCache>,
     /// Buffered/durable ops since the last derived-state disk checkpoint (DEF-023).
     derived_ops_since_checkpoint: u64,
     /// Active segment per writer shard (DEF-096 Axis B). Length == `writer_shards`.
@@ -1009,6 +1105,9 @@ impl Store {
             index: PrimaryIndex::new(),
             durable_index: PrimaryIndex::new(),
             ordered_secondary_cache: Mutex::new(HashMap::new()),
+            verified_body_cache: Mutex::new(VerifiedBodyCache::new(
+                DEFAULT_VERIFIED_BODY_CACHE_BYTES,
+            )),
             derived_ops_since_checkpoint: 0,
             actives: (0..writer_shards).map(|_| None).collect(),
             writer_shards,
@@ -1150,6 +1249,9 @@ impl Store {
             index: PrimaryIndex::new(),
             durable_index: PrimaryIndex::new(),
             ordered_secondary_cache: Mutex::new(HashMap::new()),
+            verified_body_cache: Mutex::new(VerifiedBodyCache::new(
+                DEFAULT_VERIFIED_BODY_CACHE_BYTES,
+            )),
             derived_ops_since_checkpoint: 0,
             actives: (0..writer_shards).map(|_| None).collect(),
             writer_shards,
@@ -1416,6 +1518,9 @@ impl Store {
             index: PrimaryIndex::new(),
             durable_index: PrimaryIndex::new(),
             ordered_secondary_cache: Mutex::new(HashMap::new()),
+            verified_body_cache: Mutex::new(VerifiedBodyCache::new(
+                DEFAULT_VERIFIED_BODY_CACHE_BYTES,
+            )),
             derived_ops_since_checkpoint: 0,
             actives: (0..writer_shards).map(|_| None).collect(),
             writer_shards,
@@ -4856,7 +4961,21 @@ impl Store {
         let mut groups: BTreeMap<[u8; 16], Vec<(usize, u64, crate::compact::LocatorExpect)>> =
             BTreeMap::new();
 
+        if let Ok(cache) = self.verified_body_cache.lock() {
+            for (position, subject) in subjects.iter().enumerate() {
+                let Some(crate::index::IndexEntry::Live(live)) = self.index.get(subject) else {
+                    continue;
+                };
+                if let Some(body) = cache.get(subject, &live.event_id) {
+                    results[position] = Some(Ok(Some(body)));
+                }
+            }
+        }
+
         for (position, subject) in subjects.iter().enumerate() {
+            if results[position].is_some() {
+                continue;
+            }
             let Some(crate::index::IndexEntry::Live(live)) = self.index.get(subject) else {
                 results[position] = Some(Ok(None));
                 continue;
@@ -4924,6 +5043,18 @@ impl Store {
                 // Preserve the established fallback/error taxonomy for rare
                 // corrupt, renamed, or concurrently unavailable media.
                 results[position] = Some(self.get_subject_bytes(&expect.subject));
+            }
+        }
+
+        if let Ok(mut cache) = self.verified_body_cache.lock() {
+            for (position, subject) in subjects.iter().enumerate() {
+                let Some(Ok(Some(body))) = results[position].as_ref() else {
+                    continue;
+                };
+                let Some(crate::index::IndexEntry::Live(live)) = self.index.get(subject) else {
+                    continue;
+                };
+                cache.insert(subject, live.event_id, body);
             }
         }
 
@@ -6667,6 +6798,14 @@ impl Store {
         if !lv.body.is_empty() {
             return Ok(lv.body.clone());
         }
+        if let Some(body) = self
+            .verified_body_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(subject, &lv.event_id))
+        {
+            return Ok(body);
+        }
         let expect = crate::compact::LocatorExpect {
             segment_id: lv.segment_id,
             event_id: lv.event_id,
@@ -6708,7 +6847,11 @@ impl Store {
                                 ));
                             }
                         }
-                        return Ok(body.to_vec());
+                        let body = body.to_vec();
+                        if let Ok(mut cache) = self.verified_body_cache.lock() {
+                            cache.insert(subject, lv.event_id, &body);
+                        }
+                        return Ok(body);
                     }
                 }
             }
@@ -6716,7 +6859,11 @@ impl Store {
         if lv.frame_offset == 0 {
             return Ok(Vec::new());
         }
-        self.pread_body_for_locator_matching(&expect, lv.frame_offset)
+        let body = self.pread_body_for_locator_matching(&expect, lv.frame_offset)?;
+        if let Ok(mut cache) = self.verified_body_cache.lock() {
+            cache.insert(subject, lv.event_id, &body);
+        }
+        Ok(body)
     }
 
     /// Pread an item body by (segment_id, frame_offset).
@@ -11299,6 +11446,55 @@ mod tests {
     use super::*;
     use crate::BoundaryKind;
     use tempfile::tempdir;
+
+    #[test]
+    fn verified_body_cache_is_version_keyed_and_bounded() {
+        let mut cache = VerifiedBodyCache::new(70);
+        cache.insert(b"a", [1; 16], b"one");
+        assert_eq!(
+            cache.get(b"a", &[1; 16]).as_deref(),
+            Some(b"one".as_slice())
+        );
+        assert!(cache.get(b"a", &[2; 16]).is_none());
+
+        cache.insert(b"a", [2; 16], b"two");
+        assert!(cache.get(b"a", &[1; 16]).is_none());
+        assert_eq!(
+            cache.get(b"a", &[2; 16]).as_deref(),
+            Some(b"two".as_slice())
+        );
+
+        cache.insert(b"b", [3; 16], b"six");
+        assert!(cache.resident_bytes <= cache.max_bytes);
+        assert!(cache.get(b"a", &[2; 16]).is_none());
+        assert_eq!(
+            cache.get(b"b", &[3; 16]).as_deref(),
+            Some(b"six".as_slice())
+        );
+    }
+
+    #[test]
+    fn verified_body_cache_cannot_survive_a_new_event() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::create(dir.path()).unwrap();
+        let first = store
+            .put("cache/key", b"first", DurabilityMode::Durable)
+            .unwrap();
+        assert_eq!(store.get("cache/key").unwrap().unwrap(), b"first");
+        assert_eq!(store.get("cache/key").unwrap().unwrap(), b"first");
+        assert!(store
+            .verified_body_cache
+            .lock()
+            .unwrap()
+            .get(b"cache/key", &first.event_id)
+            .is_some());
+
+        let second = store
+            .put("cache/key", b"second", DurabilityMode::Durable)
+            .unwrap();
+        assert_ne!(first.event_id, second.event_id);
+        assert_eq!(store.get("cache/key").unwrap().unwrap(), b"second");
+    }
 
     #[test]
     fn create_put_get_delete() {

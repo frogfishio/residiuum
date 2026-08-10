@@ -25,11 +25,20 @@ pub struct CompiledKernelWhere {
     /// SDA source text (params already substituted).
     pub source: String,
     prog: sda_core::Program,
+    constant: Option<bool>,
 }
 
 impl CompiledKernelWhere {
+    /// Whether evaluation is independent of the input document.
+    pub(crate) fn is_constant(&self) -> bool {
+        self.constant.is_some()
+    }
+
     /// Evaluate against one document (`input` binding).
     pub fn eval_doc(&self, doc: &JsonValue) -> Result<bool, Error> {
+        if let Some(value) = self.constant {
+            return Ok(value);
+        }
         match self.prog.run_json("input", doc.clone()) {
             Ok(JsonValue::Bool(b)) => Ok(b),
             Ok(other) => Err(Error::QueryInvalid(format!(
@@ -51,10 +60,16 @@ pub fn compile_where(
     let source = lower_predicate(pred, params)?;
     let prog = sda_core::Program::parse(&source)
         .map_err(|e| Error::QueryInvalid(format!("kernel SDA parse failed: {e}; src={source}")))?;
+    let constant = match source.as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    };
     Ok(CompiledKernelWhere {
         profile: KERNEL_PROFILE,
         source,
         prog,
+        constant,
     })
 }
 

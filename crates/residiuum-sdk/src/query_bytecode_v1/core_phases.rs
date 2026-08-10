@@ -182,6 +182,9 @@ pub(crate) struct CoreFrame<'a> {
     pending_keys: Option<PendingKeys>,
     /// Full documents in the working bag (pre-project).
     working: Vec<(String, JsonValue)>,
+    /// Group rows were accumulated while filtering; Project must not aggregate
+    /// them a second time.
+    pre_aggregated: bool,
     known_holes: Vec<HoleEvidence>,
     examined_docs: u64,
     examined_bytes: u64,
@@ -320,6 +323,7 @@ impl<'a> CoreFrame<'a> {
             index_keys_ordered: false,
             pending_keys: None,
             working: Vec::new(),
+            pre_aggregated: false,
             known_holes: Vec::new(),
             examined_docs: 0,
             examined_bytes: 0,
@@ -537,6 +541,11 @@ impl<'a> CoreFrame<'a> {
         let pending = self.pending_keys.take().ok_or_else(|| {
             Error::QueryInvalid("core frame: Filter without Scan pending keys".into())
         })?;
+        if self.project.group_agg.is_active() {
+            self.filter_group_aggregate(scan, pending)?;
+            self.saw_filter = true;
+            return Ok(());
+        }
         // Group/aggregate must see the full filtered bag (budget still applies).
         // Early-stop at page size would under-count groups.
         let need = if self.project.group_agg.is_active() {
@@ -573,6 +582,173 @@ impl<'a> CoreFrame<'a> {
             }
         }
         self.saw_filter = true;
+        Ok(())
+    }
+
+    fn filter_group_aggregate<S: DocScan>(
+        &mut self,
+        scan: &mut S,
+        pending: PendingKeys,
+    ) -> Result<(), Error> {
+        let spec = self.project.group_agg.clone();
+        let mut accumulator = super::group_agg::GroupAccumulator::new(&spec);
+        let needs_logical_key = !self.where_k.is_constant() || accumulator.requires_logical_key();
+        match pending {
+            PendingKeys::Materialized => {
+                for (key, doc) in self.working.drain(..) {
+                    check_governance(self.options, self.started)?;
+                    let doc = if needs_logical_key {
+                        with_logical_key(&key, doc)
+                    } else {
+                        doc
+                    };
+                    if self.where_k.eval_doc(&doc)? {
+                        accumulator.ingest(&doc)?;
+                    }
+                }
+            }
+            PendingKeys::Index(candidates) => {
+                let can_batch = self.budget.is_none_or(|budget| {
+                    budget.max_documents.is_none() && budget.max_bytes.is_none()
+                });
+                if can_batch {
+                    for keys in candidates.chunks(256) {
+                        check_governance(self.options, self.started)?;
+                        for (key, document) in scan.get_json_covered_many(keys)? {
+                            match document {
+                                HostDocument::Present(doc) => {
+                                    let doc = if needs_logical_key {
+                                        with_logical_key(&key, doc)
+                                    } else {
+                                        doc
+                                    };
+                                    self.examined_docs += 1;
+                                    self.examined_bytes =
+                                        self.examined_bytes.saturating_add(json_byte_len(&doc));
+                                    if self.where_k.eval_doc(&doc)? {
+                                        accumulator.ingest(&doc)?;
+                                    }
+                                }
+                                HostDocument::Absent => {
+                                    self.examined_docs += 1;
+                                    self.known_holes.push(HoleEvidence {
+                                        code: "index_key_absent".into(),
+                                        key: Some(key),
+                                    });
+                                }
+                                HostDocument::Hole { code } => {
+                                    self.examined_docs += 1;
+                                    self.known_holes.push(HoleEvidence {
+                                        code,
+                                        key: Some(key),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    for key in candidates {
+                        check_governance(self.options, self.started)?;
+                        if self.stop_if_doc_budget_full()? {
+                            break;
+                        }
+                        match scan.get_json_covered(&key)? {
+                            HostDocument::Present(doc) => {
+                                let doc = if needs_logical_key {
+                                    with_logical_key(&key, doc)
+                                } else {
+                                    doc
+                                };
+                                let length = json_byte_len(&doc);
+                                if self.stop_if_bytes_would_exceed(length)? {
+                                    break;
+                                }
+                                self.examined_docs += 1;
+                                self.examined_bytes = self.examined_bytes.saturating_add(length);
+                                if self.where_k.eval_doc(&doc)? {
+                                    accumulator.ingest(&doc)?;
+                                }
+                            }
+                            HostDocument::Absent => {
+                                self.examined_docs += 1;
+                                self.known_holes.push(HoleEvidence {
+                                    code: "index_key_absent".into(),
+                                    key: Some(key),
+                                });
+                            }
+                            HostDocument::Hole { code } => {
+                                self.examined_docs += 1;
+                                self.known_holes.push(HoleEvidence {
+                                    code,
+                                    key: Some(key),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            PendingKeys::Stream { after } => {
+                let mut after = after;
+                'pages: loop {
+                    check_governance(self.options, self.started)?;
+                    if self.budget_truncated {
+                        break;
+                    }
+                    let batch = scan.scan_json_covered_page(Some(256), after.as_deref())?;
+                    if batch.is_empty() {
+                        break;
+                    }
+                    for (key, document) in batch {
+                        check_governance(self.options, self.started)?;
+                        if self.stop_if_doc_budget_full()? {
+                            break 'pages;
+                        }
+                        after = Some(key.clone());
+                        match document {
+                            HostDocument::Present(doc) => {
+                                let doc = if needs_logical_key {
+                                    with_logical_key(&key, doc)
+                                } else {
+                                    doc
+                                };
+                                let length = json_byte_len(&doc);
+                                if self.stop_if_bytes_would_exceed(length)? {
+                                    break 'pages;
+                                }
+                                self.examined_docs += 1;
+                                self.examined_bytes = self.examined_bytes.saturating_add(length);
+                                if self.where_k.eval_doc(&doc)? {
+                                    accumulator.ingest(&doc)?;
+                                }
+                            }
+                            HostDocument::Absent => {
+                                self.examined_docs += 1;
+                                self.known_holes.push(HoleEvidence {
+                                    code: "key_listed_absent".into(),
+                                    key: Some(key),
+                                });
+                            }
+                            HostDocument::Hole { code } => {
+                                self.examined_docs += 1;
+                                self.known_holes.push(HoleEvidence {
+                                    code,
+                                    key: Some(key),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            PendingKeys::FieldIndex(_)
+            | PendingKeys::OrderedIndex(_)
+            | PendingKeys::FieldStream => {
+                return Err(Error::QueryInvalid(
+                    "core frame: invalid field-order source for group aggregation".into(),
+                ));
+            }
+        }
+        self.working = accumulator.finish()?;
+        self.pre_aggregated = true;
         Ok(())
     }
 
@@ -1031,10 +1207,12 @@ impl<'a> CoreFrame<'a> {
 
         // Q2 group/aggregate: reshape, then order + page the group bag.
         if self.project.group_agg.is_active() {
-            self.working = super::group_agg::apply_group_agg(
-                std::mem::take(&mut self.working),
-                &self.project.group_agg,
-            )?;
+            if !self.pre_aggregated {
+                self.working = super::group_agg::apply_group_agg(
+                    std::mem::take(&mut self.working),
+                    &self.project.group_agg,
+                )?;
+            }
             // Deterministic order on group rows (key tie-break still applies).
             self.working.sort_by(|(ka, va), (kb, vb)| {
                 super::ir_order::compare_rows(ka, va, kb, vb, &self.order)

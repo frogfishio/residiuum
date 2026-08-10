@@ -321,6 +321,95 @@ ordered numeric encoding. A future versioned order-preserving secondary format
 can remove that cold bridge. The scan and aggregate cells remain the dominant
 parity deficit.
 
+## Sixth optimisation pass — streaming group accumulators
+
+The group path retained every filtered input document in a bucket and then
+rescanned each bucket once for every requested aggregate. It also serialized,
+hashed and hex-encoded the group key for every input row. A five-aggregate
+query over one numeric field therefore resolved that same field four times per
+document and retained the complete 5,000-document working set until Project.
+
+The group path now accumulates while Filter consumes storage pages:
+
+- each group retains only its key values and scalar count/sum/min/max/average
+  state;
+- full input documents are released immediately after ingestion;
+- shared aggregate source paths are resolved once per document;
+- canonical group bytes identify the in-memory bucket, while BLAKE3 and hex
+  rendering happen once per distinct output group;
+- constant `true`/`false` predicates bypass SDA input cloning and evaluation;
+- Project recognizes already-accumulated rows and cannot aggregate them twice.
+
+Same 5,000-document fixture, five warm-ups and twelve measured iterations:
+
+| Query shape | After pass 5 | After pass 6 | Change | Mongo | Residiuum/Mongo |
+|---|---:|---:|---:|---:|---:|
+| Indexed equality, 10% | 11.29 ms | **11.43 ms** | noise | 2.90 ms | 3.95× |
+| Compound equality/range | 29.43 ms | **29.75 ms** | noise | 2.17 ms | 13.71× |
+| Deep nested scan | 89.66 ms | **89.68 ms** | noise | 9.76 ms | 9.19× |
+| Deterministic indexed top-10 | 0.618 ms | **0.592 ms** | 1.04× | 1.264 ms | **0.47×** |
+| Grouped count | 60.39 ms | **38.10 ms** | **1.59×** | 1.71 ms | 22.28× |
+| Five aggregates | 59.08 ms | **37.24 ms** | **1.59×** | 1.77 ms | 21.01× |
+
+All six row counts and canonical value digests remain exactly equal to Mongo.
+The grouped-count Project phase fell to 0.293 ms and the five-aggregate Project
+phase to 0.013 ms; aggregation now occurs in the streaming Filter phase as
+intended. Grouped count is 6.5× faster than the original 248.04 ms path, and
+five aggregates is 6.6× faster than the original 246.83 ms path.
+
+The remaining aggregate floor is now sharply attributed. Both workloads spend
+about 26.25 ms in verified host reads and about 37 ms in the combined streaming
+Filter phase. They are still roughly 21–22× behind Mongo, so this is not
+aggregate parity. The next useful investigation is the per-row representation
+boundary shared by scans and aggregates: JSON decode/materialisation,
+predicate/path resolution and canonical group-key allocation. A follow-up
+change also elides logical `_key` injection when a constant predicate and the
+group/aggregate paths prove that the key cannot be observed; it is not credited
+with a separate latency claim because storage variance obscured the micro-gain.
+Optimising accumulator arithmetic further cannot remove the measured storage
+floor.
+
+## Seventh optimisation pass — bounded verified-body cache
+
+Warm queries still reopened and reverified every immutable frame even after the
+operating system had cached its pages. The physical store now retains a bounded
+process-local cache of logical body bytes only after normal frame verification.
+It is derived, not authority:
+
+- lookup requires both the exact subject and the current primary-index event
+  id, so a put or delete makes old bytes unreachable immediately;
+- the cache is shared by point reads and segment-grouped query batches;
+- payload plus subject and per-entry bookkeeping count against a hard 64 MiB
+  bound, including empty values;
+- admission is FIFO and stale queue records are compacted, preventing an
+  update-heavy key from growing cache metadata without bound;
+- cache loss or process restart merely returns reads to the verified media path.
+
+Same 5,000-document fixture and exact result digests:
+
+| Query shape | Before cache | With cache | Host read with cache | Mongo | Residiuum/Mongo |
+|---|---:|---:|---:|---:|---:|
+| Indexed equality, 10% | 11.43 ms | **9.84 ms** | 3.47 ms | 2.90 ms | 3.40× |
+| Compound equality/range | 29.75 ms | **31.83 ms** | 5.41 ms | 2.17 ms | 14.67× |
+| Deep nested scan | 89.68 ms | **114.50 ms** | 23.85 ms | 9.76 ms | 11.73× |
+| Deterministic indexed top-10 | 0.592 ms | **0.890 ms** | 0.291 ms | 1.264 ms | **0.70×** |
+| Grouped count | 38.10 ms | **36.08 ms** | 17.95 ms | 1.71 ms | 21.09× |
+| Five aggregates | 37.24 ms | **34.98 ms** | 17.96 ms | 1.77 ms | 19.74× |
+
+The aggregate cells improved modestly and verified host-read time fell from
+about 26.25 ms to 17.95 ms. The mixed regressions are run-to-run storage and
+host variance, not result differences; all six outputs remain exact. More
+importantly, this experiment rejects the hypothesis that redundant physical
+verification is the dominant remaining gap. The OS page cache was already
+serving warm bytes cheaply. Repeated JSON decoding/cloning and row-oriented
+predicate/group execution now outweigh the saved media work.
+
+The next optimisation should therefore sit above the byte store: a bounded
+decoded-value cache keyed by the same immutable version identity, followed by
+phase measurement. If that still leaves a large aggregate gap, parity will
+require covering/index-only aggregation rather than increasingly elaborate
+full-document scans.
+
 ## Artefacts
 
 - Harness: `tools/rql-mongo-dipstick/`
