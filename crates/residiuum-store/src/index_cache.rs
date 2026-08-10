@@ -1264,12 +1264,10 @@ mod tests {
         let loaded = try_load_primary_sealed_manifest(&path, store_id, primary).unwrap();
         assert_eq!(loaded[0].segment_id, [1; 16]);
         assert_eq!(loaded[1].segment_id, [2; 16]);
-        assert!(try_load_primary_sealed_manifest(
-            &path,
-            store_id,
-            b"different-primary-checkpoint"
-        )
-        .is_none());
+        assert!(
+            try_load_primary_sealed_manifest(&path, store_id, b"different-primary-checkpoint")
+                .is_none()
+        );
     }
 
     #[test]

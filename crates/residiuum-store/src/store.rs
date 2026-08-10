@@ -56,10 +56,11 @@ use crate::tier::{
 };
 use crate::token_keys::ContinuationKeyring;
 use crate::write_dedup::{
-    append_write_dedup, append_write_dedup_batch_buffered, load_write_dedup_checked,
-    load_write_dedup_session, mark_write_dedup_session_clean, mark_write_dedup_session_dirty_since,
-    rewrite_write_dedup_journal, save_write_dedup, sync_write_dedup_journal,
-    write_dedup_journal_path, write_dedup_path, DedupRecord, WriteDedupSession, WriteDedupTable,
+    append_write_dedup, append_write_dedup_batch, append_write_dedup_batch_buffered,
+    load_write_dedup_checked, load_write_dedup_session, mark_write_dedup_session_clean,
+    mark_write_dedup_session_dirty_since, rewrite_write_dedup_journal, save_write_dedup,
+    sync_write_dedup_journal, write_dedup_journal_path, write_dedup_path, DedupRecord,
+    WriteDedupSession, WriteDedupTable,
 };
 use crate::writer_lock::{StoreOpenOptions, WriterLock, WriterLockObservation};
 use residiuum_format::{
@@ -700,6 +701,8 @@ pub struct Store {
     write_dedup_recovery_required: bool,
     /// Oldest segment sequence that may contain an unjournaled operation.
     write_dedup_recovery_floor_seq: u64,
+    /// Whether the on-disk journal ended at a complete checksummed record.
+    write_dedup_journal_complete: bool,
     /// Per-open evidence for the lazy first-mutation recovery path.
     write_dedup_recovery_segments_examined: u64,
     write_dedup_recovery_scan_bytes: u64,
@@ -1022,6 +1025,7 @@ impl Store {
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
             write_dedup_recovery_floor_seq: 0,
+            write_dedup_journal_complete: true,
             write_dedup_recovery_segments_examined: 0,
             write_dedup_recovery_scan_bytes: 0,
             operation_cohort_gathering: false,
@@ -1161,6 +1165,7 @@ impl Store {
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
             write_dedup_recovery_floor_seq: 0,
+            write_dedup_journal_complete: true,
             write_dedup_recovery_segments_examined: 0,
             write_dedup_recovery_scan_bytes: 0,
             operation_cohort_gathering: false,
@@ -1280,6 +1285,7 @@ impl Store {
         let (write_dedup, write_dedup_journal_complete) =
             load_write_dedup_checked(&write_dedup_path(&store.paths))?;
         store.write_dedup = write_dedup;
+        store.write_dedup_journal_complete = write_dedup_journal_complete;
         open_metrics.dedup_ns = elapsed_ns(phase);
         let phase = Instant::now();
         store.resume_or_start_all_actives()?;
@@ -1424,6 +1430,7 @@ impl Store {
             write_dedup: WriteDedupTable::new(),
             write_dedup_recovery_required: false,
             write_dedup_recovery_floor_seq: 0,
+            write_dedup_journal_complete: true,
             write_dedup_recovery_segments_examined: 0,
             write_dedup_recovery_scan_bytes: 0,
             operation_cohort_gathering: false,
@@ -3411,6 +3418,7 @@ impl Store {
     /// events. Reconciliation before reclaim ensures those operation decisions
     /// remain available for exact retry after their source frames are removed.
     fn reconcile_write_dedup_from_media(&mut self) -> Result<(), StoreError> {
+        let mut recovered = Vec::<([u8; 16], DedupRecord)>::new();
         for path in all_segment_paths(
             &self.paths,
             Some(&self.tier_placement),
@@ -3454,28 +3462,39 @@ impl Store {
                     Some(_) => return Err(StoreError::OperationIdentityConflict),
                     None => {}
                 }
-                self.write_dedup.insert(
-                    operation_id,
-                    DedupRecord {
-                        content_hash,
-                        store_id: self.store_id,
-                        segment_id: envelope.segment_id,
-                        item_id: envelope.item_id,
-                        event_id: frame.header.event_id,
-                        event_kind: envelope.event_kind,
-                        // Reclaim only follows durable compact output. The
-                        // recovered decision is therefore durable now even if
-                        // its initial acceptance requested a weaker mode.
-                        durability: DurabilityMode::Durable,
-                        offset,
-                    },
-                );
+                let record = DedupRecord {
+                    content_hash,
+                    store_id: self.store_id,
+                    segment_id: envelope.segment_id,
+                    item_id: envelope.item_id,
+                    event_id: frame.header.event_id,
+                    event_kind: envelope.event_kind,
+                    // Reclaim only follows durable compact output. The
+                    // recovered decision is therefore durable now even if
+                    // its initial acceptance requested a weaker mode.
+                    durability: DurabilityMode::Durable,
+                    offset,
+                };
+                self.write_dedup.insert(operation_id, record.clone());
+                recovered.push((operation_id, record));
             }
         }
-        // Persist even when every frame was already represented in memory: a
-        // prior atomic-file failure can leave the in-memory table ahead of disk.
-        save_write_dedup(&write_dedup_path(&self.paths), &self.write_dedup)?;
-        rewrite_write_dedup_journal(&write_dedup_journal_path(&self.paths), &self.write_dedup)
+        let journal_path = write_dedup_journal_path(&self.paths);
+        if self.write_dedup_journal_complete {
+            let refs: Vec<_> = recovered
+                .iter()
+                .map(|(operation_id, record)| (*operation_id, record))
+                .collect();
+            append_write_dedup_batch(&journal_path, &refs)?;
+        } else {
+            // A torn suffix cannot be repaired by appending beyond it because
+            // replay stops at the first invalid record. Replace the derived
+            // checkpoint and journal only in this exceptional path.
+            save_write_dedup(&write_dedup_path(&self.paths), &self.write_dedup)?;
+            rewrite_write_dedup_journal(&journal_path, &self.write_dedup)?;
+        }
+        self.write_dedup_journal_complete = true;
+        Ok(())
     }
 
     /// Pay the authoritative-media reconciliation cost at most once after an
@@ -3536,6 +3555,7 @@ impl Store {
             // The authoritative frame may already be durable. Do not publish a
             // clean session marker until its outcome has been reconstructed.
             self.write_dedup_recovery_required = true;
+            self.write_dedup_journal_complete = false;
             return Err(error);
         }
         self.write_dedup.insert(operation_id, record);
@@ -3782,6 +3802,7 @@ impl Store {
             // Keep exact-retry state in memory and deliberately withhold a
             // clean-session certificate so restart reconciles from media.
             self.write_dedup_recovery_required = true;
+            self.write_dedup_journal_complete = false;
         }
         for (operation_id, record) in records {
             self.write_dedup.insert(operation_id, record);
@@ -4399,6 +4420,7 @@ impl Store {
                 .is_ok();
         if !journal_appended {
             self.write_dedup_recovery_required = true;
+            self.write_dedup_journal_complete = false;
         }
         for (operation_id, record) in records {
             self.write_dedup.insert(operation_id, record);
@@ -11091,6 +11113,7 @@ mod tests {
         let hash = crate::write_dedup::content_identity("put", "", key, &body);
         let initial_floor;
         let advanced_floor;
+        let journal_len_before_crash;
         {
             let mut store = Store::create(dir.path()).unwrap();
             store.set_seal_threshold(8 * 1024);
@@ -11125,6 +11148,9 @@ mod tests {
                 load_write_dedup_session(store.paths()),
                 WriteDedupSession::DirtySince(advanced_floor)
             );
+            journal_len_before_crash = fs::metadata(write_dedup_journal_path(store.paths()))
+                .unwrap()
+                .len();
             // Model SIGKILL: release handles without the orderly-close barrier.
             store.orderly_close_prepared = true;
         }
@@ -11144,6 +11170,12 @@ mod tests {
             .unwrap();
         assert!(replayed);
         assert!(!reopened.write_dedup_recovery_required);
+        assert_eq!(
+            fs::metadata(write_dedup_journal_path(reopened.paths()))
+                .unwrap()
+                .len(),
+            journal_len_before_crash
+        );
         let stats = reopened.write_path_stats();
         assert_eq!(stats.write_dedup_recovery_segments_examined, 1);
         assert!(stats.write_dedup_recovery_scan_bytes < 64 * 1024);
