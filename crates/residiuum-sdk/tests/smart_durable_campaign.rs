@@ -458,11 +458,18 @@ fn smart_client_durable_retained_media_campaign() {
                 .saturating_mul(client_batch.max(4))
                 .max(DEFAULT_EMBEDDED_QUEUE_CAPACITY)
         });
+    let scheduler_queue_byte_capacity = std::env::var(
+        "RESIDIUUM_SMART_DURABLE_QUEUE_BYTE_CAPACITY",
+    )
+    .ok()
+    .and_then(|value| value.parse::<usize>().ok())
+    .unwrap_or(64 * 1024 * 1024);
     assert!(logical_target > 0);
     assert!(payload_bytes > 0);
     assert!(concurrency > 0);
     assert!(read_workers > 0);
     assert!(client_batch > 0);
+    assert!(scheduler_queue_byte_capacity > 0);
     let free_at_start = available_bytes(&root);
     assert!(
         free_at_start >= minimum_free,
@@ -498,6 +505,7 @@ fn smart_client_durable_retained_media_campaign() {
         EmbeddedOptions::new(&store)
             .workers(read_workers)
             .queue_capacity(scheduler_queue_capacity)
+            .queue_byte_capacity(scheduler_queue_byte_capacity)
             .enrichment_enabled(enrichment_enabled),
     ))
     .unwrap();
@@ -727,6 +735,7 @@ fn smart_client_durable_retained_media_campaign() {
         },
         "read_query_workers": read_workers,
         "scheduler_queue_capacity": scheduler_queue_capacity,
+        "scheduler_queue_byte_capacity": scheduler_queue_byte_capacity,
         "free_bytes_at_start": free_at_start,
         "file_logical_bytes_after_close": file_logical_bytes_after_close,
         "allocated_bytes_after_close": allocated_bytes_after_close,
