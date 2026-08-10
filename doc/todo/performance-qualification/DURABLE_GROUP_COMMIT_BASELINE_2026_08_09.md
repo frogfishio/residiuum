@@ -1197,3 +1197,59 @@ zero operation failures or admission errors. Its report is
 qualified **64 MiB segment threshold**. The 128 MiB threshold is rejected on
 sustained-shape and tail-latency grounds; transient >500 MiB/s intervals are
 not a 500 MiB/s qualification result.
+
+### Repeated embedded-host SIGKILL sensitivity
+
+The production-shaped campaign in `scripts/run-crash-reopen-sensitivity.sh`
+writes 2 GiB through the asynchronous SDK, sends a real `SIGKILL`, then kills
+two consecutive recovery sessions after their first idempotent mutation. A
+healing close and clean control follow. Open time and first-mutation recovery
+are measured separately so lazy recovery cannot hide behind a fast `open()`.
+
+The baseline at `3581c08` reproduced the reported forever-recovery shape. The
+first reopen rebuilt 2.29 GB of authority in 2.95 s and its first mutation then
+spent another 2.15 s rescanning the same retained database for operation
+outcomes. Later unclean opens were approximately 286 ms, but every first
+mutation still cost approximately 2.1 s. Only an orderly close reduced it to
+6 ms.
+
+Commit `0b9c7e3` adds a crash-safe operation-journal segment floor. The floor
+advances only after the outcome journal is stable at a segment rotation; a
+crash between authoritative persistence and outcome append therefore remains
+recoverable. Older sealed objects can no longer be reconsidered after every
+host crash. On Bonzo the repeated first-mutation scan fell from 2.29 GB to one
+34.5 MB active segment and from approximately 2.1 s to 190–195 ms.
+
+Commit `89554c8` binds an authenticated sealed-membership sidecar to the exact
+primary checkpoint. When current sealed media are an immutable superset, open
+loads that checkpoint and replays only newly sealed objects rather than
+rejecting it as an opaque fingerprint mismatch. Missing, torn, foreign,
+mutated or incomplete sidecars still fail closed to the full authoritative
+rebuild. The 2 GiB kill run reported `TailReplayed`, `AcceptedV4`, and zero
+full-scan bytes. Because the campaign starts from an empty checkpoint and then
+writes the entire 2 GiB before its first crash, that first open still had to
+decode the 2.24–2.29 GB sealed suffix and took 3.6–3.9 s. Subsequent crash opens
+replayed only their tiny active tails and took 0.29–0.43 s.
+
+Commit `ac650d8` stops rewriting the complete operation journal after a valid
+bounded reconciliation. It appends only genuinely missing outcomes and
+reserves full replacement for a torn journal. The final Bonzo campaign showed:
+
+- first post-2-GiB crash open: 3.86 s, zero full-rebuild bytes, 2.24 GB sealed
+  suffix replay, plus a 34.5 MB active tail;
+- first mutation after that crash: 47 ms;
+- next two deliberately unclean opens: 426 and 428 ms;
+- their first mutations: 49 and 49 ms, each bounded to one 34.5 MB active;
+- orderly-close control: 227 ms open and 6.3 ms first mutation, with zero
+  recovery bytes.
+
+Store unit tests (279/279), DEF-022 (6/6), DEF-104 (11/11), and SDK unit tests
+(171/171) pass. The qualified conclusion is that repeated embedded-host death
+no longer creates forever recovery: after the initial catch-up, both open and
+first-write work stay bounded across consecutive `SIGKILL`s. The explicit
+residual is the first crash after a very long session with no complete primary
+checkpoint: sealed-tail replay is safe and avoids a second scan, but its time
+still scales with bytes written since that checkpoint. Making that interval
+independent of session length requires an incremental primary-index delta
+journal; periodic full-index cloning is forbidden because it would reintroduce
+O(N²) sustained-ingest work.
