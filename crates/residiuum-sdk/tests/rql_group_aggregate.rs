@@ -137,9 +137,11 @@ fn group_pages_concatenate_without_truncating_high_cardinality_output() {
     let mut options = QueryRunOptions::default();
     options.page_size = Some(3);
     let mut rows = Vec::new();
+    let mut examined = 0;
     loop {
         let page =
             execute_rql_full(&mut client, source, &Parameters::default(), options.clone()).unwrap();
+        examined += page.base.coverage.examined_documents;
         rows.extend(page.rows);
         if page.base.exhausted {
             break;
@@ -157,6 +159,109 @@ fn group_pages_concatenate_without_truncating_high_cardinality_output() {
         keys,
         (0..7).map(|index| format!("d{index}")).collect::<Vec<_>>()
     );
+    assert_eq!(examined, 7, "the completed group bag must be scanned once");
+}
+
+#[test]
+fn group_spool_replay_or_frontier_drift_recomputes_safely() {
+    let mut client = open_client();
+    let mut docs = client.create_collection("docs").unwrap().collection;
+    for index in 0..7 {
+        docs.put(
+            &format!("d{index}"),
+            &serde_json::json!({"bucket": format!("b{index}")}),
+        )
+        .unwrap();
+    }
+
+    let source = "from docs group by _key project _key, count() as n";
+    let options = QueryRunOptions {
+        page_size: Some(3),
+        diagnostics: true,
+        ..Default::default()
+    };
+    let first = execute_rql_full(&mut client, source, &Parameters::default(), options.clone())
+        .expect("first group page");
+    let cursor = first.base.next.clone().expect("group continuation");
+
+    let mut resumed = options.clone();
+    resumed.after = Some(cursor.clone());
+    let cached = execute_rql_full(&mut client, source, &Parameters::default(), resumed.clone())
+        .expect("cached group continuation");
+    assert_eq!(cached.base.coverage.examined_documents, 0);
+
+    let replayed = execute_rql_full(&mut client, source, &Parameters::default(), resumed)
+        .expect("consumed spool cursor recomputes");
+    assert_eq!(replayed.rows, cached.rows);
+    assert_eq!(replayed.base.coverage.examined_documents, 7);
+
+    let first = execute_rql_full(&mut client, source, &Parameters::default(), options.clone())
+        .expect("fresh first group page");
+    docs.put("z", &serde_json::json!({"bucket": "bz"})).unwrap();
+    let mut drifted = options;
+    drifted.after = first.base.next;
+    let drifted = execute_rql_full(&mut client, source, &Parameters::default(), drifted)
+        .expect("frontier drift recomputes");
+    assert_eq!(drifted.base.coverage.examined_documents, 8);
+}
+
+#[test]
+fn logical_key_grouping_cannot_be_spoofed_by_a_body_field() {
+    let mut client = open_client();
+    let mut docs = client.create_collection("docs").unwrap().collection;
+    docs.put("a", &serde_json::json!({"_key": "spoof"}))
+        .unwrap();
+    docs.put("b", &serde_json::json!({"_key": "spoof"}))
+        .unwrap();
+
+    let page = execute_rql_full(
+        &mut client,
+        "from docs group by _key project _key, count() as n",
+        &Parameters::default(),
+        QueryRunOptions::default(),
+    )
+    .unwrap();
+    let groups = page
+        .rows
+        .iter()
+        .map(|(_, value)| {
+            (
+                value["_key"].as_str().unwrap().to_string(),
+                value["n"].as_u64().unwrap(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(groups, BTreeMap::from([("a".into(), 1), ("b".into(), 1)]));
+}
+
+#[test]
+fn logical_key_grouping_preserves_numeric_aggregates() {
+    let mut client = open_client();
+    let mut docs = client.create_collection("docs").unwrap().collection;
+    docs.put("a", &serde_json::json!({"amount": 7})).unwrap();
+    docs.put("b", &serde_json::json!({"amount": 11})).unwrap();
+
+    let page = execute_rql_full(
+        &mut client,
+        "from docs group by _key project _key, count() as n, sum(amount) as total, min(amount) as lo, max(amount) as hi, avg(amount) as mean",
+        &Parameters::default(),
+        QueryRunOptions::default(),
+    )
+    .unwrap();
+    let groups = page
+        .rows
+        .into_iter()
+        .map(|(_, value)| (value["_key"].as_str().unwrap().to_string(), value))
+        .collect::<BTreeMap<_, _>>();
+
+    for (key, amount) in [("a", 7), ("b", 11)] {
+        let value = &groups[key];
+        assert_eq!(value["n"], 1);
+        assert_eq!(value["total"], amount);
+        assert_eq!(value["lo"], amount);
+        assert_eq!(value["hi"], amount);
+        assert_eq!(value["mean"], amount as f64);
+    }
 }
 
 #[test]
@@ -243,10 +348,51 @@ fn warmed_filtered_group_uses_validated_index_candidates() {
     let warm = run(&mut client);
     assert_eq!(warm.0, expected);
     assert_eq!(warm.1, 3);
-    assert!(
-        warm.2 < cold.2,
-        "warm pushdown removes candidate body reads"
+    assert!(cold.2 <= 2, "cold pushdown resolves one bounded body batch");
+    assert!(warm.2 <= cold.2, "warm pushdown adds no host round trip");
+}
+
+#[test]
+fn projected_filter_preserves_missing_null_and_value_distinction() {
+    let mut client = open_client();
+    let mut docs = client.create_collection("docs").unwrap().collection;
+    for (key, value) in [
+        ("a", serde_json::json!({"status": "missing"})),
+        ("b", serde_json::json!({"marker": null, "status": "null"})),
+        ("c", serde_json::json!({"marker": "y", "status": "value"})),
+        (
+            "d",
+            serde_json::json!({"marker": "x", "status": "excluded"}),
+        ),
+    ] {
+        docs.put(key, &value).unwrap();
+    }
+
+    let mut options = QueryRunOptions::default();
+    options.diagnostics = true;
+    let page = execute_rql_full(
+        &mut client,
+        r#"from docs where marker != "x" group by status project status, count() as n"#,
+        &Parameters::default(),
+        options,
+    )
+    .unwrap();
+    let counts = page
+        .rows
+        .iter()
+        .map(|(_, row)| {
+            (
+                row["status"].as_str().unwrap().to_string(),
+                row["n"].as_u64().unwrap(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        counts,
+        BTreeMap::from([("null".to_string(), 1), ("value".to_string(), 1)])
     );
+    assert_eq!(page.base.coverage.examined_documents, 4);
+    assert!(page.base.diagnostics.unwrap().host_read_calls <= 2);
 }
 
 #[test]
@@ -274,7 +420,7 @@ fn warmed_decoded_scan_cannot_survive_a_replacement_event() {
         )
     };
 
-    assert_eq!(run_sum(&mut client), (1, 3, 1));
+    assert_eq!(run_sum(&mut client), (1, 2, 1));
     assert_eq!(
         run_sum(&mut client),
         (1, 2, 1),
@@ -285,7 +431,7 @@ fn warmed_decoded_scan_cannot_survive_a_replacement_event() {
         .unwrap();
     assert_eq!(
         run_sum(&mut client),
-        (9, 3, 1),
+        (9, 2, 1),
         "new event must bypass old decode"
     );
 }
@@ -318,7 +464,7 @@ fn projected_group_scan_preserves_nested_missing_and_null_semantics() {
     assert!(counts.contains(&(serde_json::Value::String("us".into()), 1)));
     assert!(counts.contains(&(serde_json::Value::Null, 2)));
     assert_eq!(page.base.coverage.examined_documents, 3);
-    assert_eq!(page.base.diagnostics.unwrap().host_read_calls, 3);
+    assert_eq!(page.base.diagnostics.unwrap().host_read_calls, 2);
 }
 
 #[test]

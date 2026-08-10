@@ -22,11 +22,15 @@ live in [`residiuum-sdk`](https://crates.io/crates/residiuum-sdk). Wire framing 
 
 ```toml
 [dependencies]
-residiuum-server = "0.1"
-residiuum-store = "0.1"   # open/create the store path you serve
+residiuum-server = "0.2.3"
+residiuum-store = "0.2.5"   # open/create the store path you serve
 ```
 
 Or: `cargo add residiuum-server`
+
+`0.2.3` serves the `residiuum-sdk 0.4` Full-RQL response shape: attached rows
+are sent once, while pre-attach cardinality is reported as `base_row_count`.
+The former duplicate `base_rows` payload is no longer emitted.
 
 > **License note:** This crate is AGPL-3.0-or-later. Network use of a modified
 > version triggers the AGPL source-offer obligation. Prefer MIT

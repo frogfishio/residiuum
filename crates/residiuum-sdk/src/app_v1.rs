@@ -1838,16 +1838,30 @@ fn parse_rql_full_result(
         rows.push((key.to_string(), value));
     }
 
-    let base_rows = result
-        .get("base_rows")
-        .cloned()
-        .ok_or_else(|| Error::ProtocolViolation("rql_query Full missing base_rows".into()))?;
+    // New servers send metadata-only base evidence. Accept legacy duplicated
+    // base rows for rolling upgrades, but discard their bodies after parsing.
+    let legacy_base_rows = result.get("base_rows").cloned();
+    let base_row_count = result
+        .get("base_row_count")
+        .and_then(|value| value.as_u64())
+        .and_then(|value| usize::try_from(value).ok())
+        .or_else(|| {
+            legacy_base_rows
+                .as_ref()
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+        })
+        .ok_or_else(|| Error::ProtocolViolation("rql_query Full missing base_row_count".into()))?;
     let mut base_result = result.clone();
     base_result
         .as_object_mut()
         .expect("wire result is object when fields are readable")
-        .insert("rows".into(), base_rows);
-    let base = parse_rql_query_result(base_result, heap_id, root_id)?;
+        .insert(
+            "rows".into(),
+            legacy_base_rows.unwrap_or_else(|| serde_json::json!([])),
+        );
+    let mut base = parse_rql_query_result(base_result, heap_id, root_id)?;
+    base.rows.clear();
     if base.plan_hash != expected_program_hash {
         return Err(Error::ProtocolViolation(
             "rql_query Full server QVM identity differs from the locally compiled programme".into(),
@@ -1888,6 +1902,7 @@ fn parse_rql_full_result(
         profile: crate::RQL_FULL_PROFILE,
         rows,
         base,
+        base_row_count,
         pipeline: compiled.pipeline,
         project: compiled.project,
         enrich_loads,

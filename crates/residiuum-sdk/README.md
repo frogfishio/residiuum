@@ -26,16 +26,35 @@ Freeze label: `SDK_API_VERSION` = `1.0`.
 
 ```toml
 [dependencies]
-residiuum-sdk = "0.3.0"   # MPL-2.0: bounded multi-Heap embedded client + Heap SDK
+residiuum-sdk = "0.4.0"   # MPL-2.0: bounded multi-Heap embedded client + Heap SDK
 ```
 
 Optional in-process multi-node cluster (pulls AGPL `residiuum-cluster`):
 
 ```toml
-residiuum-sdk = { version = "0.2", features = ["cluster"] }
+residiuum-sdk = { version = "0.4", features = ["cluster"] }
 ```
 
 Or: `cargo add residiuum-sdk`
+
+### 0.4 migration note
+
+`0.4.0` is the feedback release for the bounded multi-Heap client and optimized
+RQL runtime. It includes version-bearing reads/scans, named Heap binding from
+one physical connection, bounded async scheduling, grouped-query projection,
+batched enrichment and the clean-reopen storage path from `residiuum-store
+0.2.5`.
+
+The intentional breaking change is Full RQL result ownership:
+
+- `RqlFullPage.rows` remains the attached/projected result;
+- `RqlFullPage.base` retains Core continuation, coverage, consistency and
+  diagnostics, but `base.rows` is empty;
+- `RqlFullPage.base_row_count` records the number of pre-attach Core rows.
+
+Applications must consume `rows`, not `base.rows`. Remote `0.4.0` clients can
+read older Full responses containing `base_rows`, but discard the duplicated
+bodies. New servers send only `base_row_count`.
 
 ### License
 
@@ -142,7 +161,7 @@ idempotently rebuildable projections.
 ### Legacy flat embedded API
 
 The following older flat surface requires
-`residiuum-sdk = { version = "0.3.0", features = ["legacy-flat-sdk"] }`.
+`residiuum-sdk = { version = "0.4.0", features = ["legacy-flat-sdk"] }`.
 
 ```rust
 use residiuum_sdk::{json, Residiuum, Filter};

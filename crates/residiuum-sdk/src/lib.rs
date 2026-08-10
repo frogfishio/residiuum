@@ -145,8 +145,8 @@ pub use filter::{
     FieldBuilder, Filter, Pred, QueryBudget, QueryOptions, QueryPlan, SortOrder, QUERY_PLAN_PROFILE,
 };
 pub use heap::{
-    CreatedCollection, Heap, HeapBatch, HeapCollection, HeapConnection, HeapStream,
-    ListedCollection, ResidiuumDeployment, SignedCursor,
+    CreatedCollection, DecodedJsonCacheStats, Heap, HeapBatch, HeapCollection, HeapConnection,
+    HeapStream, ListedCollection, ResidiuumDeployment, SignedCursor,
 };
 pub use history::{KeyHistory, Version};
 pub use indexes::IndexInfo;

@@ -2079,15 +2079,19 @@ fn set_at_path(doc: &mut JsonValue, path: &Path, value: JsonValue) -> Result<(),
     Err(Error::QueryInvalid("within replace unreachable".into()))
 }
 
-/// Result of [`execute_rql_full`] (one base page + enrich/within attach).
+/// Result of [`execute_rql_full`] (base-page evidence + attached rows).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RqlFullPage {
     /// Profile label.
     pub profile: &'static str,
     /// Rows after pipeline (+ optional project).
     pub rows: Vec<(String, JsonValue)>,
-    /// Underlying Application Core page (pre-enrich values).
+    /// Underlying Application Core evidence. `rows` is intentionally empty:
+    /// its owned values are moved into the Full pipeline instead of retained
+    /// as a duplicate result set.
     pub base: QueryPage,
+    /// Number of rows produced by Core before the Full pipeline.
+    pub base_row_count: usize,
     /// Compiled ordered pipeline applied after the base page.
     pub pipeline: Vec<FullPipelineStepV1>,
     /// Nested project applied after the pipeline, if any.
@@ -2239,6 +2243,7 @@ pub fn execute_full_qvm_on_host_with<H: HostCapabilities>(
         profile: RQL_FULL_PROFILE,
         rows: out.rows,
         base: out.page,
+        base_row_count: out.base_row_count,
         pipeline,
         project,
         enrich_loads: out.enrich_loads,

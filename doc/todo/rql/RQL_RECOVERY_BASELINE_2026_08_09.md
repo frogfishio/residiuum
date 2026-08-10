@@ -218,9 +218,11 @@ Third recovery tranche, same day — bounded Full RQL over product wire:
 
 - op 118 now keeps backward-compatible Core semantics when `profile` is omitted
   or `core`, and admits Full only through the explicit `profile: "full"` request;
-- the frozen Full response distinguishes attached `rows` from pre-attachment
-  `base_rows`, preserves the Core page continuation/coverage evidence, and
-  reports each root enrich load mode;
+- the original Full response distinguished attached `rows` from duplicated
+  pre-attachment `base_rows`; the August 10 performance correction moves those
+  owned Core values directly into the Full pipeline and now returns metadata-
+  only Core evidence plus `base_row_count`. Remote clients accept legacy
+  `base_rows` during rolling upgrades but do not retain their bodies;
 - server execution compiles Full source and executes verified QVM against a
   collection-qualified host restricted to the authorised Heap catalogue;
 - the backend-neutral public surface is `HeapClient::rql_full`, because Full

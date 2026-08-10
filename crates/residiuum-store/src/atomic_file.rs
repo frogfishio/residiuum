@@ -61,6 +61,20 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     write_atomic_with(path, bytes, AtomicWriteOptions::default())
 }
 
+/// Atomically publish `bytes` only when the currently published bytes differ.
+///
+/// This is intended for derived control documents reconstructed during clean
+/// open. An unchanged document needs no durability event; changed or unreadable
+/// state still uses the complete atomic publish and directory-sync protocol.
+/// Returns `true` when a publish was performed.
+pub fn write_atomic_if_changed(path: &Path, bytes: &[u8]) -> Result<bool, StoreError> {
+    if fs::read(path).is_ok_and(|current| current == bytes) {
+        return Ok(false);
+    }
+    write_atomic(path, bytes)?;
+    Ok(true)
+}
+
 /// Atomically replace `path`, keeping the prior file as [`previous_path`].
 pub fn write_atomic_keep_previous(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     write_atomic_with(
@@ -255,6 +269,16 @@ mod tests {
         write_atomic(&path, b"{\"v\":2}").unwrap();
         assert_eq!(fs::read(&path).unwrap(), b"{\"v\":2}");
         assert!(!previous_path(&path).exists());
+    }
+
+    #[test]
+    fn write_atomic_if_changed_skips_identical_publish() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("derived.bin");
+        assert!(write_atomic_if_changed(&path, b"one").unwrap());
+        assert!(!write_atomic_if_changed(&path, b"one").unwrap());
+        assert!(write_atomic_if_changed(&path, b"two").unwrap());
+        assert_eq!(fs::read(path).unwrap(), b"two");
     }
 
     #[test]

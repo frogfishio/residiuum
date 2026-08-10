@@ -260,7 +260,7 @@ pub fn write_segment_catalog(
     catalog: &SegmentCatalog,
 ) -> Result<(), StoreError> {
     let bytes = encode_catalog(store_id, catalog);
-    crate::atomic_file::write_atomic(path, &bytes)?;
+    crate::atomic_file::write_atomic_if_changed(path, &bytes)?;
     Ok(())
 }
 

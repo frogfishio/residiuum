@@ -3,7 +3,10 @@
 Status: **qualified integration candidate; use the bounded embedded slice only**
 
 Minimum SDK package for one physical connection with simultaneous Tinker and
-Gremlin Heap bindings: **0.3.0**.
+Gremlin Heap bindings and the current query/runtime corrections: **0.4.0**.
+
+Migration note: Full RQL callers consume `RqlFullPage.rows`; `base.rows` is now
+empty metadata evidence and `base_row_count` carries pre-attach cardinality.
 
 Authority: [Async Driver Spine Specification](./ASYNC_DRIVER_SPINE_SPEC.md)
 

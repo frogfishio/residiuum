@@ -858,7 +858,7 @@ pub fn write_placement(
     placement: &TierPlacement,
 ) -> Result<(), StoreError> {
     let bytes = encode_placement(store_id, placement);
-    crate::atomic_file::write_atomic(path, &bytes)?;
+    crate::atomic_file::write_atomic_if_changed(path, &bytes)?;
     Ok(())
 }
 
@@ -902,7 +902,7 @@ pub fn write_tier_roots_file(
             .unwrap_or_else(|| default_tier_dir(paths, tier).display().to_string());
         body.push_str(&format!("{} {} {}\n", tier.as_str(), avail, root));
     }
-    crate::atomic_file::write_atomic(&path, body.as_bytes())?;
+    crate::atomic_file::write_atomic_if_changed(&path, body.as_bytes())?;
     Ok(())
 }
 

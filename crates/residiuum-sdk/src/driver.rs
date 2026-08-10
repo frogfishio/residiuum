@@ -567,6 +567,9 @@ pub struct ClientInspection {
     /// Constant-time physical-store lifecycle counters. `None` only when the
     /// store mutex was poisoned and its state could not be inspected safely.
     pub write_path: Option<residiuum_store::StoreWritePathStats>,
+    /// Constant-time deployment decoded JSON cache counters. `None` only when
+    /// the cache mutex was poisoned.
+    pub decoded_json_cache: Option<crate::DecodedJsonCacheStats>,
 }
 
 /// Async connection to one physical Residiuum deployment.
@@ -674,6 +677,7 @@ impl Client {
         let mut inspection = self.scheduler.inspect();
         inspection.operation_commits = self.deployment.operation_commit_stats();
         inspection.write_path = self.deployment.write_path_stats().ok();
+        inspection.decoded_json_cache = self.deployment.decoded_json_cache_stats();
         inspection
     }
 
@@ -2430,6 +2434,7 @@ impl Scheduler {
             closed: self.closed.load(Ordering::Acquire),
             operation_commits: residiuum_store::OperationCommitStats::default(),
             write_path: None,
+            decoded_json_cache: None,
         }
     }
 

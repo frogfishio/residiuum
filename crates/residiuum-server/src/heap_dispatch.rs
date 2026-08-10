@@ -1690,11 +1690,6 @@ fn dispatch_rql_query(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> He
             .iter()
             .map(|(key, value)| serde_json::json!({ "key": key, "value": value }))
             .collect();
-        let base_rows: Vec<Value> = base
-            .rows
-            .iter()
-            .map(|r| serde_json::json!({ "key": r.key, "value": r.value }))
-            .collect();
         let next = base
             .next
             .as_ref()
@@ -1731,7 +1726,7 @@ fn dispatch_rql_query(id: u64, req: &HeapRpcRequest, ctx: HeapDataCtx<'_>) -> He
                 "heap_id": heap_id.to_string(),
                 "collection_id": coll.to_string(),
                 "rows": rows,
-                "base_rows": base_rows,
+                "base_row_count": page.base_row_count,
                 "next": next,
                 "exhausted": base.exhausted,
                 "coverage": { "complete": base.coverage.complete, "mode": cov_mode },

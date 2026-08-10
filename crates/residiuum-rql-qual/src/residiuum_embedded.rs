@@ -25,7 +25,7 @@ use residiuum_heap::{
 };
 use residiuum_sdk::driver::{
     Client as DriverClient, Collection as DriverCollection, CreateCollectionOptions,
-    EmbeddedOptions, PutManyEntry,
+    EmbeddedOptions, HeapClient as DriverHeapClient, PutManyEntry,
 };
 use residiuum_sdk::{Parameters, QueryRunOptions, ResidiuumDeployment, RqlFullExecuteOptions};
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
@@ -72,6 +72,107 @@ pub struct GameDipstickReport {
     pub queries: Vec<GameDipstickQuery>,
 }
 
+/// Selected store-open evidence for one reopen repetition.
+#[derive(Debug, Clone, Serialize)]
+pub struct GameReopenOpenReport {
+    pub total_ns: u64,
+    pub identity_and_lock_ns: u64,
+    pub tier_state_ns: u64,
+    pub inventory_ns: u64,
+    pub inventory_descriptor_probe_bytes: u64,
+    pub inventory_fallback_scan_bytes: u64,
+    pub pending_recovery_ns: u64,
+    pub pending_seals_recovered: u64,
+    pub protected_pair_recovery_ns: u64,
+    pub protected_pairs_recovered: u64,
+    pub index_ns: u64,
+    pub index_disposition: String,
+    pub index_cache_decision: String,
+    pub index_cache_bytes: u64,
+    pub index_cache_decode_ns: u64,
+    pub index_install_clone_ns: u64,
+    pub index_catalog_derive_ns: u64,
+    pub index_full_scan_bytes: u64,
+    pub index_active_replay_bytes: u64,
+    pub index_sealed_replay_bytes: u64,
+    pub index_entries: u64,
+    pub chunk_locator_entries: u64,
+    pub chunk_locators_from_checkpoint: bool,
+    pub index_segments_examined: u64,
+    pub catalog_ns: u64,
+    pub allocator_ns: u64,
+    pub dedup_ns: u64,
+    pub active_resume_ns: u64,
+    pub compaction_recovery_ns: u64,
+    pub compaction_jobs_examined: u64,
+    pub recovery_mode_ns: u64,
+}
+
+/// Decoded-cache work attributable to one query execution.
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct GameCacheDelta {
+    pub hits: u64,
+    pub misses: u64,
+    pub entries_after: usize,
+    pub resident_charge_after: usize,
+    pub max_charge: usize,
+}
+
+/// One raw store-reopen, first-query, same-connection-repeat observation.
+#[derive(Debug, Clone, Serialize)]
+pub struct GameReopenSample {
+    pub driver_open_ns: u64,
+    pub store_open: GameReopenOpenReport,
+    pub heap_bind_ns: u64,
+    pub collection_bind_ns: u64,
+    pub first_query_ns: u64,
+    pub repeat_query_ns: u64,
+    pub orderly_close_ns: u64,
+    pub first_examined_documents: u64,
+    pub repeat_examined_documents: u64,
+    pub first_cache: GameCacheDelta,
+    pub repeat_cache: GameCacheDelta,
+    pub first_phase_ns: BTreeMap<String, u64>,
+    pub repeat_phase_ns: BTreeMap<String, u64>,
+}
+
+/// Reopen-versus-same-connection result for one query shape.
+#[derive(Debug, Clone, Serialize)]
+pub struct GameReopenQuery {
+    pub name: String,
+    pub rql: String,
+    pub repetitions: u32,
+    pub row_count: u64,
+    pub values_digest: String,
+    pub driver_open_p50_ns: u64,
+    pub store_open_p50_ns: u64,
+    pub first_query_p50_ns: u64,
+    pub first_query_p95_ns: u64,
+    pub repeat_query_p50_ns: u64,
+    pub repeat_query_p95_ns: u64,
+    pub first_to_repeat_ratio: f64,
+    pub samples: Vec<GameReopenSample>,
+}
+
+/// Honest store-reopen report. This deliberately makes no device-cold or
+/// MongoDB-server-restart claim.
+#[derive(Debug, Clone, Serialize)]
+pub struct GameReopenReport {
+    pub format: &'static str,
+    pub engine: &'static str,
+    pub lifecycle: &'static str,
+    pub claims_process_restart: bool,
+    pub claims_device_cold: bool,
+    pub comparator_scored: bool,
+    pub comparator_note: &'static str,
+    pub document_count: u64,
+    pub payload_class: &'static str,
+    pub fixture_hash: String,
+    pub fixture_path: String,
+    pub repetitions: u32,
+    pub queries: Vec<GameReopenQuery>,
+}
+
 fn percentile(sorted: &[u64], percentile: f64) -> u64 {
     if sorted.is_empty() {
         return 0;
@@ -80,15 +181,137 @@ fn percentile(sorted: &[u64], percentile: f64) -> u64 {
     sorted[at.min(sorted.len() - 1)]
 }
 
-/// Run a quick, warm, same-deployment product dipstick and emit the identical
-/// JSON fixture consumed by the Mongo Node.js side. Load and index build are
-/// deliberately outside the measured intervals.
-pub fn run_game_dipstick(
+#[derive(Debug, Clone, Copy)]
+struct GameCase {
+    name: &'static str,
+    source: &'static str,
+    order_sensitive: bool,
+    group_key: Option<&'static str>,
+}
+
+const GAME_CASES: [GameCase; 10] = [
+    GameCase { name: "indexed_equality", source: "from docs where sel_bucket = \"HIT\"", order_sensitive: false, group_key: None },
+    GameCase { name: "compound_range", source: "from docs where amount >= 100 and amount < 500 and region = \"r0\"", order_sensitive: false, group_key: None },
+    GameCase { name: "nested_scan", source: "from docs where nested.l1.l2.l3.flag = true", order_sensitive: false, group_key: None },
+    GameCase { name: "deterministic_topk", source: "from docs order by score desc, _key asc limit 10", order_sensitive: true, group_key: None },
+    GameCase { name: "group_count", source: "from docs group by status project status, count() as count", order_sensitive: false, group_key: Some("status") },
+    GameCase { name: "aggregate_five", source: "from docs group by region project region, count() as count, sum(amount) as sum, min(amount) as min, max(amount) as max, avg(amount) as avg", order_sensitive: false, group_key: Some("region") },
+    GameCase { name: "full_scan_materialize", source: "from docs", order_sensitive: false, group_key: None },
+    GameCase { name: "filtered_group_count", source: "from docs where region = \"r0\" group by status project status, count() as count", order_sensitive: false, group_key: Some("status") },
+    GameCase { name: "high_cardinality_group", source: "from docs group by _key project _key, count() as count", order_sensitive: false, group_key: Some("_key") },
+    GameCase { name: "indexed_enrich_many", source: "from docs enrich customer using customers matching customer_id = id expect many", order_sensitive: false, group_key: None },
+];
+
+fn run_game_query_once(
+    heap: &DriverHeapClient,
+    docs: &DriverCollection<Value>,
+    case: GameCase,
+) -> Result<(Vec<ResultRow>, u64, BTreeMap<String, u64>), AdapterError> {
+    let mut options = QueryRunOptions::default();
+    options.page_size = Some(4_096);
+    options.diagnostics = true;
+    let mut rows = Vec::new();
+    let mut examined = 0u64;
+    let mut phases = BTreeMap::<String, u64>::new();
+    loop {
+        let (page_rows, page_examined, diagnostics, exhausted, next) = if case.name
+            == "indexed_enrich_many"
+        {
+            let page = block_on(heap.rql_full(
+                case.source,
+                &Parameters::default(),
+                RqlFullExecuteOptions {
+                    query: options.clone(),
+                    ..Default::default()
+                },
+            ))
+            .map_err(|error| AdapterError::Execute(format!("dipstick {}: {error}", case.name)))?;
+            (
+                page.rows,
+                page.base.coverage.examined_documents,
+                page.base.diagnostics,
+                page.base.exhausted,
+                page.base.next,
+            )
+        } else {
+            let page = block_on(docs.rql(case.source, &Parameters::default(), options.clone()))
+                .map_err(|error| {
+                    AdapterError::Execute(format!("dipstick {}: {error}", case.name))
+                })?;
+            (
+                page.rows
+                    .into_iter()
+                    .map(|row| (row.key, row.value))
+                    .collect(),
+                page.coverage.examined_documents,
+                page.diagnostics,
+                page.exhausted,
+                page.next,
+            )
+        };
+        examined = examined.saturating_add(page_examined);
+        if let Some(d) = &diagnostics {
+            for (phase, elapsed) in [
+                ("compile", d.compile_ns),
+                ("lower", d.lower_ns),
+                ("decode", d.decode_ns),
+                ("verify", d.verify_ns),
+                ("bind", d.bind_ns),
+                ("index", d.index_ns),
+                ("scan", d.scan_ns),
+                ("filter", d.filter_ns),
+                ("order", d.order_ns),
+                ("page", d.page_ns),
+                ("project", d.project_ns),
+                ("attach", d.attach_ns),
+                ("host_read", d.host_read_ns),
+                ("byte_account", d.byte_account_ns),
+                ("host_read_calls", d.host_read_calls),
+            ] {
+                phases
+                    .entry(phase.into())
+                    .and_modify(|value| *value = value.saturating_add(elapsed))
+                    .or_insert(elapsed);
+            }
+        }
+        rows.extend(page_rows.into_iter().map(|(row_key, mut value)| {
+            let key = case
+                .group_key
+                .and_then(|field| value.get(field))
+                .map(|value| value.to_string())
+                .unwrap_or(row_key);
+            if let Value::Object(map) = &mut value {
+                map.remove("_key");
+            }
+            ResultRow { key, value }
+        }));
+        if exhausted || next.is_none() {
+            break;
+        }
+        options.after = next;
+    }
+    Ok((rows, examined, phases))
+}
+
+struct PreparedGameDeployment {
+    _directory: tempfile::TempDir,
+    capability: residiuum_heap::HeapCap,
+    document_count: u64,
+    payload_class: &'static str,
+    fixture_hash: String,
+    fixture_path: std::path::PathBuf,
+}
+
+impl PreparedGameDeployment {
+    fn root(&self) -> &Path {
+        self._directory.path()
+    }
+}
+
+fn prepare_game_deployment(
     output_dir: &Path,
     document_count: u64,
-    warmups: u32,
-    iterations: u32,
-) -> Result<GameDipstickReport, AdapterError> {
+) -> Result<PreparedGameDeployment, AdapterError> {
     std::fs::create_dir_all(output_dir)
         .map_err(|error| AdapterError::Execute(format!("dipstick output: {error}")))?;
     let mut spec = DatasetSpec::smoke_default(0xD1_0571_C0_u64);
@@ -123,6 +346,7 @@ pub fn run_game_dipstick(
         .map_err(|error| AdapterError::Execute(error.to_string()))?;
     let capability = mint_cap_for(heap_id, deployment_id);
     drop(deployment);
+
     let loader = block_on(DriverClient::open_embedded(
         EmbeddedOptions::new(root)
             .workers(4)
@@ -138,49 +362,26 @@ pub fn run_game_dipstick(
     let loader_customers: DriverCollection<Value> =
         block_on(loader_heap.create_collection("customers", CreateCollectionOptions::default()))
             .map_err(|error| AdapterError::Execute(format!("create customers: {error}")))?;
-    let all_docs: Vec<_> = dataset.collections.get("docs").unwrap().iter().collect();
-    for chunk in all_docs.chunks(1_000) {
-        let entries = chunk
-            .iter()
-            .map(|(key, document)| {
-                let mut body = (*document).clone();
-                if let Value::Object(map) = &mut body {
-                    map.remove("_key");
-                }
-                PutManyEntry::new((*key).clone(), body)
-            })
-            .collect();
-        let outcomes = block_on(loader_docs.put_many(entries))
-            .map_err(|error| AdapterError::Execute(format!("bulk load: {error}")))?;
-        for outcome in outcomes {
-            outcome.result.map_err(|error| {
-                AdapterError::Execute(format!("bulk key {}: {error}", outcome.key))
-            })?;
-        }
-    }
-    let all_customers: Vec<_> = dataset
-        .collections
-        .get("customers")
-        .unwrap()
-        .iter()
-        .collect();
-    for chunk in all_customers.chunks(1_000) {
-        let entries = chunk
-            .iter()
-            .map(|(key, document)| {
-                let mut body = (*document).clone();
-                if let Value::Object(map) = &mut body {
-                    map.remove("_key");
-                }
-                PutManyEntry::new((*key).clone(), body)
-            })
-            .collect();
-        let outcomes = block_on(loader_customers.put_many(entries))
-            .map_err(|error| AdapterError::Execute(format!("bulk customers: {error}")))?;
-        for outcome in outcomes {
-            outcome.result.map_err(|error| {
-                AdapterError::Execute(format!("bulk customer {}: {error}", outcome.key))
-            })?;
+    for (collection, name) in [(&loader_docs, "docs"), (&loader_customers, "customers")] {
+        let all: Vec<_> = dataset.collections.get(name).unwrap().iter().collect();
+        for chunk in all.chunks(1_000) {
+            let entries = chunk
+                .iter()
+                .map(|(key, document)| {
+                    let mut body = (*document).clone();
+                    if let Value::Object(map) = &mut body {
+                        map.remove("_key");
+                    }
+                    PutManyEntry::new((*key).clone(), body)
+                })
+                .collect();
+            let outcomes = block_on(collection.put_many(entries))
+                .map_err(|error| AdapterError::Execute(format!("bulk load {name}: {error}")))?;
+            for outcome in outcomes {
+                outcome.result.map_err(|error| {
+                    AdapterError::Execute(format!("bulk {name}/{}: {error}", outcome.key))
+                })?;
+            }
         }
     }
     block_on(loader.close())
@@ -190,30 +391,24 @@ pub fn run_game_dipstick(
     drop(loader_heap);
     drop(loader);
 
-    // Index administration is outside the timed workload. Data loading above
-    // uses only the bounded async driver; this legacy handle performs no writes.
+    // Index administration remains outside every measured interval.
     let deployment = ResidiuumDeployment::open(root)
         .map_err(|error| AdapterError::Execute(format!("index deployment open: {error}")))?;
     let mut heap = residiuum_sdk::HeapClient::from(deployment.open_heap(capability.clone()));
     let mut collection = heap
         .open_collection("docs")
         .map_err(|error| AdapterError::Execute(format!("open docs for indexes: {error}")))?;
-    collection
-        .indexes()
-        .create("by_sel_bucket", &["sel_bucket"])
-        .map_err(|error| AdapterError::Execute(format!("index sel_bucket: {error}")))?;
-    collection
-        .indexes()
-        .create("by_region_amount", &["region", "amount"])
-        .map_err(|error| AdapterError::Execute(format!("index region amount: {error}")))?;
-    collection
-        .indexes()
-        .create("by_region", &["region"])
-        .map_err(|error| AdapterError::Execute(format!("index region: {error}")))?;
-    collection
-        .indexes()
-        .create("by_score", &["score"])
-        .map_err(|error| AdapterError::Execute(format!("index score: {error}")))?;
+    for (name, fields) in [
+        ("by_sel_bucket", &["sel_bucket"][..]),
+        ("by_region_amount", &["region", "amount"][..]),
+        ("by_region", &["region"][..]),
+        ("by_score", &["score"][..]),
+    ] {
+        collection
+            .indexes()
+            .create(name, fields)
+            .map_err(|error| AdapterError::Execute(format!("index {name}: {error}")))?;
+    }
     drop(collection);
     let mut customers = heap
         .open_collection("customers")
@@ -226,6 +421,29 @@ pub fn run_game_dipstick(
     drop(heap);
     drop(deployment);
 
+    Ok(PreparedGameDeployment {
+        _directory: directory,
+        capability,
+        document_count: spec.doc_count,
+        payload_class: spec.payload.as_str(),
+        fixture_hash: dataset.content_hash,
+        fixture_path,
+    })
+}
+
+/// Run a quick, warm, same-deployment product dipstick and emit the identical
+/// JSON fixture consumed by the Mongo Node.js side. Load and index build are
+/// deliberately outside the measured intervals.
+pub fn run_game_dipstick(
+    output_dir: &Path,
+    document_count: u64,
+    warmups: u32,
+    iterations: u32,
+) -> Result<GameDipstickReport, AdapterError> {
+    let prepared = prepare_game_deployment(output_dir, document_count)?;
+    let root = prepared.root();
+    let capability = prepared.capability.clone();
+
     let connection = block_on(DriverClient::open_embedded(
         EmbeddedOptions::new(root).workers(1).queue_capacity(8),
     ))
@@ -235,107 +453,10 @@ pub fn run_game_dipstick(
     let docs: DriverCollection<Value> = block_on(heap.open_collection("docs"))
         .map_err(|error| AdapterError::Execute(format!("driver docs: {error}")))?;
 
-    let cases = [
-        ("indexed_equality", "from docs where sel_bucket = \"HIT\"", false, None),
-        ("compound_range", "from docs where amount >= 100 and amount < 500 and region = \"r0\"", false, None),
-        ("nested_scan", "from docs where nested.l1.l2.l3.flag = true", false, None),
-        ("deterministic_topk", "from docs order by score desc, _key asc limit 10", true, None),
-        ("group_count", "from docs group by status project status, count() as count", false, Some("status")),
-        ("aggregate_five", "from docs group by region project region, count() as count, sum(amount) as sum, min(amount) as min, max(amount) as max, avg(amount) as avg", false, Some("region")),
-        ("full_scan_materialize", "from docs", false, None),
-        ("filtered_group_count", "from docs where region = \"r0\" group by status project status, count() as count", false, Some("status")),
-        ("high_cardinality_group", "from docs group by _key project _key, count() as count", false, Some("_key")),
-        ("indexed_enrich_many", "from docs enrich customer using customers matching customer_id = id expect many", false, None),
-    ];
     let mut queries = Vec::new();
-    for (name, source, order_sensitive, group_key) in cases {
-        let run_once = || -> Result<(Vec<ResultRow>, u64, BTreeMap<String, u64>), AdapterError> {
-            let mut options = QueryRunOptions::default();
-            options.page_size = Some(4_096);
-            options.diagnostics = true;
-            let mut rows = Vec::new();
-            let mut examined = 0u64;
-            let mut phases = BTreeMap::<String, u64>::new();
-            loop {
-                let (page_rows, page_examined, diagnostics, exhausted, next) = if name
-                    == "indexed_enrich_many"
-                {
-                    let page = block_on(heap.rql_full(
-                        source,
-                        &Parameters::default(),
-                        RqlFullExecuteOptions {
-                            query: options.clone(),
-                            ..Default::default()
-                        },
-                    ))
-                    .map_err(|error| AdapterError::Execute(format!("dipstick {name}: {error}")))?;
-                    (
-                        page.rows,
-                        page.base.coverage.examined_documents,
-                        page.base.diagnostics,
-                        page.base.exhausted,
-                        page.base.next,
-                    )
-                } else {
-                    let page = block_on(docs.rql(source, &Parameters::default(), options.clone()))
-                        .map_err(|error| {
-                            AdapterError::Execute(format!("dipstick {name}: {error}"))
-                        })?;
-                    (
-                        page.rows
-                            .into_iter()
-                            .map(|row| (row.key, row.value))
-                            .collect(),
-                        page.coverage.examined_documents,
-                        page.diagnostics,
-                        page.exhausted,
-                        page.next,
-                    )
-                };
-                examined = examined.saturating_add(page_examined);
-                if let Some(d) = &diagnostics {
-                    for (phase, elapsed) in [
-                        ("compile", d.compile_ns),
-                        ("lower", d.lower_ns),
-                        ("decode", d.decode_ns),
-                        ("verify", d.verify_ns),
-                        ("bind", d.bind_ns),
-                        ("index", d.index_ns),
-                        ("scan", d.scan_ns),
-                        ("filter", d.filter_ns),
-                        ("order", d.order_ns),
-                        ("page", d.page_ns),
-                        ("project", d.project_ns),
-                        ("attach", d.attach_ns),
-                        ("host_read", d.host_read_ns),
-                        ("byte_account", d.byte_account_ns),
-                        ("host_read_calls", d.host_read_calls),
-                    ] {
-                        phases
-                            .entry(phase.into())
-                            .and_modify(|value| *value = value.saturating_add(elapsed))
-                            .or_insert(elapsed);
-                    }
-                }
-                rows.extend(page_rows.into_iter().map(|(row_key, mut value)| {
-                    let key = group_key
-                        .and_then(|field| value.get(field))
-                        .map(|value| value.to_string())
-                        .unwrap_or(row_key);
-                    if let Value::Object(map) = &mut value {
-                        map.remove("_key");
-                    }
-                    ResultRow { key, value }
-                }));
-                if exhausted || next.is_none() {
-                    break;
-                }
-                options.after = next;
-            }
-            Ok((rows, examined, phases))
-        };
+    for case in GAME_CASES {
         for _ in 0..warmups {
-            let _ = run_once()?;
+            let _ = run_game_query_once(&heap, &docs, case)?;
         }
         let mut latency_ns = Vec::with_capacity(iterations as usize);
         let mut final_rows = Vec::new();
@@ -343,7 +464,7 @@ pub fn run_game_dipstick(
         let mut phase_samples = BTreeMap::<String, Vec<u64>>::new();
         for _ in 0..iterations.max(1) {
             let started = std::time::Instant::now();
-            let (rows, docs_examined, phases) = run_once()?;
+            let (rows, docs_examined, phases) = run_game_query_once(&heap, &docs, case)?;
             latency_ns.push(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
             final_rows = rows;
             examined = docs_examined;
@@ -351,7 +472,7 @@ pub fn run_game_dipstick(
                 phase_samples.entry(phase).or_default().push(elapsed);
             }
         }
-        let canonical = canonicalize_rows(&final_rows, order_sensitive, true);
+        let canonical = canonicalize_rows(&final_rows, case.order_sensitive, true);
         let first_key = final_rows.first().map(|row| row.key.clone());
         let first_value = final_rows
             .first()
@@ -367,8 +488,8 @@ pub fn run_game_dipstick(
             })
             .collect();
         queries.push(GameDipstickQuery {
-            name: name.into(),
-            rql: source.into(),
+            name: case.name.into(),
+            rql: case.source.into(),
             warmups,
             iterations: iterations.max(1),
             latency_ns,
@@ -387,10 +508,237 @@ pub fn run_game_dipstick(
     Ok(GameDipstickReport {
         format: "residiuum-rql-game-dipstick-v1",
         engine: "residiuum_embedded_smart_client",
-        document_count: spec.doc_count,
-        payload_class: spec.payload.as_str(),
-        fixture_hash: dataset.content_hash,
-        fixture_path: fixture_path.display().to_string(),
+        document_count: prepared.document_count,
+        payload_class: prepared.payload_class,
+        fixture_hash: prepared.fixture_hash,
+        fixture_path: prepared.fixture_path.display().to_string(),
+        queries,
+    })
+}
+
+fn game_open_report(report: residiuum_store::StoreOpenReport) -> GameReopenOpenReport {
+    GameReopenOpenReport {
+        total_ns: report.total_ns,
+        identity_and_lock_ns: report.identity_and_lock_ns,
+        tier_state_ns: report.tier_state_ns,
+        inventory_ns: report.inventory_ns,
+        inventory_descriptor_probe_bytes: report.inventory_descriptor_probe_bytes,
+        inventory_fallback_scan_bytes: report.inventory_fallback_scan_bytes,
+        pending_recovery_ns: report.pending_recovery_ns,
+        pending_seals_recovered: report.pending_seals_recovered,
+        protected_pair_recovery_ns: report.protected_pair_recovery_ns,
+        protected_pairs_recovered: report.protected_pairs_recovered,
+        index_ns: report.index_ns,
+        index_disposition: format!("{:?}", report.index_disposition),
+        index_cache_decision: format!("{:?}", report.index_cache_decision),
+        index_cache_bytes: report.index_cache_bytes,
+        index_cache_decode_ns: report.index_cache_decode_ns,
+        index_install_clone_ns: report.index_install_clone_ns,
+        index_catalog_derive_ns: report.index_catalog_derive_ns,
+        index_full_scan_bytes: report.index_full_scan_bytes,
+        index_active_replay_bytes: report.index_active_replay_bytes,
+        index_sealed_replay_bytes: report.index_sealed_replay_bytes,
+        index_entries: report.index_entries,
+        chunk_locator_entries: report.chunk_locator_entries,
+        chunk_locators_from_checkpoint: report.chunk_locators_from_checkpoint,
+        index_segments_examined: report.index_segments_examined,
+        catalog_ns: report.catalog_ns,
+        allocator_ns: report.allocator_ns,
+        dedup_ns: report.dedup_ns,
+        active_resume_ns: report.active_resume_ns,
+        compaction_recovery_ns: report.compaction_recovery_ns,
+        compaction_jobs_examined: report.compaction_jobs_examined,
+        recovery_mode_ns: report.recovery_mode_ns,
+    }
+}
+
+fn cache_delta(
+    before: residiuum_sdk::DecodedJsonCacheStats,
+    after: residiuum_sdk::DecodedJsonCacheStats,
+) -> GameCacheDelta {
+    GameCacheDelta {
+        hits: after.hits.saturating_sub(before.hits),
+        misses: after.misses.saturating_sub(before.misses),
+        entries_after: after.entries,
+        resident_charge_after: after.resident_charge,
+        max_charge: after.max_charge,
+    }
+}
+
+fn cache_stats(
+    connection: &DriverClient,
+) -> Result<residiuum_sdk::DecodedJsonCacheStats, AdapterError> {
+    connection
+        .inspect()
+        .decoded_json_cache
+        .ok_or_else(|| AdapterError::Execute("decoded JSON cache inspection unavailable".into()))
+}
+
+fn elapsed_ns(started: std::time::Instant) -> u64 {
+    started.elapsed().as_nanos().min(u64::MAX as u128) as u64
+}
+
+/// Measure store reopen separately from the first query and an immediate
+/// same-connection repetition for every game-dipstick query shape.
+///
+/// Every repetition creates a fresh deployment and decoded cache over the same
+/// orderly-closed media. The OS page cache is not purged, so this is explicitly
+/// a store-reopen lifecycle—not a process-restart or device-cold claim.
+pub fn run_game_reopen_dipstick(
+    output_dir: &Path,
+    document_count: u64,
+    repetitions: u32,
+) -> Result<GameReopenReport, AdapterError> {
+    let prepared = prepare_game_deployment(output_dir, document_count)?;
+    let root = prepared.root();
+    let repetitions = repetitions.max(1);
+    let mut queries = Vec::with_capacity(GAME_CASES.len());
+
+    for case in GAME_CASES {
+        let mut samples = Vec::with_capacity(repetitions as usize);
+        let mut canonical_result = None;
+        for _ in 0..repetitions {
+            let started = std::time::Instant::now();
+            let connection = block_on(DriverClient::open_embedded(
+                EmbeddedOptions::new(root).workers(1).queue_capacity(8),
+            ))
+            .map_err(|error| AdapterError::Execute(format!("reopen driver: {error}")))?;
+            let driver_open_ns = elapsed_ns(started);
+            let store_open = game_open_report(connection.open_report());
+            let cache_before_first = cache_stats(&connection)?;
+            if cache_before_first.hits != 0
+                || cache_before_first.misses != 0
+                || cache_before_first.entries != 0
+            {
+                return Err(AdapterError::Execute(
+                    "fresh deployment opened with non-empty decoded cache evidence".into(),
+                ));
+            }
+
+            let started = std::time::Instant::now();
+            let heap = block_on(connection.open_heap(prepared.capability.clone()))
+                .map_err(|error| AdapterError::Execute(format!("reopen heap: {error}")))?;
+            let heap_bind_ns = elapsed_ns(started);
+            let started = std::time::Instant::now();
+            let docs: DriverCollection<Value> = block_on(heap.open_collection("docs"))
+                .map_err(|error| AdapterError::Execute(format!("reopen docs: {error}")))?;
+            let collection_bind_ns = elapsed_ns(started);
+
+            let started = std::time::Instant::now();
+            let (first_rows, first_examined_documents, first_phase_ns) =
+                run_game_query_once(&heap, &docs, case)?;
+            let first_query_ns = elapsed_ns(started);
+            let cache_after_first = cache_stats(&connection)?;
+            let first_cache = cache_delta(cache_before_first, cache_after_first);
+
+            let started = std::time::Instant::now();
+            let (repeat_rows, repeat_examined_documents, repeat_phase_ns) =
+                run_game_query_once(&heap, &docs, case)?;
+            let repeat_query_ns = elapsed_ns(started);
+            let cache_after_repeat = cache_stats(&connection)?;
+            let repeat_cache = cache_delta(cache_after_first, cache_after_repeat);
+
+            let first_canonical = canonicalize_rows(&first_rows, case.order_sensitive, true);
+            let repeat_canonical = canonicalize_rows(&repeat_rows, case.order_sensitive, true);
+            if first_canonical != repeat_canonical {
+                return Err(AdapterError::Execute(format!(
+                    "reopen first/repeat result drift for {}",
+                    case.name
+                )));
+            }
+            if let Some(expected) = &canonical_result {
+                if expected != &first_canonical {
+                    return Err(AdapterError::Execute(format!(
+                        "reopen repetition result drift for {}",
+                        case.name
+                    )));
+                }
+            } else {
+                canonical_result = Some(first_canonical);
+            }
+
+            drop(docs);
+            drop(heap);
+            let started = std::time::Instant::now();
+            block_on(connection.close())
+                .map_err(|error| AdapterError::Execute(format!("reopen close: {error}")))?;
+            let orderly_close_ns = elapsed_ns(started);
+            drop(connection);
+
+            samples.push(GameReopenSample {
+                driver_open_ns,
+                store_open,
+                heap_bind_ns,
+                collection_bind_ns,
+                first_query_ns,
+                repeat_query_ns,
+                orderly_close_ns,
+                first_examined_documents,
+                repeat_examined_documents,
+                first_cache,
+                repeat_cache,
+                first_phase_ns,
+                repeat_phase_ns,
+            });
+        }
+
+        let mut driver_open = samples
+            .iter()
+            .map(|sample| sample.driver_open_ns)
+            .collect::<Vec<_>>();
+        let mut store_open = samples
+            .iter()
+            .map(|sample| sample.store_open.total_ns)
+            .collect::<Vec<_>>();
+        let mut first = samples
+            .iter()
+            .map(|sample| sample.first_query_ns)
+            .collect::<Vec<_>>();
+        let mut repeat = samples
+            .iter()
+            .map(|sample| sample.repeat_query_ns)
+            .collect::<Vec<_>>();
+        for values in [&mut driver_open, &mut store_open, &mut first, &mut repeat] {
+            values.sort_unstable();
+        }
+        let first_p50 = percentile(&first, 0.50);
+        let repeat_p50 = percentile(&repeat, 0.50);
+        let canonical = canonical_result.expect("at least one reopen repetition");
+        queries.push(GameReopenQuery {
+            name: case.name.into(),
+            rql: case.source.into(),
+            repetitions,
+            row_count: canonical.row_count,
+            values_digest: canonical.values_digest,
+            driver_open_p50_ns: percentile(&driver_open, 0.50),
+            store_open_p50_ns: percentile(&store_open, 0.50),
+            first_query_p50_ns: first_p50,
+            first_query_p95_ns: percentile(&first, 0.95),
+            repeat_query_p50_ns: repeat_p50,
+            repeat_query_p95_ns: percentile(&repeat, 0.95),
+            first_to_repeat_ratio: if repeat_p50 == 0 {
+                0.0
+            } else {
+                first_p50 as f64 / repeat_p50 as f64
+            },
+            samples,
+        });
+    }
+
+    Ok(GameReopenReport {
+        format: "residiuum-rql-game-reopen-dipstick-v1",
+        engine: "residiuum_embedded_smart_client",
+        lifecycle: "orderly_store_reopen_os_page_cache_uncontrolled",
+        claims_process_restart: false,
+        claims_device_cold: false,
+        comparator_scored: false,
+        comparator_note:
+            "A warm MongoDB server is not a valid scored comparator for an embedded store reopen.",
+        document_count: prepared.document_count,
+        payload_class: prepared.payload_class,
+        fixture_hash: prepared.fixture_hash,
+        fixture_path: prepared.fixture_path.display().to_string(),
+        repetitions,
         queries,
     })
 }
@@ -1485,5 +1833,32 @@ mod tests {
         let out = adapter.execute_plan(&plan).unwrap();
         assert_eq!(out.status, AdapterStatus::Refused);
         assert!(!out.is_product_ready());
+    }
+
+    #[test]
+    fn game_reopen_report_separates_open_first_and_repeat_with_cache_evidence() {
+        let output = tempfile::tempdir().unwrap();
+        let report = run_game_reopen_dipstick(output.path(), 32, 1).unwrap();
+        assert_eq!(report.queries.len(), GAME_CASES.len());
+        assert!(!report.claims_process_restart);
+        assert!(!report.claims_device_cold);
+        assert!(!report.comparator_scored);
+        for query in &report.queries {
+            assert_eq!(query.samples.len(), 1);
+            let sample = &query.samples[0];
+            assert_eq!(sample.store_open.index_disposition, "Loaded");
+            assert_eq!(sample.store_open.index_cache_decision, "AcceptedV4");
+            assert_eq!(sample.store_open.index_full_scan_bytes, 0);
+            assert_eq!(sample.store_open.pending_seals_recovered, 0);
+            assert_eq!(sample.store_open.protected_pairs_recovered, 0);
+            assert_eq!(sample.repeat_cache.misses, 0, "{}", query.name);
+        }
+        let nested = report
+            .queries
+            .iter()
+            .find(|query| query.name == "nested_scan")
+            .unwrap();
+        assert_eq!(nested.samples[0].first_cache.misses, 32);
+        assert_eq!(nested.samples[0].repeat_cache.hits, 32);
     }
 }

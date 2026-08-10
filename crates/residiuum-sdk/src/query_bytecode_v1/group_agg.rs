@@ -201,11 +201,17 @@ struct CoveringSlots {
     numeric: Vec<usize>,
 }
 
+enum UniqueLogicalKeyRows {
+    CountOnly(Vec<JsonValue>),
+    General(Vec<(JsonValue, GroupState)>),
+}
+
 /// One-pass group accumulator. It retains group keys and scalar accumulator
 /// state only; full input documents are consumed and released immediately.
 pub(crate) struct GroupAccumulator<'a> {
     spec: &'a GroupAggSpec,
     groups: HashMap<GroupKey, GroupState>,
+    unique_logical_key_rows: Option<UniqueLogicalKeyRows>,
     numeric_paths: Vec<&'a Path>,
     aggregate_source_slots: Vec<Option<usize>>,
     covering_slots: Option<CoveringSlots>,
@@ -236,6 +242,19 @@ impl<'a> GroupAccumulator<'a> {
         Self {
             spec,
             groups: HashMap::new(),
+            unique_logical_key_rows: (spec.group_by.len() == 1
+                && is_exact_logical_key_path(&spec.group_by[0]))
+            .then(|| {
+                if spec
+                    .aggregates
+                    .iter()
+                    .all(|aggregate| aggregate.fun == AggFn::Count)
+                {
+                    UniqueLogicalKeyRows::CountOnly(Vec::new())
+                } else {
+                    UniqueLogicalKeyRows::General(Vec::new())
+                }
+            }),
             numeric_paths,
             aggregate_source_slots,
             covering_slots: None,
@@ -255,6 +274,17 @@ impl<'a> GroupAccumulator<'a> {
                     .filter_map(|aggregate| aggregate.source.as_ref()),
             )
             .any(is_logical_key_path)
+    }
+
+    pub(crate) fn uses_exact_logical_key(&self) -> bool {
+        self.unique_logical_key_rows.is_some()
+    }
+
+    pub(crate) fn uses_exact_logical_key_count_only(&self) -> bool {
+        matches!(
+            self.unique_logical_key_rows,
+            Some(UniqueLogicalKeyRows::CountOnly(_))
+        )
     }
 
     /// Exact field order requested from a covering secondary index.
@@ -365,11 +395,58 @@ impl<'a> GroupAccumulator<'a> {
         self.ingest_resolved(key_values, &numeric_values)
     }
 
+    pub(crate) fn ingest_with_logical_key(
+        &mut self,
+        key: &str,
+        doc: &JsonValue,
+    ) -> Result<(), Error> {
+        if !self.uses_exact_logical_key() {
+            return Err(Error::Internal(
+                "logical-key ingest used for a non-unique group".into(),
+            ));
+        }
+        let numeric_values = self
+            .numeric_paths
+            .iter()
+            .map(|path| numeric_present(doc, path))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.ingest_resolved(vec![JsonValue::String(key.to_string())], &numeric_values)
+    }
+
     fn ingest_resolved(
         &mut self,
         key_values: Vec<JsonValue>,
         numeric_values: &[Option<f64>],
     ) -> Result<(), Error> {
+        if let Some(rows) = &mut self.unique_logical_key_rows {
+            let key = key_values
+                .into_iter()
+                .next()
+                .ok_or_else(|| Error::Internal("unique group omitted logical key".into()))?;
+            if let UniqueLogicalKeyRows::CountOnly(keys) = rows {
+                keys.push(key);
+                return Ok(());
+            }
+            let mut group = GroupState {
+                aggregates: self
+                    .spec
+                    .aggregates
+                    .iter()
+                    .map(|aggregate| AggregateState::new(aggregate.fun))
+                    .collect(),
+            };
+            ingest_aggregate_states(
+                self.spec,
+                &self.aggregate_source_slots,
+                numeric_values,
+                &mut group.aggregates,
+            )?;
+            let UniqueLogicalKeyRows::General(rows) = rows else {
+                unreachable!("count-only unique rows returned above")
+            };
+            rows.push((key, group));
+            return Ok(());
+        }
         let group = self
             .groups
             .entry(GroupKey(key_values))
@@ -381,41 +458,57 @@ impl<'a> GroupAccumulator<'a> {
                     .map(|aggregate| AggregateState::new(aggregate.fun))
                     .collect(),
             });
-        for ((aggregate, source_slot), state) in self
-            .spec
-            .aggregates
-            .iter()
-            .zip(&self.aggregate_source_slots)
-            .zip(&mut group.aggregates)
-        {
-            let value = match aggregate.fun {
-                AggFn::Count => None,
-                _ => {
-                    let slot = source_slot.ok_or_else(|| {
-                        Error::QueryInvalid(format!(
-                            "{}() requires a field path",
-                            aggregate.fun.as_str()
-                        ))
-                    })?;
-                    numeric_values[slot]
-                }
-            };
-            state.ingest(value);
-        }
-        Ok(())
+        ingest_aggregate_states(
+            self.spec,
+            &self.aggregate_source_slots,
+            numeric_values,
+            &mut group.aggregates,
+        )
     }
 
     pub(crate) fn finish(self) -> Result<Vec<(String, JsonValue)>, Error> {
-        let mut output = Vec::with_capacity(self.groups.len());
-        let mut groups = self
-            .groups
-            .into_iter()
-            .map(|(key, group)| {
-                let canonical = canonical_group_key_bytes(&key.0);
-                (canonical, key.0, group)
-            })
-            .collect::<Vec<_>>();
-        groups.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+        let groups = match self.unique_logical_key_rows {
+            Some(UniqueLogicalKeyRows::CountOnly(keys)) => {
+                let mut output = Vec::with_capacity(keys.len());
+                for key in keys {
+                    let key_values = vec![key];
+                    let canonical = canonical_group_key_bytes(&key_values);
+                    let mut object = Map::new();
+                    object.insert(
+                        output_field_name(&self.spec.group_by[0]),
+                        key_values.into_iter().next().expect("one logical key"),
+                    );
+                    for aggregate in &self.spec.aggregates {
+                        object.insert(aggregate.output.clone(), JsonValue::Number(1u64.into()));
+                    }
+                    output.push((
+                        format!("g:{}", canonical_group_key_from_bytes(&canonical)),
+                        JsonValue::Object(object),
+                    ));
+                }
+                return Ok(output);
+            }
+            Some(UniqueLogicalKeyRows::General(rows)) => rows
+                .into_iter()
+                .map(|(key, group)| {
+                    let key_values = vec![key];
+                    let canonical = canonical_group_key_bytes(&key_values);
+                    (canonical, key_values, group)
+                })
+                .collect::<Vec<_>>(),
+            None => self
+                .groups
+                .into_iter()
+                .map(|(key, group)| {
+                    let canonical = canonical_group_key_bytes(&key.0);
+                    (canonical, key.0, group)
+                })
+                .collect::<Vec<_>>(),
+        };
+        let mut output = Vec::with_capacity(groups.len());
+        // Core ProjectPaths applies the authoritative query order immediately
+        // after finish. Sorting here would order by canonical group encoding
+        // and then sort the same bag again by the actual OrderTerms.
         for (canonical_bytes, key_values, group) in groups {
             let mut object = Map::new();
             for (index, path) in self.spec.group_by.iter().enumerate() {
@@ -433,8 +526,41 @@ impl<'a> GroupAccumulator<'a> {
     }
 }
 
+fn ingest_aggregate_states(
+    spec: &GroupAggSpec,
+    aggregate_source_slots: &[Option<usize>],
+    numeric_values: &[Option<f64>],
+    states: &mut [AggregateState],
+) -> Result<(), Error> {
+    for ((aggregate, source_slot), state) in spec
+        .aggregates
+        .iter()
+        .zip(aggregate_source_slots)
+        .zip(states)
+    {
+        let value = match aggregate.fun {
+            AggFn::Count => None,
+            _ => {
+                let slot = source_slot.ok_or_else(|| {
+                    Error::QueryInvalid(format!(
+                        "{}() requires a field path",
+                        aggregate.fun.as_str()
+                    ))
+                })?;
+                numeric_values[slot]
+            }
+        };
+        state.ingest(value);
+    }
+    Ok(())
+}
+
 fn is_logical_key_path(path: &Path) -> bool {
     matches!(path.0.first().map(String::as_str), Some("_key" | "$key"))
+}
+
+fn is_exact_logical_key_path(path: &Path) -> bool {
+    path.0.len() == 1 && is_logical_key_path(path)
 }
 
 fn output_field_name(path: &Path) -> String {

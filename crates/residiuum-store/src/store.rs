@@ -6855,11 +6855,16 @@ impl Store {
             }
             self.wait_seals_applied()?;
 
-            // These are rebuildable, but persisting them after the authoritative
+            // These are rebuildable, but persisting them after an authoritative
             // frontier change is what makes ordinary restart a load, not a scan.
-            self.persist_index_cache()?;
-            self.refresh_collection_catalog()?;
-            self.flush_derived_catalogs_best_effort();
+            // A read-only open has no new frontier and its accepted checkpoint
+            // is already current; rewriting every derived file would add syncs
+            // without establishing any new durability fact.
+            if self.derived_ops_since_checkpoint != 0 {
+                self.persist_index_cache()?;
+                self.refresh_collection_catalog()?;
+                self.flush_derived_catalogs_best_effort();
+            }
 
             let journal = write_dedup_journal_path(&self.paths);
             sync_write_dedup_journal(&journal)?;
@@ -10873,10 +10878,12 @@ impl Store {
         // Rebuild ActiveSegment by re-appending recovered item events.
         let rebuilt = rebuild_active_from_bytes(&kept, self.store_id, segment_id, self.limits)?;
         let durable_len = rebuilt.len();
-        file.set_len(0)?;
-        file.seek(SeekFrom::Start(0))?;
-        file.write_all(rebuilt.as_bytes())?;
-        file.sync_all()?;
+        if rebuilt.as_bytes() != kept.as_slice() {
+            file.set_len(0)?;
+            file.seek(SeekFrom::Start(0))?;
+            file.write_all(rebuilt.as_bytes())?;
+            file.sync_all()?;
+        }
 
         let mut item_events = 0u64;
         {

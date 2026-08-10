@@ -372,6 +372,8 @@ pub(crate) struct VmOutcome {
     pub rows: Vec<(String, JsonValue)>,
     /// Root enrich load evidence (empty for Core-only programs).
     pub enrich_loads: Vec<EnrichLoadEvidence>,
+    /// Number of Core rows moved into the Full pipeline.
+    pub base_row_count: usize,
 }
 
 /// Open Within scope: parents saved; working set is carrier elements.
@@ -853,6 +855,16 @@ pub(crate) fn run_vm<H: HostCapabilities>(
         )));
     }
     let mut diagnostics = options.diagnostics.then(QueryDiagnostics::default);
+    let has_full_pipeline = prog.ops.iter().any(|instruction| {
+        matches!(
+            instruction.op,
+            OpCode::Enrich
+                | OpCode::Within
+                | OpCode::WithinEnd
+                | OpCode::FilterAttach
+                | OpCode::ProjectBrace
+        )
+    });
     let verify_started = diagnostics.as_ref().map(|_| Instant::now());
     verify_vm_program(prog)?;
     if let (Some(diagnostics), Some(started)) = (&mut diagnostics, verify_started) {
@@ -862,6 +874,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
     let mut pc = 0usize;
     let mut frame: Option<CoreFrame<'_>> = None;
     let mut page: Option<QueryPage> = None;
+    let mut base_row_count = 0usize;
     let mut rows: Vec<(String, JsonValue)> = Vec::new();
     let mut enrich_loads: Vec<EnrichLoadEvidence> = Vec::new();
     let mut foreign_cache: BTreeMap<CollectionId, Vec<(String, JsonValue)>> = BTreeMap::new();
@@ -995,12 +1008,20 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                     host: &mut host,
                     collection_id,
                 };
-                let p = f.project_paths(&mut scan)?;
-                rows = p
-                    .rows
-                    .iter()
-                    .map(|r| (r.key.clone(), r.value.clone()))
-                    .collect();
+                let mut p = f.project_paths(&mut scan)?;
+                base_row_count = p.rows.len();
+                if has_full_pipeline {
+                    rows = std::mem::take(&mut p.rows)
+                        .into_iter()
+                        .map(|row| (row.key, row.value))
+                        .collect();
+                } else {
+                    rows = p
+                        .rows
+                        .iter()
+                        .map(|row| (row.key.clone(), row.value.clone()))
+                        .collect();
+                }
                 page = Some(p);
                 // Core ProjectPaths has already enforced the page's query and
                 // host result-memory limits. Full checks resume after the
@@ -1178,6 +1199,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
         page,
         rows,
         enrich_loads,
+        base_row_count,
     })
 }
 

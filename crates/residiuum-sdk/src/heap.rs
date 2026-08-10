@@ -20,6 +20,7 @@ use serde::Serialize;
 use std::collections::VecDeque;
 use std::hash::{BuildHasher, Hash, Hasher as _};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -40,12 +41,52 @@ struct CachedDecodedJson {
     charge: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ProjectedJsonKey {
+    document: DecodedJsonKey,
+    fields_hash: [u8; 32],
+}
+
+#[derive(Debug)]
+struct CachedProjectedJson {
+    version: [u8; 16],
+    fields: Arc<[String]>,
+    values: Arc<[Option<serde_json::Value>]>,
+    logical_bytes: u64,
+    charge: usize,
+}
+
 #[derive(Debug)]
 struct DecodedJsonCache {
     entries: hashbrown::HashMap<DecodedJsonKey, CachedDecodedJson>,
     admission_order: VecDeque<(DecodedJsonKey, [u8; 16])>,
     resident_charge: usize,
     max_charge: usize,
+    hits: AtomicU64,
+    misses: AtomicU64,
+    projected_entries: hashbrown::HashMap<ProjectedJsonKey, CachedProjectedJson>,
+    projected_admission_order: VecDeque<(ProjectedJsonKey, [u8; 16])>,
+    projected_resident_charge: usize,
+    projected_max_charge: usize,
+}
+
+/// Constant-time deployment-wide decoded JSON cache counters.
+///
+/// Hits and misses count version-qualified lookup attempts, not queries. The
+/// counters start at zero for every physical deployment open, making reopen
+/// and first-query cache behavior directly observable without a store scan.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DecodedJsonCacheStats {
+    /// Version-qualified cache lookups satisfied from decoded memory.
+    pub hits: u64,
+    /// Version-qualified cache lookups that required another path.
+    pub misses: u64,
+    /// Currently resident decoded documents.
+    pub entries: usize,
+    /// Current conservative memory charge in bytes.
+    pub resident_charge: usize,
+    /// Hard conservative memory-charge bound in bytes.
+    pub max_charge: usize,
 }
 
 impl DecodedJsonCache {
@@ -55,12 +96,41 @@ impl DecodedJsonCache {
             admission_order: VecDeque::new(),
             resident_charge: 0,
             max_charge,
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            projected_entries: hashbrown::HashMap::new(),
+            projected_admission_order: VecDeque::new(),
+            projected_resident_charge: 0,
+            projected_max_charge: max_charge.saturating_div(4).max(1),
+        }
+    }
+
+    fn observe<T>(&self, value: Option<T>) -> Option<T> {
+        if value.is_some() {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.misses.fetch_add(1, Ordering::Relaxed);
+        }
+        value
+    }
+
+    fn stats(&self) -> DecodedJsonCacheStats {
+        DecodedJsonCacheStats {
+            hits: self.hits.load(Ordering::Relaxed),
+            misses: self.misses.load(Ordering::Relaxed),
+            entries: self.entries.len(),
+            resident_charge: self.resident_charge,
+            max_charge: self.max_charge,
         }
     }
 
     fn get(&self, key: &DecodedJsonKey, version: &[u8; 16]) -> Option<Arc<serde_json::Value>> {
-        let entry = self.entries.get(key)?;
-        (entry.version == *version).then(|| Arc::clone(&entry.value))
+        self.observe(
+            self.entries
+                .get(key)
+                .filter(|entry| entry.version == *version)
+                .map(|entry| Arc::clone(&entry.value)),
+        )
     }
 
     fn get_with_len(
@@ -68,8 +138,12 @@ impl DecodedJsonCache {
         key: &DecodedJsonKey,
         version: &[u8; 16],
     ) -> Option<(Arc<serde_json::Value>, u64)> {
-        let entry = self.entries.get(key)?;
-        (entry.version == *version).then(|| (Arc::clone(&entry.value), entry.logical_bytes))
+        self.observe(
+            self.entries
+                .get(key)
+                .filter(|entry| entry.version == *version)
+                .map(|entry| (Arc::clone(&entry.value), entry.logical_bytes)),
+        )
     }
 
     fn get_raw_ref_with_len(
@@ -84,12 +158,16 @@ impl DecodedJsonCache {
         collection_id.hash(&mut hasher);
         key.hash(&mut hasher);
         let hash = hasher.finish();
-        let (_, entry) = self.entries.raw_entry().from_hash(hash, |candidate| {
+        let result = self.entries.raw_entry().from_hash(hash, |candidate| {
             &candidate.heap_id == heap_id
                 && &candidate.collection_id == collection_id
                 && candidate.key == key
-        })?;
-        (entry.version == *version).then(|| (entry.value.as_ref(), entry.logical_bytes))
+        });
+        let value = result
+            .map(|(_, entry)| entry)
+            .filter(|entry| entry.version == *version)
+            .map(|entry| (entry.value.as_ref(), entry.logical_bytes));
+        self.observe(value)
     }
 
     fn get_projected(
@@ -98,8 +176,12 @@ impl DecodedJsonCache {
         version: &[u8; 16],
         fields: &[String],
     ) -> Option<Vec<serde_json::Value>> {
-        let entry = self.entries.get(key)?;
-        (entry.version == *version).then(|| project_json_fields(&entry.value, fields))
+        self.observe(
+            self.entries
+                .get(key)
+                .filter(|entry| entry.version == *version)
+                .map(|entry| project_json_fields(&entry.value, fields)),
+        )
     }
 
     fn insert(
@@ -162,6 +244,117 @@ impl DecodedJsonCache {
             }
         }
     }
+
+    fn get_projection_raw(
+        &self,
+        heap_id: &[u8; 16],
+        collection_id: &[u8; 16],
+        key: &str,
+        fields_hash: &[u8; 32],
+        version: &[u8; 16],
+        fields: &[String],
+    ) -> Option<(Arc<[Option<serde_json::Value>]>, u64)> {
+        let mut hasher = self.projected_entries.hasher().build_hasher();
+        heap_id.hash(&mut hasher);
+        collection_id.hash(&mut hasher);
+        key.hash(&mut hasher);
+        fields_hash.hash(&mut hasher);
+        let hash = hasher.finish();
+        self.projected_entries
+            .raw_entry()
+            .from_hash(hash, |candidate| {
+                &candidate.document.heap_id == heap_id
+                    && &candidate.document.collection_id == collection_id
+                    && candidate.document.key == key
+                    && &candidate.fields_hash == fields_hash
+            })
+            .map(|(_, entry)| entry)
+            .filter(|entry| entry.version == *version && entry.fields.as_ref() == fields)
+            .map(|entry| (Arc::clone(&entry.values), entry.logical_bytes))
+    }
+
+    fn insert_projection(
+        &mut self,
+        key: ProjectedJsonKey,
+        version: [u8; 16],
+        fields: Arc<[String]>,
+        values: Arc<[Option<serde_json::Value>]>,
+        logical_bytes: u64,
+    ) {
+        if self
+            .projected_entries
+            .get(&key)
+            .is_some_and(|entry| entry.version == version && entry.fields == fields)
+        {
+            return;
+        }
+        if let Some(previous) = self.projected_entries.remove(&key) {
+            self.projected_resident_charge = self
+                .projected_resident_charge
+                .saturating_sub(previous.charge);
+        }
+        let value_charge = values
+            .iter()
+            .filter_map(Option::as_ref)
+            .map(crate::resource::estimate_json_bytes)
+            .sum::<u64>() as usize;
+        let charge = value_charge
+            .saturating_add(key.document.key.len())
+            .saturating_add(160);
+        if charge > self.projected_max_charge {
+            return;
+        }
+        self.projected_resident_charge = self.projected_resident_charge.saturating_add(charge);
+        self.projected_entries.insert(
+            key.clone(),
+            CachedProjectedJson {
+                version,
+                fields,
+                values,
+                logical_bytes,
+                charge,
+            },
+        );
+        self.projected_admission_order.push_back((key, version));
+        if self.projected_admission_order.len()
+            > self
+                .projected_entries
+                .len()
+                .saturating_mul(2)
+                .saturating_add(1_024)
+        {
+            self.projected_admission_order.retain(|(key, version)| {
+                self.projected_entries
+                    .get(key)
+                    .is_some_and(|entry| entry.version == *version)
+            });
+        }
+        while self.projected_resident_charge > self.projected_max_charge {
+            let Some((key, version)) = self.projected_admission_order.pop_front() else {
+                break;
+            };
+            if self
+                .projected_entries
+                .get(&key)
+                .is_some_and(|entry| entry.version == version)
+            {
+                if let Some(removed) = self.projected_entries.remove(&key) {
+                    self.projected_resident_charge = self
+                        .projected_resident_charge
+                        .saturating_sub(removed.charge);
+                }
+            }
+        }
+    }
+}
+
+fn projection_fields_hash(fields: &[String]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    for field in fields {
+        hasher.update(&(field.len() as u64).to_le_bytes());
+        hasher.update(field.as_bytes());
+    }
+    *hasher.finalize().as_bytes()
 }
 
 fn project_json_fields(value: &serde_json::Value, fields: &[String]) -> Vec<serde_json::Value> {
@@ -254,6 +447,14 @@ impl ResidiuumDeployment {
     /// Structured startup disposition, recovery actions, counts, and timings.
     pub fn open_report(&self) -> Result<residiuum_store::StoreOpenReport, Error> {
         Ok(self.host.open_report()?)
+    }
+
+    /// Constant-time decoded JSON cache counters for this deployment open.
+    pub fn decoded_json_cache_stats(&self) -> Option<DecodedJsonCacheStats> {
+        self.decoded_json_cache
+            .lock()
+            .ok()
+            .map(|cache| cache.stats())
     }
 
     /// Durable group-commit counters from the shared physical deployment.
@@ -775,6 +976,32 @@ impl HeapCollection {
         Ok(value)
     }
 
+    /// Decode a body already proven absent from the version-qualified cache.
+    /// The caller must have obtained and verified `version` in the same bounded
+    /// resolution flow; avoiding a second cache probe keeps miss accounting and
+    /// hot-lock work honest.
+    fn decode_json_cache_miss_shared(
+        &self,
+        key: &str,
+        body: &[u8],
+        version: [u8; 16],
+    ) -> Result<Arc<serde_json::Value>, Error> {
+        let value = Arc::new(crate::value::decode_json(body)?);
+        if let Ok(mut cache) = self.decoded_json_cache.lock() {
+            cache.insert(
+                DecodedJsonKey {
+                    heap_id: *self.cap.heap_id().as_bytes(),
+                    collection_id: *self.id.as_bytes(),
+                    key: key.to_string(),
+                },
+                version,
+                Arc::clone(&value),
+                body.len(),
+            );
+        }
+        Ok(value)
+    }
+
     /// Get opaque application bytes for `key` (strips type tag).
     pub fn get_bytes(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
         match self.get_raw_body(key)? {
@@ -898,7 +1125,7 @@ impl HeapCollection {
                     return self.get_json_many_covered_raw(keys);
                 };
                 let document =
-                    match self.decode_json_versioned_shared(&key, &body, expected_version) {
+                    match self.decode_json_cache_miss_shared(&key, &body, expected_version) {
                         Ok(value) => HostDocument::Present {
                             value: value.into(),
                             logical_bytes: crate::value::encoded_json_payload_len(&body),
@@ -1388,6 +1615,30 @@ impl HeapCollection {
         use crate::query_bytecode_v1::HostGroupAggregate;
 
         let mut accumulator = crate::query_bytecode_v1::GroupAccumulator::new(spec);
+        let key_only = accumulator.uses_exact_logical_key_count_only();
+        let (projected_fields, projected_predicate) = if where_k.constant_value() == Some(true) {
+            (
+                accumulator
+                    .covering_fields()
+                    .or_else(|| key_only.then(Vec::new)),
+                false,
+            )
+        } else if let Some(mut fields) = where_k.direct_fields() {
+            if let Some(aggregate_fields) = accumulator.covering_fields() {
+                for field in aggregate_fields {
+                    if !fields.contains(&field) {
+                        fields.push(field);
+                    }
+                }
+                (Some(fields), true)
+            } else if key_only {
+                (Some(fields), true)
+            } else {
+                (None, false)
+            }
+        } else {
+            (None, false)
+        };
         let mut examined_documents = 0u64;
         let mut examined_bytes = 0u64;
         if let Some(keys) = candidate_keys {
@@ -1404,11 +1655,9 @@ impl HeapCollection {
             if identities.len() != keys.len() {
                 return Ok(None);
             }
-            let Ok(cache) = self.decoded_json_cache.lock() else {
-                return Ok(None);
-            };
-            for ((expected_key, expected_raw), (actual_raw, version)) in
-                keys.iter().zip(&raw_keys).zip(&identities)
+            let mut required = Vec::with_capacity(keys.len());
+            for ((expected_raw, (actual_raw, version)), expected_key) in
+                raw_keys.iter().zip(&identities).zip(keys)
             {
                 if actual_raw != expected_raw {
                     return Ok(None);
@@ -1416,6 +1665,46 @@ impl HeapCollection {
                 let Some(version) = version else {
                     return Ok(None);
                 };
+                required.push((expected_key.clone(), expected_raw.clone(), *version));
+            }
+            if let Some(fields) = projected_fields.as_ref() {
+                let Some(rows) = self.resolve_projected_aggregate_rows(&required, fields)? else {
+                    return Ok(None);
+                };
+                for (key, values, logical_bytes) in rows {
+                    examined_documents = examined_documents.saturating_add(1);
+                    examined_bytes = examined_bytes.saturating_add(logical_bytes);
+                    if projected_predicate
+                        && !where_k
+                            .eval_direct_projected(fields, &values)
+                            .ok_or_else(|| {
+                                Error::Internal("projected predicate field mismatch".into())
+                            })?
+                    {
+                        continue;
+                    }
+                    if key_only {
+                        accumulator.ingest_with_logical_key(&key, &serde_json::Value::Null)?;
+                    } else {
+                        accumulator.ingest_covering(
+                            fields,
+                            values.into_iter().map(Option::unwrap_or_default).collect(),
+                        )?;
+                    }
+                }
+                return Ok(Some(HostGroupAggregate {
+                    rows: accumulator.finish()?,
+                    examined_documents,
+                    examined_bytes,
+                }));
+            }
+            if !self.ensure_decoded_cache_entries(&required)? {
+                return Ok(None);
+            }
+            let Ok(cache) = self.decoded_json_cache.lock() else {
+                return Ok(None);
+            };
+            for (expected_key, _, version) in &required {
                 let Some((value, logical_bytes)) = cache.get_raw_ref_with_len(
                     self.cap.heap_id().as_bytes(),
                     self.id.as_bytes(),
@@ -1427,7 +1716,11 @@ impl HeapCollection {
                 examined_documents = examined_documents.saturating_add(1);
                 examined_bytes = examined_bytes.saturating_add(logical_bytes);
                 if where_k.eval_doc(value)? {
-                    accumulator.ingest(value)?;
+                    if accumulator.uses_exact_logical_key() {
+                        accumulator.ingest_with_logical_key(expected_key, value)?;
+                    } else {
+                        accumulator.ingest(value)?;
+                    }
                 }
             }
             return Ok(Some(HostGroupAggregate {
@@ -1443,12 +1736,58 @@ impl HeapCollection {
                 4_096,
                 after_key.as_deref(),
             )?;
+            let required = page
+                .entries
+                .iter()
+                .map(|(raw_key, version)| {
+                    let key = String::from_utf8(raw_key.clone())
+                        .map_err(|_| Error::Internal("aggregate scan: non-UTF-8 key".into()))?;
+                    Ok((key, raw_key.clone(), *version))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            if let Some(fields) = projected_fields.as_ref() {
+                let Some(rows) = self.resolve_projected_aggregate_rows(&required, fields)? else {
+                    return Ok(None);
+                };
+                for (key, values, logical_bytes) in rows {
+                    examined_documents = examined_documents.saturating_add(1);
+                    examined_bytes = examined_bytes.saturating_add(logical_bytes);
+                    if projected_predicate
+                        && !where_k
+                            .eval_direct_projected(fields, &values)
+                            .ok_or_else(|| {
+                                Error::Internal("projected predicate field mismatch".into())
+                            })?
+                    {
+                        continue;
+                    }
+                    if key_only {
+                        accumulator.ingest_with_logical_key(&key, &serde_json::Value::Null)?;
+                    } else {
+                        accumulator.ingest_covering(
+                            fields,
+                            values.into_iter().map(Option::unwrap_or_default).collect(),
+                        )?;
+                    }
+                }
+                if !page.has_more {
+                    break;
+                }
+                let Some(next_key) = page.last_key else {
+                    return Err(Error::Internal(
+                        "aggregate scan has_more without continuation key".into(),
+                    ));
+                };
+                after_key = Some(next_key);
+                continue;
+            }
+            if !self.ensure_decoded_cache_entries(&required)? {
+                return Ok(None);
+            }
             let Ok(cache) = self.decoded_json_cache.lock() else {
                 return Ok(None);
             };
-            for (raw_key, version) in &page.entries {
-                let key = std::str::from_utf8(raw_key)
-                    .map_err(|_| Error::Internal("aggregate scan: non-UTF-8 key".into()))?;
+            for (key, _, version) in &required {
                 let Some((value, logical_bytes)) = cache.get_raw_ref_with_len(
                     self.cap.heap_id().as_bytes(),
                     self.id.as_bytes(),
@@ -1460,7 +1799,11 @@ impl HeapCollection {
                 examined_documents = examined_documents.saturating_add(1);
                 examined_bytes = examined_bytes.saturating_add(logical_bytes);
                 if where_k.eval_doc(value)? {
-                    accumulator.ingest(value)?;
+                    if accumulator.uses_exact_logical_key() {
+                        accumulator.ingest_with_logical_key(key, value)?;
+                    } else {
+                        accumulator.ingest(value)?;
+                    }
                 }
             }
             drop(cache);
@@ -1479,6 +1822,164 @@ impl HeapCollection {
             examined_documents,
             examined_bytes,
         }))
+    }
+
+    /// Resolve and partially decode an exact set of aggregate inputs. Every
+    /// body is still version/hole checked and its complete JSON syntax is
+    /// consumed before any row reaches the accumulator.
+    fn resolve_projected_aggregate_rows(
+        &self,
+        required: &[(String, Vec<u8>, [u8; 16])],
+        fields: &[String],
+    ) -> Result<Option<Vec<(String, Vec<Option<serde_json::Value>>, u64)>>, Error> {
+        let fields_hash = projection_fields_hash(fields);
+        let cached_fields: Arc<[String]> = fields.to_vec().into();
+        let projected_key = |key: &str| ProjectedJsonKey {
+            document: DecodedJsonKey {
+                heap_id: *self.cap.heap_id().as_bytes(),
+                collection_id: *self.id.as_bytes(),
+                key: key.to_string(),
+            },
+            fields_hash,
+        };
+        let mut rows = vec![None; required.len()];
+        let mut missing = Vec::new();
+        {
+            let Ok(cache) = self.decoded_json_cache.lock() else {
+                return Ok(None);
+            };
+            for (slot, (key, _, version)) in required.iter().enumerate() {
+                if let Some((values, logical_bytes)) = cache.get_projection_raw(
+                    self.cap.heap_id().as_bytes(),
+                    self.id.as_bytes(),
+                    key,
+                    &fields_hash,
+                    version,
+                    fields,
+                ) {
+                    rows[slot] = Some((key.clone(), values.to_vec(), logical_bytes));
+                } else {
+                    missing.push(slot);
+                }
+            }
+        }
+        if missing.is_empty() {
+            return Ok(rows.into_iter().collect());
+        }
+        let raw_keys = missing
+            .iter()
+            .map(|slot| required[*slot].1.clone())
+            .collect::<Vec<_>>();
+        let resolved = self
+            .store
+            .get_collection_many_versioned(self.id.as_bytes(), &raw_keys)?;
+        if resolved.len() != missing.len() {
+            return Ok(None);
+        }
+        let mut admissions = Vec::with_capacity(missing.len());
+        for (slot, (actual_key, body, version, hole)) in missing.into_iter().zip(resolved) {
+            let (key, expected_key, expected_version) = &required[slot];
+            if actual_key != *expected_key || version != Some(*expected_version) || hole.is_some() {
+                return Ok(None);
+            }
+            let Some(body) = body else {
+                return Ok(None);
+            };
+            let logical_bytes = crate::value::encoded_json_payload_len(&body)
+                .ok_or_else(|| crate::value::decode_json(&body).unwrap_err())?;
+            let Some(values) = crate::value::project_json_fields_present(&body, fields)? else {
+                return Ok(None);
+            };
+            let values: Arc<[Option<serde_json::Value>]> = values.into();
+            rows[slot] = Some((key.clone(), values.to_vec(), logical_bytes));
+            admissions.push((
+                projected_key(key),
+                *expected_version,
+                Arc::clone(&cached_fields),
+                values,
+                logical_bytes,
+            ));
+        }
+        if let Ok(mut cache) = self.decoded_json_cache.lock() {
+            for (key, version, fields, values, logical_bytes) in admissions {
+                cache.insert_projection(key, version, fields, values, logical_bytes);
+            }
+        }
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Populate exact key/version decoded identities as one bounded body read.
+    /// Returns `false` when concurrent drift, disappearance, a storage hole or
+    /// cache admission prevents the caller from proving the shortcut; callers
+    /// then use the ordinary coverage-aware path.
+    fn ensure_decoded_cache_entries(
+        &self,
+        required: &[(String, Vec<u8>, [u8; 16])],
+    ) -> Result<bool, Error> {
+        let mut missing = Vec::new();
+        {
+            let Ok(cache) = self.decoded_json_cache.lock() else {
+                return Ok(false);
+            };
+            for (slot, (key, _, version)) in required.iter().enumerate() {
+                if cache
+                    .get_raw_ref_with_len(
+                        self.cap.heap_id().as_bytes(),
+                        self.id.as_bytes(),
+                        key,
+                        version,
+                    )
+                    .is_none()
+                {
+                    missing.push(slot);
+                }
+            }
+        }
+        if missing.is_empty() {
+            return Ok(true);
+        }
+
+        let raw_keys = missing
+            .iter()
+            .map(|slot| required[*slot].1.clone())
+            .collect::<Vec<_>>();
+        let resolved = self
+            .store
+            .get_collection_many_versioned(self.id.as_bytes(), &raw_keys)?;
+        if resolved.len() != missing.len() {
+            return Ok(false);
+        }
+        let mut decoded = Vec::with_capacity(missing.len());
+        for (slot, (actual_key, body, version, hole)) in missing.into_iter().zip(resolved) {
+            let (key, expected_key, expected_version) = &required[slot];
+            if actual_key != *expected_key || version != Some(*expected_version) || hole.is_some() {
+                return Ok(false);
+            }
+            let Some(body) = body else {
+                return Ok(false);
+            };
+            let value = Arc::new(crate::value::decode_json(&body)?);
+            decoded.push((
+                DecodedJsonKey {
+                    heap_id: *self.cap.heap_id().as_bytes(),
+                    collection_id: *self.id.as_bytes(),
+                    key: key.clone(),
+                },
+                *expected_version,
+                value,
+                body.len(),
+            ));
+        }
+        let Ok(mut cache) = self.decoded_json_cache.lock() else {
+            return Ok(false);
+        };
+        for (key, version, value, encoded_len) in decoded {
+            cache.insert(key, version, value, encoded_len);
+        }
+        // The caller immediately performs the authoritative version-qualified
+        // lookup while holding this cache. Oversize/evicted admissions therefore
+        // refuse there without paying for a second complete cache probe here.
+        Ok(true)
     }
 
     /// Create a field index over JSON documents. Requires IndexAdmin + Read for build.
@@ -1783,5 +2284,77 @@ mod decoded_cache_tests {
             cache.get(&second_key, &[5; 16]).unwrap().as_ref(),
             &json!({"v": 3})
         );
+        let stats = cache.stats();
+        assert_eq!(stats.hits, 4);
+        assert_eq!(stats.misses, 3);
+        assert_eq!(stats.entries, 1);
+        assert!(stats.resident_charge <= stats.max_charge);
+    }
+
+    #[test]
+    fn projected_cache_is_version_and_exact_field_list_fenced_and_bounded() {
+        let mut cache = DecodedJsonCache::new(1_024);
+        let fields: Arc<[String]> = vec!["region".to_string()].into();
+        let first = ProjectedJsonKey {
+            document: key("a"),
+            fields_hash: projection_fields_hash(&fields),
+        };
+        cache.insert_projection(
+            first.clone(),
+            [3; 16],
+            Arc::clone(&fields),
+            vec![Some(json!("us"))].into(),
+            1_000,
+        );
+        assert_eq!(
+            cache
+                .get_projection_raw(
+                    &[1; 16],
+                    &[2; 16],
+                    "a",
+                    &first.fields_hash,
+                    &[3; 16],
+                    &fields
+                )
+                .unwrap()
+                .0
+                .as_ref(),
+            &[Some(json!("us"))]
+        );
+        assert!(cache
+            .get_projection_raw(
+                &[1; 16],
+                &[2; 16],
+                "a",
+                &first.fields_hash,
+                &[4; 16],
+                &fields
+            )
+            .is_none());
+        assert!(cache
+            .get_projection_raw(
+                &[1; 16],
+                &[2; 16],
+                "a",
+                &first.fields_hash,
+                &[3; 16],
+                &["status".to_string()],
+            )
+            .is_none());
+
+        let second = ProjectedJsonKey {
+            document: key("b"),
+            fields_hash: first.fields_hash,
+        };
+        cache.insert_projection(
+            second.clone(),
+            [5; 16],
+            fields,
+            vec![Some(json!("eu"))].into(),
+            1_000,
+        );
+        assert!(cache.projected_resident_charge <= cache.projected_max_charge);
+        assert!(!cache.projected_entries.contains_key(&first));
+        assert!(cache.projected_entries.contains_key(&second));
     }
 }

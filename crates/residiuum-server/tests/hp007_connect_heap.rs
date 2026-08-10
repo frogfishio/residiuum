@@ -887,7 +887,8 @@ fn apb7_query_from_remote_collection_plane() {
         .expect("remote Full page one");
     assert_eq!(first.profile, RQL_FULL_PROFILE);
     assert_eq!(first.rows.len(), 1);
-    assert_eq!(first.base.rows.len(), 1);
+    assert!(first.base.rows.is_empty());
+    assert_eq!(first.base_row_count, 1);
     assert_eq!(first.enrich_loads.len(), 1);
     assert!(first.rows[0].1["customer"]["name"].is_string());
     assert!(first.rows[0].1.get("customer_id").is_none());

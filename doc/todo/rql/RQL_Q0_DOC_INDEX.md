@@ -18,6 +18,14 @@ surface for Gate-1 target/profile:
 
 Strategy (not freeze exit): [RQL_QUERY_QUALIFICATION_PROGRAM.md](./RQL_QUERY_QUALIFICATION_PROGRAM.md).
 
+## Current performance campaign restart
+
+The parked RQL/Mongo performance effort resumes from
+[RQL_PERFORMANCE_PROOF_CONTINUATION_2026_08_10.md](./RQL_PERFORMANCE_PROOF_CONTINUATION_2026_08_10.md).
+It contains the frozen local baseline, remaining scale/remote/join work,
+Bonzo procedure, validation commands and evidence-admission rules. Do not
+restart that work from the historical chat or the original weak-cell baseline.
+
 ## Process / honesty (temporary; archive after Q0 ACCEPT)
 
 | Artefact | Role | After principal Q0 ACCEPT |

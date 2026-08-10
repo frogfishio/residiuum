@@ -49,6 +49,44 @@ impl DirectPredicate {
             Self::And(args) => args.iter().all(|arg| arg.eval(doc)),
         }
     }
+
+    fn collect_fields(&self, fields: &mut Vec<String>) {
+        match self {
+            Self::Cmp { path, .. } => {
+                let field = path.join(".");
+                if !fields.contains(&field) {
+                    fields.push(field);
+                }
+            }
+            Self::And(args) => {
+                for arg in args {
+                    arg.collect_fields(fields);
+                }
+            }
+        }
+    }
+
+    fn eval_projected(&self, fields: &[String], values: &[Option<JsonValue>]) -> Option<bool> {
+        match self {
+            Self::Cmp { op, path, literal } => {
+                let field = path.join(".");
+                let slot = fields.iter().position(|candidate| candidate == &field)?;
+                Some(
+                    values
+                        .get(slot)?
+                        .as_ref()
+                        .is_some_and(|value| direct_compare(*op, value, literal)),
+                )
+            }
+            Self::And(args) => {
+                let mut result = true;
+                for arg in args {
+                    result &= arg.eval_projected(fields, values)?;
+                }
+                Some(result)
+            }
+        }
+    }
 }
 
 impl CompiledKernelWhere {
@@ -58,6 +96,28 @@ impl CompiledKernelWhere {
 
     pub(crate) fn requires_logical_key(&self) -> bool {
         self.requires_logical_key
+    }
+
+    /// Exact body fields required by the allocation-light direct predicate.
+    /// General SDA programs and predicates over the external logical key do
+    /// not claim this shortcut.
+    pub(crate) fn direct_fields(&self) -> Option<Vec<String>> {
+        if self.requires_logical_key {
+            return None;
+        }
+        let direct = self.direct.as_ref()?;
+        let mut fields = Vec::new();
+        direct.collect_fields(&mut fields);
+        Some(fields)
+    }
+
+    /// Evaluate the direct predicate against presence-aware projected fields.
+    pub(crate) fn eval_direct_projected(
+        &self,
+        fields: &[String],
+        values: &[Option<JsonValue>],
+    ) -> Option<bool> {
+        self.direct.as_ref()?.eval_projected(fields, values)
     }
 
     /// Evaluate against one document (`input` binding).

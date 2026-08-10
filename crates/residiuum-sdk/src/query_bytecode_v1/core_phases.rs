@@ -41,8 +41,9 @@ use super::{HostDocument, HostJsonValue};
 fn with_logical_key(key: &str, doc: JsonValue) -> JsonValue {
     match doc {
         JsonValue::Object(mut m) => {
-            m.entry("_key".to_string())
-                .or_insert_with(|| JsonValue::String(key.to_string()));
+            // `_key` is the immutable store key, never an overridable body
+            // field. This also makes exact `_key` grouping provably unique.
+            m.insert("_key".to_string(), JsonValue::String(key.to_string()));
             JsonValue::Object(m)
         }
         other => other,
@@ -518,30 +519,36 @@ impl<'a> CoreFrame<'a> {
         {
             let constant_true = self.where_k.constant_value() == Some(true);
             let accumulator = super::group_agg::GroupAccumulator::new(&self.project.group_agg);
-            if let Some(fields) = accumulator.covering_fields() {
+            let covering_fields = accumulator.covering_fields();
+            if let Some(fields) = covering_fields.as_ref() {
                 if constant_true {
-                    if let Some(rows) = scan.try_covering_index_values(&fields)? {
+                    if let Some(rows) = scan.try_covering_index_values(fields)? {
                         self.examined_docs = rows.len() as u64;
                         self.examined_bytes =
                             rows.iter().map(|row| json_array_values_byte_len(row)).sum();
                         self.used_index = true;
-                        self.pending_keys = Some(PendingKeys::ProjectedGroup { fields, rows });
+                        self.pending_keys = Some(PendingKeys::ProjectedGroup {
+                            fields: fields.clone(),
+                            rows,
+                        });
                         self.saw_scan = true;
                         return Ok(());
                     }
                 }
-                if let Some(result) = scan.try_group_aggregate(
-                    &self.project.group_agg,
-                    &self.where_k,
-                    index_keys.as_deref(),
-                )? {
-                    self.examined_docs = result.examined_documents;
-                    self.examined_bytes = result.examined_bytes;
-                    self.working = result.rows;
-                    self.pending_keys = Some(PendingKeys::Aggregated);
-                    self.saw_scan = true;
-                    return Ok(());
-                }
+            }
+            if let Some(result) = scan.try_group_aggregate(
+                &self.project.group_agg,
+                &self.where_k,
+                index_keys.as_deref(),
+            )? {
+                self.examined_docs = result.examined_documents;
+                self.examined_bytes = result.examined_bytes;
+                self.working = result.rows;
+                self.pending_keys = Some(PendingKeys::Aggregated);
+                self.saw_scan = true;
+                return Ok(());
+            }
+            if let Some(fields) = covering_fields {
                 if constant_true {
                     if let Some(rows) = scan.try_projected_values(&fields)? {
                         self.examined_docs = rows.len() as u64;
@@ -781,6 +788,8 @@ impl<'a> CoreFrame<'a> {
     ) -> Result<(), Error> {
         let spec = self.project.group_agg.clone();
         let mut accumulator = super::group_agg::GroupAccumulator::new(&spec);
+        let fast_logical_key =
+            !self.where_k.requires_logical_key() && accumulator.uses_exact_logical_key();
         let needs_logical_key =
             self.where_k.requires_logical_key() || accumulator.requires_logical_key();
         match pending {
@@ -797,6 +806,12 @@ impl<'a> CoreFrame<'a> {
             PendingKeys::Materialized => {
                 for (key, doc) in self.working.drain(..) {
                     check_governance(self.options, self.started)?;
+                    if fast_logical_key {
+                        if self.where_k.eval_doc(&doc)? {
+                            accumulator.ingest_with_logical_key(&key, &doc)?;
+                        }
+                        continue;
+                    }
                     let doc = if needs_logical_key {
                         with_logical_key(&key, doc)
                     } else {
@@ -820,6 +835,17 @@ impl<'a> CoreFrame<'a> {
                                     value: doc,
                                     logical_bytes,
                                 } => {
+                                    if fast_logical_key {
+                                        self.examined_docs += 1;
+                                        self.examined_bytes = self.examined_bytes.saturating_add(
+                                            document_byte_len(doc.as_value(), logical_bytes),
+                                        );
+                                        if self.where_k.eval_doc(doc.as_value())? {
+                                            accumulator
+                                                .ingest_with_logical_key(&key, doc.as_value())?;
+                                        }
+                                        continue;
+                                    }
                                     let preserved_length = logical_bytes;
                                     let doc = doc.into_owned();
                                     let doc = if needs_logical_key {
@@ -867,6 +893,20 @@ impl<'a> CoreFrame<'a> {
                                 value: doc,
                                 logical_bytes,
                             } => {
+                                if fast_logical_key {
+                                    let length = document_byte_len(doc.as_value(), logical_bytes);
+                                    if self.stop_if_bytes_would_exceed(length)? {
+                                        break;
+                                    }
+                                    self.examined_docs += 1;
+                                    self.examined_bytes =
+                                        self.examined_bytes.saturating_add(length);
+                                    if self.where_k.eval_doc(doc.as_value())? {
+                                        accumulator
+                                            .ingest_with_logical_key(&key, doc.as_value())?;
+                                    }
+                                    continue;
+                                }
                                 let preserved_length = logical_bytes;
                                 let doc = doc.into_owned();
                                 let doc = if needs_logical_key {
@@ -908,12 +948,14 @@ impl<'a> CoreFrame<'a> {
             }
             PendingKeys::Stream { after } => {
                 let mut after = after;
+                let scan_batch_size = if self.budget.is_none() { 4_096 } else { 256 };
                 'pages: loop {
                     check_governance(self.options, self.started)?;
                     if self.budget_truncated {
                         break;
                     }
-                    let batch = scan.scan_json_covered_page(Some(256), after.as_deref())?;
+                    let batch =
+                        scan.scan_json_covered_page(Some(scan_batch_size), after.as_deref())?;
                     if batch.is_empty() {
                         break;
                     }
@@ -928,6 +970,20 @@ impl<'a> CoreFrame<'a> {
                                 value: doc,
                                 logical_bytes,
                             } => {
+                                if fast_logical_key {
+                                    let length = document_byte_len(doc.as_value(), logical_bytes);
+                                    if self.stop_if_bytes_would_exceed(length)? {
+                                        break 'pages;
+                                    }
+                                    self.examined_docs += 1;
+                                    self.examined_bytes =
+                                        self.examined_bytes.saturating_add(length);
+                                    if self.where_k.eval_doc(doc.as_value())? {
+                                        accumulator
+                                            .ingest_with_logical_key(&key, doc.as_value())?;
+                                    }
+                                    continue;
+                                }
                                 let preserved_length = logical_bytes;
                                 let doc = doc.into_owned();
                                 let doc = if needs_logical_key {
