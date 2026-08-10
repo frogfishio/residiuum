@@ -15,10 +15,12 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 // Two logical batches may be gathered into one physical durability cohort.
-// Each half stays bounded so the existing 2,048-request client window can fill
-// both before any acknowledgement; the gathered write remains at most 16 MiB.
-const MAX_COHORT_ENTRIES: usize = 1_024;
-const MAX_COHORT_BYTES: usize = 8 * 1024 * 1024;
+// Each half stays bounded; saturated bulk clients can fill both from the same
+// asynchronous request window. The gathered write remains at most 32 MiB.
+// Record frames remain independently checksummed and recoverable: this changes
+// group-commit width, not record atomicity or the acknowledgement boundary.
+const MAX_COHORT_ENTRIES: usize = 2_048;
+const MAX_COHORT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_GATHERED_COHORT_ENTRIES: usize = 2 * MAX_COHORT_ENTRIES;
 const MAX_GATHERED_COHORT_BYTES: usize = 2 * MAX_COHORT_BYTES;
 const MAX_ADMITTED_BYTES: usize = 2 * MAX_GATHERED_COHORT_BYTES;
@@ -672,7 +674,7 @@ fn install_batch_pair(
     }
 
     // Oversized singleton/edge shapes retain the qualified depth-two path;
-    // never exceed the physical 16 MiB gathered-cohort bound merely to merge.
+    // never exceed the physical 32 MiB gathered-cohort bound merely to merge.
     note_batch_attempt(inner, &first);
     note_batch_attempt(inner, &second);
     let (first_result, second_result) = commit_batch_pair(inner, &first, &second);
@@ -1210,37 +1212,38 @@ mod tests {
         let physical_guard = physical.lock().unwrap();
         let body_bytes = 16 * 1024 * 1024;
 
-        let first = {
+        let mut admitted = Vec::new();
+        for index in 0..3u8 {
             let coordinator = Arc::clone(&coordinator);
-            thread::spawn(move || {
+            admitted.push(thread::spawn(move || {
                 coordinator.submit(
-                    b"credit/first".to_vec(),
-                    vec![0x41; body_bytes],
+                    format!("credit/{index}").into_bytes(),
+                    vec![0x41 + index; body_bytes],
                     WriteCondition::Unconditional,
-                    [0x11; 16],
-                    [0x21; 32],
+                    [0x11 + index; 16],
+                    [0x21 + index; 32],
                 )
-            })
-        };
+            }));
+        }
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        while coordinator.stats().admitted_bytes < body_bytes {
+        while coordinator.stats().admitted_bytes < body_bytes * 3 {
             assert!(
                 Instant::now() < deadline,
-                "first operation was not admitted"
+                "initial operations were not admitted"
             );
             thread::yield_now();
         }
 
-        let second = {
+        let blocked_submit = {
             let coordinator = Arc::clone(&coordinator);
             thread::spawn(move || {
                 coordinator.submit(
-                    b"credit/second".to_vec(),
-                    vec![0x42; body_bytes],
+                    b"credit/blocked".to_vec(),
+                    vec![0x44; body_bytes],
                     WriteCondition::Unconditional,
-                    [0x12; 16],
-                    [0x22; 32],
+                    [0x14; 16],
+                    [0x24; 32],
                 )
             })
         };
@@ -1248,7 +1251,7 @@ mod tests {
         while coordinator.stats().byte_admission_waits == 0 {
             assert!(
                 Instant::now() < deadline,
-                "second operation did not wait for credits"
+                "fourth operation did not wait for credits"
             );
             thread::yield_now();
         }
@@ -1257,8 +1260,10 @@ mod tests {
         assert!(blocked.peak_admitted_bytes <= blocked.admitted_byte_capacity);
 
         drop(physical_guard);
-        first.join().unwrap().unwrap();
-        second.join().unwrap().unwrap();
+        for handle in admitted {
+            handle.join().unwrap().unwrap();
+        }
+        blocked_submit.join().unwrap().unwrap();
         let complete = coordinator.stats();
         assert_eq!(complete.admitted_bytes, 0);
         assert!(complete.byte_admission_waits >= 1);
