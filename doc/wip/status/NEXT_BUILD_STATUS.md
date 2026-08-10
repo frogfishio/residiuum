@@ -7,8 +7,8 @@ Sources: [CRITICAL_PATH.md](../../../CRITICAL_PATH.md),
 [NEXT_BUILD_PLAN.md](../../done/programs/NEXT_BUILD_PLAN.md),
 [M0_1_EVIDENCE_INVENTORY.md](../../done/programs/M0_1_EVIDENCE_INVENTORY.md), and active package plans.
 
-Updated: 2026-08-09 (**RQL recovery baseline recorded**; Q0 is the only accepted
-package; Q5 remains HOLD). Recovery authority:
+Updated: 2026-08-10 (**Atomics admitted by principal amendment**; RQL recovery
+baseline preserved; Q0 is the only accepted package; Q5 remains HOLD). Recovery authority:
 [RQL_RECOVERY_BASELINE_2026_08_09.md](../../todo/rql/RQL_RECOVERY_BASELINE_2026_08_09.md).
 Accept pack §5: [RQL_Q0_PRINCIPAL_ACCEPT.md](../../todo/rql/RQL_Q0_PRINCIPAL_ACCEPT.md)
 · clean tip `e1f5c670a99dc54da477c531c83bca4985199a42` · index
@@ -16,7 +16,9 @@ Accept pack §5: [RQL_Q0_PRINCIPAL_ACCEPT.md](../../todo/rql/RQL_Q0_PRINCIPAL_AC
 **Decision 0 OPEN**; RQL-C1 **forbidden**
 ([RQL_D0_CLOSE_READINESS.md](../../todo/rql/RQL_D0_CLOSE_READINESS.md); A7 micro-op
 purity not required for D0 close).
-**RQL active** — Q0 accept; Q1–Q4 labor on board `in_review` (not package accept). Pre-accept **F1–F9 labor `in_review`** — Q5+ hold for principal. CRITICAL_PATH RQL→Atomics→Cluster.
+**Atomics active critical path** — RQL Q1–Q4 remain `in_review` and unaccepted;
+Q5–Q7 are parked, not waived. Atomics architecture v1.1 and delivery plan are
+developer-ready; start ATM-0 only. Cluster remains forbidden.
 Prior: RQL-I1/0/F1/F2; P0 packaging 0.2.2; CSE-3 ~21–23K SoT.
 **ETQ-2 paused.** **AWO paused.**
 Labor hold: [RQL_LABOR_HOLD.md](../../todo/rql/RQL_LABOR_HOLD.md) — Q0 hold **lifted** for Q1.
@@ -157,7 +159,7 @@ Current verification includes the completed Residiuum rebrand through REB-12.
 | RRE-4 | not_started | — | RRE-3 | — | — | document-local enforcement |
 | RRE-5 | not_started | — | RRE-4, ATM path | — | — | operational lifecycle |
 | RRE-6 | not_started | — | RRE-5, REL | — | — | P2 release gate |
-| ATM-0 | not_started | — | HAR-2 freeze identity | plan §14 / §0.8: pure oracle/profile after HAR-2; principal wants early risk discovery | no LocalHeap Atomic product API until M4 packages accept | semantic oracle |
+| ATM-0 | ready | 2026-08-10 | — (principal §1.1 amendment; immutable Heap/collection identity already landed) | [Atomics spec](../../todo/atomics/ATOMICS_SPEC.md); [delivery plan](../../todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md); current baseline recorded | pure crate, exact CBOR profile, hostile corpus, oracle and model skeleton not implemented; no product claim | protocol/oracle freeze |
 | ATM-1 | not_started | — | ATM-0 | — | — | canonical plans |
 | ATM-2 | not_started | — | ATM-1 | — | — | prepare/member evidence |
 | ATM-3 | not_started | — | ATM-2 | — | — | durable decision |

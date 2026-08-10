@@ -20,10 +20,14 @@ Critical-path supporting infrastructure:
   pooling, streamed RQL, cancellation/retry truth, and server read concurrency;
   only slices required by the active RQL gate are admitted
 
+Active critical-path programme (principal amendment 2026-08-10):
+
+- [Atomics](atomics/) — bounded serializable LocalHeap transitions, exact
+  outcome evidence, recovery, async SDK, and cost qualification
+
 Later programs:
 
 - [RRE and collection contracts](rre/)
-- [Atomics](atomics/)
 - [Direct Access](direct-access/)
 - [Order Wavelets](order-wavelets/)
 - Evidence, Telemetry, Studio, clustering (including the

@@ -8,5 +8,7 @@ Normative specification:
 Current embedded application handoff:
 [GREMLIN_EMBEDDED_HANDOFF.md](./GREMLIN_EMBEDDED_HANDOFF.md).
 
-Start `DRV-0` only. This supplies the async application path required by RQL;
-it does not admit non-Rust bindings, Atomics implementation, or cluster work.
+Driver work remains governed here. Atomics implementation is now separately
+admitted by `CRITICAL_PATH.md` §1.1 and must follow
+[the Atomics programme](../atomics/README.md); it reuses this async client and
+does not broaden driver scope to non-Rust bindings or cluster work.

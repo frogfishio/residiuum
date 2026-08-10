@@ -1,0 +1,28 @@
+# Atomics programme
+
+Status: **active critical-path architecture; developer delivery starts at ATM-0**
+
+Execution authority:
+
+1. [ATOMICS_SPEC.md](./ATOMICS_SPEC.md) — normative semantics, storage
+   protocol, async product API, failure model, and conformance contract.
+2. [ATOMICS_IMPLEMENTATION_PLAN.md](./ATOMICS_IMPLEMENTATION_PLAN.md) — current
+   baseline, package ownership, PR order, gates, evidence, and governance.
+
+Compatibility note:
+[TRANSACTIONS.md](./TRANSACTIONS.md) explains how transaction terminology may
+later project the Atomic contract. It is subordinate and is not an
+implementation authority.
+
+Historical rationale:
+[ATOMICS_PROPOSAL.md](../../done/proposals/ATOMICS_PROPOSAL.md) is archived.
+Developers must not implement from it.
+
+Current product truth:
+
+- key-local conditional writes and durable operation replay exist;
+- physical group commit exists but its members are logically independent;
+- Heap-local multi-record Atomics do not exist;
+- `Capabilities::atomics` remains `false` until ATM-5 acceptance; and
+- no cross-Heap, cross-partition, interactive, synchronous, or external-effect
+  transaction is in scope.

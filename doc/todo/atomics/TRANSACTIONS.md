@@ -1,6 +1,7 @@
 # Residiuum scoped transaction compatibility profile
 
-Status: compatibility draft v0.2; subordinate to `ATOMICS_SPEC.md`
+Status: compatibility note v0.3; subordinate to `ATOMICS_SPEC.md`; not an
+implementation authority
 
 Target: familiar transaction API over qualified LocalHeap and Partition
 Atomics
@@ -238,17 +239,16 @@ This is the ordinary transaction profile for embedded applications.
 Example shape:
 
 ```rust
-let mut tx = heap.transaction(TransactionOptions::serializable())?;
-
-let account = tx.collection("accounts")?.get("account-42")?;
-tx.collection("accounts")?.replace(
+let account = accounts.get_versioned("account-42").await?.unwrap();
+let mut atomic = heap.atomic(AtomicOptions::new(atomic_id));
+atomic.replace(
+    &accounts,
     "account-42",
-    &debit(&account, 100)?,
-    ReplaceOptions::new().if_version(account.version),
+    account.version,
+    &debit(&account.value, 100)?,
 )?;
-tx.collection("ledger")?.create("entry-901", &entry)?;
-
-let receipt = tx.commit()?;
+atomic.create(&ledger, "entry-901", &entry)?;
+let outcome = heap.commit_atomic(atomic.build()?).await?;
 ```
 
 ### 6.3 Partition transaction compatibility
@@ -260,15 +260,11 @@ The caller declares a partition key or receives a transaction handle already
 bound to a partition:
 
 ```rust
-let mut tx = heap.partition_transaction(
-    "account-42",
-    TransactionOptions::serializable(),
-)?;
-
-tx.collection("accounts")?.put("account-42", &account)?;
-tx.collection("ledger")?.create("account-42/entry-901", &entry)?;
-
-let receipt = tx.commit()?;
+// Future qualified Partition profile; not part of LocalHeap v1 delivery.
+let mut atomic = heap.partition_atomic("account-42", options)?;
+atomic.replace(&accounts, "account-42", version, &account)?;
+atomic.create(&ledger, "account-42/entry-901", &entry)?;
+let outcome = heap.commit_atomic(atomic.build()?).await?;
 ```
 
 The SDK computes the partition for every member before submission where
@@ -358,10 +354,10 @@ Deadlock detection is unnecessary if the implementation uses one ordered
 commit sequencer per scope and does not hold user locks during transaction
 construction.
 
-For an embedded closure API, “construction” is entirely client-side buffering:
-the closure returns, the SDK freezes one immutable Atomic plan, and that plan
-is submitted once. The remote API accepts only a complete plan. No server-side
-transaction session remains open across arbitrary network pauses.
+Construction is entirely client-side builder buffering. `build()` freezes one
+immutable Atomic plan and that plan is submitted once. The remote API accepts
+only a complete plan. No server-side transaction session remains open across
+arbitrary network pauses.
 
 ## 8. API model
 
@@ -391,7 +387,7 @@ pub struct TransactionOptions {
     pub transaction_id: Option<TransactionId>,
     pub scope: TransactionScope,
     pub isolation: IsolationLevel,
-    pub durability: DurabilityMode,
+    pub durability: AtomicDurability, // LocalHeap v1 accepts Durable only
     pub timeout: Duration,
     pub max_operations: u32,
     pub max_bytes: u64,
@@ -406,19 +402,18 @@ pub struct TransactionReceipt {
 The SDK may provide convenience accessors for scope, isolation, operation
 count, commit position, durability, and evidence, but their sole source is
 `atomic_receipt`; it must not maintain a second receipt truth. Exact public
-Rust types require an API review.
+Rust types are frozen by `ATOMICS_SPEC.md` §15. The product API is async-only
+and builder-based. This compatibility projection may not add a synchronous
+mutation path.
 
 ### 8.2 Transaction operations
 
-The first profile supports:
-
-- `get` and `inspect`;
-- `create`;
-- `put`;
-- `replace(if_version)`;
-- `delete`;
-- generated-key `add`;
-- append-only event insertion.
+The LocalHeap v1 product profile supports pre-Atomic version-bearing reads on
+ordinary collection handles, then `create`, explicit `put_unconditional`,
+`replace(if_version)`, `delete(if_version)`, and assertions in the immutable
+plan. A blind upsert derived from a read must also assert that read's version.
+The profile does not expose generated-key allocation or an interactive read
+method on the builder. Familiar adapters must preserve that closed vocabulary.
 
 Index creation, tier movement, schema changes, compaction, purge, and cluster
 membership changes are administrative operations and cannot be transaction
@@ -448,22 +443,22 @@ must preserve the distinction from unknown outcome.
 
 ### 8.4 Status resolution
 
-Every backend supports a compatibility projection of Atomic status:
+Every qualified backend supports the governing async Atomic status call:
 
 ```rust
-heap.transaction_status(transaction_id)?
+heap.atomic_status(transaction_id).await?
 ```
 
-Possible states:
+The compatibility projection does not invent states. It exposes the logical
+and material axes from `ATOMICS_SPEC.md`:
 
 - `not_found` — no evidence within complete declared coverage;
-- `prepared`;
 - `committed`;
-- `aborted`;
-- `conflicting`;
-- `incomplete`;
+- `not_committed`;
 - `unknown_commit`;
-- `coverage_incomplete`.
+- `conflicting_decision_evidence`; and
+- material `complete`, `partial`, `missing`, `conflicting`, or
+  `coverage_incomplete`.
 
 `not_found` is legal only when the relevant scope and retention window have
 complete coverage.
@@ -558,13 +553,11 @@ A committed decision is valid only when:
 
 ### 9.5 Abort evidence
 
-An abort does not require a durable frame when no prepared data was written.
-
-If prepared members were persisted, an optional not-committed decision frame
-should be defined in a later compatible core kind or Atomic-decision
-extension.
-Absence of commit alone means “not proven committed,” not necessarily a proven
-explicit abort.
+Structural rejection before durable prepare is a request error, not an abort
+of an issued Atomic. Once a valid prepare exists, precondition/rule failure or
+recovery abort requires a durable `AtomicDecision(not_committed)` and lifetime
+decision tombstone. Absence of a valid decision during recovery is resolved to
+that not-committed evidence before the ID is reused.
 
 ### 9.6 Recovery classification
 
@@ -589,15 +582,18 @@ The normative state machine is the LocalHeap Atomic protocol in
 `ATOMICS_SPEC.md`. Its initial transaction-compatible append sequence is:
 
 ```text
-validate read/write set
-    ↓
 append AtomicPrepare
     ↓
+validate read/write set under Heap sequencer
+    ├── conflict → append/sync AtomicDecision(not_committed) → return
+    ↓ success
 append AtomicMember frames
+    ↓
+persist prepare + all members (boundary 1)
     ↓
 append AtomicDecision(committed)
     ↓
-persist to requested durability
+persist decision (boundary 2 / linearization)
     ↓
 publish all index changes atomically
     ↓
@@ -606,13 +602,10 @@ return receipt
 
 Rules:
 
-- Prepare, members, and commit should be contiguous in the initial
-  implementation, but recovery must use identity and hashes rather than rely
-  solely on adjacency.
-- Visibility is published only after the commit frame reaches the requested
-  durability.
-- A memory-mode transaction may be visible in process but must not enter any
-  persisted derived artifact before authoritative bytes are flushed.
+- Physical contiguity is not required and is not evidence; recovery uses
+  identity, manifest roots, hashes, and the decision.
+- Visibility is published only after the committed decision is durable.
+- LocalHeap v1 has no memory/buffered acknowledgement mode.
 - Index/catalog publication must install one Atomic delta indivisibly.
 - A crash before valid commit leaves prepared evidence but no committed
   logical mutation.
@@ -809,7 +802,7 @@ Core telemetry uses Atomic names and identity. The compatibility layer MAY
 project these transaction-shaped metrics:
 
 - begun, committed, aborted, conflicted, expired, and unknown transactions;
-- commit latency by durability and scope;
+- commit latency by scope and durable-boundary phase;
 - validation failures;
 - operations and bytes per transaction;
 - open transaction count and age;
@@ -820,14 +813,14 @@ project these transaction-shaped metrics:
 
 Logs and traces include Atomic ID (projected as transaction ID), scope,
 partition, term/position,
-requested/achieved durability, and stable error code. Payloads are excluded by
+achieved durable profile, and stable error code. Payloads are excluded by
 default.
 
 ## 18. Compatibility implementation phases
 
-These phases deliver the transaction-shaped API. They depend on, and cannot
-replace, the corresponding `A0`–`A5` Atomic phases in
-`ATOMICS_SPEC.md`.
+These phases describe an optional later naming adapter. They depend on, and
+cannot replace, `ATM-0`–`ATM-5` in
+`ATOMICS_IMPLEMENTATION_PLAN.md`.
 
 ### Phase T0 — Compatibility naming and fixtures
 
@@ -987,7 +980,7 @@ Benchmark:
 - 2, 10, 100, and maximum-member batches;
 - read-write contention;
 - conflict-heavy workload;
-- durable fsync modes;
+- durable group-commit width and member counts;
 - remote transaction latency;
 - partition quorum latency;
 - recovery scan with prepared transactions;
@@ -1026,18 +1019,17 @@ If this proposal is accepted:
 7. Add implementation tasks and release gates to `DEFECTS.md`.
 8. Do not increment stable API/profile labels until compatibility review.
 
-## 23. Open decisions
+## 23. Closed compatibility decisions
 
-Core identity, evidence, limits, retention, durability, and recovery decisions
-belong to `ATOMICS_SPEC.md`. This compatibility profile must resolve
-only:
-
-1. Whether the embedded API exposes a closure, an explicit builder, or both.
-2. Exact transaction-shaped names for Atomic outcomes and stable error aliases.
-3. Whether read-only snapshots appear under this API or a separate snapshot
-   API.
-4. Whether `transaction_status` is retained as an alias for `atomic_status`.
-5. Which ecosystem adapters may use transaction terminology.
+1. The product exposes the explicit async Atomic builder and one-shot commit;
+   no transaction closure or synchronous mutation path is added.
+2. Atomic names are primary. Transaction-shaped names are optional adapters and
+   project the same outcome/error types without a second truth.
+3. Read-only snapshots, if added, use a separate future API.
+4. V1 exposes `atomic_status`; it does not add `transaction_status` merely as an
+   alias.
+5. Ecosystem adapters may use transaction terminology only after the backend's
+   corresponding Atomic capability is qualified.
 
 ## 24. Recommendation
 

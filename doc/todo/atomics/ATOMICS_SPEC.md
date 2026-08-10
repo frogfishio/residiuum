@@ -5,7 +5,11 @@ Formal assurance companion:
 theorem families `FAS-6` and `FAS-7`. Atomic safety and isolation proofs are
 developed with the implementation, not retrofitted after it.
 
-Status: normative design v1.0-draft; implementation not yet qualified
+Status: **normative developer contract v1.1; implementation not yet qualified**
+
+Execution scope: LocalHeap Atomics. Partition Atomics are a separately gated
+future profile. Relationship enforcement consumes this contract but does not
+delay the core LocalHeap API.
 
 Profiles:
 
@@ -44,6 +48,12 @@ It has:
 An Atomic is not defined by an API closure, adjacent writes, a process mutex,
 or transaction-shaped syntax.
 
+Physical batching is not logical atomicity. The existing operation commit
+coordinator may share cooking, append, and stable-media boundaries among
+independent writes; each member still succeeds or fails independently. An
+Atomic instead has one plan identity, one validation result, one decision, and
+one all-or-nothing publication.
+
 The product statement is:
 
 > Within one Key, LocalHeap, or qualified Partition scope, Residiuum can commit
@@ -60,7 +70,8 @@ V1 defines:
 
 - Key Atomics on every backend;
 - LocalHeap Atomics for embedded and qualified single-server Heaps;
-- Partition Atomics only after a partition profile passes its separate gate;
+- the semantic shape of Partition Atomics, disabled until a separate profile
+  and qualification gate passes;
 - create-if-absent, compare-version replace/delete, and bounded mutation plans;
 - serializable read/write and absence predicates;
 - RRE enforcement;
@@ -82,6 +93,11 @@ V1 excludes:
 - distributed sagas presented as Atomics.
 
 Cross-scope work is an explicit workflow with idempotent steps and compensation.
+
+The first shipped capability is `LocalHeap`. A build MUST NOT advertise
+`Capabilities::atomics = true` for a backend until the complete ATM-5 gate for
+that backend passes. Key-local CAS already present in the product is a
+precursor, not evidence that LocalHeap Atomics exist.
 
 ## 4. Coordination scopes
 
@@ -113,6 +129,11 @@ If closure escapes the declared scope, execution fails before prepare.
 ```text
 AtomicId = 32 opaque bytes
 ```
+
+`AtomicId` is distinct from the driver's 16-byte `OperationId` and 16-byte
+`RequestId`. It MUST NOT be truncated into either namespace. Atomic members
+have event/version IDs for history but are not independently replayable client
+operations; retry resolves the enclosing Atomic decision only.
 
 Caller-generated IDs MUST come from a cryptographically secure random source
 or a caller-owned stable idempotency derivation.
@@ -154,15 +175,55 @@ AtomicPlan {
     atomic_id
     heap_id
     scope
-    expected_frontier?
+    read_frontier?
     reads[]
     predicates[]
     mutations[]
     active_rule_revisions[]
-    caller_context_hash
     limits
 }
 ```
+
+`read_frontier` is present when the plan contains a witness produced by a
+prior read; write-only create plans may omit it. Request ID, transport attempt,
+deadline, trace context, bearer capability bytes, and connection identity are
+submission metadata and MUST NOT enter `canonical_plan_bytes`. This permits an
+identical plan to be retried over a new request or renewed connection without
+an identity conflict. The plan still binds immutable Heap/collection identity,
+semantic authority/rule revisions, and the applied semantic limits.
+
+The LocalHeap v1 mutation vocabulary is closed:
+
+```text
+Create       collection_id, key, encoded_value
+Put          collection_id, key, encoded_value
+Replace      collection_id, key, if_version, encoded_value
+Delete       collection_id, key, if_version
+AssertAbsent collection_id, key
+AssertPresent collection_id, key
+AssertVersion collection_id, key, version
+```
+
+`Put` is an explicit blind upsert and is serializable at the Atomic commit
+position. It is not CAS. If its value was computed from a prior read, the
+caller MUST also declare that read with `assert_version`; otherwise the plan
+has intentionally declared no dependency on the overwritten version. The SDK
+names the method `put_unconditional` so a blind write is not confused with
+`replace(if_version)`.
+
+A plan MUST reject before prepare:
+
+- the same `(collection_id, canonical_key)` appearing more than once as a
+  mutation target;
+- a collection belonging to another Heap;
+- a collection capability lacking the required right;
+- a key/value that fails the collection's frozen encoding contract;
+- an unknown mutation or predicate kind; or
+- any configured or hard resource ceiling.
+
+Assertions may share a target with its one mutation; they are folded into that
+member's precondition during canonicalization. Canonicalization is pure and
+must produce byte-identical output independent of builder call order.
 
 Members are canonically ordered by:
 
@@ -216,6 +277,13 @@ under which absence was observed.
 
 A candidate or damaged index cannot prove absence.
 
+The public builder exposes `assert_absent`, `assert_present`, and
+`assert_version`. Exact scalar and range predicates are compiled through the
+canonical RQL/RRE predicate representation; they are not host-language
+closures. A caller whose computation read a record that it does not mutate
+MUST add that record's exact version witness. Otherwise Residiuum makes no
+claim about a dependency the plan did not declare.
+
 ## 8. Serialization and isolation
 
 Read/write Atomics are serializable.
@@ -226,17 +294,58 @@ The LocalHeap reference algorithm is:
 2. read and record versions/predicates;
 3. build the closed mutation plan;
 4. acquire the LocalHeap commit sequencer;
-5. validate Heap authority, rights, lifecycle, reads, predicates, and active
-   invariant revisions;
-6. allocate one Heap commit position;
-7. persist prepare, members, and decision under the crash protocol;
-8. publish one logical committed delta;
-9. release sequencer;
-10. return receipt only after the requested durability boundary.
+5. resolve existing identity or durably prepare the accepted plan;
+6. validate Heap authority, rights, lifecycle, reads, predicates, and active
+   invariant revisions at the serialization frontier;
+7. on validation failure, durably record `not committed` and release;
+8. on success, allocate one Heap commit position and persist members plus the
+   committed decision under the crash protocol;
+9. publish one logical committed delta;
+10. release sequencer;
+11. return receipt only after the durable decision boundary.
 
 The sequencer is an implementation mechanism, not the semantics. An optimistic
 or parallel implementation is conforming only if histories are equivalent to
 the same serial contract.
+
+### 8.1 One Heap commit order
+
+Once LocalHeap Atomics are enabled, **every** ordinary write, Key Atomic,
+LocalHeap Atomic, internal RRE consequence, collection lifecycle mutation, and
+derived publication that can affect an Atomic predicate MUST participate in
+the same per-Heap commit order. Routing only multi-record requests through a
+new lock is non-conforming: an ordinary write could otherwise pass validation
+and break serializability.
+
+The existing physical group-commit coordinator remains usable below this
+order. It may coalesce independent Key Atomics and LocalHeap Atomics into one
+I/O cohort, but it MUST preserve each logical decision and commit position.
+
+### 8.2 Visibility generation
+
+Publication replaces one immutable Heap read view (or applies one delta while
+holding its equivalent publication guard). Point reads, scans, RQL, history,
+and index consumers bind either the generation before the Atomic or the
+generation after it. No reader may bind a generation containing a proper
+subset of committed members.
+
+Prepared member frames are not inserted into the ordinary primary index.
+Secondary indexes may lag only under their existing honest-coverage rules;
+they may not expose a prepared member or use partial Atomic application to
+prove absence.
+
+### 8.3 Linearization and durability
+
+For LocalHeap v1, the linearization point is the successful durable write of
+the valid committed `AtomicDecision`. Publication follows that decision. A
+crash after decision durability and before in-memory publication therefore
+recovers to committed and publishes the whole delta.
+
+LocalHeap v1 exposes only durable commit acknowledgements. Buffering and group
+commit are allowed before the acknowledgement; one fsync per member is neither
+required nor desired. `Memory` or unqualified `Buffered` Atomic acknowledgement
+requires a different future profile because it cannot satisfy stable retry and
+crash outcome promises.
 
 The commit position is:
 
@@ -312,6 +421,50 @@ Persistent v1 uses deterministic CBOR under the repository canonical-CBOR
 profile. Exact numeric field assignments MUST land in
 `spec/atomics/cbor-v1.json` before `ATM-1`.
 
+LocalHeap storage uses the existing core `BatchPrepare` and `BatchCommit` frame
+kinds. Atomic member item events carry `atomic_id`, ordinal, content root, and
+Heap commit position under the frozen Atomic envelope extension. The legacy
+presence of a `batch_id` field or physical `put_many` call MUST NOT be
+interpreted as Atomic evidence.
+
+The decision is stored in a designated per-Heap coordinator stream; member
+events may reside on any writer shard. The prepare manifest commits to every
+member's target, operation, payload hash, and intended shard before any member
+is installed. The decision commits to the verified prepare and ordered member
+root. Recovery never infers a decision from adjacency, member count, or a
+shared fsync.
+
+### 9.1 Local durable protocol
+
+Under the Heap commit sequencer, the implementation performs:
+
+1. resolve prior identity, validate the closed structural plan, and reserve one
+   commit position;
+2. append the prepare to the Heap coordinator stream;
+3. validate data/rule predicates at the serialization frontier;
+4. when validation fails, append `not committed`, make prepare plus decision
+   durable, publish no member, and return that stable outcome;
+5. otherwise append every prepared member to its selected authoritative segment without
+   ordinary index publication;
+6. make the prepare and all member bytes durable on every touched file;
+7. append the committed decision to the coordinator stream;
+8. make that decision durable;
+9. publish one complete read-view delta;
+10. append/update derived status acceleration without adding another required
+   acknowledgement barrier; and
+11. return the receipt.
+
+Steps 6 and 8 are separate ordering boundaries. An implementation may combine
+multiple Atomics at each corresponding boundary, but MUST NOT make a decision
+durable before all bytes it names are durable. Failure before the durable
+committed-decision boundary in step 8 yields no committed Atomic. Failure after
+step 8 yields committed, even if publication or the reply did not occur.
+
+Recovery Shadow, backup, compaction, and salvage MUST preserve Atomic evidence
+with the same or stronger survival posture as the member item events. A
+recovery representation that preserves values but discards their decision
+boundary is not qualified.
+
 ## 10. Outcomes
 
 ```rust
@@ -349,9 +502,36 @@ conflicting
 coverage_incomplete
 ```
 
+`AtomicStatus::NotFound` is a lookup result, not a logical decision. It is
+returned only when the status index/evidence search has complete coverage for
+that Heap and no valid prepare or decision exists for the ID. In incomplete
+coverage, the answer is `unknown_commit + coverage_incomplete`, never
+`NotFound`. Every **issued Atomic**—defined as one with a valid durable
+prepare—eventually has exactly one durable committed or not-committed decision,
+or is reported as conflicting/degraded evidence rather than guessed.
+
 `committed + partial` means the transition committed but later damage removed
 material. Healthy members remain examinable; current logical materialization
 MUST NOT invent missing values.
+
+Conflict, failed data precondition, and rule rejection after durable acceptance
+are `NotCommitted`, not transport errors and not `Unknown`. Post-admission
+cancellation does not abort execution; it may make the caller's observation
+`Unknown` until status resolution. `Unknown` describes the observer's current
+knowledge, never a third decision written by the engine.
+
+There is one sharp admission boundary:
+
+- malformed input, unsupported profile, local builder error, authorization
+  failure, hard-limit failure, deadline, or cancellation **before acceptance**
+  is a request error; no Atomic was issued and no retry promise is created;
+- durable acceptance occurs when the valid prepare for
+  `(heap_id, atomic_id, content_root)` is recorded; after that point every
+  precondition conflict, rule rejection, or recovery abort produces durable
+  `not committed` decision evidence and the lifetime decision tombstone.
+
+An accepted ID never becomes eligible for later re-execution merely because
+its first decision was not committed.
 
 ## 11. Crash protocol
 
@@ -371,13 +551,22 @@ before_ack
 Allowed restart outcomes:
 
 - no valid prepare: not committed;
-- valid prepare, no valid decision: unknown until deterministic recovery
-  resolves or records abort under the recovery profile;
+- valid prepare and complete members, no valid decision: recovery writes the
+  deterministic `not committed` decision/tombstone before the ID can be
+  resolved or reused; prepared material remains invisible and may later be
+  reclaimed;
+- evidence coverage that cannot establish whether a decision existed:
+  unknown commit and degraded status;
 - one valid commit decision with complete manifest: committed;
 - conflicting valid decisions: conflicting evidence, Heap degraded;
 - commit decision with damaged members: committed + partial/missing.
 
 Prepared members are never visible to ordinary reads.
+
+Recovery MUST be bounded by Atomic evidence indexes/checkpoints and the tails
+opened since their frontier. Normal open MUST NOT scan the full database merely
+to rediscover old decisions. Any fallback full scan is a measured degraded
+rebuild path with an `OpenReport` reason.
 
 ## 12. Retry and retention
 
@@ -424,6 +613,20 @@ V1 hard ceilings:
 | construction deadline | 2 s | 5 s |
 | emitted violations | 1,024 | 1,024 |
 
+The public LocalHeap v1 builder defaults are stricter than the hard ceilings:
+
+| Quantity | Default |
+|---|---:|
+| caller mutations | 64 |
+| canonical plan bytes | 512 KiB |
+| proposed value bytes | 4 MiB |
+| affected collections | 16 |
+| end-to-end timeout | 5 s |
+
+Admission charges the complete encoded plan, proposed values, generated-member
+reserve, and reply reserve against the shared async driver's count and byte
+windows. An Atomic is one admission unit and is never split to fit a cohort.
+
 Heap policy MAY lower these ceilings and records the applied limits in the
 prepare. Raising one requires a new Atomic profile.
 
@@ -456,21 +659,26 @@ Internal enforcement Atomics use a non-serializable engine capability derived
 from the active rule/definition and still check the caller's ordinary data
 rights.
 
-## 15. External API
+## 15. Async product API
 
-V1 external mutation is one-shot:
+The Rust product surface is builder plus one-shot asynchronous submission. It
+does not expose a synchronous mutation method, an interactive server-held
+transaction, or an async closure that performs arbitrary user code while a
+database resource is held.
 
 ```rust
-let plan = heap.atomic()
-    .id(id)
-    .expect_version(users, "u1", version)
-    .put(users, "u1", updated)
-    .build()?;
+let mut atomic = heap.atomic(AtomicOptions::new(atomic_id));
+atomic.replace(&state, STATE_KEY, state_version, &next_state)?;
+atomic.create(&turns, turn_key, &turn)?;
+atomic.create(&turn_ids, turn_id_key, &locator)?;
+let plan = atomic.build()?;
 
-match heap.commit(plan)? {
-    AtomicOutcome::Committed(receipt) => { /* visible */ }
-    AtomicOutcome::NotCommitted { reason, .. } => { /* no effect */ }
-    AtomicOutcome::Unknown { resolution, .. } => { /* resolve */ }
+match heap.commit_atomic(plan).await? {
+    AtomicOutcome::Committed(receipt) => { /* all three visible */ }
+    AtomicOutcome::NotCommitted { reason, .. } => { /* none visible */ }
+    AtomicOutcome::Unknown { atomic_id, .. } => {
+        let status = heap.atomic_status(atomic_id).await?;
+    }
 }
 ```
 
@@ -478,8 +686,113 @@ Remote API submits one immutable canonical plan. It does not open a transaction
 session or hold a lock between client calls.
 
 ```rust
-heap.atomic_status(atomic_id)?
+heap.atomic_status(atomic_id).await?
 ```
+
+Required public types live under `residiuum_sdk::driver::atomics` and are:
+
+```text
+AtomicId([u8; 32])
+AtomicOptions { atomic_id, deadline, limits }
+AtomicBuilder
+AtomicPlan                    // immutable, Heap-bound, not user-constructible
+AtomicOutcome
+AtomicReceipt
+AtomicMemberReceipt { collection_id, key, before_version?, after_version? }
+AtomicAbortReason
+AtomicStatus
+AtomicResolutionHandle
+```
+
+Required method shapes are:
+
+```rust
+impl HeapClient {
+    pub fn atomic(&self, options: AtomicOptions) -> AtomicBuilder;
+    pub async fn commit_atomic(
+        &self,
+        plan: AtomicPlan,
+    ) -> Result<AtomicOutcome, Error>;
+    pub async fn atomic_status(
+        &self,
+        atomic_id: AtomicId,
+    ) -> Result<AtomicStatus, Error>;
+}
+
+impl AtomicBuilder {
+    pub fn create<T: Serialize>(
+        &mut self, collection: &Collection<T>, key: impl Into<String>, value: &T,
+    ) -> Result<&mut Self, Error>;
+    pub fn put_unconditional<T: Serialize>(
+        &mut self, collection: &Collection<T>, key: impl Into<String>, value: &T,
+    ) -> Result<&mut Self, Error>;
+    pub fn replace<T: Serialize>(
+        &mut self, collection: &Collection<T>, key: impl Into<String>,
+        if_version: [u8; 16], value: &T,
+    ) -> Result<&mut Self, Error>;
+    pub fn delete<T>(
+        &mut self, collection: &Collection<T>, key: impl Into<String>,
+        if_version: [u8; 16],
+    ) -> Result<&mut Self, Error>;
+    pub fn assert_absent<T>(
+        &mut self, collection: &Collection<T>, key: impl Into<String>,
+    ) -> Result<&mut Self, Error>;
+    pub fn assert_present<T>(
+        &mut self, collection: &Collection<T>, key: impl Into<String>,
+    ) -> Result<&mut Self, Error>;
+    pub fn assert_version<T>(
+        &mut self, collection: &Collection<T>, key: impl Into<String>,
+        version: [u8; 16],
+    ) -> Result<&mut Self, Error>;
+    pub fn build(self) -> Result<AtomicPlan, Error>;
+}
+```
+
+`AtomicOptions::new(atomic_id)` requires the stable ID; the SDK does not hide
+it in an unobservable auto-generated request. `AtomicId::random()` is provided,
+but the application retains it until a terminal outcome is known.
+
+The committed receipt contains exactly:
+
+```text
+AtomicReceipt {
+    atomic_id
+    heap_id
+    content_root
+    commit_position
+    durability = durable
+    members[]       // canonical target order
+    decision_hash
+    replayed
+}
+
+AtomicMemberReceipt {
+    collection_id
+    key
+    before_version?
+    after_version?  // absent for delete
+    event_id
+}
+```
+
+`AtomicStatus` returns the logical and material axes from §10, the content root
+when known, and the receipt when committed material/evidence permits it. It
+never returns payload values by default.
+
+`AtomicPlan` captures the `HeapId`, collection IDs, capability/authority
+revision, canonical encoded values, preconditions, limits, and content root.
+A plan built from collections belonging to different `HeapClient` bindings is
+rejected locally and again by the kernel. One physical `Client` may own many
+Heap bindings, but one Atomic belongs to exactly one of them.
+
+Dropping the future or crossing its deadline before admission returns a request
+error and guarantees that the Atomic was not accepted. Once admitted to the
+commit sequencer, execution continues to a safe terminal decision. A deadline,
+cancellation, transport loss, or dropped future after admission is represented
+as `Ok(AtomicOutcome::Unknown { .. })` whenever an observer remains available
+to receive it; the resolution carries the `AtomicId`. It is not also encoded as
+a second error truth. A dropped observer resolves later with `atomic_status`.
+Retrying the same canonical plan and ID is always safe.
 
 resolves using evidence and explicit coverage.
 
@@ -662,6 +975,13 @@ V1 requires:
 
 No capability is advertised beyond the scopes that pass.
 
+The Gremlin acceptance journey is mandatory, not illustrative: conditional
+replacement of the authoritative conversation state plus creation of the turn
+record and turn-id locator must commit together, survive restart, replay by
+the same `AtomicId`, reject a stale state version with no projection writes,
+and remain isolated from a second authorized Heap sharing the same physical
+`Client`.
+
 ## 24. Closed decisions
 
 This specification resolves every open question from
@@ -684,4 +1004,7 @@ This specification resolves every open question from
 15. Integrity status uses dedicated/optional read surfaces.
 16. Administration and recovery authority are fixed by §14.
 
-An implementer has no remaining semantic choice in this list.
+An implementer has no remaining semantic choice in this list. Exact Rust names,
+async-only submission, LocalHeap durable acknowledgement, ordinary-write
+participation, publication generation, and the local durable protocol are also
+closed by §§8--15.

@@ -35,6 +35,40 @@ Changing this sequence requires a dated principal amendment in this file.
 Chat, an attractive prototype, an existing card or code already in the tree
 does not amend it.
 
+### 1.1 Principal execution amendment — 2026-08-10
+
+RQL has reached a useful proof and implementation checkpoint at Q1--Q4, but
+Gate 1 has **not** been accepted. Q5--Q7 and the remaining controlled
+comparison/qualification work are parked with their state and residuals
+preserved.
+
+Atomics is now the active critical-path programme. This is a deliberate
+risk-order amendment: compound state transition correctness is an independent
+RED risk and is required by real application invariants now. It does not turn
+the RQL checkpoint into a pass, waive any RQL exit criterion, admit Cluster,
+or authorize broad product work.
+
+Active execution is therefore:
+
+```text
+RQL checkpoint preserved
+        |
+        v
+Atomics specification/governance -> ATM-0 -> ... -> ATM-5
+        |
+        v
+resume/accept remaining RQL gate work before the combined database claim
+        |
+        v
+Cluster
+```
+
+Atomics delivery authority is
+[ATOMICS_SPEC.md](./doc/todo/atomics/ATOMICS_SPEC.md) plus
+[ATOMICS_IMPLEMENTATION_PLAN.md](./doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md).
+No developer may substitute the older proposal or transaction compatibility
+sketch for those two documents.
+
 ## 2. Proven baseline
 
 The critical path begins from evidence already earned, not from zero.
@@ -180,8 +214,10 @@ RQL is de-risked only when all of the following are true:
 8. Formal claims, tests and implementation are connected; no proof refers only
    to an unused model.
 
-Until this gate passes, Atomics may receive specification corrections and
-small feasibility spikes only. It does not become the active programme.
+Except for the dated principal amendment in §1.1, this gate would restrict
+Atomics to specification corrections and small feasibility spikes. The
+amendment explicitly admits Atomics while preserving every unaccepted RQL
+residual.
 
 ### 4.6 Immediate RQL package
 

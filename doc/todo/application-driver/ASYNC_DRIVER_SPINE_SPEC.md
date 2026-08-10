@@ -489,17 +489,21 @@ compaction, and damage.
 RQL uses the one canonical QVM, executes remotely on the server, and explains
 the executed plan. Qualification records engine and application-observed time.
 
-The future Atomic shape is reserved:
+The Atomic integration boundary is governed by
+`doc/todo/atomics/ATOMICS_SPEC.md`. The reserved shape is an immutable builder
+plus one-shot asynchronous commit:
 
 ```rust
-client.atomic(options, |atomic| async move {
-    let users = atomic.collection::<User>("users");
-}).await
+let mut atomic = heap.atomic(options);
+atomic.create(&users, "u1", &user)?;
+let outcome = heap.commit_atomic(atomic.build()?).await?;
 ```
 
-No Atomic behavior is implemented by DRV. `ClientInner` also uses an endpoint/
-topology abstraction now so future route refresh does not change collection
-semantics; it contains logical identity, not socket/leader ownership.
+No Atomic behavior was implemented by DRV. The Atomics programme reuses the
+same scheduler and handle ownership; it does not create a second client.
+`ClientInner` also uses an endpoint/topology abstraction now so future route
+refresh does not change collection semantics; it contains logical identity,
+not socket/leader ownership.
 
 ## 12. Observability
 
