@@ -69,11 +69,11 @@ use residiuum_format::{
     FrameParts, SafetyLimits, SegmentId, WIRE_MAJOR, WIRE_MINOR,
 };
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 type MutationIdentity = ([u8; 16], [u8; 32]);
@@ -657,6 +657,9 @@ pub struct Store {
     /// memory-mode visibility. Used for index-cache and on-disk catalog writes
     /// so the write path never rescans sealed segment bytes.
     durable_index: PrimaryIndex,
+    /// Process-local validated order projections for secondary indexes.
+    /// Derived only; every secondary-index write/delete invalidates its scope.
+    ordered_secondary_cache: Mutex<HashMap<(String, String, bool, bool), Vec<Vec<u8>>>>,
     /// Buffered/durable ops since the last derived-state disk checkpoint (DEF-023).
     derived_ops_since_checkpoint: u64,
     /// Active segment per writer shard (DEF-096 Axis B). Length == `writer_shards`.
@@ -1005,6 +1008,7 @@ impl Store {
             open_metrics: StoreOpenMetrics::default(),
             index: PrimaryIndex::new(),
             durable_index: PrimaryIndex::new(),
+            ordered_secondary_cache: Mutex::new(HashMap::new()),
             derived_ops_since_checkpoint: 0,
             actives: (0..writer_shards).map(|_| None).collect(),
             writer_shards,
@@ -1145,6 +1149,7 @@ impl Store {
             open_metrics: StoreOpenMetrics::default(),
             index: PrimaryIndex::new(),
             durable_index: PrimaryIndex::new(),
+            ordered_secondary_cache: Mutex::new(HashMap::new()),
             derived_ops_since_checkpoint: 0,
             actives: (0..writer_shards).map(|_| None).collect(),
             writer_shards,
@@ -1410,6 +1415,7 @@ impl Store {
             open_metrics: StoreOpenMetrics::default(),
             index: PrimaryIndex::new(),
             durable_index: PrimaryIndex::new(),
+            ordered_secondary_cache: Mutex::new(HashMap::new()),
             derived_ops_since_checkpoint: 0,
             actives: (0..writer_shards).map(|_| None).collect(),
             writer_shards,
@@ -4789,6 +4795,31 @@ impl Store {
             .collect()
     }
 
+    /// Bounded live-subject walk for paged heap/query consumers.
+    ///
+    /// Unlike [`Self::index_live_after`], this never clones the unconsumed tail
+    /// of the index merely to discard it at the page boundary.
+    pub fn index_live_after_bounded(
+        &self,
+        after: Option<&[u8]>,
+        prefix: Option<&[u8]>,
+        limit: usize,
+    ) -> Vec<Vec<u8>> {
+        self.index
+            .live_entries_after(after, prefix)
+            .take(limit)
+            .map(|(subject, _)| subject.clone())
+            .collect()
+    }
+
+    /// Count live subjects in one byte-prefix range without cloning keys.
+    ///
+    /// Used to prove that an order-serving secondary index has exactly one
+    /// posting for every live document before it may become an exclusive scan.
+    pub fn index_live_count_with_prefix(&self, prefix: &[u8]) -> usize {
+        self.index.live_entries_after(None, Some(prefix)).count()
+    }
+
     /// Get current live value for `subject`, if any.
     ///
     /// For chunked values this reassembles chunks and returns the complete body
@@ -4810,6 +4841,138 @@ impl Store {
             // DEF-098: contradictory verified evidence is damage, not mere partial.
             Some(PayloadResult::Conflicting { .. }) => Err(StoreError::PayloadConflict),
         }
+    }
+
+    /// Resolve a bounded explicit subject set with segment-grouped media I/O.
+    /// Results preserve input order and retain one fail-closed outcome per key.
+    pub(crate) fn get_subject_bytes_many(
+        &self,
+        subjects: &[Vec<u8>],
+    ) -> Vec<(Vec<u8>, Result<Option<Vec<u8>>, StoreError>)> {
+        let mut results: Vec<Option<Result<Option<Vec<u8>>, StoreError>>> =
+            std::iter::repeat_with(|| None)
+                .take(subjects.len())
+                .collect();
+        let mut groups: BTreeMap<[u8; 16], Vec<(usize, u64, crate::compact::LocatorExpect)>> =
+            BTreeMap::new();
+
+        for (position, subject) in subjects.iter().enumerate() {
+            let Some(crate::index::IndexEntry::Live(live)) = self.index.get(subject) else {
+                results[position] = Some(Ok(None));
+                continue;
+            };
+            if !live.body.is_empty() || live.frame_offset == 0 {
+                results[position] = Some(self.get_subject_bytes(subject));
+                continue;
+            }
+            groups.entry(live.segment_id).or_default().push((
+                position,
+                live.frame_offset,
+                crate::compact::LocatorExpect {
+                    segment_id: live.segment_id,
+                    event_id: live.event_id,
+                    item_id: live.item_id,
+                    subject: subject.clone(),
+                    writer_sequence: live.writer_sequence,
+                },
+            ));
+        }
+
+        for (segment_id, group) in groups {
+            let paths = self.named_paths_for_segment(&segment_id);
+            if paths.is_empty() {
+                for (position, _, expect) in group {
+                    results[position] = Some(self.get_subject_bytes(&expect.subject));
+                }
+                continue;
+            }
+            let mut pending = group;
+            for path in paths {
+                if pending.is_empty() {
+                    break;
+                }
+                let requests: Vec<_> = pending
+                    .iter()
+                    .map(|(_, offset, expect)| (*offset, expect.clone()))
+                    .collect();
+                let batch =
+                    match crate::compact::pread_item_bodies_matching(&path, &requests, self.limits)
+                    {
+                        Ok(batch) => batch,
+                        Err(_) => continue,
+                    };
+                let mut still_pending = Vec::new();
+                for ((position, offset, expect), outcome) in
+                    pending.into_iter().zip(batch.into_iter())
+                {
+                    match outcome {
+                        Ok(body) if !is_chunk_manifest(&body) => {
+                            results[position] = Some(Ok(Some(body)));
+                        }
+                        Ok(_) => {
+                            // Chunk manifests require generation-exact reassembly.
+                            results[position] = Some(self.get_subject_bytes(&expect.subject));
+                        }
+                        Err(_) => {
+                            still_pending.push((position, offset, expect));
+                        }
+                    }
+                }
+                pending = still_pending;
+            }
+            for (position, _, expect) in pending {
+                // Preserve the established fallback/error taxonomy for rare
+                // corrupt, renamed, or concurrently unavailable media.
+                results[position] = Some(self.get_subject_bytes(&expect.subject));
+            }
+        }
+
+        subjects
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(position, subject)| {
+                let outcome = results[position]
+                    .take()
+                    .unwrap_or_else(|| self.get_subject_bytes(&subject));
+                (subject, outcome)
+            })
+            .collect()
+    }
+
+    fn named_paths_for_segment(&self, segment_id: &[u8; 16]) -> Vec<PathBuf> {
+        let mut paths = Vec::new();
+        if self.find_active_by_segment(segment_id).is_some() {
+            let shards = self.writer_shards();
+            for shard in 0..shards {
+                if self
+                    .active_ref(shard)
+                    .is_some_and(|active| active.segment_id == *segment_id)
+                {
+                    let path = self.paths.active_segment_for_shard(shard, shards);
+                    if path.is_file() {
+                        paths.push(path);
+                    }
+                    break;
+                }
+            }
+        }
+        if let Some(placement) = self.tier_placement.get(segment_id) {
+            if let Ok(path) = crate::tier::resolve_placement_path(&self.paths, placement) {
+                if path.is_file() && !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        for path in [
+            self.paths.sealed_segment(segment_id),
+            self.paths.pending_segment(segment_id),
+        ] {
+            if path.is_file() && !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+        paths
     }
 
     /// Get the current payload with explicit completeness (Stage 6 chunks).
@@ -5745,6 +5908,7 @@ impl Store {
 
     /// Persist a secondary index file (derived only).
     pub fn write_secondary_index(&self, index: &SecondaryIndex) -> Result<PathBuf, StoreError> {
+        self.ordered_secondary_cache_clear(&index.meta.collection);
         let path = secondary_index_path(&self.paths, &index.meta.collection, &index.meta.name);
         write_secondary_index(&path, self.store_id, index)?;
         Ok(path)
@@ -5776,8 +5940,57 @@ impl Store {
 
     /// Delete a secondary index file (never touches segments).
     pub fn delete_secondary_index(&self, collection: &str, name: &str) -> Result<(), StoreError> {
+        self.ordered_secondary_cache_clear(collection);
         let path = secondary_index_path(&self.paths, collection, name);
         delete_secondary_index(&path)
+    }
+
+    /// Read a validated process-local ordered secondary projection.
+    pub fn ordered_secondary_cache_get(
+        &self,
+        collection: &str,
+        field: &str,
+        field_descending: bool,
+        key_descending: bool,
+    ) -> Option<Vec<Vec<u8>>> {
+        self.ordered_secondary_cache
+            .lock()
+            .ok()?
+            .get(&(
+                collection.to_string(),
+                field.to_string(),
+                field_descending,
+                key_descending,
+            ))
+            .cloned()
+    }
+
+    /// Install a validated process-local ordered secondary projection.
+    pub fn ordered_secondary_cache_put(
+        &self,
+        collection: &str,
+        field: &str,
+        field_descending: bool,
+        key_descending: bool,
+        keys: Vec<Vec<u8>>,
+    ) {
+        if let Ok(mut cache) = self.ordered_secondary_cache.lock() {
+            cache.insert(
+                (
+                    collection.to_string(),
+                    field.to_string(),
+                    field_descending,
+                    key_descending,
+                ),
+                keys,
+            );
+        }
+    }
+
+    fn ordered_secondary_cache_clear(&self, collection: &str) {
+        if let Ok(mut cache) = self.ordered_secondary_cache.lock() {
+            cache.retain(|(scope, _, _, _), _| scope != collection);
+        }
     }
 
     /// Current segment fingerprint (for index build coverage).
@@ -11102,6 +11315,64 @@ mod tests {
         );
         store.delete("user-42", DurabilityMode::Durable).unwrap();
         assert!(store.get("user-42").unwrap().is_none());
+    }
+
+    #[test]
+    fn grouped_subject_reads_preserve_order_absence_and_frame_identity() {
+        let dir = tempdir().unwrap();
+        let mut store = Store::create(dir.path()).unwrap();
+        store
+            .put("batch/a", b"alpha", DurabilityMode::Durable)
+            .unwrap();
+        store
+            .put("batch/b", b"bravo", DurabilityMode::Durable)
+            .unwrap();
+
+        let subjects = vec![
+            b"batch/a".to_vec(),
+            b"batch/missing".to_vec(),
+            b"batch/b".to_vec(),
+        ];
+        let mut resolved = store.get_subject_bytes_many(&subjects).into_iter();
+        assert_eq!(
+            resolved.next().unwrap().1.unwrap().as_deref(),
+            Some(b"alpha".as_slice())
+        );
+        assert!(resolved.next().unwrap().1.unwrap().is_none());
+        assert_eq!(
+            resolved.next().unwrap().1.unwrap().as_deref(),
+            Some(b"bravo".as_slice())
+        );
+
+        let live = match store.index.get(b"batch/a").unwrap() {
+            crate::index::IndexEntry::Live(live) => live.clone(),
+            _ => panic!("batch/a must be live"),
+        };
+        let path = store
+            .named_paths_for_segment(&live.segment_id)
+            .into_iter()
+            .next()
+            .expect("active segment path");
+        let correct = crate::compact::LocatorExpect {
+            segment_id: live.segment_id,
+            event_id: live.event_id,
+            item_id: live.item_id,
+            subject: b"batch/a".to_vec(),
+            writer_sequence: live.writer_sequence,
+        };
+        let mut wrong = correct.clone();
+        wrong.subject = b"batch/not-a".to_vec();
+        let outcomes = crate::compact::pread_item_bodies_matching(
+            &path,
+            &[(live.frame_offset, correct), (live.frame_offset, wrong)],
+            store.limits,
+        )
+        .unwrap();
+        assert_eq!(outcomes[0].as_ref().unwrap(), b"alpha");
+        assert!(matches!(
+            outcomes[1],
+            Err(StoreError::ConsistencyViolation(_))
+        ));
     }
 
     #[test]

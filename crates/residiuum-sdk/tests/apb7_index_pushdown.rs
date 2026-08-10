@@ -5,9 +5,7 @@ use residiuum_heap::{
     HeapAdministrativeState, HeapId, HeapSecuritySnapshot, HeapSlot, Rights, SecurityRevision,
     TrustedInstant, VerifiedCertificate,
 };
-use residiuum_sdk::{
-    field, param, HeapClient, Parameters, QueryRunOptions, ResidiuumDeployment,
-};
+use residiuum_sdk::{field, param, HeapClient, Parameters, QueryRunOptions, ResidiuumDeployment};
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout, IndexState};
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -45,7 +43,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -172,7 +177,8 @@ fn index_miss_empty_when_ready_complete() {
 fn without_index_still_scans() {
     let (_dir, mut client) = open_bound_client();
     let mut col = client.create_collection("orders").unwrap().collection;
-    col.put("a", &serde_json::json!({"status": "open"})).unwrap();
+    col.put("a", &serde_json::json!({"status": "open"}))
+        .unwrap();
     col.put("b", &serde_json::json!({"status": "closed"}))
         .unwrap();
     // No index created — must still answer correctly via scan.
@@ -189,4 +195,127 @@ fn without_index_still_scans() {
         .unwrap();
     assert_eq!(page.rows.len(), 1);
     assert_eq!(page.rows[0].key, "a");
+}
+
+#[test]
+fn compound_equality_prefix_is_used_only_when_trailing_fields_are_constrained() {
+    let (_dir, mut client) = open_bound_client();
+    let mut col = client.create_collection("orders").unwrap().collection;
+    col.put("a", &serde_json::json!({"status": "open", "n": 1}))
+        .unwrap();
+    col.put("b", &serde_json::json!({"status": "open", "n": 3}))
+        .unwrap();
+    col.put("c", &serde_json::json!({"status": "closed", "n": 4}))
+        .unwrap();
+    // Omitted from the compound posting because `n` is missing.
+    col.put("d", &serde_json::json!({"status": "open"}))
+        .unwrap();
+    col.indexes()
+        .create("by_status_n", &["status", "n"])
+        .unwrap();
+
+    let ranged = col
+        .rql(
+            r#"from orders where status = "open" and n >= 2"#,
+            &Parameters::default(),
+            QueryRunOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        ranged
+            .rows
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b"]
+    );
+    assert_eq!(ranged.coverage.examined_documents, 2);
+
+    // Prefix-only use would lose `d`, so the planner must fall back to a full
+    // scan when the trailing compound field is unconstrained.
+    let prefix_only = col
+        .rql(
+            r#"from orders where status = "open""#,
+            &Parameters::default(),
+            QueryRunOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        prefix_only
+            .rows
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a", "b", "d"]
+    );
+    assert_eq!(prefix_only.coverage.examined_documents, 4);
+}
+
+#[test]
+fn ordered_index_serves_numeric_topk_and_stops_at_limit() {
+    let (_dir, mut client) = open_bound_client();
+    let mut col = client.create_collection("scores").unwrap().collection;
+    for (key, score) in [("a", 2), ("b", 100), ("c", 10), ("d", 100), ("e", 7)] {
+        col.put(key, &serde_json::json!({"score": score})).unwrap();
+    }
+    col.indexes().create("by_score", &["score"]).unwrap();
+
+    let page = col
+        .rql(
+            "from scores order by score desc, _key asc limit 2",
+            &Parameters::default(),
+            QueryRunOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["b", "d"]
+    );
+    assert_eq!(page.coverage.examined_documents, 2);
+    assert!(page.exhausted);
+
+    // The first query populated the ordered projection cache. A subsequent
+    // write marks the index stale and must invalidate that cache before the
+    // new highest score can be observed.
+    col.put("f", &serde_json::json!({"score": 1_000})).unwrap();
+    let after_write = col
+        .rql(
+            "from scores order by score desc, _key asc limit 2",
+            &Parameters::default(),
+            QueryRunOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        after_write
+            .rows
+            .iter()
+            .map(|row| row.key.as_str())
+            .collect::<Vec<_>>(),
+        vec!["f", "b"]
+    );
+    assert_eq!(after_write.coverage.examined_documents, 6);
+}
+
+#[test]
+fn ordered_index_refuses_when_any_live_document_lacks_a_posting() {
+    let (_dir, mut client) = open_bound_client();
+    let mut col = client.create_collection("scores").unwrap().collection;
+    col.put("a", &serde_json::json!({"score": 2})).unwrap();
+    col.put("b", &serde_json::json!({"score": 100})).unwrap();
+    col.put("c", &serde_json::json!({})).unwrap();
+    col.indexes().create("by_score", &["score"]).unwrap();
+
+    let page = col
+        .rql(
+            "from scores order by score desc, _key asc limit 2",
+            &Parameters::default(),
+            QueryRunOptions::default(),
+        )
+        .unwrap();
+    // Missing values participate in RQL ordering, so an index that omitted
+    // `c` cannot be exclusive. The full streaming oracle must be used.
+    assert_eq!(page.coverage.examined_documents, 3);
 }

@@ -24,6 +24,7 @@
 //! **Not claimed:** product query qualification (APB-7 package accept), product
 //! cursor secrets, remote op 118, snapshot reads.
 
+use super::HostDocument;
 use crate::app_v1::QueryExplanation;
 use crate::error::Error;
 use crate::plan_v1::CollectionBindings;
@@ -31,7 +32,6 @@ use crate::predicate::{CompareOp, Operand, Predicate};
 use crate::rql_app_core::compile_app_core;
 use residiuum_heap::CollectionId;
 use serde_json::Value as JsonValue;
-use super::HostDocument;
 use std::collections::BTreeMap;
 
 /// Profile label for this executor cut (not full product query).
@@ -59,6 +59,33 @@ pub(crate) trait DocScan {
         })
     }
 
+    /// Coverage-aware bounded document page in deterministic key order.
+    fn scan_json_covered_page(
+        &mut self,
+        limit: Option<usize>,
+        after_key: Option<&str>,
+    ) -> Result<Vec<(String, HostDocument)>, Error> {
+        let keys = self.list_keys(limit, after_key)?;
+        keys.into_iter()
+            .map(|key| {
+                let document = self.get_json_covered(&key)?;
+                Ok((key, document))
+            })
+            .collect()
+    }
+
+    fn get_json_covered_many(
+        &mut self,
+        keys: &[String],
+    ) -> Result<Vec<(String, HostDocument)>, Error> {
+        keys.iter()
+            .map(|key| {
+                let document = self.get_json_covered(key)?;
+                Ok((key.clone(), document))
+            })
+            .collect()
+    }
+
     /// Optional equality-index acceleration (APB-7 T4).
     ///
     /// Default: no index → caller full-scans. Implementors may return candidate
@@ -66,6 +93,22 @@ pub(crate) trait DocScan {
     fn try_equality_index_keys(
         &mut self,
         _equalities: &[(String, JsonValue)],
+    ) -> Result<Option<Vec<String>>, Error> {
+        Ok(None)
+    }
+
+    fn try_index_keys_with_constraints(
+        &mut self,
+        equalities: &[(String, JsonValue)],
+        constrained_fields: &[String],
+    ) -> Result<Option<Vec<String>>, Error> {
+        let _ = constrained_fields;
+        self.try_equality_index_keys(equalities)
+    }
+
+    fn try_ordered_index_keys(
+        &mut self,
+        _order: &[crate::plan_v1::OrderTerm],
     ) -> Result<Option<Vec<String>>, Error> {
         Ok(None)
     }
@@ -96,8 +139,9 @@ pub fn explain_rql_source(
 
 /// Extract field equality constraints for index pushdown (shallow AND of `=` only).
 ///
-/// Returns empty when the predicate is not a pure conjunction of field equalities
-/// (or a single equality). Parameters are resolved from `params`.
+/// Extracts equality conjuncts from an AND predicate. Non-equality siblings are
+/// retained for final predicate evaluation and do not invalidate the equality
+/// candidate superset. Parameters are resolved from `params`.
 pub(crate) fn equality_constraints(
     pred: &Predicate,
     params: &BTreeMap<String, JsonValue>,
@@ -121,15 +165,34 @@ pub(crate) fn equality_constraints(
         Predicate::And { args } => {
             let mut out = Vec::new();
             for a in args {
-                let part = equality_constraints(a, params);
-                if part.is_empty() {
-                    // Non-equality conjunct → do not claim pure eq-AND for pushdown.
-                    return Vec::new();
-                }
-                out.extend(part);
+                out.extend(equality_constraints(a, params));
             }
             out
         }
+        _ => Vec::new(),
+    }
+}
+
+/// Paths participating in comparisons in a conjunctive predicate. Constraints
+/// below OR/NOT are deliberately ignored; using a sibling AND constraint is a
+/// safe candidate superset because the complete predicate is re-evaluated.
+pub(crate) fn constrained_paths(
+    pred: &Predicate,
+    params: &BTreeMap<String, JsonValue>,
+) -> Vec<String> {
+    match pred {
+        Predicate::Cmp { left, right, .. } => match (left, right) {
+            (Operand::Path { path }, other) | (other, Operand::Path { path })
+                if operand_as_json(other, params).is_some() =>
+            {
+                vec![path.dotted()]
+            }
+            _ => Vec::new(),
+        },
+        Predicate::And { args } => args
+            .iter()
+            .flat_map(|predicate| constrained_paths(predicate, params))
+            .collect(),
         _ => Vec::new(),
     }
 }

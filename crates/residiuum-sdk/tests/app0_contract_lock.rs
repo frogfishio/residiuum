@@ -218,6 +218,7 @@ fn app0_rust_compile_surface() {
         after: None,
         deadline: None,
         cancel: None,
+        diagnostics: false,
     };
     let err = col.rql("from orders", &params, opts).unwrap_err();
     assert_eq!(err.code(), ErrorCode::Internal);

@@ -461,7 +461,7 @@ baseline records current delivery truth; this programme remains target authority
 |---|---|---|
 | RQL-Q0 Target freeze | **`accept`** (2026-08-07; SHA e1f5c670…) | Tier and comparator profile accepted |
 | RQL-Q1 Practical corpus | `active`; Q1.1–Q1.4 labor landed; not frozen | Immutable corpus accepted |
-| RQL-Q2 Capability closure | `in_review`; 147/147 explicit closed outcomes (145 execute + 2 stable refusals) | principal accept; Decision 0 remains separate |
+| RQL-Q2 Capability closure | `active`; live 2026-08-10 audit: 143 execute + 2 stable refusals + 2 result-budget semantic gaps | close two gaps; principal accept; Decision 0 remains separate |
 | RQL-Q3 Semantic qualification | Q3.1–Q3.4 labor exit ready; 147/147 green denominator | principal accept |
 | RQL-Q4 Harness | Q4.1–Q4.3 `in_review`; product scaling/repetition/maintenance/damage rehearsals verifier-green | R400 memory + resource probes + real comparator/server campaign + principal accept |
 | RQL-Q5 Baseline | `backlog` | Baseline accepted; gates frozen |

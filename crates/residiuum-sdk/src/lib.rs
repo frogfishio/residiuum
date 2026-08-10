@@ -87,7 +87,7 @@ pub use app_v1::{
     CollectionQuery, ConsistencyEvidence, ConsistencyMode, Continuation, CoverageEvidence,
     CoveragePolicy, CreateCollectionOptions, CreateCollectionResult, DeleteWithOptions,
     FindJsonOptions, HeapClient, HoleEvidence, IndexManager, KeyProfile, Parameters,
-    QueryExplanation, QueryId, QueryPage, QueryRow, QueryRunOptions, ReplaceOptions,
+    QueryDiagnostics, QueryExplanation, QueryId, QueryPage, QueryRow, QueryRunOptions, ReplaceOptions,
     ScanJsonOptions, ScanJsonPage, UpsertResult, ViewBoundCollection, ViewBoundQuery,
     CURSOR_PROFILE, KEY_PROFILE_RANDOM_V1, PREDICATE_PROFILE, RQL_APP_CORE_PROFILE,
     RQL_PLAN_PROFILE, RUST_APP_PROFILE,

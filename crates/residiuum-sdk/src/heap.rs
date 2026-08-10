@@ -581,6 +581,44 @@ impl HeapCollection {
             .get_collection(self.id.as_bytes(), key.as_bytes())?)
     }
 
+    pub(crate) fn get_json_many_covered(
+        &self,
+        keys: &[String],
+    ) -> Result<Vec<(String, crate::query_bytecode_v1::HostDocument)>, Error> {
+        use crate::query_bytecode_v1::HostDocument;
+
+        for key in keys {
+            validate_key(key)?;
+        }
+        let raw_keys: Vec<Vec<u8>> = keys.iter().map(|key| key.as_bytes().to_vec()).collect();
+        self.store
+            .get_collection_many(self.id.as_bytes(), &raw_keys)?
+            .into_iter()
+            .map(|(key, body, hole)| {
+                let key = String::from_utf8(key)
+                    .map_err(|_| Error::Internal("get-many: non-UTF-8 key".into()))?;
+                let document = match (body, hole) {
+                    (Some(body), None) => match crate::value::decode_json(&body) {
+                        Ok(value) => HostDocument::Present(value),
+                        Err(error) => HostDocument::Hole {
+                            code: error.code().as_str().to_string(),
+                        },
+                    },
+                    (None, Some(reason)) => HostDocument::Hole {
+                        code: reason.as_str().to_string(),
+                    },
+                    (None, None) => HostDocument::Absent,
+                    (Some(_), Some(_)) => {
+                        return Err(Error::Internal(
+                            "get-many returned body and hole for one key".into(),
+                        ))
+                    }
+                };
+                Ok((key, document))
+            })
+            .collect()
+    }
+
     pub(crate) fn get_versioned_raw_body(
         &self,
         key: &str,
@@ -688,6 +726,53 @@ impl HeapCollection {
             }
         }
         Ok(Some(out))
+    }
+
+    pub(crate) fn lookup_index_keys_with_constraints(
+        &self,
+        equalities: &[(String, serde_json::Value)],
+        constrained_fields: &[String],
+    ) -> Result<Option<Vec<String>>, Error> {
+        let raw = self.store.lookup_index_keys_with_constraints(
+            self.id.as_bytes(),
+            equalities,
+            constrained_fields,
+        )?;
+        let Some(keys) = raw else {
+            return Ok(None);
+        };
+        keys.into_iter()
+            .map(|key| {
+                String::from_utf8(key)
+                    .map_err(|_| Error::Internal("index lookup: non-UTF-8 application key".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+    }
+
+    pub(crate) fn lookup_ordered_index_keys(
+        &self,
+        field: &str,
+        field_descending: bool,
+        key_descending: bool,
+    ) -> Result<Option<Vec<String>>, Error> {
+        let raw = self.store.lookup_ordered_index_keys(
+            self.id.as_bytes(),
+            field,
+            field_descending,
+            key_descending,
+        )?;
+        let Some(keys) = raw else {
+            return Ok(None);
+        };
+        keys.into_iter()
+            .map(|key| {
+                String::from_utf8(key).map_err(|_| {
+                    Error::Internal("ordered index lookup: non-UTF-8 application key".into())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
     }
 
     /// Create a field index over JSON documents. Requires IndexAdmin + Read for build.

@@ -15,6 +15,25 @@ use std::cmp::Ordering;
 /// IR profile id for Core order / sort-tuple.
 pub const ORDER_IR_PROFILE: &str = "residiuum-query-ir-order-v1";
 
+/// Reduce an order to the shape currently servable by a secondary index:
+/// exactly one document field followed by the deterministic key tie-break.
+pub(crate) fn ordered_index_request(order: &[OrderTerm]) -> Option<(String, bool, bool)> {
+    let is_key = |term: &OrderTerm| {
+        term.tie_break || term.path.0.as_slice() == ["$key"] || term.path.0.as_slice() == ["_key"]
+    };
+    if order.len() < 2 || is_key(&order[0]) || !order[1..].iter().all(is_key) {
+        return None;
+    }
+    Some((
+        order[0].path.0.join("."),
+        order[0].dir == OrderDir::Desc,
+        // An explicit `_key`/`$key` may precede the injected tie-break. It is
+        // the first key term that determines the effective direction; later
+        // aliases compare the same immutable key and are therefore redundant.
+        order[1].dir == OrderDir::Desc,
+    ))
+}
+
 /// Compare two keyed documents under `order`.
 pub fn compare_rows(
     ka: &str,
@@ -91,6 +110,33 @@ pub fn retain_after_sort_tuple(
         let c = cmp_sort_tuples(&t, last, order);
         c == Ordering::Greater
     });
+}
+
+/// Retain the first `keep` rows under `order`, without fully sorting rows that
+/// cannot reach the bounded result. The retained prefix is returned in exact
+/// query order.
+///
+/// `compare_rows` has a deterministic key fallback, so selection remains a
+/// total order even when all explicit order terms compare equal.
+pub(crate) fn retain_best_rows(
+    full: &mut Vec<(String, JsonValue)>,
+    order: &[OrderTerm],
+    keep: usize,
+) {
+    if keep == 0 {
+        full.clear();
+        return;
+    }
+    let compare = |(ka, va): &(String, JsonValue), (kb, vb): &(String, JsonValue)| {
+        compare_rows(ka, va, kb, vb, order)
+    };
+    if full.len() > keep {
+        // The element at `keep` and everything after it cannot reach the
+        // result. Only the smaller partition needs ordering.
+        full.select_nth_unstable_by(keep, &compare);
+        full.truncate(keep);
+    }
+    full.sort_by(compare);
 }
 
 /// Key stream resume: last element of sort tuple is the document key when
@@ -208,5 +254,49 @@ mod tests {
         let order = vec![key_term()];
         let t = build_sort_tuple("k1", &json!({}), &order);
         assert_eq!(key_from_sort_tuple(&t).as_deref(), Some("k1"));
+    }
+
+    #[test]
+    fn bounded_best_rows_equal_full_sort_prefix() {
+        let orders = [
+            vec![
+                OrderTerm {
+                    path: Path::parse_dotted("score").unwrap(),
+                    dir: OrderDir::Asc,
+                    nulls: NullsOrder::Last,
+                    tie_break: false,
+                },
+                key_term(),
+            ],
+            vec![
+                OrderTerm {
+                    path: Path::parse_dotted("score").unwrap(),
+                    dir: OrderDir::Desc,
+                    nulls: NullsOrder::First,
+                    tie_break: false,
+                },
+                key_term(),
+            ],
+        ];
+        let rows = vec![
+            ("f".to_string(), json!({"score": 8})),
+            ("b".to_string(), json!({"score": 2})),
+            ("e".to_string(), json!({"score": null})),
+            ("a".to_string(), json!({"score": 2})),
+            ("d".to_string(), json!({})),
+            ("c".to_string(), json!({"score": 5})),
+        ];
+
+        for order in orders {
+            for keep in 0..=rows.len() + 1 {
+                let mut expected = rows.clone();
+                expected.sort_by(|(ka, va), (kb, vb)| compare_rows(ka, va, kb, vb, &order));
+                expected.truncate(keep);
+
+                let mut actual = rows.clone();
+                retain_best_rows(&mut actual, &order, keep);
+                assert_eq!(actual, expected, "keep={keep}, order={order:?}");
+            }
+        }
     }
 }

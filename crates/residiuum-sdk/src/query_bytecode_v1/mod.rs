@@ -23,6 +23,7 @@ mod full_imm_json;
 mod group_agg;
 mod ir_attach;
 mod ir_order;
+pub(crate) use ir_order::ordered_index_request;
 mod ir_page;
 mod ir_project;
 mod kernel;
@@ -123,11 +124,65 @@ pub trait HostCapabilities {
         })
     }
 
+    /// Coverage-aware document page in deterministic key order.
+    ///
+    /// The default preserves host compatibility by composing `list_keys` and
+    /// point reads. Embedded hosts override this with one bounded storage scan.
+    fn scan_json_covered_page(
+        &mut self,
+        collection_id: CollectionId,
+        limit: Option<usize>,
+        after_key: Option<&str>,
+    ) -> Result<Vec<(String, HostDocument)>, Error> {
+        let keys = self.list_keys(collection_id, limit, after_key)?;
+        keys.into_iter()
+            .map(|key| {
+                let document = self.get_json_covered(collection_id, &key)?;
+                Ok((key, document))
+            })
+            .collect()
+    }
+
+    /// Coverage-aware bounded materialisation for an explicit candidate set.
+    fn get_json_covered_many(
+        &mut self,
+        collection_id: CollectionId,
+        keys: &[String],
+    ) -> Result<Vec<(String, HostDocument)>, Error> {
+        keys.iter()
+            .map(|key| {
+                let document = self.get_json_covered(collection_id, key)?;
+                Ok((key.clone(), document))
+            })
+            .collect()
+    }
+
     /// Optional equality-index candidate keys on `collection_id` (not a semantic filter).
     fn lookup_index_keys(
         &mut self,
         _collection_id: CollectionId,
         _equalities: &[(String, JsonValue)],
+    ) -> Result<Option<Vec<String>>, Error> {
+        Ok(None)
+    }
+
+    /// Candidate lookup using equality prefixes plus all constrained paths.
+    /// Hosts without compound-prefix support retain exact-equality behaviour.
+    fn lookup_index_keys_with_constraints(
+        &mut self,
+        collection_id: CollectionId,
+        equalities: &[(String, JsonValue)],
+        _constrained_fields: &[String],
+    ) -> Result<Option<Vec<String>>, Error> {
+        self.lookup_index_keys(collection_id, equalities)
+    }
+
+    /// Optional exclusive candidate stream already ordered by the requested
+    /// non-key field plus deterministic key tie-break.
+    fn lookup_ordered_index_keys(
+        &mut self,
+        _collection_id: CollectionId,
+        _order: &[crate::plan_v1::OrderTerm],
     ) -> Result<Option<Vec<String>>, Error> {
         Ok(None)
     }
@@ -284,9 +339,17 @@ pub fn execute_qvm_bytes<H: HostCapabilities>(
     heap_id: HeapId,
     collection_id: CollectionId,
 ) -> Result<QueryPage, Error> {
+    let decode_started = options.diagnostics.then(std::time::Instant::now);
     let prog = qvm::decode_qvm(qvm_bytes)?;
+    let decode_ns = decode_started
+        .map(|started| started.elapsed().as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
     let out = vm_exec::run_vm(host, &prog, params, options, heap_id, collection_id, false)?;
-    Ok(out.page)
+    let mut page = out.page;
+    if let Some(diagnostics) = &mut page.diagnostics {
+        diagnostics.decode_ns = decode_ns;
+    }
+    Ok(page)
 }
 
 /// Product entry: Core RQL source → lower → execute on host.
@@ -304,6 +367,7 @@ pub fn execute_core_rql<H: HostCapabilities>(
             "use explain_rql for explain; rql executes rows".into(),
         ));
     }
+    let compile_started = options.diagnostics.then(std::time::Instant::now);
     let mut bindings = CollectionBindings {
         by_name: BTreeMap::new(),
     };
@@ -319,15 +383,27 @@ pub fn execute_core_rql<H: HostCapabilities>(
         &mut effective_options,
     )?;
     compiled.after = None;
+    let compile_ns = compile_started
+        .map(|started| started.elapsed().as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    let lower_started = options.diagnostics.then(std::time::Instant::now);
     let bytecode = QueryBytecodeV1::from_compiled_core(compiled)?;
-    execute_bytecode(
+    let lower_ns = lower_started
+        .map(|started| started.elapsed().as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    let mut page = execute_bytecode(
         host,
         &bytecode,
         &semantic_parameters.values,
         &effective_options,
         heap_id,
         collection_id,
-    )
+    )?;
+    if let Some(diagnostics) = &mut page.diagnostics {
+        diagnostics.compile_ns = compile_ns;
+        diagnostics.lower_ns = lower_ns;
+    }
+    Ok(page)
 }
 
 /// Shared Core page entry used by Full lower paths (RQL-VM1R → one Query VM).
@@ -435,6 +511,33 @@ mod tests {
         )
         .expect("exec");
         assert!(page.rows.is_empty());
+        assert!(page.diagnostics.is_none());
+    }
+
+    #[test]
+    fn query_diagnostics_are_explicitly_opt_in() {
+        let id = CollectionId::from_bytes(uuidish(10)).expect("id");
+        let heap = HeapId::from_bytes(uuidish(2)).expect("heap");
+        let mut host = MapHost {
+            docs: BTreeMap::from([("a".into(), json!({"value": 1}))]),
+        };
+        let options = QueryRunOptions {
+            diagnostics: true,
+            ..Default::default()
+        };
+        let page = execute_core_rql(
+            &mut host,
+            "from items where value = 1",
+            &Parameters::default(),
+            &options,
+            heap,
+            id,
+            "items",
+        )
+        .expect("diagnostic execution");
+        let diagnostics = page.diagnostics.expect("diagnostics");
+        assert!(diagnostics.host_read_calls >= 2);
+        assert!(diagnostics.filter_ns > 0);
     }
 
     #[test]

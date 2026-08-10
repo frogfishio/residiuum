@@ -29,7 +29,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use super::core_page::{equality_constraints, DocScan};
+use super::core_page::{constrained_paths, equality_constraints, DocScan};
 use super::kernel::CompiledKernelWhere;
 use super::HostDocument;
 
@@ -142,6 +142,15 @@ enum PendingKeys {
     Index(Vec<String>),
     /// Key-stream full scan: resume cursor for `list_keys`.
     Stream { after: Option<String> },
+    /// Field-order index path: every candidate must be examined, but Filter
+    /// may retain only the bounded best rows.
+    FieldIndex(Vec<String>),
+    /// Exclusive candidates already in requested field order. Filter may stop
+    /// after the bounded page frontier is full.
+    OrderedIndex(Vec<String>),
+    /// Field-order full scan: every document must be examined, but Filter may
+    /// retain only the bounded best rows.
+    FieldStream,
 }
 
 /// Mutable Core pipeline state driven by Query VM opcodes (RQL-VM2/VM3/VM3b).
@@ -167,6 +176,8 @@ pub(crate) struct CoreFrame<'a> {
     key_only_order: bool,
     /// `None` until [`Self::index_eq`].
     index_keys: Option<Option<Vec<String>>>,
+    /// The selected candidate set is already in requested field order.
+    index_keys_ordered: bool,
     /// Set by Scan; consumed by Filter (RQL-VM3b).
     pending_keys: Option<PendingKeys>,
     /// Full documents in the working bag (pre-project).
@@ -306,6 +317,7 @@ impl<'a> CoreFrame<'a> {
             remaining_limit,
             key_only_order,
             index_keys: None,
+            index_keys_ordered: false,
             pending_keys: None,
             working: Vec::new(),
             known_holes: Vec::new(),
@@ -329,16 +341,27 @@ impl<'a> CoreFrame<'a> {
         where_pred: &Predicate,
         force_scan: bool,
     ) -> Result<(), Error> {
-        let keys = if force_scan {
+        let mut ordered = false;
+        let mut keys = if force_scan {
             None
         } else {
             let eqs = equality_constraints(where_pred, self.params);
             if eqs.is_empty() {
                 None
             } else {
-                scan.try_equality_index_keys(&eqs)?
+                let constrained = constrained_paths(where_pred, self.params);
+                scan.try_index_keys_with_constraints(&eqs, &constrained)?
             }
         };
+        if !force_scan
+            && keys.is_none()
+            && !self.key_only_order
+            && !self.project.group_agg.is_active()
+        {
+            keys = scan.try_ordered_index_keys(&self.order)?;
+            ordered = keys.is_some();
+        }
+        self.index_keys_ordered = ordered;
         self.index_keys = Some(keys);
         Ok(())
     }
@@ -359,18 +382,26 @@ impl<'a> CoreFrame<'a> {
             .and_then(super::ir_order::key_from_sort_tuple);
 
         if let Some(mut candidates) = index_keys.clone() {
-            candidates.sort();
+            if !self.index_keys_ordered {
+                candidates.sort();
+            }
             if self.key_only_order {
                 if let Some(ak) = after_key.as_deref() {
                     candidates.retain(|k| k.as_str() > ak);
                 }
                 self.pending_keys = Some(PendingKeys::Index(candidates));
+            } else if self.index_keys_ordered {
+                self.pending_keys = Some(PendingKeys::OrderedIndex(candidates));
+            } else if !self.project.group_agg.is_active() {
+                self.pending_keys = Some(PendingKeys::FieldIndex(candidates));
             } else {
                 self.scan_index_materialize(scan, candidates)?;
                 self.pending_keys = Some(PendingKeys::Materialized);
             }
         } else if self.key_only_order {
             self.pending_keys = Some(PendingKeys::Stream { after: after_key });
+        } else if !self.project.group_agg.is_active() {
+            self.pending_keys = Some(PendingKeys::FieldStream);
         } else {
             self.scan_full_unordered(scan)?;
             self.pending_keys = Some(PendingKeys::Materialized);
@@ -384,6 +415,39 @@ impl<'a> CoreFrame<'a> {
         scan: &mut S,
         candidates: Vec<String>,
     ) -> Result<(), Error> {
+        if self
+            .budget
+            .is_none_or(|budget| budget.max_documents.is_none() && budget.max_bytes.is_none())
+        {
+            for keys in candidates.chunks(256) {
+                check_governance(self.options, self.started)?;
+                for (key, document) in scan.get_json_covered_many(keys)? {
+                    match document {
+                        HostDocument::Present(doc) => {
+                            self.examined_docs += 1;
+                            self.examined_bytes =
+                                self.examined_bytes.saturating_add(json_byte_len(&doc));
+                            self.working.push((key, doc));
+                        }
+                        HostDocument::Absent => {
+                            self.examined_docs += 1;
+                            self.known_holes.push(HoleEvidence {
+                                code: "index_key_absent".into(),
+                                key: Some(key),
+                            });
+                        }
+                        HostDocument::Hole { code } => {
+                            self.examined_docs += 1;
+                            self.known_holes.push(HoleEvidence {
+                                code,
+                                key: Some(key),
+                            });
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
         for key in candidates {
             check_governance(self.options, self.started)?;
             if self.stop_if_doc_budget_full()? {
@@ -425,17 +489,17 @@ impl<'a> CoreFrame<'a> {
             if self.budget_truncated {
                 break;
             }
-            let batch = scan.list_keys(Some(256), after.as_deref())?;
+            let batch = scan.scan_json_covered_page(Some(256), after.as_deref())?;
             if batch.is_empty() {
                 break;
             }
-            for key in batch {
+            for (key, document) in batch {
                 check_governance(self.options, self.started)?;
                 if self.stop_if_doc_budget_full()? {
                     return Ok(());
                 }
                 after = Some(key.clone());
-                match scan.get_json_covered(&key)? {
+                match document {
                     HostDocument::Present(doc) => {
                         let blen = json_byte_len(&doc);
                         if self.stop_if_bytes_would_exceed(blen)? {
@@ -498,8 +562,270 @@ impl<'a> CoreFrame<'a> {
             PendingKeys::Stream { after } => {
                 self.filter_key_stream(scan, after, need)?;
             }
+            PendingKeys::FieldIndex(candidates) => {
+                self.filter_field_index_stream(scan, candidates)?;
+            }
+            PendingKeys::OrderedIndex(candidates) => {
+                self.filter_ordered_index_stream(scan, candidates)?;
+            }
+            PendingKeys::FieldStream => {
+                self.filter_field_stream(scan)?;
+            }
         }
         self.saw_filter = true;
+        Ok(())
+    }
+
+    fn field_order_keep(&self) -> usize {
+        match self.remaining_limit {
+            Some(limit) if limit <= self.page_size as u64 => limit as usize,
+            _ => self.page_size.saturating_add(1),
+        }
+    }
+
+    fn retain_field_order_bound(&mut self, keep: usize, force: bool) {
+        // Pruning on every insertion would repeatedly select the same small
+        // bag. Let it grow to at most 2K, then reduce it to K.
+        let prune_at = keep.saturating_mul(2).max(keep.saturating_add(1));
+        if force || self.working.len() >= prune_at {
+            super::ir_order::retain_best_rows(&mut self.working, &self.order, keep);
+        }
+    }
+
+    fn push_field_order_match(&mut self, key: String, doc: JsonValue, keep: usize) {
+        if keep == 0 {
+            return;
+        }
+        if let Some(ref last) = self.last_sort_tuple_resume {
+            let tuple = super::ir_order::build_sort_tuple(&key, &doc, &self.order);
+            if super::ir_order::cmp_sort_tuples(&tuple, last, &self.order)
+                != std::cmp::Ordering::Greater
+            {
+                return;
+            }
+        }
+        // A small top-K frontier is cheapest as a permanently sorted vector:
+        // O(log K) comparisons, a tiny pointer move, and no periodic general
+        // selection pass. Larger pages use the batched partition path below.
+        if keep <= 64 {
+            let position = self
+                .working
+                .binary_search_by(|(existing_key, existing_doc)| {
+                    super::ir_order::compare_rows(
+                        existing_key,
+                        existing_doc,
+                        &key,
+                        &doc,
+                        &self.order,
+                    )
+                })
+                .unwrap_or_else(|position| position);
+            if position < keep {
+                self.working.insert(position, (key, doc));
+                self.working.truncate(keep);
+            }
+            return;
+        }
+        self.working.push((key, doc));
+        self.retain_field_order_bound(keep, false);
+    }
+
+    fn filter_field_index_stream<S: DocScan>(
+        &mut self,
+        scan: &mut S,
+        candidates: Vec<String>,
+    ) -> Result<(), Error> {
+        let keep = self.field_order_keep();
+        let can_batch = self
+            .budget
+            .is_none_or(|budget| budget.max_documents.is_none() && budget.max_bytes.is_none());
+        if can_batch {
+            for keys in candidates.chunks(256) {
+                check_governance(self.options, self.started)?;
+                for (key, document) in scan.get_json_covered_many(keys)? {
+                    match document {
+                        HostDocument::Present(doc) => {
+                            let blen = json_byte_len(&doc);
+                            let doc = with_logical_key(&key, doc);
+                            self.examined_docs += 1;
+                            self.examined_bytes = self.examined_bytes.saturating_add(blen);
+                            if self.where_k.eval_doc(&doc)? {
+                                self.push_field_order_match(key, doc, keep);
+                            }
+                        }
+                        HostDocument::Absent => {
+                            self.examined_docs += 1;
+                            self.known_holes.push(HoleEvidence {
+                                code: "index_key_absent".into(),
+                                key: Some(key),
+                            });
+                        }
+                        HostDocument::Hole { code } => {
+                            self.examined_docs += 1;
+                            self.known_holes.push(HoleEvidence {
+                                code,
+                                key: Some(key),
+                            });
+                        }
+                    }
+                }
+            }
+        } else {
+            for key in candidates {
+                check_governance(self.options, self.started)?;
+                if self.stop_if_doc_budget_full()? {
+                    break;
+                }
+                match scan.get_json_covered(&key)? {
+                    HostDocument::Present(doc) => {
+                        let blen = json_byte_len(&doc);
+                        if self.stop_if_bytes_would_exceed(blen)? {
+                            break;
+                        }
+                        let doc = with_logical_key(&key, doc);
+                        self.examined_docs += 1;
+                        self.examined_bytes = self.examined_bytes.saturating_add(blen);
+                        if self.where_k.eval_doc(&doc)? {
+                            self.push_field_order_match(key, doc, keep);
+                        }
+                    }
+                    HostDocument::Absent => {
+                        self.examined_docs += 1;
+                        self.known_holes.push(HoleEvidence {
+                            code: "index_key_absent".into(),
+                            key: Some(key),
+                        });
+                    }
+                    HostDocument::Hole { code } => {
+                        self.examined_docs += 1;
+                        self.known_holes.push(HoleEvidence {
+                            code,
+                            key: Some(key),
+                        });
+                    }
+                }
+            }
+        }
+        self.retain_field_order_bound(keep, true);
+        Ok(())
+    }
+
+    fn filter_ordered_index_stream<S: DocScan>(
+        &mut self,
+        scan: &mut S,
+        candidates: Vec<String>,
+    ) -> Result<(), Error> {
+        let keep = self.field_order_keep();
+        if keep == 0 {
+            return Ok(());
+        }
+        let batch_size = keep.clamp(16, 64);
+        for keys in candidates.chunks(batch_size) {
+            check_governance(self.options, self.started)?;
+            let documents = if self
+                .budget
+                .is_none_or(|budget| budget.max_documents.is_none() && budget.max_bytes.is_none())
+            {
+                scan.get_json_covered_many(keys)?
+            } else {
+                let mut documents = Vec::with_capacity(keys.len());
+                for key in keys {
+                    documents.push((key.clone(), scan.get_json_covered(key)?));
+                }
+                documents
+            };
+            for (key, document) in documents {
+                check_governance(self.options, self.started)?;
+                if self.stop_if_doc_budget_full()? {
+                    return Ok(());
+                }
+                match document {
+                    HostDocument::Present(doc) => {
+                        let blen = json_byte_len(&doc);
+                        if self.stop_if_bytes_would_exceed(blen)? {
+                            return Ok(());
+                        }
+                        let doc = with_logical_key(&key, doc);
+                        self.examined_docs += 1;
+                        self.examined_bytes = self.examined_bytes.saturating_add(blen);
+                        if self.where_k.eval_doc(&doc)? {
+                            self.push_field_order_match(key, doc, keep);
+                            if self.working.len() >= keep {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    HostDocument::Absent => {
+                        self.examined_docs += 1;
+                        self.known_holes.push(HoleEvidence {
+                            code: "index_key_absent".into(),
+                            key: Some(key),
+                        });
+                    }
+                    HostDocument::Hole { code } => {
+                        self.examined_docs += 1;
+                        self.known_holes.push(HoleEvidence {
+                            code,
+                            key: Some(key),
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn filter_field_stream<S: DocScan>(&mut self, scan: &mut S) -> Result<(), Error> {
+        let keep = self.field_order_keep();
+        let mut after: Option<String> = None;
+        loop {
+            check_governance(self.options, self.started)?;
+            if self.budget_truncated {
+                break;
+            }
+            let batch = scan.scan_json_covered_page(Some(256), after.as_deref())?;
+            if batch.is_empty() {
+                break;
+            }
+            for (key, document) in batch {
+                check_governance(self.options, self.started)?;
+                if self.stop_if_doc_budget_full()? {
+                    self.retain_field_order_bound(keep, true);
+                    return Ok(());
+                }
+                after = Some(key.clone());
+                match document {
+                    HostDocument::Present(doc) => {
+                        let blen = json_byte_len(&doc);
+                        if self.stop_if_bytes_would_exceed(blen)? {
+                            self.retain_field_order_bound(keep, true);
+                            return Ok(());
+                        }
+                        let doc = with_logical_key(&key, doc);
+                        self.examined_docs += 1;
+                        self.examined_bytes = self.examined_bytes.saturating_add(blen);
+                        if self.where_k.eval_doc(&doc)? {
+                            self.push_field_order_match(key, doc, keep);
+                        }
+                    }
+                    HostDocument::Absent => {
+                        self.examined_docs += 1;
+                        self.known_holes.push(HoleEvidence {
+                            code: "key_listed_absent".into(),
+                            key: Some(key),
+                        });
+                    }
+                    HostDocument::Hole { code } => {
+                        self.examined_docs += 1;
+                        self.known_holes.push(HoleEvidence {
+                            code,
+                            key: Some(key),
+                        });
+                    }
+                }
+            }
+        }
+        self.retain_field_order_bound(keep, true);
         Ok(())
     }
 
@@ -509,6 +835,43 @@ impl<'a> CoreFrame<'a> {
         candidates: Vec<String>,
         need: usize,
     ) -> Result<(), Error> {
+        let can_batch_all = need >= candidates.len()
+            && self
+                .budget
+                .is_none_or(|budget| budget.max_documents.is_none() && budget.max_bytes.is_none());
+        if can_batch_all {
+            for keys in candidates.chunks(256) {
+                check_governance(self.options, self.started)?;
+                for (key, document) in scan.get_json_covered_many(keys)? {
+                    match document {
+                        HostDocument::Absent => {
+                            self.examined_docs += 1;
+                            self.known_holes.push(HoleEvidence {
+                                code: "index_key_absent".into(),
+                                key: Some(key),
+                            });
+                        }
+                        HostDocument::Hole { code } => {
+                            self.examined_docs += 1;
+                            self.known_holes.push(HoleEvidence {
+                                code,
+                                key: Some(key),
+                            });
+                        }
+                        HostDocument::Present(doc) => {
+                            let doc = with_logical_key(&key, doc);
+                            self.examined_docs += 1;
+                            self.examined_bytes =
+                                self.examined_bytes.saturating_add(json_byte_len(&doc));
+                            if self.where_k.eval_doc(&doc)? {
+                                self.working.push((key, doc));
+                            }
+                        }
+                    }
+                }
+            }
+            return Ok(());
+        }
         let mut iter = candidates.into_iter();
         while let Some(key) = iter.next() {
             check_governance(self.options, self.started)?;
@@ -563,17 +926,17 @@ impl<'a> CoreFrame<'a> {
             if self.budget_truncated {
                 break;
             }
-            let batch = scan.list_keys(Some(256), after.as_deref())?;
+            let batch = scan.scan_json_covered_page(Some(256), after.as_deref())?;
             if batch.is_empty() {
                 break;
             }
-            for key in batch {
+            for (key, document) in batch {
                 check_governance(self.options, self.started)?;
                 if self.stop_if_doc_budget_full()? {
                     return Ok(());
                 }
                 after = Some(key.clone());
-                match scan.get_json_covered(&key)? {
+                match document {
                     HostDocument::Absent => {
                         self.known_holes.push(HoleEvidence {
                             code: "key_listed_absent".into(),
@@ -620,9 +983,17 @@ impl<'a> CoreFrame<'a> {
             ));
         }
         if !self.project.group_agg.is_active() && !self.key_only_order {
-            self.working.sort_by(|(ka, va), (kb, vb)| {
-                super::ir_order::compare_rows(ka, va, kb, vb, &self.order)
-            });
+            if let Some(ref lst) = self.last_sort_tuple_resume {
+                super::ir_order::retain_after_sort_tuple(&mut self.working, &self.order, lst);
+            }
+            let page_size = self.page_size;
+            let keep = match self.remaining_limit {
+                Some(limit) if limit <= page_size as u64 => limit as usize,
+                // Preserve one look-ahead row so Page can distinguish an exact
+                // page from a page with a valid continuation.
+                _ => page_size.saturating_add(1),
+            };
+            super::ir_order::retain_best_rows(&mut self.working, &self.order, keep);
         }
         self.saw_order = true;
         Ok(())
@@ -637,9 +1008,6 @@ impl<'a> CoreFrame<'a> {
             return Err(Error::QueryInvalid("core frame: Page before Order".into()));
         }
         if !self.project.group_agg.is_active() && !self.key_only_order {
-            if let Some(ref lst) = self.last_sort_tuple_resume {
-                super::ir_order::retain_after_sort_tuple(&mut self.working, &self.order, lst);
-            }
             if let Some(n) = self.remaining_limit {
                 self.working.truncate(n as usize);
             }
@@ -808,6 +1176,7 @@ impl<'a> CoreFrame<'a> {
             // Filled by the VM-wide counting HostCapabilities wrapper after
             // Core and any Full attach opcodes have completed.
             logical_bytes_examined: 0,
+            diagnostics: None,
         })
     }
 }

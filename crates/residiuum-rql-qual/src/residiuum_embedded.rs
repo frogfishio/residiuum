@@ -24,12 +24,15 @@ use residiuum_heap::{
     TrustedInstant, VerifiedCertificate,
 };
 use residiuum_sdk::driver::{
-    Client as DriverClient, Collection as DriverCollection, EmbeddedOptions,
+    Client as DriverClient, Collection as DriverCollection, CreateCollectionOptions,
+    EmbeddedOptions, PutManyEntry,
 };
 use residiuum_sdk::{Parameters, QueryRunOptions, ResidiuumDeployment, RqlFullExecuteOptions};
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
+use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::{
@@ -38,6 +41,282 @@ use std::{
     task::{Context, Poll, Wake, Waker},
 };
 use tempfile::tempdir;
+
+/// One warm-query result from the deliberately small Mongo game dipstick.
+#[derive(Debug, Clone, Serialize)]
+pub struct GameDipstickQuery {
+    pub name: String,
+    pub rql: String,
+    pub warmups: u32,
+    pub iterations: u32,
+    pub latency_ns: Vec<u64>,
+    pub p50_ns: u64,
+    pub p95_ns: u64,
+    pub row_count: u64,
+    pub values_digest: String,
+    pub first_key: Option<String>,
+    pub first_value: Option<Value>,
+    pub examined_documents: u64,
+    pub phase_p50_ns: BTreeMap<String, u64>,
+}
+
+/// Product-side output paired with `tools/rql-mongo-dipstick/mongo-dipstick.mjs`.
+#[derive(Debug, Clone, Serialize)]
+pub struct GameDipstickReport {
+    pub format: &'static str,
+    pub engine: &'static str,
+    pub document_count: u64,
+    pub payload_class: &'static str,
+    pub fixture_hash: String,
+    pub fixture_path: String,
+    pub queries: Vec<GameDipstickQuery>,
+}
+
+fn percentile(sorted: &[u64], percentile: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let at = ((sorted.len() - 1) as f64 * percentile).round() as usize;
+    sorted[at.min(sorted.len() - 1)]
+}
+
+/// Run a quick, warm, same-deployment product dipstick and emit the identical
+/// JSON fixture consumed by the Mongo Node.js side. Load and index build are
+/// deliberately outside the measured intervals.
+pub fn run_game_dipstick(
+    output_dir: &Path,
+    document_count: u64,
+    warmups: u32,
+    iterations: u32,
+) -> Result<GameDipstickReport, AdapterError> {
+    std::fs::create_dir_all(output_dir)
+        .map_err(|error| AdapterError::Execute(format!("dipstick output: {error}")))?;
+    let mut spec = DatasetSpec::smoke_default(0xD1_0571_C0_u64);
+    spec.doc_count = document_count.max(1);
+    spec.payload = crate::dataset::PayloadClass::Approx1KiB;
+    spec.shape = crate::dataset::DocShape::DeeplyNested;
+    spec.selectivity = crate::dataset::SelectivityClass::S10;
+    spec.cardinality = crate::dataset::CardinalityClass::Medium;
+    let dataset = crate::generator::generate_dataset(&spec);
+    let fixture_path = output_dir.join("fixture.json");
+    let fixture_body = serde_json::to_vec(&dataset)
+        .map_err(|error| AdapterError::Execute(format!("encode fixture: {error}")))?;
+    std::fs::write(&fixture_path, fixture_body)
+        .map_err(|error| AdapterError::Execute(format!("write fixture: {error}")))?;
+
+    let directory = tempdir().map_err(|error| AdapterError::Execute(error.to_string()))?;
+    let root = directory.path();
+    let deployment = ResidiuumDeployment::create(root)
+        .map_err(|error| AdapterError::Execute(error.to_string()))?;
+    let layout = HeapMetaLayout::new(root);
+    let deployment_id = DeploymentId::new_random().unwrap();
+    let heap_id = HeapId::new_random().unwrap();
+    let staged = stage_heap_genesis(
+        &layout,
+        *deployment_id.as_bytes(),
+        *heap_id.as_bytes(),
+        uuid_bytes(),
+        "heap-rql-game-dipstick",
+    )
+    .map_err(|error| AdapterError::Execute(error.to_string()))?;
+    publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash)
+        .map_err(|error| AdapterError::Execute(error.to_string()))?;
+    let capability = mint_cap_for(heap_id, deployment_id);
+    drop(deployment);
+    let loader = block_on(DriverClient::open_embedded(
+        EmbeddedOptions::new(root)
+            .workers(4)
+            .queue_capacity(2_048)
+            .queue_byte_capacity(64 * 1024 * 1024),
+    ))
+    .map_err(|error| AdapterError::Execute(format!("loader open: {error}")))?;
+    let loader_heap = block_on(loader.open_heap(capability.clone()))
+        .map_err(|error| AdapterError::Execute(format!("loader heap: {error}")))?;
+    let loader_docs: DriverCollection<Value> =
+        block_on(loader_heap.create_collection("docs", CreateCollectionOptions::default()))
+            .map_err(|error| AdapterError::Execute(format!("create docs: {error}")))?;
+    let all_docs: Vec<_> = dataset.collections.get("docs").unwrap().iter().collect();
+    for chunk in all_docs.chunks(1_000) {
+        let entries = chunk
+            .iter()
+            .map(|(key, document)| {
+                let mut body = (*document).clone();
+                if let Value::Object(map) = &mut body {
+                    map.remove("_key");
+                }
+                PutManyEntry::new((*key).clone(), body)
+            })
+            .collect();
+        let outcomes = block_on(loader_docs.put_many(entries))
+            .map_err(|error| AdapterError::Execute(format!("bulk load: {error}")))?;
+        for outcome in outcomes {
+            outcome.result.map_err(|error| {
+                AdapterError::Execute(format!("bulk key {}: {error}", outcome.key))
+            })?;
+        }
+    }
+    block_on(loader.close())
+        .map_err(|error| AdapterError::Execute(format!("loader close: {error}")))?;
+    drop(loader_docs);
+    drop(loader_heap);
+    drop(loader);
+
+    // Index administration is outside the timed workload. Data loading above
+    // uses only the bounded async driver; this legacy handle performs no writes.
+    let deployment = ResidiuumDeployment::open(root)
+        .map_err(|error| AdapterError::Execute(format!("index deployment open: {error}")))?;
+    let mut heap = residiuum_sdk::HeapClient::from(deployment.open_heap(capability.clone()));
+    let mut collection = heap
+        .open_collection("docs")
+        .map_err(|error| AdapterError::Execute(format!("open docs for indexes: {error}")))?;
+    collection
+        .indexes()
+        .create("by_sel_bucket", &["sel_bucket"])
+        .map_err(|error| AdapterError::Execute(format!("index sel_bucket: {error}")))?;
+    collection
+        .indexes()
+        .create("by_region_amount", &["region", "amount"])
+        .map_err(|error| AdapterError::Execute(format!("index region amount: {error}")))?;
+    collection
+        .indexes()
+        .create("by_score", &["score"])
+        .map_err(|error| AdapterError::Execute(format!("index score: {error}")))?;
+    drop(collection);
+    drop(heap);
+    drop(deployment);
+
+    let connection = block_on(DriverClient::open_embedded(
+        EmbeddedOptions::new(root).workers(1).queue_capacity(8),
+    ))
+    .map_err(|error| AdapterError::Execute(format!("driver open: {error}")))?;
+    let heap = block_on(connection.open_heap(capability))
+        .map_err(|error| AdapterError::Execute(format!("driver heap: {error}")))?;
+    let docs: DriverCollection<Value> = block_on(heap.open_collection("docs"))
+        .map_err(|error| AdapterError::Execute(format!("driver docs: {error}")))?;
+
+    let cases = [
+        ("indexed_equality", "from docs where sel_bucket = \"HIT\"", false, None),
+        ("compound_range", "from docs where amount >= 100 and amount < 500 and region = \"r0\"", false, None),
+        ("nested_scan", "from docs where nested.l1.l2.l3.flag = true", false, None),
+        ("deterministic_topk", "from docs order by score desc, _key asc limit 10", true, None),
+        ("group_count", "from docs group by status project status, count() as count", false, Some("status")),
+        ("aggregate_five", "from docs group by region project region, count() as count, sum(amount) as sum, min(amount) as min, max(amount) as max, avg(amount) as avg", false, Some("region")),
+    ];
+    let mut queries = Vec::new();
+    for (name, source, order_sensitive, group_key) in cases {
+        let run_once = || -> Result<(Vec<ResultRow>, u64, BTreeMap<String, u64>), AdapterError> {
+            let mut options = QueryRunOptions::default();
+            options.page_size = Some(4_096);
+            options.diagnostics = true;
+            let mut rows = Vec::new();
+            let mut examined = 0u64;
+            let mut phases = BTreeMap::<String, u64>::new();
+            loop {
+                let page = block_on(docs.rql(source, &Parameters::default(), options.clone()))
+                    .map_err(|error| AdapterError::Execute(format!("dipstick {name}: {error}")))?;
+                examined = examined.saturating_add(page.coverage.examined_documents);
+                if let Some(d) = &page.diagnostics {
+                    for (phase, elapsed) in [
+                        ("compile", d.compile_ns),
+                        ("lower", d.lower_ns),
+                        ("decode", d.decode_ns),
+                        ("verify", d.verify_ns),
+                        ("bind", d.bind_ns),
+                        ("index", d.index_ns),
+                        ("scan", d.scan_ns),
+                        ("filter", d.filter_ns),
+                        ("order", d.order_ns),
+                        ("page", d.page_ns),
+                        ("project", d.project_ns),
+                        ("attach", d.attach_ns),
+                        ("host_read", d.host_read_ns),
+                        ("byte_account", d.byte_account_ns),
+                        ("host_read_calls", d.host_read_calls),
+                    ] {
+                        phases
+                            .entry(phase.into())
+                            .and_modify(|value| *value = value.saturating_add(elapsed))
+                            .or_insert(elapsed);
+                    }
+                }
+                rows.extend(page.rows.into_iter().map(|row| {
+                    let mut value = row.value;
+                    let key = group_key
+                        .and_then(|field| value.get(field))
+                        .map(|value| value.to_string())
+                        .unwrap_or(row.key);
+                    if let Value::Object(map) = &mut value {
+                        map.remove("_key");
+                    }
+                    ResultRow { key, value }
+                }));
+                if page.exhausted || page.next.is_none() {
+                    break;
+                }
+                options.after = page.next;
+            }
+            Ok((rows, examined, phases))
+        };
+        for _ in 0..warmups {
+            let _ = run_once()?;
+        }
+        let mut latency_ns = Vec::with_capacity(iterations as usize);
+        let mut final_rows = Vec::new();
+        let mut examined = 0;
+        let mut phase_samples = BTreeMap::<String, Vec<u64>>::new();
+        for _ in 0..iterations.max(1) {
+            let started = std::time::Instant::now();
+            let (rows, docs_examined, phases) = run_once()?;
+            latency_ns.push(started.elapsed().as_nanos().min(u64::MAX as u128) as u64);
+            final_rows = rows;
+            examined = docs_examined;
+            for (phase, elapsed) in phases {
+                phase_samples.entry(phase).or_default().push(elapsed);
+            }
+        }
+        let canonical = canonicalize_rows(&final_rows, order_sensitive, true);
+        let first_key = final_rows.first().map(|row| row.key.clone());
+        let first_value = final_rows
+            .first()
+            .map(|row| crate::canonicalize::normalize_value(&row.value));
+        let mut sorted = latency_ns.clone();
+        sorted.sort_unstable();
+        let phase_p50_ns = phase_samples
+            .into_iter()
+            .map(|(phase, mut samples)| {
+                samples.sort_unstable();
+                let value = percentile(&samples, 0.50);
+                (phase, value)
+            })
+            .collect();
+        queries.push(GameDipstickQuery {
+            name: name.into(),
+            rql: source.into(),
+            warmups,
+            iterations: iterations.max(1),
+            latency_ns,
+            p50_ns: percentile(&sorted, 0.50),
+            p95_ns: percentile(&sorted, 0.95),
+            row_count: canonical.row_count,
+            values_digest: canonical.values_digest,
+            first_key,
+            first_value,
+            examined_documents: examined,
+            phase_p50_ns,
+        });
+    }
+    block_on(connection.close())
+        .map_err(|error| AdapterError::Execute(format!("driver close: {error}")))?;
+    Ok(GameDipstickReport {
+        format: "residiuum-rql-game-dipstick-v1",
+        engine: "residiuum_embedded_smart_client",
+        document_count: spec.doc_count,
+        payload_class: spec.payload.as_str(),
+        fixture_hash: dataset.content_hash,
+        fixture_path: fixture_path.display().to_string(),
+        queries,
+    })
+}
 
 fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapCap {
     let snap = HeapSecuritySnapshot {

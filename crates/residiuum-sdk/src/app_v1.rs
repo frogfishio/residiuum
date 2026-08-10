@@ -222,6 +222,11 @@ pub struct QueryRunOptions {
     /// When cancelled, the executor fails closed with
     /// [`Error::ResourceLimit`] (`query cancelled`).
     pub cancel: Option<crate::resource::CancelToken>,
+    /// Collect per-phase executor timings on the returned page.
+    ///
+    /// Disabled by default so production queries do not pay diagnostic clock
+    /// reads. Timings are observational and never alter planning or execution.
+    pub diagnostics: bool,
 }
 
 impl Default for QueryRunOptions {
@@ -235,8 +240,44 @@ impl Default for QueryRunOptions {
             after: None,
             deadline: None,
             cancel: None,
+            diagnostics: false,
         }
     }
+}
+
+/// Opt-in wall-clock breakdown for one query-page execution.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueryDiagnostics {
+    /// Source parsing, semantic compilation, and parameter binding.
+    pub compile_ns: u64,
+    /// Plan-to-QVM lowering, encoding, and authority round-trip validation.
+    pub lower_ns: u64,
+    /// Product QVM decode before execution.
+    pub decode_ns: u64,
+    /// VM structural and semantic verification.
+    pub verify_ns: u64,
+    /// Collection binding and Core frame construction.
+    pub bind_ns: u64,
+    /// Equality-index selection and candidate lookup.
+    pub index_ns: u64,
+    /// Scan-source establishment or unfiltered materialisation.
+    pub scan_ns: u64,
+    /// Document loading and predicate evaluation.
+    pub filter_ns: u64,
+    /// Sort-key construction and ordering.
+    pub order_ns: u64,
+    /// Limit, page, and continuation processing.
+    pub page_ns: u64,
+    /// Core projection, grouping, and aggregation.
+    pub project_ns: u64,
+    /// Full-RQL enrich, within, attached filter, and brace projection.
+    pub attach_ns: u64,
+    /// Time inside host key, document, and index calls.
+    pub host_read_ns: u64,
+    /// Time spent serializing decoded JSON solely for logical-byte evidence.
+    pub byte_account_ns: u64,
+    /// Number of host data-access calls made by the VM.
+    pub host_read_calls: u64,
 }
 
 /// Coverage policy for Application Core queries.
@@ -309,6 +350,8 @@ pub struct QueryPage {
     /// nested-within loads; damaged/unavailable bodies contribute zero bytes
     /// and remain represented by coverage holes.
     pub logical_bytes_examined: u64,
+    /// Present only when [`QueryRunOptions::diagnostics`] was enabled.
+    pub diagnostics: Option<QueryDiagnostics>,
 }
 
 /// One projected row.
@@ -1978,6 +2021,7 @@ fn parse_rql_query_result(
             .get("logical_bytes_examined")
             .and_then(|value| value.as_u64())
             .unwrap_or(0),
+        diagnostics: None,
     })
 }
 
@@ -2176,6 +2220,19 @@ impl crate::query_bytecode_v1::HostCapabilities for HeapClient {
         )
     }
 
+    fn get_json_covered_many(
+        &mut self,
+        collection_id: CollectionId,
+        keys: &[String],
+    ) -> Result<Vec<(String, crate::query_bytecode_v1::HostDocument)>, Error> {
+        let mut col = self.open_collection_by_id(collection_id)?;
+        <CollectionClient as crate::query_bytecode_v1::HostCapabilities>::get_json_covered_many(
+            &mut col,
+            collection_id,
+            keys,
+        )
+    }
+
     fn lookup_index_keys(
         &mut self,
         collection_id: CollectionId,
@@ -2186,6 +2243,34 @@ impl crate::query_bytecode_v1::HostCapabilities for HeapClient {
             &mut col,
             collection_id,
             equalities,
+        )
+    }
+
+    fn lookup_index_keys_with_constraints(
+        &mut self,
+        collection_id: CollectionId,
+        equalities: &[(String, serde_json::Value)],
+        constrained_fields: &[String],
+    ) -> Result<Option<Vec<String>>, Error> {
+        let mut col = self.open_collection_by_id(collection_id)?;
+        <CollectionClient as crate::query_bytecode_v1::HostCapabilities>::lookup_index_keys_with_constraints(
+            &mut col,
+            collection_id,
+            equalities,
+            constrained_fields,
+        )
+    }
+
+    fn lookup_ordered_index_keys(
+        &mut self,
+        collection_id: CollectionId,
+        order: &[crate::plan_v1::OrderTerm],
+    ) -> Result<Option<Vec<String>>, Error> {
+        let mut col = self.open_collection_by_id(collection_id)?;
+        <CollectionClient as crate::query_bytecode_v1::HostCapabilities>::lookup_ordered_index_keys(
+            &mut col,
+            collection_id,
+            order,
         )
     }
 }
@@ -2260,6 +2345,33 @@ impl crate::query_bytecode_v1::HostCapabilities for CollectionClient {
         }
     }
 
+    fn get_json_covered_many(
+        &mut self,
+        collection_id: CollectionId,
+        keys: &[String],
+    ) -> Result<Vec<(String, crate::query_bytecode_v1::HostDocument)>, Error> {
+        if collection_id != self.collection_id {
+            return Err(Error::QueryInvalid(
+                "HostCapabilities: collection_id mismatch on CollectionClient".into(),
+            ));
+        }
+        match &self.backend {
+            CollectionBackend::Embedded(collection) => collection.get_json_many_covered(keys),
+            CollectionBackend::Remote { .. } | CollectionBackend::Unbound => keys
+                .iter()
+                .map(|key| {
+                    let document =
+                        <Self as crate::query_bytecode_v1::HostCapabilities>::get_json_covered(
+                            self,
+                            collection_id,
+                            key,
+                        )?;
+                    Ok((key.clone(), document))
+                })
+                .collect(),
+        }
+    }
+
     fn lookup_index_keys(
         &mut self,
         collection_id: CollectionId,
@@ -2273,6 +2385,48 @@ impl crate::query_bytecode_v1::HostCapabilities for CollectionClient {
         match &self.backend {
             CollectionBackend::Embedded(hc) => hc.lookup_index_keys(equalities),
             // Remote residual: no index-probe wire for Application Core yet.
+            CollectionBackend::Remote { .. } | CollectionBackend::Unbound => Ok(None),
+        }
+    }
+
+    fn lookup_index_keys_with_constraints(
+        &mut self,
+        collection_id: CollectionId,
+        equalities: &[(String, serde_json::Value)],
+        constrained_fields: &[String],
+    ) -> Result<Option<Vec<String>>, Error> {
+        if collection_id != self.collection_id {
+            return Err(Error::QueryInvalid(
+                "HostCapabilities: collection_id mismatch on CollectionClient".into(),
+            ));
+        }
+        match &self.backend {
+            CollectionBackend::Embedded(collection) => {
+                collection.lookup_index_keys_with_constraints(equalities, constrained_fields)
+            }
+            CollectionBackend::Remote { .. } | CollectionBackend::Unbound => Ok(None),
+        }
+    }
+
+    fn lookup_ordered_index_keys(
+        &mut self,
+        collection_id: CollectionId,
+        order: &[crate::plan_v1::OrderTerm],
+    ) -> Result<Option<Vec<String>>, Error> {
+        if collection_id != self.collection_id {
+            return Err(Error::QueryInvalid(
+                "HostCapabilities: collection_id mismatch on CollectionClient".into(),
+            ));
+        }
+        let Some((field, field_descending, key_descending)) =
+            crate::query_bytecode_v1::ordered_index_request(order)
+        else {
+            return Ok(None);
+        };
+        match &self.backend {
+            CollectionBackend::Embedded(collection) => {
+                collection.lookup_ordered_index_keys(&field, field_descending, key_descending)
+            }
             CollectionBackend::Remote { .. } | CollectionBackend::Unbound => Ok(None),
         }
     }
@@ -2311,6 +2465,17 @@ impl crate::query_bytecode_v1::DocScan for CollectionClient {
         )
     }
 
+    fn get_json_covered_many(
+        &mut self,
+        keys: &[String],
+    ) -> Result<Vec<(String, crate::query_bytecode_v1::HostDocument)>, Error> {
+        <Self as crate::query_bytecode_v1::HostCapabilities>::get_json_covered_many(
+            self,
+            self.collection_id,
+            keys,
+        )
+    }
+
     fn try_equality_index_keys(
         &mut self,
         equalities: &[(String, serde_json::Value)],
@@ -2319,6 +2484,30 @@ impl crate::query_bytecode_v1::DocScan for CollectionClient {
             self,
             self.collection_id,
             equalities,
+        )
+    }
+
+    fn try_index_keys_with_constraints(
+        &mut self,
+        equalities: &[(String, serde_json::Value)],
+        constrained_fields: &[String],
+    ) -> Result<Option<Vec<String>>, Error> {
+        <Self as crate::query_bytecode_v1::HostCapabilities>::lookup_index_keys_with_constraints(
+            self,
+            self.collection_id,
+            equalities,
+            constrained_fields,
+        )
+    }
+
+    fn try_ordered_index_keys(
+        &mut self,
+        order: &[crate::plan_v1::OrderTerm],
+    ) -> Result<Option<Vec<String>>, Error> {
+        <Self as crate::query_bytecode_v1::HostCapabilities>::lookup_ordered_index_keys(
+            self,
+            self.collection_id,
+            order,
         )
     }
 }

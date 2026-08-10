@@ -993,34 +993,31 @@ where
         let heap_id = self.heap_id();
         let collection_id = self.id();
         let admission_bytes = key.len().saturating_add(body.len());
-        self.heap_client
-            .connection
-            .scheduler
-            .dispatch_mutation(
-                request_id,
-                operation_id,
-                deadline,
-                admission_bytes,
-                move |completion| {
-                    collection.submit_raw_body_with_operation(
-                        key,
-                        body,
-                        residiuum_store::WriteCondition::Unconditional,
-                        operation_id.0,
-                        content_hash,
-                        move |result| {
-                            completion(result.map(|(storage, deduplicated)| WriteReceipt {
-                                request_id,
-                                operation_id,
-                                heap_id,
-                                collection_id,
-                                deduplicated,
-                                storage,
-                            }))
-                        },
-                    )
-                },
-            )
+        self.heap_client.connection.scheduler.dispatch_mutation(
+            request_id,
+            operation_id,
+            deadline,
+            admission_bytes,
+            move |completion| {
+                collection.submit_raw_body_with_operation(
+                    key,
+                    body,
+                    residiuum_store::WriteCondition::Unconditional,
+                    operation_id.0,
+                    content_hash,
+                    move |result| {
+                        completion(result.map(|(storage, deduplicated)| WriteReceipt {
+                            request_id,
+                            operation_id,
+                            heap_id,
+                            collection_id,
+                            deduplicated,
+                            storage,
+                        }))
+                    },
+                )
+            },
+        )
     }
 
     /// Insert only when the key is absent.
@@ -1390,6 +1387,51 @@ impl crate::HostCapabilities for DriverHeapHost {
         }
     }
 
+    fn scan_json_covered_page(
+        &mut self,
+        collection_id: CollectionId,
+        limit: Option<usize>,
+        after_key: Option<&str>,
+    ) -> Result<Vec<(String, crate::query_bytecode_v1::HostDocument)>, SdkError> {
+        use crate::query_bytecode_v1::HostDocument;
+
+        let collection = self.heap.collection_by_id(collection_id)?;
+        let page = collection.scan_page_raw(limit.unwrap_or(256), after_key.map(str::as_bytes))?;
+        let mut documents = std::collections::BTreeMap::new();
+        for (key, body, _) in page.entries {
+            let key = String::from_utf8(key)
+                .map_err(|_| SdkError::Internal("scan: non-UTF-8 application key".into()))?;
+            let document = match crate::value::decode_json(&body) {
+                Ok(value) => HostDocument::Present(value),
+                Err(error) => HostDocument::Hole {
+                    code: error.code().as_str().to_string(),
+                },
+            };
+            documents.insert(key, document);
+        }
+        for hole in page.incomplete {
+            let key = String::from_utf8(hole.key)
+                .map_err(|_| SdkError::Internal("scan: non-UTF-8 application key".into()))?;
+            documents.insert(
+                key,
+                HostDocument::Hole {
+                    code: hole.reason.as_str().to_string(),
+                },
+            );
+        }
+        Ok(documents.into_iter().collect())
+    }
+
+    fn get_json_covered_many(
+        &mut self,
+        collection_id: CollectionId,
+        keys: &[String],
+    ) -> Result<Vec<(String, crate::query_bytecode_v1::HostDocument)>, SdkError> {
+        self.heap
+            .collection_by_id(collection_id)?
+            .get_json_many_covered(keys)
+    }
+
     fn lookup_index_keys(
         &mut self,
         collection_id: CollectionId,
@@ -1398,6 +1440,32 @@ impl crate::HostCapabilities for DriverHeapHost {
         self.heap
             .collection_by_id(collection_id)?
             .lookup_index_keys(equalities)
+    }
+
+    fn lookup_index_keys_with_constraints(
+        &mut self,
+        collection_id: CollectionId,
+        equalities: &[(String, serde_json::Value)],
+        constrained_fields: &[String],
+    ) -> Result<Option<Vec<String>>, SdkError> {
+        self.heap
+            .collection_by_id(collection_id)?
+            .lookup_index_keys_with_constraints(equalities, constrained_fields)
+    }
+
+    fn lookup_ordered_index_keys(
+        &mut self,
+        collection_id: CollectionId,
+        order: &[crate::plan_v1::OrderTerm],
+    ) -> Result<Option<Vec<String>>, SdkError> {
+        let Some((field, field_descending, key_descending)) =
+            crate::query_bytecode_v1::ordered_index_request(order)
+        else {
+            return Ok(None);
+        };
+        self.heap
+            .collection_by_id(collection_id)?
+            .lookup_ordered_index_keys(&field, field_descending, key_descending)
     }
 }
 
@@ -1774,8 +1842,7 @@ impl MutationDrain {
     }
 
     fn close_admission(&self) {
-        self.state
-            .fetch_or(MUTATION_DRAIN_CLOSED, Ordering::AcqRel);
+        self.state.fetch_or(MUTATION_DRAIN_CLOSED, Ordering::AcqRel);
     }
 
     fn wait_empty(&self) {

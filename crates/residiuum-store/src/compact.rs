@@ -392,6 +392,57 @@ pub fn pread_item_body_matching(
 ) -> Result<Vec<u8>, StoreError> {
     let (header, envelope, body, file_len) =
         pread_item_frame_full(path, offset, expect.segment_id, limits)?;
+    validate_item_body_matching(path, offset, expect, header, envelope, body, file_len)
+}
+
+/// Resolve several locators from one segment while opening and statting the
+/// immutable media only once. Every frame is still independently verified.
+pub(crate) fn pread_item_bodies_matching(
+    path: &Path,
+    requests: &[(u64, LocatorExpect)],
+    limits: SafetyLimits,
+) -> Result<Vec<Result<Vec<u8>, StoreError>>, StoreError> {
+    let Some((first_offset, first_expect)) = requests.first() else {
+        return Ok(Vec::new());
+    };
+    let mut file = File::open(path).map_err(|error| {
+        StoreError::LocatorFault(Box::new(crate::error::LocatorFault::at_path(
+            crate::error::LocatorFaultKind::SegmentNotFound,
+            first_expect.segment_id,
+            *first_offset,
+            path,
+            None,
+            Some(error.to_string()),
+        )))
+    })?;
+    let file_len = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    Ok(requests
+        .iter()
+        .map(|(offset, expect)| {
+            let (header, envelope, body, file_len) = pread_item_frame_full_open(
+                &mut file,
+                file_len,
+                path,
+                *offset,
+                expect.segment_id,
+                limits,
+            )?;
+            validate_item_body_matching(
+                path, *offset, expect, header, envelope, body, file_len,
+            )
+        })
+        .collect())
+}
+
+fn validate_item_body_matching(
+    path: &Path,
+    offset: u64,
+    expect: &LocatorExpect,
+    header: residiuum_format::FrameHeader,
+    envelope: Vec<u8>,
+    body: Vec<u8>,
+    file_len: u64,
+) -> Result<Vec<u8>, StoreError> {
     if header.event_id != expect.event_id {
         return Err(StoreError::ConsistencyViolation(
             "locator event_id mismatch at disk frame offset".into(),
@@ -480,6 +531,24 @@ fn pread_item_frame_full(
         )))
     })?;
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    pread_item_frame_full_open(
+        &mut file,
+        file_len,
+        path,
+        offset,
+        expect_segment_id,
+        limits,
+    )
+}
+
+fn pread_item_frame_full_open(
+    file: &mut File,
+    file_len: u64,
+    path: &Path,
+    offset: u64,
+    expect_segment_id: [u8; 16],
+    limits: SafetyLimits,
+) -> Result<(residiuum_format::FrameHeader, Vec<u8>, Vec<u8>, u64), StoreError> {
     if offset >= file_len {
         return Err(StoreError::LocatorFault(Box::new(
             crate::error::LocatorFault::at_path(

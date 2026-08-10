@@ -11,7 +11,9 @@
 //!
 //! Decision 0 remains OPEN; **RQL-C1 must not be accepted.**
 
-use crate::app_v1::{ConsistencyMode, CoveragePolicy, QueryBudget, QueryPage, QueryRunOptions};
+use crate::app_v1::{
+    ConsistencyMode, CoveragePolicy, QueryBudget, QueryDiagnostics, QueryPage, QueryRunOptions,
+};
 use crate::error::Error;
 use crate::plan_v1::{OrderTerm, RqlPlanV1};
 use crate::predicate::{Path, Predicate};
@@ -20,6 +22,7 @@ use crate::rql_app_core::merge_budgets;
 use residiuum_heap::{CollectionId, HeapId};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
+use std::time::Instant;
 
 use super::core_page::DocScan;
 use super::core_phases::CoreFrame;
@@ -37,24 +40,43 @@ use super::{HostCapabilities, HostDocument};
 struct CountingHost<'a, H: HostCapabilities> {
     inner: &'a mut H,
     logical_bytes_examined: u64,
+    collect_diagnostics: bool,
+    host_read_ns: u64,
+    byte_account_ns: u64,
+    host_read_calls: u64,
 }
 
 impl<'a, H: HostCapabilities> CountingHost<'a, H> {
-    fn new(inner: &'a mut H) -> Self {
+    fn new(inner: &'a mut H, collect_diagnostics: bool) -> Self {
         Self {
             inner,
             logical_bytes_examined: 0,
+            collect_diagnostics,
+            host_read_ns: 0,
+            byte_account_ns: 0,
+            host_read_calls: 0,
         }
     }
 
     fn account(&mut self, value: &JsonValue) -> Result<(), Error> {
+        let started = self.collect_diagnostics.then(Instant::now);
         let bytes = serde_json::to_vec(value).map_err(|error| {
             Error::Internal(format!("logical JSON byte accounting failed: {error}"))
         })?;
         self.logical_bytes_examined = self
             .logical_bytes_examined
             .saturating_add(bytes.len() as u64);
+        if let Some(started) = started {
+            self.byte_account_ns = self.byte_account_ns.saturating_add(elapsed_ns(started));
+        }
         Ok(())
+    }
+
+    fn account_host_call(&mut self, started: Option<Instant>) {
+        if let Some(started) = started {
+            self.host_read_ns = self.host_read_ns.saturating_add(elapsed_ns(started));
+            self.host_read_calls = self.host_read_calls.saturating_add(1);
+        }
     }
 }
 
@@ -65,7 +87,10 @@ impl<H: HostCapabilities> HostCapabilities for CountingHost<'_, H> {
         limit: Option<usize>,
         after_key: Option<&str>,
     ) -> Result<Vec<String>, Error> {
-        self.inner.list_keys(collection_id, limit, after_key)
+        let started = self.collect_diagnostics.then(Instant::now);
+        let result = self.inner.list_keys(collection_id, limit, after_key);
+        self.account_host_call(started);
+        result
     }
 
     fn get_json(
@@ -73,7 +98,9 @@ impl<H: HostCapabilities> HostCapabilities for CountingHost<'_, H> {
         collection_id: CollectionId,
         key: &str,
     ) -> Result<Option<JsonValue>, Error> {
+        let started = self.collect_diagnostics.then(Instant::now);
         let value = self.inner.get_json(collection_id, key)?;
+        self.account_host_call(started);
         if let Some(value) = value.as_ref() {
             self.account(value)?;
         }
@@ -85,11 +112,48 @@ impl<H: HostCapabilities> HostCapabilities for CountingHost<'_, H> {
         collection_id: CollectionId,
         key: &str,
     ) -> Result<HostDocument, Error> {
+        let started = self.collect_diagnostics.then(Instant::now);
         let document = self.inner.get_json_covered(collection_id, key)?;
+        self.account_host_call(started);
         if let HostDocument::Present(value) = &document {
             self.account(value)?;
         }
         Ok(document)
+    }
+
+    fn scan_json_covered_page(
+        &mut self,
+        collection_id: CollectionId,
+        limit: Option<usize>,
+        after_key: Option<&str>,
+    ) -> Result<Vec<(String, HostDocument)>, Error> {
+        let started = self.collect_diagnostics.then(Instant::now);
+        let documents = self
+            .inner
+            .scan_json_covered_page(collection_id, limit, after_key)?;
+        self.account_host_call(started);
+        for (_, document) in &documents {
+            if let HostDocument::Present(value) = document {
+                self.account(value)?;
+            }
+        }
+        Ok(documents)
+    }
+
+    fn get_json_covered_many(
+        &mut self,
+        collection_id: CollectionId,
+        keys: &[String],
+    ) -> Result<Vec<(String, HostDocument)>, Error> {
+        let started = self.collect_diagnostics.then(Instant::now);
+        let documents = self.inner.get_json_covered_many(collection_id, keys)?;
+        self.account_host_call(started);
+        for (_, document) in &documents {
+            if let HostDocument::Present(value) = document {
+                self.account(value)?;
+            }
+        }
+        Ok(documents)
     }
 
     fn lookup_index_keys(
@@ -97,7 +161,37 @@ impl<H: HostCapabilities> HostCapabilities for CountingHost<'_, H> {
         collection_id: CollectionId,
         equalities: &[(String, JsonValue)],
     ) -> Result<Option<Vec<String>>, Error> {
-        self.inner.lookup_index_keys(collection_id, equalities)
+        let started = self.collect_diagnostics.then(Instant::now);
+        let result = self.inner.lookup_index_keys(collection_id, equalities);
+        self.account_host_call(started);
+        result
+    }
+
+    fn lookup_index_keys_with_constraints(
+        &mut self,
+        collection_id: CollectionId,
+        equalities: &[(String, JsonValue)],
+        constrained_fields: &[String],
+    ) -> Result<Option<Vec<String>>, Error> {
+        let started = self.collect_diagnostics.then(Instant::now);
+        let result = self.inner.lookup_index_keys_with_constraints(
+            collection_id,
+            equalities,
+            constrained_fields,
+        );
+        self.account_host_call(started);
+        result
+    }
+
+    fn lookup_ordered_index_keys(
+        &mut self,
+        collection_id: CollectionId,
+        order: &[OrderTerm],
+    ) -> Result<Option<Vec<String>>, Error> {
+        let started = self.collect_diagnostics.then(Instant::now);
+        let result = self.inner.lookup_ordered_index_keys(collection_id, order);
+        self.account_host_call(started);
+        result
     }
 }
 
@@ -124,11 +218,47 @@ impl<H: HostCapabilities> DocScan for HostScan<'_, H> {
         self.host.get_json_covered(self.collection_id, key)
     }
 
+    fn scan_json_covered_page(
+        &mut self,
+        limit: Option<usize>,
+        after_key: Option<&str>,
+    ) -> Result<Vec<(String, HostDocument)>, Error> {
+        self.host
+            .scan_json_covered_page(self.collection_id, limit, after_key)
+    }
+
+    fn get_json_covered_many(
+        &mut self,
+        keys: &[String],
+    ) -> Result<Vec<(String, HostDocument)>, Error> {
+        self.host.get_json_covered_many(self.collection_id, keys)
+    }
+
     fn try_equality_index_keys(
         &mut self,
         equalities: &[(String, JsonValue)],
     ) -> Result<Option<Vec<String>>, Error> {
         self.host.lookup_index_keys(self.collection_id, equalities)
+    }
+
+    fn try_index_keys_with_constraints(
+        &mut self,
+        equalities: &[(String, JsonValue)],
+        constrained_fields: &[String],
+    ) -> Result<Option<Vec<String>>, Error> {
+        self.host.lookup_index_keys_with_constraints(
+            self.collection_id,
+            equalities,
+            constrained_fields,
+        )
+    }
+
+    fn try_ordered_index_keys(
+        &mut self,
+        order: &[OrderTerm],
+    ) -> Result<Option<Vec<String>>, Error> {
+        self.host
+            .lookup_ordered_index_keys(self.collection_id, order)
     }
 }
 
@@ -621,8 +751,13 @@ pub(crate) fn run_vm<H: HostCapabilities>(
             prog.profile
         )));
     }
+    let mut diagnostics = options.diagnostics.then(QueryDiagnostics::default);
+    let verify_started = diagnostics.as_ref().map(|_| Instant::now());
     verify_vm_program(prog)?;
-    let mut host = CountingHost::new(host);
+    if let (Some(diagnostics), Some(started)) = (&mut diagnostics, verify_started) {
+        diagnostics.verify_ns = elapsed_ns(started);
+    }
+    let mut host = CountingHost::new(host, options.diagnostics);
     let mut pc = 0usize;
     let mut frame: Option<CoreFrame<'_>> = None;
     let mut page: Option<QueryPage> = None;
@@ -634,6 +769,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
 
     while pc < prog.ops.len() {
         let instr = &prog.ops[pc];
+        let phase_started = diagnostics.as_ref().map(|_| Instant::now());
         match instr.op {
             OpCode::BindCollection => {
                 let VmImm::Collection(id) = &instr.imm else {
@@ -891,7 +1027,37 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                 if page.is_none() {
                     return Err(Error::QueryInvalid("run_vm: Halt without Core page".into()));
                 }
-                break;
+                pc += 1;
+            }
+        }
+        if let (Some(diagnostics), Some(started)) = (&mut diagnostics, phase_started) {
+            let elapsed = elapsed_ns(started);
+            match instr.op {
+                OpCode::BindCollection => {
+                    diagnostics.bind_ns = diagnostics.bind_ns.saturating_add(elapsed)
+                }
+                OpCode::IndexEq => {
+                    diagnostics.index_ns = diagnostics.index_ns.saturating_add(elapsed)
+                }
+                OpCode::Scan => diagnostics.scan_ns = diagnostics.scan_ns.saturating_add(elapsed),
+                OpCode::Filter => {
+                    diagnostics.filter_ns = diagnostics.filter_ns.saturating_add(elapsed)
+                }
+                OpCode::Order => {
+                    diagnostics.order_ns = diagnostics.order_ns.saturating_add(elapsed)
+                }
+                OpCode::Page => diagnostics.page_ns = diagnostics.page_ns.saturating_add(elapsed),
+                OpCode::ProjectPaths => {
+                    diagnostics.project_ns = diagnostics.project_ns.saturating_add(elapsed)
+                }
+                OpCode::Enrich
+                | OpCode::Within
+                | OpCode::WithinEnd
+                | OpCode::FilterAttach
+                | OpCode::ProjectBrace => {
+                    diagnostics.attach_ns = diagnostics.attach_ns.saturating_add(elapsed)
+                }
+                OpCode::Halt => {}
             }
         }
     }
@@ -899,11 +1065,21 @@ pub(crate) fn run_vm<H: HostCapabilities>(
     let mut page =
         page.ok_or_else(|| Error::QueryInvalid("run_vm: finished without Core page".into()))?;
     page.logical_bytes_examined = host.logical_bytes_examined;
+    if let Some(diagnostics) = &mut diagnostics {
+        diagnostics.host_read_ns = host.host_read_ns;
+        diagnostics.byte_account_ns = host.byte_account_ns;
+        diagnostics.host_read_calls = host.host_read_calls;
+    }
+    page.diagnostics = diagnostics;
     Ok(VmOutcome {
         page,
         rows,
         enrich_loads,
     })
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    started.elapsed().as_nanos().min(u64::MAX as u128) as u64
 }
 
 /// Bound both the public attached result and the VM's total retained
@@ -980,7 +1156,7 @@ mod tests {
         let value = serde_json::json!({"a": [1, 2], "s": "x"});
         let expected = serde_json::to_vec(&value).unwrap().len() as u64;
         let mut inner = ByteHost { value };
-        let mut host = CountingHost::new(&mut inner);
+        let mut host = CountingHost::new(&mut inner, false);
 
         assert!(host.get_json(id, "present").unwrap().is_some());
         assert!(matches!(

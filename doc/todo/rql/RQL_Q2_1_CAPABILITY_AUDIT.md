@@ -9,6 +9,12 @@ Status: **labor complete** (2026-08-07) · package RQL-Q2 **not accepted**
 expected stable refusal **2**/147; **gap 0**. Computed conditional projection,
 textual authenticated continuation, and the grammar-aligned unread-within case
 all compile and execute through QVM. Full server wire remains separate.
+**Live re-audit (2026-08-10):** execute_ok **143**/147; expected stable refusal
+**2**/147; semantic gap **2**/147. The two result-byte-budget cases now return
+`QueryBudgetRequired` rather than the corpus's bounded incomplete outcome:
+`messaging.messages.budget_cancel_surface` and
+`telemetry.events.budget_result_bytes`. The audit test completes successfully
+because it classifies outcomes; it is not a zero-gap gate.
 Task: Q2.1 · Feature `019fda4c-1227-7c93-b7e6-292141ec7a78`  
 Authority: [RQL_QUERY_QUALIFICATION_PROGRAM.md](./RQL_QUERY_QUALIFICATION_PROGRAM.md) §5  
 Machine report: [`spec/rql/qualification/corpus-v1/q2_1_capability_audit.json`](../../../spec/rql/qualification/corpus-v1/q2_1_capability_audit.json)  

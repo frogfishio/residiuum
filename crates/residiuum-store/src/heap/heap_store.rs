@@ -12,6 +12,7 @@ use crate::store::WriteReceipt;
 use residiuum_format::{decode_subject_v2, encode_subject_v2, SubjectObjectKind};
 use residiuum_heap::{refresh_capability_or_terminate, HeapCap, Rights};
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use super::commit_coordinator::OperationCommitCoordinator;
@@ -139,8 +140,8 @@ impl CollectionScanHole {
             CollectionScanHoleReason::PayloadConflict => StoreError::PayloadConflict,
             // Locator-kind holes normally carry `locator` from `from_error`; if
             // missing, still fail-closed with the correct kind (no soft-skip).
-            CollectionScanHoleReason::LocatorOffsetInvalid => StoreError::LocatorFault(Box::new(
-                LocatorFault {
+            CollectionScanHoleReason::LocatorOffsetInvalid => {
+                StoreError::LocatorFault(Box::new(LocatorFault {
                     kind: LocatorFaultKind::OffsetInvalid,
                     segment_id: [0; 16],
                     frame_offset: 0,
@@ -148,8 +149,8 @@ impl CollectionScanHole {
                     file_len: None,
                     observed_segment_id: None,
                     cause: Some("collection scan incomplete (no locator ctx)".into()),
-                },
-            )),
+                }))
+            }
             CollectionScanHoleReason::LocatorFrameVerifyFailed => {
                 StoreError::LocatorFault(Box::new(LocatorFault {
                     kind: LocatorFaultKind::FrameVerifyFailed,
@@ -323,6 +324,7 @@ impl HeapStore {
         self.require_subject_v2(subject, None, None)?;
         // Admit under the physical lock; wait for collection install *outside*
         // the lock so concurrent independent puts can coalesce.
+        let mut direct_receipt = None;
         let completion = {
             let mut guard = self
                 .physical
@@ -338,22 +340,27 @@ impl HeapStore {
                 ) {
                     AdmissionResult::Admitted(c) => Some(c),
                     AdmissionResult::Rejected(e) => {
-                        return Err(crate::adaptive_write::AdaptiveWriteHandle::to_store_error(e));
+                        return Err(crate::adaptive_write::AdaptiveWriteHandle::to_store_error(
+                            e,
+                        ));
                     }
                 }
             } else {
-                return Ok(guard.put_subject_bytes_if(
+                direct_receipt = Some(guard.put_subject_bytes_if(
                     subject,
                     value,
                     DurabilityMode::Durable,
                     condition,
                 )?);
+                None
             }
         };
-        let receipt = completion
-            .expect("awo admit")
-            .wait()
-            .map_err(crate::adaptive_write::AdaptiveWriteHandle::to_store_error)?;
+        let receipt = match completion {
+            Some(completion) => completion
+                .wait()
+                .map_err(crate::adaptive_write::AdaptiveWriteHandle::to_store_error)?,
+            None => direct_receipt.expect("direct put receipt"),
+        };
         // Collection writes invalidate derived secondary indexes (DEF-027).
         if let Ok(sv2) = decode_subject_v2(subject) {
             if sv2.object_kind == SubjectObjectKind::Collection {
@@ -424,17 +431,14 @@ impl HeapStore {
                 .lock()
                 .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
             if let Some(awo) = self.adaptive.as_ref().filter(|h| h.lease_active()) {
-                match awo.admit_delete(
-                    &mut guard,
-                    subject,
-                    DurabilityMode::Durable,
-                    condition,
-                ) {
+                match awo.admit_delete(&mut guard, subject, DurabilityMode::Durable, condition) {
                     AdmissionResult::Admitted(c) => c
                         .wait()
                         .map_err(crate::adaptive_write::AdaptiveWriteHandle::to_store_error)?,
                     AdmissionResult::Rejected(e) => {
-                        return Err(crate::adaptive_write::AdaptiveWriteHandle::to_store_error(e));
+                        return Err(crate::adaptive_write::AdaptiveWriteHandle::to_store_error(
+                            e,
+                        ));
                     }
                 }
             } else {
@@ -456,7 +460,12 @@ impl HeapStore {
         key: &[u8],
         value: &[u8],
     ) -> Result<WriteReceipt, StoreError> {
-        self.put_collection_if(collection_id, key, value, crate::WriteCondition::Unconditional)
+        self.put_collection_if(
+            collection_id,
+            key,
+            value,
+            crate::WriteCondition::Unconditional,
+        )
     }
 
     /// Conditional collection put (APB-2 Key Atomic under store lock).
@@ -565,6 +574,53 @@ impl HeapStore {
         )
         .map_err(|e| StoreError::HeapAdmit(format!("subject v2 encode: {e}")))?;
         self.get(&subject)
+    }
+
+    /// Bounded collection point batch under one capability check and store
+    /// lock. Each key retains explicit absent/hole evidence.
+    pub fn get_collection_many(
+        &self,
+        collection_id: &[u8; 16],
+        keys: &[Vec<u8>],
+    ) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>, Option<CollectionScanHoleReason>)>, StoreError> {
+        self.gate()?;
+        self.require_right(Rights::READ)?;
+        if keys.len() > 4096 {
+            return Err(StoreError::HeapAdmit(
+                "collection get-many exceeds 4096 keys".into(),
+            ));
+        }
+        let mut subjects = Vec::with_capacity(keys.len());
+        for key in keys {
+            let subject = residiuum_format::encode_subject_v2(
+                self.cap.heap_id().as_bytes(),
+                SubjectObjectKind::Collection,
+                collection_id,
+                key,
+            )
+            .map_err(|error| StoreError::HeapAdmit(format!("subject v2 encode: {error}")))?;
+            subjects.push((key.clone(), subject));
+        }
+        let guard = self
+            .physical
+            .lock()
+            .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
+        let subject_values: Vec<Vec<u8>> = subjects
+            .iter()
+            .map(|(_, subject)| subject.clone())
+            .collect();
+        let resolved = guard.get_subject_bytes_many(&subject_values);
+        let mut out = Vec::with_capacity(subjects.len());
+        for ((key, _), (_, outcome)) in subjects.into_iter().zip(resolved) {
+            match outcome {
+                Ok(body) => out.push((key, body, None)),
+                Err(error) => match CollectionScanHoleReason::from_store_error(&error) {
+                    Some(reason) => out.push((key, None, Some(reason))),
+                    None => return Err(error),
+                },
+            }
+        }
+        Ok(out)
     }
 
     /// Get a collection value and its establishing event id atomically.
@@ -722,7 +778,11 @@ impl HeapStore {
             key,
         )
         .map_err(|e| StoreError::HeapAdmit(format!("subject v2 encode: {e}")))?;
-        self.require_subject_v2(&subject, Some(SubjectObjectKind::Collection), Some(collection_id))?;
+        self.require_subject_v2(
+            &subject,
+            Some(SubjectObjectKind::Collection),
+            Some(collection_id),
+        )?;
         let guard = self
             .physical
             .lock()
@@ -772,8 +832,8 @@ impl HeapStore {
             .physical
             .lock()
             .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
-        let subjects = guard.index_live_after(after_subject.as_deref(), Some(&prefix));
-        drop(guard);
+        let subjects =
+            guard.index_live_after_bounded(after_subject.as_deref(), Some(&prefix), limit);
         let mut out = Vec::new();
         for subject in subjects {
             if out.len() >= limit {
@@ -1004,9 +1064,10 @@ impl HeapStore {
 
     /// Scan live rows with establishing event ids and explicit holes.
     ///
-    /// Each body/version pair is read under one store lock. The page is not a
-    /// snapshot across rows; a returned version can therefore become stale
-    /// immediately, which a conditional mutation will correctly refuse.
+    /// The bounded page is read under one store lock, so each body/version pair
+    /// is coherent and the page cannot interleave with a mutation. A returned
+    /// version can become stale immediately after return, which a conditional
+    /// mutation will correctly refuse.
     pub fn scan_collection_page_versioned(
         &self,
         collection_id: &[u8; 16],
@@ -1029,25 +1090,22 @@ impl HeapStore {
             ),
             None => None,
         };
+        // Bound total subjects examined (complete + holes). Prevents unbounded
+        // walks over hole-only collections while still filling complete rows.
+        let examine_budget = limit.saturating_mul(8).clamp(limit, 4096);
         let guard = self
             .physical
             .lock()
             .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
-        let subjects = guard.index_live_after(after_subject.as_deref(), Some(&prefix));
-        drop(guard);
-        let mut entries = Vec::new();
-        let mut incomplete = Vec::new();
-        let mut examined = 0usize;
-        let mut last_key: Option<Vec<u8>> = None;
-        let mut saw_more = false;
-        // Bound total subjects examined (complete + holes). Prevents unbounded
-        // walks over hole-only collections while still filling complete rows.
-        let examine_budget = limit.saturating_mul(8).clamp(limit, 4096);
+        // One look-ahead subject is sufficient to establish `has_more`; never
+        // clone the entire remaining collection for a bounded page.
+        let subjects = guard.index_live_after_bounded(
+            after_subject.as_deref(),
+            Some(&prefix),
+            examine_budget.saturating_add(1),
+        );
+        let mut candidates = Vec::new();
         for subject in subjects {
-            if entries.len() >= limit || examined >= examine_budget {
-                saw_more = true;
-                break;
-            }
             let sv2 = match decode_subject_v2(&subject) {
                 Ok(s)
                     if s.heap_id == self.cap.heap_id().as_bytes()
@@ -1058,21 +1116,58 @@ impl HeapStore {
                 }
                 _ => continue,
             };
-            let key = sv2.key.to_vec();
-            examined += 1;
-            last_key = Some(key.clone());
-            match self.get_versioned(&subject) {
-                Ok(Some(value)) => entries.push((key, value.body, value.version)),
-                Ok(None) => {}
-                Err(e) => {
-                    if let Some(hole) = CollectionScanHole::from_error(key, &e) {
-                        incomplete.push(hole);
-                    } else {
-                        return Err(e);
+            candidates.push((sv2.key.to_vec(), subject));
+        }
+
+        let mut entries = Vec::new();
+        let mut incomplete = Vec::new();
+        let mut examined = 0usize;
+        let mut last_key: Option<Vec<u8>> = None;
+        let mut position = 0usize;
+        while position < candidates.len() && entries.len() < limit && examined < examine_budget {
+            let wanted = limit.saturating_sub(entries.len()).max(1);
+            let end = position
+                .saturating_add(wanted)
+                .min(candidates.len())
+                .min(position.saturating_add(examine_budget - examined));
+            let batch_subjects: Vec<Vec<u8>> = candidates[position..end]
+                .iter()
+                .map(|(_, subject)| subject.clone())
+                .collect();
+            let resolved = guard.get_subject_bytes_many(&batch_subjects);
+            for ((key, subject), (_, outcome)) in
+                candidates[position..end].iter().cloned().zip(resolved)
+            {
+                examined += 1;
+                last_key = Some(key.clone());
+                let version = guard.live_event_id(&subject);
+                match outcome {
+                    Ok(Some(body)) => match version {
+                        Some(version) => entries.push((key, body, version)),
+                        None => {
+                            return Err(StoreError::CorruptMeta(
+                                "live collection body/version invariant violated",
+                            ))
+                        }
+                    },
+                    Ok(None) if version.is_none() => {}
+                    Ok(None) => {
+                        return Err(StoreError::CorruptMeta(
+                            "live collection body/version invariant violated",
+                        ))
+                    }
+                    Err(error) => {
+                        if let Some(hole) = CollectionScanHole::from_error(key, &error) {
+                            incomplete.push(hole);
+                        } else {
+                            return Err(error);
+                        }
                     }
                 }
             }
+            position = end;
         }
+        let saw_more = position < candidates.len();
         let complete = incomplete.is_empty();
         Ok(VersionedCollectionScanPage {
             entries,
@@ -1122,6 +1217,21 @@ impl HeapStore {
         collection_id: &[u8; 16],
         equalities: &[(String, JsonValue)],
     ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
+        let constrained_fields: Vec<String> =
+            equalities.iter().map(|(path, _)| path.clone()).collect();
+        self.lookup_index_keys_with_constraints(collection_id, equalities, &constrained_fields)
+    }
+
+    /// Lookup an exclusive candidate set using the longest equality prefix of
+    /// a compound index. Every trailing index field must still be constrained
+    /// by the query, so documents omitted for a missing trailing field cannot
+    /// be false negatives. The caller re-evaluates the complete predicate.
+    pub fn lookup_index_keys_with_constraints(
+        &self,
+        collection_id: &[u8; 16],
+        equalities: &[(String, JsonValue)],
+        constrained_fields: &[String],
+    ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
         self.gate()?;
         self.require_right(Rights::READ)?;
         if equalities.is_empty() {
@@ -1135,31 +1245,48 @@ impl HeapStore {
                 .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
             guard.list_secondary_indexes(&scope)?
         };
+        let mut best: Option<Vec<Vec<u8>>> = None;
         for idx in indexes {
             // Exclusive candidate sets only — Partial hits are incomplete.
             if !idx.meta.may_supply_exclusive_candidates() || idx.meta.fields.is_empty() {
                 continue;
             }
-            // All index fields must appear as equalities.
             let mut values = Vec::new();
-            let mut ok = true;
             for f in &idx.meta.fields {
                 match equalities.iter().find(|(path, _)| path == f) {
                     Some((_, v)) => values.push(v.clone()),
-                    None => {
-                        ok = false;
-                        break;
-                    }
+                    None => break,
                 }
             }
-            if !ok {
+            if values.is_empty() {
                 continue;
             }
-            let key = match index_key_from_values(&values) {
+            // A prefix probe is exclusive only when every trailing indexed
+            // field is constrained too. Missing values cannot then satisfy the
+            // predicate and their absent posting is harmless.
+            if values.len() < idx.meta.fields.len()
+                && !idx.meta.fields[values.len()..].iter().all(|field| {
+                    constrained_fields
+                        .iter()
+                        .any(|constrained| constrained == field)
+                })
+            {
+                continue;
+            }
+            let mut key = match index_key_from_values(&values) {
                 Some(k) => k,
                 None => continue,
             };
-            let subjects = idx.lookup(&key).to_vec();
+            let subjects = if values.len() == idx.meta.fields.len() {
+                idx.lookup(&key).to_vec()
+            } else {
+                key.push(0x1f);
+                idx.entries
+                    .range(key.clone()..)
+                    .take_while(|(candidate, _)| candidate.starts_with(&key))
+                    .flat_map(|(_, postings)| postings.iter().cloned())
+                    .collect()
+            };
             // Empty miss is authoritative: exclusive complete coverage only.
             let mut keys = Vec::new();
             for subject in subjects {
@@ -1175,9 +1302,134 @@ impl HeapStore {
                 };
                 keys.push(sv2.key.to_vec());
             }
+            keys.sort();
+            keys.dedup();
+            if best
+                .as_ref()
+                .is_none_or(|current| keys.len() < current.len())
+            {
+                best = Some(keys);
+            }
+        }
+        Ok(best)
+    }
+
+    /// Return every application key in semantic order when a Ready, complete,
+    /// single-field index can prove exactly one posting per live document.
+    ///
+    /// Current secondary keys are equality encodings, not order-preserving
+    /// bytes, so this decodes and sorts the lightweight postings. It still
+    /// avoids reading full document bodies and lets the query executor fetch
+    /// only the leading candidates required by a bounded page.
+    pub fn lookup_ordered_index_keys(
+        &self,
+        collection_id: &[u8; 16],
+        field: &str,
+        field_descending: bool,
+        key_descending: bool,
+    ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
+        self.gate()?;
+        self.require_right(Rights::READ)?;
+        let scope = self.index_scope_key(collection_id);
+        let guard = self
+            .physical
+            .lock()
+            .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
+        if let Some(keys) =
+            guard.ordered_secondary_cache_get(&scope, field, field_descending, key_descending)
+        {
+            return Ok(Some(keys));
+        }
+        let indexes = guard.list_secondary_indexes(&scope)?;
+        let live_count =
+            guard.index_live_count_with_prefix(&self.collection_subject_prefix(collection_id));
+
+        for idx in indexes {
+            if !idx.meta.may_supply_exclusive_candidates()
+                || idx.meta.fields.as_slice() != [field]
+                || idx.meta.entry_count as usize != live_count
+            {
+                continue;
+            }
+            let mut rows = Vec::with_capacity(live_count);
+            let mut posted_subjects = HashSet::with_capacity(live_count);
+            for (encoded_value, subjects) in &idx.entries {
+                let value: JsonValue = match serde_json::from_slice(encoded_value) {
+                    Ok(value) => value,
+                    Err(_) => {
+                        rows.clear();
+                        break;
+                    }
+                };
+                for subject in subjects {
+                    if !posted_subjects.insert(subject.clone())
+                        || guard.live_event_id(subject).is_none()
+                    {
+                        rows.clear();
+                        break;
+                    }
+                    let sv2 = match decode_subject_v2(subject) {
+                        Ok(sv2)
+                            if sv2.heap_id == self.cap.heap_id().as_bytes()
+                                && sv2.object_kind == SubjectObjectKind::Collection
+                                && sv2.object_id == collection_id =>
+                        {
+                            sv2
+                        }
+                        _ => {
+                            rows.clear();
+                            break;
+                        }
+                    };
+                    rows.push((value.clone(), sv2.key.to_vec()));
+                }
+                if rows.is_empty() && live_count != 0 {
+                    break;
+                }
+            }
+            if rows.len() != live_count {
+                continue;
+            }
+            rows.sort_by(|(av, ak), (bv, bk)| {
+                let mut ordering = semantic_json_order(av, bv);
+                if field_descending {
+                    ordering = ordering.reverse();
+                }
+                if ordering == std::cmp::Ordering::Equal {
+                    ordering = ak.cmp(bk);
+                    if key_descending {
+                        ordering = ordering.reverse();
+                    }
+                }
+                ordering
+            });
+            let keys: Vec<Vec<u8>> = rows.into_iter().map(|(_, key)| key).collect();
+            guard.ordered_secondary_cache_put(
+                &scope,
+                field,
+                field_descending,
+                key_descending,
+                keys.clone(),
+            );
             return Ok(Some(keys));
         }
         Ok(None)
+    }
+}
+
+fn semantic_json_order(a: &JsonValue, b: &JsonValue) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (JsonValue::Null, JsonValue::Null) => Ordering::Equal,
+        (JsonValue::Null, _) => Ordering::Less,
+        (_, JsonValue::Null) => Ordering::Greater,
+        (JsonValue::Bool(x), JsonValue::Bool(y)) => x.cmp(y),
+        (JsonValue::Number(x), JsonValue::Number(y)) => match (x.as_f64(), y.as_f64()) {
+            (Some(x), Some(y)) => x.partial_cmp(&y).unwrap_or(Ordering::Equal),
+            _ => x.to_string().cmp(&y.to_string()),
+        },
+        (JsonValue::String(x), JsonValue::String(y)) => x.cmp(y),
+        _ => a.to_string().cmp(&b.to_string()),
     }
 }
 
