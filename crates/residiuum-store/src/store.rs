@@ -7662,6 +7662,7 @@ impl Store {
         // write-tail hashing stay off (measured regressions). See
         // doc/archive/performance-qualification/2026-08-04-defer-segment-blake3/.
         let zero_scan_meta = prefix_len > 0 && frame_count > 0;
+        let mut deferred_shadow_stage = None;
         let protected = if let Some(dual) = writer.shadow_dual.take() {
             if dual.is_poisoned() || dual.image_len() != prefix_len {
                 return Err(StoreError::CorruptMeta(
@@ -7691,18 +7692,16 @@ impl Store {
                     "async Shadow active lacks summary metadata",
                 ));
             }
-            let plan = crate::incremental_seal::meta_publish_plan(
-                ids,
-                prefix_len,
-                frame_count,
-                writer_sequence,
-                item_events,
+            // Persist the shard-tagged intent before detaching authority. The
+            // stage worker can now finish its buffered mirror and assemble the
+            // summary after the writer has installed the replacement active.
+            crate::recovery_shadow::PreparedShadowPublish::persist_shard_meta_for(
+                &self.paths,
+                &segment_id,
+                shard as u16,
             )?;
-            let prepared = stage.finish(&plan.summary_frame, shard as u16)?;
-            prepared.persist_shard_meta(&self.paths)?;
-            crate::positioned_io::write_all_at(&mut writer.file, prefix_len, &plan.summary_frame)?;
-            writer.file.set_len(plan.sealed_len)?;
-            Some((prepared, plan))
+            deferred_shadow_stage = Some(stage);
+            None
         } else if self.async_shadow_staging {
             return Err(StoreError::CorruptMeta(
                 "async Shadow staging handle missing",
@@ -7768,7 +7767,23 @@ impl Store {
                     .max_pending_seals
                     .max(DEFAULT_MAX_PENDING_SEALS.saturating_mul(n.max(1)));
             }
-            if let Some((prepared_shadow, plan)) = protected {
+            if let Some(stage) = deferred_shadow_stage {
+                pipe.submit_seal(LifecycleJob::FinalizeStagedProtectedPair {
+                    store_id: self.store_id,
+                    ids,
+                    segment_id,
+                    shard: shard as u16,
+                    prefix_len,
+                    frame_count,
+                    writer_sequence,
+                    item_events,
+                    pending_path: pending_path.clone(),
+                    sealed_path: self.paths.sealed_segment(&segment_id),
+                    shadow_stage: stage,
+                    paths: self.paths.clone(),
+                    require_fsync,
+                })?;
+            } else if let Some((prepared_shadow, plan)) = protected {
                 pipe.submit_seal(LifecycleJob::FinalizeProtectedPair {
                     store_id: self.store_id,
                     segment_id,
