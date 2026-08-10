@@ -223,7 +223,9 @@ fn decode_container(bytes: &[u8]) -> Result<PointContainer, StoreError> {
     let dictionary = bytes[off..off + dict_len].to_vec();
     off += dict_len;
 
-    let table_bytes = record_count.checked_mul(16).ok_or_else(|| bad("table overflow"))?;
+    let table_bytes = record_count
+        .checked_mul(16)
+        .ok_or_else(|| bad("table overflow"))?;
     if bytes.len() < off + table_bytes {
         return Err(bad("container slot table truncated"));
     }

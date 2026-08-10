@@ -670,10 +670,7 @@ pub fn serve_store_with(
             tls_enabled,
             mtls,
         )
-        .with_auth_path(
-            options.qualified_heap_key,
-            options.legacy_token_server,
-        )
+        .with_auth_path(options.qualified_heap_key, options.legacy_token_server)
         .emit_stderr();
         eprintln!(
             "residiuum serve: profile={SERVER_PROFILE} protocol={PROTOCOL_PROFILE} \
@@ -895,12 +892,14 @@ fn qualified_connection_shared(
 ) -> Result<(), Error> {
     let tls_exporter = stream.export_channel_binding()?;
     let mut reader = BufReader::new(stream);
-    let registry = options.heap_registry.as_ref().ok_or_else(|| {
-        Error::ValidationMsg("qualified listener missing heap_registry".into())
-    })?;
-    let deployment_id = options.deployment_id.as_deref().ok_or_else(|| {
-        Error::ValidationMsg("qualified listener missing deployment_id".into())
-    })?;
+    let registry = options
+        .heap_registry
+        .as_ref()
+        .ok_or_else(|| Error::ValidationMsg("qualified listener missing heap_registry".into()))?;
+    let deployment_id = options
+        .deployment_id
+        .as_deref()
+        .ok_or_else(|| Error::ValidationMsg("qualified listener missing deployment_id".into()))?;
     let now_unix_s = options.security_now_unix_s.unwrap_or_else(|| {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -928,14 +927,15 @@ fn qualified_connection_shared(
 fn server_handshake_buffered(reader: &mut BufReader<IoStream>) -> Result<NegotiatedSession, Error> {
     // server_handshake needs separate Read/Write; use BufReader + get_mut.
     // Temporarily implement inline using the same logic as residiuum_sdk::server_handshake.
-    let payload = match read_frame_or_detect_legacy(reader, residiuum_sdk::HANDSHAKE_MAX_FRAME_BYTES)? {
-        Some(p) => p,
-        None => {
-            return Err(Error::ProtocolViolation(
-                "connection closed before protocol hello".into(),
-            ));
-        }
-    };
+    let payload =
+        match read_frame_or_detect_legacy(reader, residiuum_sdk::HANDSHAKE_MAX_FRAME_BYTES)? {
+            Some(p) => p,
+            None => {
+                return Err(Error::ProtocolViolation(
+                    "connection closed before protocol hello".into(),
+                ));
+            }
+        };
     let hello = match residiuum_sdk::parse_handshake(&payload) {
         Ok(h) => h,
         Err(e) => {
@@ -968,7 +968,8 @@ fn server_handshake_buffered(reader: &mut BufReader<IoStream>) -> Result<Negotia
         );
         return Err(Error::ProtocolViolation(msg));
     }
-    let features = match residiuum_sdk::negotiate_features(hello.features.as_deref().unwrap_or(&[])) {
+    let features = match residiuum_sdk::negotiate_features(hello.features.as_deref().unwrap_or(&[]))
+    {
         Ok(f) => f,
         Err(e) => {
             let _ = write_json_frame(
@@ -1582,7 +1583,8 @@ fn read_rpc_request(
         if n == 0 {
             return Ok(None);
         }
-        if let Err(e) = residiuum_sdk::check_rpc_line_len(line.len(), &residiuum_sdk::host_limits()) {
+        if let Err(e) = residiuum_sdk::check_rpc_line_len(line.len(), &residiuum_sdk::host_limits())
+        {
             let _ = write_rpc_response(
                 reader,
                 options,

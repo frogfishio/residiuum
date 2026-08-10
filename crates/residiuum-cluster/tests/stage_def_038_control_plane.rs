@@ -47,9 +47,7 @@ fn rebalance_job_survives_coordinator_restart_at_every_phase() {
             for i in 0..30 {
                 let s = format!("p/{i}");
                 if cluster.partition_for_subject(&s) == p {
-                    cluster
-                        .put(&s, b"seed", DurabilityMode::Durable)
-                        .unwrap();
+                    cluster.put(&s, b"seed", DurabilityMode::Durable).unwrap();
                 }
             }
 
@@ -131,10 +129,9 @@ fn health_reports_missing_nodes_and_inflight_rebalance() {
     let root = dir.path().join("health");
 
     {
-        let mut cluster = Cluster::create(
-            ClusterConfig::dependable_local(&root).with_virtual_partitions(4),
-        )
-        .unwrap();
+        let mut cluster =
+            Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(4))
+                .unwrap();
         assert!(!cluster.health().degraded);
         let p = PartitionId::new(0);
         cluster
@@ -154,9 +151,7 @@ fn health_reports_missing_nodes_and_inflight_rebalance() {
     let h = cluster.health();
     assert!(h.degraded, "missing store must mark degraded");
     assert!(
-        h.missing_store_paths
-            .iter()
-            .any(|n| n.index() == 2),
+        h.missing_store_paths.iter().any(|n| n.index() == 2),
         "node 2 must appear in missing_store_paths: {:?}",
         h.missing_store_paths
     );
@@ -171,10 +166,9 @@ fn missing_placement_refuses_silent_synthetic_open() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("no-place");
     {
-        let _cluster = Cluster::create(
-            ClusterConfig::dependable_local(&root).with_virtual_partitions(4),
-        )
-        .unwrap();
+        let _cluster =
+            Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(4))
+                .unwrap();
     }
     fs::remove_file(root.join("placement.json")).ok();
     fs::remove_file(root.join("placement.json.prev")).ok();
@@ -189,10 +183,9 @@ fn endpoint_registration_requires_secret_when_configured() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("ep");
     {
-        let _cluster = Cluster::create(
-            ClusterConfig::dependable_local(&root).with_virtual_partitions(2),
-        )
-        .unwrap();
+        let _cluster =
+            Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(2))
+                .unwrap();
     }
 
     // Without secret: unauthenticated upsert works.
@@ -218,10 +211,9 @@ fn joint_membership_persisted_on_peer_stores() {
     let p = PartitionId::new(2);
 
     {
-        let mut cluster = Cluster::create(
-            ClusterConfig::dependable_local(&root).with_virtual_partitions(4),
-        )
-        .unwrap();
+        let mut cluster =
+            Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(4))
+                .unwrap();
         cluster
             .begin_rebalance(p, vec![NodeId::new(1), NodeId::new(2)])
             .unwrap();

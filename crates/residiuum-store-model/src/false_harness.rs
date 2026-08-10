@@ -4,7 +4,7 @@
 //! checkers. They exist so the suite cannot pass vacuously.
 
 use crate::{
-    known_bad_absence_from_damage, detects_absence_from_damage_cheat, DurabilityAck, ModelReceipt,
+    detects_absence_from_damage_cheat, known_bad_absence_from_damage, DurabilityAck, ModelReceipt,
     ObservationDto, ValueObservation,
 };
 
@@ -12,7 +12,10 @@ use crate::{
 pub fn known_bad_upgrade_acks(obs: &ObservationDto) -> ObservationDto {
     let mut bad = obs.clone();
     for (_k, r) in bad.receipts.iter_mut() {
-        if matches!(r.durability, DurabilityAck::Memory | DurabilityAck::Buffered) {
+        if matches!(
+            r.durability,
+            DurabilityAck::Memory | DurabilityAck::Buffered
+        ) {
             r.durability = DurabilityAck::Durable;
         }
     }

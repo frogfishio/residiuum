@@ -45,11 +45,20 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
-    *residiuum_heap::CollectionId::new_random().unwrap().as_bytes()
+    *residiuum_heap::CollectionId::new_random()
+        .unwrap()
+        .as_bytes()
 }
 
 #[test]
@@ -219,7 +228,15 @@ fn heap_store_rejects_foreign_subject_v2() {
 
     let sa = stage_heap_genesis(&layout, dep, heap_a, uuid(), "heap-a").unwrap();
     publish_staged_genesis(&layout, &sa.staging_id, &sa.descriptor_hash).unwrap();
-    create_object(&layout, &heap_a, ObjectKind::Collection, coll, uuid(), "users").unwrap();
+    create_object(
+        &layout,
+        &heap_a,
+        ObjectKind::Collection,
+        coll,
+        uuid(),
+        "users",
+    )
+    .unwrap();
 
     let cap_a = mint_cap_for(
         HeapId::from_bytes_unchecked_nonzero(heap_a).unwrap(),

@@ -133,7 +133,11 @@ impl RaftPeerStore {
     }
 
     /// Open or create the peer store directory.
-    pub fn open(cluster_root: &Path, node: NodeId, partition: PartitionId) -> Result<Self, ClusterError> {
+    pub fn open(
+        cluster_root: &Path,
+        node: NodeId,
+        partition: PartitionId,
+    ) -> Result<Self, ClusterError> {
         let root = Self::dir(cluster_root, node, partition);
         fs::create_dir_all(&root)?;
         Ok(Self {
@@ -233,10 +237,7 @@ impl RaftPeerStore {
             return Ok(());
         }
         let path = self.root.join(LOG_FILE);
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let mut f = OpenOptions::new().create(true).append(true).open(&path)?;
         for e in entries {
             let mut rec = Vec::new();
             encode_log_record(e, &mut rec)?;
@@ -452,9 +453,7 @@ fn write_checksum_doc<T: Serialize>(path: &Path, body: &T) -> Result<(), Cluster
     Ok(())
 }
 
-fn read_checksum_doc<T: for<'de> Deserialize<'de>>(
-    path: &Path,
-) -> Result<Option<T>, ClusterError> {
+fn read_checksum_doc<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Option<T>, ClusterError> {
     // Prefer primary; fall back to previous generation if primary fails checksum.
     if path.is_file() {
         if let Ok(bytes) = fs::read(path) {
@@ -506,8 +505,8 @@ fn parse_checksum_doc<T: for<'de> Deserialize<'de>>(
 
 /// Record: u32le length | blake3-32 | payload-json
 fn encode_log_record(entry: &LogEntry, out: &mut Vec<u8>) -> Result<(), ClusterError> {
-    let payload = serde_json::to_vec(entry)
-        .map_err(|_| ClusterError::CorruptMeta("serialize log entry"))?;
+    let payload =
+        serde_json::to_vec(entry).map_err(|_| ClusterError::CorruptMeta("serialize log entry"))?;
     let sum = blake3::hash(&payload);
     let len = (32 + payload.len()) as u32;
     out.extend_from_slice(&len.to_le_bytes());
@@ -671,7 +670,9 @@ mod tests {
         let blob = br#"{"sm":"v1"}"#;
         let meta = snapshot_meta_for(3, Term(1), blob, "test");
         let remaining: Vec<LogEntry> = entries.into_iter().filter(|e| e.index > 3).collect();
-        store.install_snapshot(meta.clone(), blob, &remaining).unwrap();
+        store
+            .install_snapshot(meta.clone(), blob, &remaining)
+            .unwrap();
         let snap = store.load_snapshot().unwrap().expect("snap");
         assert_eq!(snap.meta, meta);
         assert_eq!(snap.blob, blob);

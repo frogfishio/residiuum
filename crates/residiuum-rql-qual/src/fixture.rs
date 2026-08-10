@@ -94,10 +94,11 @@ impl CorpusIndex {
                         .and_then(|x| x.as_str())
                         .map(|s| s.to_string())
                 });
-            let seed = c
-                .get("seed")
-                .and_then(|x| x.as_u64())
-                .or_else(|| c.get("fixture").and_then(|f| f.get("seed")).and_then(|x| x.as_u64()));
+            let seed = c.get("seed").and_then(|x| x.as_u64()).or_else(|| {
+                c.get("fixture")
+                    .and_then(|f| f.get("seed"))
+                    .and_then(|x| x.as_u64())
+            });
             let rql_source = extract_rql_source(c);
             let server_lane_ineligible = c
                 .get("server_lane_ineligible")

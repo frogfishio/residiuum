@@ -51,7 +51,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {

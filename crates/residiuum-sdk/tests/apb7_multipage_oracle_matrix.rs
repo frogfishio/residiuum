@@ -50,7 +50,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -75,7 +82,10 @@ fn open_bound_client() -> (TempDir, HeapClient) {
 }
 
 /// Independent oracle: full list_keys + get, filter, sort by key (scan order).
-fn oracle_key_order(col: &mut CollectionClient, pred: impl Fn(&serde_json::Value) -> bool) -> Vec<String> {
+fn oracle_key_order(
+    col: &mut CollectionClient,
+    pred: impl Fn(&serde_json::Value) -> bool,
+) -> Vec<String> {
     let mut out = Vec::new();
     for k in col.list_keys(Some(1000), None).unwrap() {
         if let Some(v) = col.get(&k).unwrap() {
@@ -114,7 +124,10 @@ fn drain_rql(
         pages += 1;
         assert!(pages < 100, "runaway pagination");
         let page = col.rql(source, params, opts.clone()).expect("rql page");
-        assert!(page.coverage.complete, "oracle matrix expects complete coverage");
+        assert!(
+            page.coverage.complete,
+            "oracle matrix expects complete coverage"
+        );
         for r in &page.rows {
             all.push(r.key.clone());
         }

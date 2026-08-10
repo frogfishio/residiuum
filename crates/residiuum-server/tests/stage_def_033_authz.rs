@@ -1,10 +1,13 @@
 //! DEF-033: authorization privileges + tamper-evident audit (no secret leakage).
 
+use residiuum_sdk::{
+    client_handshake, json, read_frame, write_frame, ConnectOptions, Error, ErrorCode, Residiuum,
+};
 
-use residiuum_sdk::{client_handshake, json, read_frame, write_frame, ConnectOptions, Residiuum, Error, ErrorCode};
-
-
-
+use residiuum_server::{
+    serve_store_with, AuditDecision, AuditLog, AuthzPolicy, Privilege, PrivilegeSet, ServeOptions,
+    AUTHZ_PROFILE, FORCE_RECONFIG_CONFIRM, PURGE_CONFIRM,
+};
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,7 +15,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
-use residiuum_server::{AUTHZ_PROFILE, AuditDecision, AuditLog, AuthzPolicy, FORCE_RECONFIG_CONFIRM, PURGE_CONFIRM, Privilege, PrivilegeSet, ServeOptions, serve_store_with};
 
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -136,7 +138,10 @@ fn writer_can_put_but_not_admin_or_purge() {
     let (policy, audit) = writer_policy();
     let (bind, stop, handle) = start_server(
         &dir,
-        ServeOptions::new().legacy_token_server().authz(policy).audit(Arc::clone(&audit)),
+        ServeOptions::new()
+            .legacy_token_server()
+            .authz(policy)
+            .audit(Arc::clone(&audit)),
     );
 
     let put = rpc(&bind, Some("writer-secret"), "put", Some("docs"), None);
@@ -203,7 +208,10 @@ fn root_purge_requires_confirm_then_succeeds() {
     let (policy, audit) = writer_policy();
     let (bind, stop, handle) = start_server(
         &dir,
-        ServeOptions::new().legacy_token_server().authz(policy).audit(Arc::clone(&audit)),
+        ServeOptions::new()
+            .legacy_token_server()
+            .authz(policy)
+            .audit(Arc::clone(&audit)),
     );
 
     let missing = rpc(&bind, Some("root-secret"), "purge", Some("docs"), None);
@@ -258,7 +266,10 @@ fn reader_cannot_write() {
     let (policy, audit) = writer_policy();
     let (bind, stop, handle) = start_server(
         &dir,
-        ServeOptions::new().legacy_token_server().authz(policy).audit(Arc::clone(&audit)),
+        ServeOptions::new()
+            .legacy_token_server()
+            .authz(policy)
+            .audit(Arc::clone(&audit)),
     );
 
     let put = rpc(&bind, Some("reader-secret"), "put", Some("docs"), None);
@@ -279,7 +290,10 @@ fn bad_token_is_authentication_failed_not_permission() {
     let (policy, audit) = writer_policy();
     let (bind, stop, handle) = start_server(
         &dir,
-        ServeOptions::new().legacy_token_server().authz(policy).audit(Arc::clone(&audit)),
+        ServeOptions::new()
+            .legacy_token_server()
+            .authz(policy)
+            .audit(Arc::clone(&audit)),
     );
 
     let r = rpc(&bind, Some("nope"), "store_info", None, None);
@@ -298,7 +312,8 @@ fn legacy_shared_token_is_superuser() {
     let audit = Arc::new(AuditLog::new());
     let (bind, stop, handle) = start_server(
         &dir,
-        ServeOptions::new().legacy_token_server()
+        ServeOptions::new()
+            .legacy_token_server()
             .auth_token("legacy-token")
             .audit(Arc::clone(&audit)),
     );

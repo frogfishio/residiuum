@@ -6,8 +6,8 @@ use residiuum_heap::{
     TrustedInstant, VerifiedCertificate,
 };
 use residiuum_sdk::{
-    execute_rql_full, DIAG_RQL_WITHIN_TYPE, HeapClient, Parameters, QueryRunOptions,
-    ResidiuumDeployment, RQL_FULL_PROFILE,
+    execute_rql_full, HeapClient, Parameters, QueryRunOptions, ResidiuumDeployment,
+    DIAG_RQL_WITHIN_TYPE, RQL_FULL_PROFILE,
 };
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
 use std::sync::Arc;
@@ -45,7 +45,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {

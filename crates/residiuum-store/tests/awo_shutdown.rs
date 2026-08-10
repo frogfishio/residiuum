@@ -70,10 +70,7 @@ fn shutdown_drain_timeout_reports_remaining() {
     let err = p
         .wait_empty(Instant::now() + Duration::from_millis(5))
         .unwrap_err();
-    assert!(matches!(
-        err,
-        PipelineError::DrainTimeout { remaining: 1 }
-    ));
+    assert!(matches!(err, PipelineError::DrainTimeout { remaining: 1 }));
     // Clean up so Drop of nothing hangs — abort leftover.
     let id = p.in_flight_ids()[0];
     p.abort_reservation(id).unwrap();
@@ -125,7 +122,11 @@ fn static_runtime_exposes_pipeline_depth_two() {
     let physical = host.physical();
     let mut guard = physical.lock().unwrap();
     let err = handle
-        .admit_put_batch(&mut guard, &[("awo/pipe/x", b"1")], DurabilityMode::Buffered)
+        .admit_put_batch(
+            &mut guard,
+            &[("awo/pipe/x", b"1")],
+            DurabilityMode::Buffered,
+        )
         .expect_err("depth exceeded");
     assert_eq!(err.as_str(), "pipeline_depth_exceeded");
     // Direct put still lease-fenced.
@@ -138,7 +139,11 @@ fn static_runtime_exposes_pipeline_depth_two() {
     pipe.abort_reservation(r2).unwrap();
     // After free, batch admit works and leaves pipeline empty.
     let receipts = handle
-        .admit_put_batch(&mut guard, &[("awo/pipe/ok", b"z")], DurabilityMode::Buffered)
+        .admit_put_batch(
+            &mut guard,
+            &[("awo/pipe/ok", b"z")],
+            DurabilityMode::Buffered,
+        )
         .unwrap();
     assert_eq!(receipts.len(), 1);
     assert_eq!(pipe.status().in_flight, 0);

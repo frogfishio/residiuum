@@ -184,7 +184,10 @@ fn differential_ni_labelled_units() {
     let obs1 = observe(&env_b_clean);
     let obs2 = observe(&env_b_corrupt);
     let obs3 = observe(&env_b_empty);
-    assert!(obs1 && obs2 && obs3, "target heap A observation must stay allow");
+    assert!(
+        obs1 && obs2 && obs3,
+        "target heap A observation must stay allow"
+    );
 
     // Cross-heap mix remains deny and identical across other-heap mutations.
     let deny1 = labelled_unit_readable(&heap_a, &env_b_clean, &env_b_clean);
@@ -198,7 +201,10 @@ fn differential_ni_labelled_units() {
     let before = slot_a.load().administrative_state;
     let mut life_b = HeapLifecycle::open(tmp.path().join("b"), Arc::clone(&slot_b));
     life_b.retire(op(0xb2)).unwrap();
-    assert_eq!(slot_b.load().administrative_state, HeapAdministrativeState::Retired);
+    assert_eq!(
+        slot_b.load().administrative_state,
+        HeapAdministrativeState::Retired
+    );
     assert_eq!(
         slot_a.load().administrative_state,
         before,
@@ -343,7 +349,14 @@ fn mint_cap(slot: Arc<HeapSlot>) -> residiuum_heap::HeapCap {
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -480,7 +493,14 @@ fn mint_cap_with_constraints(
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -545,7 +565,10 @@ fn derived_path_indexes_streams_scoped() {
     fs::write(idx_b.join("sec.idx"), b"b-derived").unwrap();
 
     delete_rebuildable_catalogs(&layout).unwrap();
-    assert!(!idx_a.exists(), "heap A derived indexes must be wiped with catalogs");
+    assert!(
+        !idx_a.exists(),
+        "heap A derived indexes must be wiped with catalogs"
+    );
     assert!(
         !idx_b.exists(),
         "delete_rebuildable_catalogs clears every published heap index dir"
@@ -555,8 +578,12 @@ fn derived_path_indexes_streams_scoped() {
     let (_heaps, objects) = rebuild_and_persist_all_catalogs(&layout).unwrap();
     let streams_a = objects.get(&heap_a).unwrap();
     let streams_b = objects.get(&heap_b).unwrap();
-    assert!(streams_a.iter().any(|e| e.object_id == stream_a && e.heap_id == heap_a));
-    assert!(streams_b.iter().any(|e| e.object_id == stream_b && e.heap_id == heap_b));
+    assert!(streams_a
+        .iter()
+        .any(|e| e.object_id == stream_a && e.heap_id == heap_a));
+    assert!(streams_b
+        .iter()
+        .any(|e| e.object_id == stream_b && e.heap_id == heap_b));
     assert!(!streams_a.iter().any(|e| e.object_id == stream_b));
     assert!(!streams_b.iter().any(|e| e.object_id == stream_a));
 
@@ -779,10 +806,7 @@ fn fuzz_budget_structured_mutations() {
                 AdmitDecision::Admit {
                     ownership: OwnershipEvidence::Known { heap_id, .. },
                 } => {
-                    assert_eq!(
-                        heap_id, *bound,
-                        "admitted ownership must equal bound heap"
-                    );
+                    assert_eq!(heap_id, *bound, "admitted ownership must equal bound heap");
                     same_heap_admits += 1;
                 }
                 AdmitDecision::Admit {
@@ -813,8 +837,7 @@ fn operator_runbook_present() {
         "fuzz",
     ] {
         assert!(
-            body.to_lowercase().contains(&needle.to_lowercase())
-                || body.contains(needle),
+            body.to_lowercase().contains(&needle.to_lowercase()) || body.contains(needle),
             "runbook missing section/needle: {needle}"
         );
     }
@@ -910,8 +933,8 @@ fn operational_metrics_logs_export_scoped() {
     // confinement refuses mixing foreign ids before the manifest is built.
     let only = confine_export_heaps(&cap, &[cap.heap_id()]).unwrap();
     let dep = uuidish(0x01);
-    let manifest = build_backup_manifest(dep, &only.iter().map(|h| h.to_bytes()).collect::<Vec<_>>())
-        .unwrap();
+    let manifest =
+        build_backup_manifest(dep, &only.iter().map(|h| h.to_bytes()).collect::<Vec<_>>()).unwrap();
     assert_eq!(manifest.heap_ids, vec![cap.heap_id().to_bytes()]);
     assert!(!manifest.heap_ids.contains(&foreign.to_bytes()));
 }
@@ -938,10 +961,7 @@ fn lifecycle_crash_matrix_peer_heaps_unaffected() {
     assert!(refresh_capability_or_terminate(&cap_b).is_ok());
 
     // Crash after state store during suspend: slot advanced; receipt may be missing.
-    arm_failpoint_once(
-        "heap_lifecycle.after_state_store",
-        FailpointAction::Error,
-    );
+    arm_failpoint_once("heap_lifecycle.after_state_store", FailpointAction::Error);
     let err = life_a.suspend(op(0xb2)).unwrap_err();
     assert!(
         err.to_string().contains("failpoint") || err.to_string().contains("Failpoint"),
@@ -961,10 +981,7 @@ fn lifecycle_crash_matrix_peer_heaps_unaffected() {
     assert_eq!(tomb.kind, TombstoneKind::Retired);
 
     // Crash after purge plan: A is Purging; B unchanged.
-    arm_failpoint_once(
-        "heap_lifecycle.after_purge_plan",
-        FailpointAction::Error,
-    );
+    arm_failpoint_once("heap_lifecycle.after_purge_plan", FailpointAction::Error);
     let err = life_a
         .begin_purge_media(
             op(0xb5),
@@ -1106,8 +1123,8 @@ fn h6_decide_obligations_connected() {
     assert!(h6_decide_obligations::authority_admission_bundle());
     assert!(h6_decide_obligations::mint_grace_only_previous_generation());
 
-    let verus = fs::read_to_string(workspace_root().join("verification/heap-verus/src/lib.rs"))
-        .unwrap();
+    let verus =
+        fs::read_to_string(workspace_root().join("verification/heap-verus/src/lib.rs")).unwrap();
     assert!(verus.contains("authority_binding_holds"));
     assert!(verus.contains("confine_health_detail"));
     assert!(verus.contains("confine_support_bundle"));
@@ -1130,7 +1147,10 @@ fn isolation_profile_registry_closed() {
     let embedded = load_isolation_profiles().unwrap();
     assert_eq!(reg.sha256_hex, embedded.sha256_hex);
     assert_eq!(reg.h6_minimum_profile, H6_MINIMUM_PROFILE);
-    assert_eq!(REFERENCE_ISOLATION_PROFILE, IsolationProfileId::HeapDataIsolated);
+    assert_eq!(
+        REFERENCE_ISOLATION_PROFILE,
+        IsolationProfileId::HeapDataIsolated
+    );
 
     let data = reg.get(IsolationProfileId::HeapDataIsolated).unwrap();
     for f in UNAUTHENTICATED_DECLASSIFIED_FIELDS {
@@ -1146,7 +1166,9 @@ fn isolation_profile_registry_closed() {
     assert!(hard.is_always_confidential("aggregate_load"));
     assert!(hard.is_always_confidential("fine_timing_ms"));
     assert!(hard.authenticated_allows_heap_local("usage").is_ok());
-    assert!(hard.authenticated_allows_heap_local("physical_paths").is_err());
+    assert!(hard
+        .authenticated_allows_heap_local("physical_paths")
+        .is_err());
 
     // Empty deployment extension — cannot invent fields at runtime.
     assert_eq!(reg.extension_version, 0);
@@ -1270,8 +1292,8 @@ fn h6_pure_proof_bundle_connected() {
         connected_pure_proof_bundle(),
         "pure proof bundle must hold for Gate H6 connected evidence"
     );
-    let verus = fs::read_to_string(workspace_root().join("verification/heap-verus/src/lib.rs"))
-        .unwrap();
+    let verus =
+        fs::read_to_string(workspace_root().join("verification/heap-verus/src/lib.rs")).unwrap();
     assert!(verus.contains("VERUS_PROOFS_CONNECTED"));
     assert!(verus.contains("KANI_HARNESSES_CONNECTED"));
     assert!(verus.contains("connected_pure_proof_bundle"));
@@ -1285,18 +1307,16 @@ fn h6_pure_proof_bundle_connected() {
             || verus.contains("const KANI_HARNESSES_CONNECTED: bool = true"),
         "Kani harnesses must be marked connected"
     );
-    let pure = fs::read_to_string(
-        workspace_root().join("crates/residiuum-heap/src/pure_proofs.rs"),
-    )
-    .unwrap();
+    let pure =
+        fs::read_to_string(workspace_root().join("crates/residiuum-heap/src/pure_proofs.rs"))
+            .unwrap();
     assert!(
         pure.contains("fn kani_connected_pure_proof_bundle"),
         "Kani harness kani_connected_pure_proof_bundle must exist"
     );
-    let verus_src = fs::read_to_string(
-        workspace_root().join("verification/heap-verus/verus/pure_kernel.rs"),
-    )
-    .unwrap();
+    let verus_src =
+        fs::read_to_string(workspace_root().join("verification/heap-verus/verus/pure_kernel.rs"))
+            .unwrap();
     assert!(
         verus_src.contains("lemma_connected_pure_proof_bundle"),
         "Verus pure_kernel lemma_connected_pure_proof_bundle must exist"
@@ -1318,10 +1338,15 @@ fn complete_path_and_external_review_artifacts() {
         "legacy",
         "Residiuum::collection",
     ] {
-        assert!(cpr.contains(needle), "complete-path review missing {needle}");
+        assert!(
+            cpr.contains(needle),
+            "complete-path review missing {needle}"
+        );
     }
 
-    let brief = fs::read_to_string(root.join("doc/wip/heap/HEAP_EXTERNAL_SECURITY_REVIEW_BRIEF.md")).unwrap();
+    let brief =
+        fs::read_to_string(root.join("doc/wip/heap/HEAP_EXTERNAL_SECURITY_REVIEW_BRIEF.md"))
+            .unwrap();
     for needle in [
         "External security review",
         "TCB",
@@ -1330,11 +1355,15 @@ fn complete_path_and_external_review_artifacts() {
         "qualified=false",
         "HeapCap",
     ] {
-        assert!(brief.contains(needle), "external review brief missing {needle}");
+        assert!(
+            brief.contains(needle),
+            "external review brief missing {needle}"
+        );
     }
 
     // Matrix must index both artifacts under H6 without claiming qualified.
-    let raw = fs::read_to_string(root.join("spec/heap/qualification/hp010-matrix-v1.json")).unwrap();
+    let raw =
+        fs::read_to_string(root.join("spec/heap/qualification/hp010-matrix-v1.json")).unwrap();
     assert!(raw.contains("HEAP_COMPLETE_PATH_REVIEW.md"));
     assert!(raw.contains("HEAP_EXTERNAL_SECURITY_REVIEW_BRIEF.md"));
     assert!(raw.contains("\"qualified\": false") || raw.contains("\"qualified\":false"));

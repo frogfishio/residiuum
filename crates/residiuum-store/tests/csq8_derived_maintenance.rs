@@ -15,23 +15,18 @@ use std::path::Path;
 use tempfile::tempdir;
 
 fn seed_live(store: &mut Store) {
-    store
-        .put("keep", b"v1", DurabilityMode::Durable)
-        .unwrap();
-    store
-        .put("drop", b"gone", DurabilityMode::Durable)
-        .unwrap();
+    store.put("keep", b"v1", DurabilityMode::Durable).unwrap();
+    store.put("drop", b"gone", DurabilityMode::Durable).unwrap();
     store.delete("drop", DurabilityMode::Durable).unwrap();
-    store
-        .put("keep", b"v2", DurabilityMode::Durable)
-        .unwrap();
-    store
-        .put("extra", b"e1", DurabilityMode::Durable)
-        .unwrap();
+    store.put("keep", b"v2", DurabilityMode::Durable).unwrap();
+    store.put("extra", b"e1", DurabilityMode::Durable).unwrap();
 }
 
 fn assert_live_projection(store: &Store) {
-    assert_eq!(store.get("keep").unwrap().as_deref(), Some(b"v2".as_slice()));
+    assert_eq!(
+        store.get("keep").unwrap().as_deref(),
+        Some(b"v2".as_slice())
+    );
     assert!(store.get("drop").unwrap().is_none());
     assert_eq!(
         store.get("extra").unwrap().as_deref(),
@@ -90,9 +85,7 @@ fn csq_der_rebuild_deterministic() {
         let mut store = Store::create(&root).unwrap();
         seed_live(&mut store);
         store.seal_active().unwrap();
-        store
-            .put("post", b"p1", DurabilityMode::Durable)
-            .unwrap();
+        store.put("post", b"p1", DurabilityMode::Durable).unwrap();
         store.persist_index_cache().unwrap();
         store.rebuild_catalogs().unwrap();
     }
@@ -156,9 +149,7 @@ fn csq_mnt_scrub_non_mutation() {
     let before_extra = store.get("extra").unwrap();
     let before_count = store.live_count();
 
-    let report = store
-        .scrub_to_completion(ScrubOptions::default())
-        .unwrap();
+    let report = store.scrub_to_completion(ScrubOptions::default()).unwrap();
     assert!(report.cycle_completed);
     assert_eq!(report.failures_this_call, 0);
 
@@ -251,7 +242,10 @@ fn csq_bak_tampered_manifest_rejected() {
     let err = verify_package_files(&bak, &manifest).unwrap_err();
     let msg = err.to_string().to_lowercase();
     assert!(
-        msg.contains("hash") || msg.contains("mismatch") || msg.contains("tamper") || msg.contains("blake"),
+        msg.contains("hash")
+            || msg.contains("mismatch")
+            || msg.contains("tamper")
+            || msg.contains("blake"),
         "unexpected verify error: {err}"
     );
 }
@@ -267,9 +261,7 @@ fn csq_mig_roundtrip_preserves_source() {
     seed_live(&mut store);
     let sid = store.store_id();
 
-    let report = store
-        .migrate_to(&dst, MigrateOptions::default())
-        .unwrap();
+    let report = store.migrate_to(&dst, MigrateOptions::default()).unwrap();
     assert_eq!(report.phase, MigratePhase::Done);
     assert!(report.files_applied >= 1);
     assert_eq!(report.verified_live_subjects, Some(2));

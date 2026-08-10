@@ -44,7 +44,11 @@ impl SeedRng {
     /// never stuck in the all-zero fixed point.
     pub fn new(seed: u64) -> Self {
         Self {
-            state: if seed == 0 { 0x9e37_79b9_7f4a_7c15 } else { seed },
+            state: if seed == 0 {
+                0x9e37_79b9_7f4a_7c15
+            } else {
+                seed
+            },
         }
     }
 
@@ -320,7 +324,10 @@ impl HistoryEntry {
     pub fn is_committed_put(&self) -> bool {
         matches!(
             self.outcome,
-            Some(OpOutcome::PutOk { committed: true, .. })
+            Some(OpOutcome::PutOk {
+                committed: true,
+                ..
+            })
         )
     }
 }
@@ -399,7 +406,21 @@ fn check_subject_linearizable(
     let constrained: Vec<&HistoryEntry> = ops
         .iter()
         .copied()
-        .filter(|e| matches!((&e.op, &e.outcome), (ClientOp::Put { .. }, Some(OpOutcome::PutOk { committed: true, .. })) | (ClientOp::Get { .. }, Some(OpOutcome::GetOk { value: Some(_) }))))
+        .filter(|e| {
+            matches!(
+                (&e.op, &e.outcome),
+                (
+                    ClientOp::Put { .. },
+                    Some(OpOutcome::PutOk {
+                        committed: true,
+                        ..
+                    })
+                ) | (
+                    ClientOp::Get { .. },
+                    Some(OpOutcome::GetOk { value: Some(_) })
+                )
+            )
+        })
         .collect();
 
     if constrained.len() > 12 {
@@ -494,7 +515,12 @@ fn sequential_ok(ops: &[&HistoryEntry], order: &[usize], _subject: &str) -> bool
     for &i in order {
         let e = ops[i];
         match (&e.op, e.outcome.as_ref().unwrap()) {
-            (ClientOp::Put { value, .. }, OpOutcome::PutOk { committed: true, .. }) => {
+            (
+                ClientOp::Put { value, .. },
+                OpOutcome::PutOk {
+                    committed: true, ..
+                },
+            ) => {
                 state = Some(value.clone());
             }
             (ClientOp::Get { .. }, OpOutcome::GetOk { value: Some(v) }) => {
@@ -994,17 +1020,23 @@ impl SimWorld {
         let transport = self.transport_for(candidate);
         let result = self
             .net
-            .with_node_mut(self.partition, candidate, |n| n.campaign(&transport, &online))
+            .with_node_mut(self.partition, candidate, |n| {
+                n.campaign(&transport, &online)
+            })
             .ok_or(ElectError::NotAVoter)?;
         let label = match &result {
             Ok((id, term)) => format!("ok leader={} term={}", id.index(), term.0),
             Err(e) => format!("err={e:?}"),
         };
-        self.faults.lock().expect("sim faults").events.push(SimEvent::Campaign {
-            time: t,
-            candidate: candidate.index(),
-            result: label,
-        });
+        self.faults
+            .lock()
+            .expect("sim faults")
+            .events
+            .push(SimEvent::Campaign {
+                time: t,
+                candidate: candidate.index(),
+                result: label,
+            });
         result
     }
 
@@ -1110,38 +1142,35 @@ impl SimWorld {
     /// (put overwrites; delete clears). This is a **leader-local / replica-local**
     /// linearizable read of the Raft log, not a multi-hop routing path.
     pub fn committed_value(&self, node: NodeId, subject: &str) -> Option<Option<Vec<u8>>> {
-        self.net.with_node(self.partition, node, |n| {
-            let peer = n.group().peer(n.local)?;
-            let mut state: Option<Vec<u8>> = None;
-            let commit = peer.commit_index;
-            for e in &peer.log {
-                if e.index > commit {
-                    break;
-                }
-                match &e.command {
-                    LogCommand::Put { subject: s, value } if s == subject => {
-                        state = Some(value.clone());
+        self.net
+            .with_node(self.partition, node, |n| {
+                let peer = n.group().peer(n.local)?;
+                let mut state: Option<Vec<u8>> = None;
+                let commit = peer.commit_index;
+                for e in &peer.log {
+                    if e.index > commit {
+                        break;
                     }
-                    LogCommand::Delete { subject: s } if s == subject => {
-                        state = None;
+                    match &e.command {
+                        LogCommand::Put { subject: s, value } if s == subject => {
+                            state = Some(value.clone());
+                        }
+                        LogCommand::Delete { subject: s } if s == subject => {
+                            state = None;
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 }
-            }
-            Some(state)
-        })
-        .flatten()
+                Some(state)
+            })
+            .flatten()
     }
 
     /// Client get against a peer's committed log, with history recording.
     ///
     /// Returns `Ok(None)` when the subject has no committed put (or was deleted).
     /// Returns `Err` if the peer is offline / missing.
-    pub fn client_get(
-        &mut self,
-        subject: &str,
-        node: NodeId,
-    ) -> Result<Option<Vec<u8>>, String> {
+    pub fn client_get(&mut self, subject: &str, node: NodeId) -> Result<Option<Vec<u8>>, String> {
         let invoke = self.tick();
         let call_id = self.next_call;
         self.next_call += 1;
@@ -1162,10 +1191,7 @@ impl SimWorld {
                 OpOutcome::GetOk { value: v.clone() },
                 format!("ok present={}", v.is_some()),
             ),
-            Err(e) => (
-                OpOutcome::GetErr { code: e.clone() },
-                format!("err={e}"),
-            ),
+            Err(e) => (OpOutcome::GetErr { code: e.clone() }, format!("err={e}")),
         };
         self.history.push(HistoryEntry {
             call_id,
@@ -1232,7 +1258,9 @@ impl SimWorld {
         let transport = self.transport_for(candidate);
         let result = self
             .net
-            .with_node_mut(self.partition, candidate, |n| n.campaign(&transport, &online))
+            .with_node_mut(self.partition, candidate, |n| {
+                n.campaign(&transport, &online)
+            })
             .ok_or(ElectError::NotAVoter)?;
         // Restore the real epoch so a failed stale campaign does not poison state.
         self.net.with_node_mut(self.partition, candidate, |n| {
@@ -1248,18 +1276,26 @@ impl SimWorld {
             ),
             Err(e) => format!("err-epoch={e:?} epoch={}", placement_epoch.0),
         };
-        self.faults.lock().expect("sim faults").events.push(SimEvent::Campaign {
-            time: t,
-            candidate: candidate.index(),
-            result: label,
-        });
+        self.faults
+            .lock()
+            .expect("sim faults")
+            .events
+            .push(SimEvent::Campaign {
+                time: t,
+                candidate: candidate.index(),
+                result: label,
+            });
         result
     }
 
     /// Short deterministic soak: chaos + heal + elect + put/get under seed.
     ///
     /// Returns `(committed_puts, successful_gets)` after a final linearizability check.
-    pub fn run_soak(&mut self, chaos_steps: usize, post_ops: usize) -> Result<(usize, usize), LinError> {
+    pub fn run_soak(
+        &mut self,
+        chaos_steps: usize,
+        post_ops: usize,
+    ) -> Result<(usize, usize), LinError> {
         self.set_drop_prob(0.05);
         let committed = self.run_chaos(chaos_steps);
         self.heal_network();
@@ -1385,7 +1421,14 @@ impl SimWorld {
                 e.call_id, e.invoke_time, e.return_time, e.op, e.outcome
             ));
         }
-        for ev in events.iter().rev().take(40).collect::<Vec<_>>().into_iter().rev() {
+        for ev in events
+            .iter()
+            .rev()
+            .take(40)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
             out.push_str(&format!("  evt {ev:?}\n"));
         }
         out
@@ -1551,8 +1594,7 @@ pub fn run_conformance_matrix(seed: u64) -> Vec<CaseReport> {
             if r2.term.0 < new_term.0 {
                 return Err("put2 term below election".into());
             }
-            w.check_linearizable()
-                .map_err(|e| e.to_string())?;
+            w.check_linearizable().map_err(|e| e.to_string())?;
             detail = w.dump();
             Ok::<(), String>(())
         })();
@@ -1571,10 +1613,20 @@ pub fn run_conformance_matrix(seed: u64) -> Vec<CaseReport> {
         let ok = (|| {
             let (leader, _) = w.elect_any().map_err(|e| format!("elect: {e:?}"))?;
             let r1 = w
-                .client_put("s22/retry", b"once", Some("op-idempotent-aaaaaaaaaaaaaaaa"), leader)
+                .client_put(
+                    "s22/retry",
+                    b"once",
+                    Some("op-idempotent-aaaaaaaaaaaaaaaa"),
+                    leader,
+                )
                 .map_err(|e| format!("put1: {e:?}"))?;
             let r2 = w
-                .client_put("s22/retry", b"once", Some("op-idempotent-aaaaaaaaaaaaaaaa"), leader)
+                .client_put(
+                    "s22/retry",
+                    b"once",
+                    Some("op-idempotent-aaaaaaaaaaaaaaaa"),
+                    leader,
+                )
                 .map_err(|e| format!("put2: {e:?}"))?;
             if r1.position != r2.position || r1.term != r2.term {
                 return Err(format!(
@@ -1658,7 +1710,9 @@ pub fn run_conformance_matrix(seed: u64) -> Vec<CaseReport> {
                 Err(e) => return Err(format!("unexpected elect err: {e:?}")),
             }
             // Current epoch still elects.
-            let _ = w.elect_any().map_err(|e| format!("re-elect current: {e:?}"))?;
+            let _ = w
+                .elect_any()
+                .map_err(|e| format!("re-elect current: {e:?}"))?;
             detail = w.dump();
             Ok::<(), String>(())
         })();
@@ -1768,7 +1822,10 @@ pub fn run_conformance_matrix(seed: u64) -> Vec<CaseReport> {
             case: ConformanceCase::SeededChaosLinearizable.id().into(),
             seed: seed.wrapping_add(41),
             ok: lin.is_ok(),
-            detail: lin.err().map(|e| format!("{e}\n{}", w.dump())).unwrap_or_else(|| w.dump()),
+            detail: lin
+                .err()
+                .map(|e| format!("{e}\n{}", w.dump()))
+                .unwrap_or_else(|| w.dump()),
         });
     }
 
@@ -1778,7 +1835,10 @@ pub fn run_conformance_matrix(seed: u64) -> Vec<CaseReport> {
         let detail;
         let ok = match w.run_soak(24, 6) {
             Ok((puts, gets)) => {
-                detail = format!("soak ok committed_puts={puts} matched_gets={gets}\n{}", w.dump());
+                detail = format!(
+                    "soak ok committed_puts={puts} matched_gets={gets}\n{}",
+                    w.dump()
+                );
                 // At least the post-chaos window should land some matched gets
                 // when a leader is available; zero is only ok if elect failed.
                 true
@@ -1906,7 +1966,8 @@ mod tests {
     fn put_get_round_trip_linearizable() {
         let mut w = SimWorld::three_node(77);
         let (leader, _) = w.elect_any().unwrap();
-        w.client_put("pg/k", b"hello", Some("op-pg-1"), leader).unwrap();
+        w.client_put("pg/k", b"hello", Some("op-pg-1"), leader)
+            .unwrap();
         let got = w.client_get("pg/k", leader).unwrap();
         assert_eq!(got.as_deref(), Some(b"hello".as_slice()));
         w.check_linearizable().unwrap();

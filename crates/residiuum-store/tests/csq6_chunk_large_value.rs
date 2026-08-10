@@ -68,7 +68,10 @@ fn csq_chk_current_generation_exact_after_rewrites() {
         last = large(gen, 48 + gen as usize);
         let rc = store.put("target", &last, DurabilityMode::Durable).unwrap();
         assert_eq!(rc.layout, PayloadLayout::Chunked);
-        assert_eq!(store.get("target").unwrap().as_deref(), Some(last.as_slice()));
+        assert_eq!(
+            store.get("target").unwrap().as_deref(),
+            Some(last.as_slice())
+        );
     }
     assert_complete(&store, "target", &last);
 
@@ -133,7 +136,9 @@ fn csq_chk_unrelated_growth_does_not_poison_point_read() {
     store.set_chunk_size(8);
 
     let target = large(11, 80);
-    store.put("target", &target, DurabilityMode::Durable).unwrap();
+    store
+        .put("target", &target, DurabilityMode::Durable)
+        .unwrap();
     let hist = store.history("target").unwrap();
     let event_id = hist.events.last().expect("put event").event_id;
     let baseline = store
@@ -217,12 +222,7 @@ fn csq_chk_partial_reassembly_reports_missing_extents() {
             }
             if let Some(piece) = decode_chunk_body(&frame.body) {
                 if piece.item_id == put_ev.item_id {
-                    resolved.push(resolve_piece(
-                        frame.header.event_id,
-                        piece,
-                        [0u8; 16],
-                        off,
-                    ));
+                    resolved.push(resolve_piece(frame.header.event_id, piece, [0u8; 16], off));
                 }
             }
         }
@@ -236,7 +236,9 @@ fn csq_chk_partial_reassembly_reports_missing_extents() {
         .collect();
 
     match reassemble_with_manifest(put_ev.item_id, &manifest, &surviving) {
-        PayloadResult::Partial { missing, extents, .. } => {
+        PayloadResult::Partial {
+            missing, extents, ..
+        } => {
             assert!(missing.contains(&drop_idx));
             assert_eq!(extents.len(), manifest.chunks.len());
             assert!(!extents[drop_idx as usize].present);
@@ -265,7 +267,9 @@ fn csq_def103_rewrite_heavy_latest_wins() {
     // Over-max admission still fails closed with zero effect on hot key.
     let max = store.large_value_policy().max_logical_payload_bytes as usize;
     let too_big = vec![0xABu8; max + 1];
-    let err = store.put("hot", &too_big, DurabilityMode::Durable).unwrap_err();
+    let err = store
+        .put("hot", &too_big, DurabilityMode::Durable)
+        .unwrap_err();
     assert!(matches!(err, StoreError::PayloadTooLarge));
     assert_complete(&store, "hot", &last);
 }
@@ -301,7 +305,9 @@ fn csq_transcript_survival_after_seal_reopen() {
         let mut store = Store::create(&path).unwrap();
         store.set_chunk_threshold(20);
         store.set_chunk_size(16);
-        store.put("survive", &body, DurabilityMode::Durable).unwrap();
+        store
+            .put("survive", &body, DurabilityMode::Durable)
+            .unwrap();
         store.seal_active().unwrap();
     }
     let store = Store::open(&path).unwrap();

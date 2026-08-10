@@ -3,9 +3,7 @@
 //! incomplete media-domain purge, retention scheduler,
 //! live filesystem multi-tier media wipe.
 
-use residiuum_heap::{
-    DeploymentId, HeapAdministrativeState, HeapId, HeapSlot, SecurityRevision,
-};
+use residiuum_heap::{DeploymentId, HeapAdministrativeState, HeapId, HeapSlot, SecurityRevision};
 use residiuum_store::{
     active_snapshot, build_backup_manifest, classify_mixed_heap_frame, decode_purge_receipt,
     destroy_data_key, disaster_recovery_restore_retaining_id, encode_purge_receipt,
@@ -15,8 +13,7 @@ use residiuum_store::{
     restore_payload_to_new_heap, verify_purge_receipt, DataKeyHandle, DataKeyProvider,
     DisasterRecoveryCeremony, DisasterRecoveryPackage, HeapLifecycle, HeapRetentionPolicy,
     HsmDataKeyConfig, HsmDataKeyProvider, InProcessDataKeyProvider, MediaDomain,
-    MixedHeapSalvageClass,
-    PurgeCoverageUnit, TierClass, TombstoneKind,
+    MixedHeapSalvageClass, PurgeCoverageUnit, TierClass, TombstoneKind,
 };
 use std::fs;
 use std::sync::Arc;
@@ -95,10 +92,7 @@ fn payload_only_restore_cannot_grant_access() {
     assert_eq!(restored.source_heap_id, source);
 
     let deny = refuse_access_from_payload_restore(&restored).unwrap_err();
-    assert!(
-        deny.to_string().contains("cannot grant access"),
-        "{deny}"
-    );
+    assert!(deny.to_string().contains("cannot grant access"), "{deny}");
 
     // Manifest lists exact heap ids and carries no authority fields.
     let manifest = build_backup_manifest(uuidish(0x02), &[source, uuidish(0x41)]).unwrap();
@@ -193,8 +187,8 @@ fn data_key_destruction_and_permanent_tombstone() {
         new_master_public_key: [0xcd; 32],
         recovery_authority_evidence: [0x11; 32],
     };
-    let err = disaster_recovery_restore_retaining_id(tmp.path(), &pkg, &ceremony, None)
-        .unwrap_err();
+    let err =
+        disaster_recovery_restore_retaining_id(tmp.path(), &pkg, &ceremony, None).unwrap_err();
     assert!(err.to_string().contains("purged"), "{err}");
 }
 
@@ -251,16 +245,12 @@ fn disaster_recovery_retain_id_takeover_fences_old_deployment() {
     // Zero evidence rejected.
     let mut bad = ceremony.clone();
     bad.recovery_authority_evidence = [0; 32];
-    assert!(
-        disaster_recovery_restore_retaining_id(tmp.path(), &package, &bad, None).is_err()
-    );
+    assert!(disaster_recovery_restore_retaining_id(tmp.path(), &package, &bad, None).is_err());
     // Epoch must advance by exactly one.
     bad = ceremony.clone();
     bad.recovery_authority_evidence = [0x33; 32];
     bad.new_authority_epoch = 5;
-    assert!(
-        disaster_recovery_restore_retaining_id(tmp.path(), &package, &bad, None).is_err()
-    );
+    assert!(disaster_recovery_restore_retaining_id(tmp.path(), &package, &bad, None).is_err());
 }
 
 #[test]
@@ -367,10 +357,7 @@ fn retention_scheduler_blocks_purge_until_window_elapses() {
         .retention_mut()
         .tick_eligible(retain_until - 1)
         .is_empty());
-    assert_eq!(
-        life.retention_mut().tick_eligible(retain_until),
-        vec![heap]
-    );
+    assert_eq!(life.retention_mut().tick_eligible(retain_until), vec![heap]);
 
     // After window: purge proceeds and can complete when all domains available.
     let units = vec![

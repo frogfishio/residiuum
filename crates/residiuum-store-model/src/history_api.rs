@@ -132,14 +132,10 @@ impl ModelStore {
     /// policy; preserves partials when coverage is incomplete.
     pub fn last_complete(&self, subject: &[u8], max_events: usize) -> LastCompleteResult {
         let hist = self.history(subject);
-        let gaps: Vec<HistoryGap> = self
-            .gaps_for(subject)
-            .into_iter()
-            .cloned()
-            .collect();
+        let gaps: Vec<HistoryGap> = self.gaps_for(subject).into_iter().cloned().collect();
         let sk = Self::subject_key(subject);
-        let incomplete = self.unavailable_coverage.contains(&sk)
-            || self.known_damage.contains_key(&sk);
+        let incomplete =
+            self.unavailable_coverage.contains(&sk) || self.known_damage.contains_key(&sk);
 
         let mut complete = None;
         let mut partials = Vec::new();

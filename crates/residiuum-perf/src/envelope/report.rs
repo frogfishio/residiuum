@@ -1,11 +1,11 @@
 //! L1 campaign report: curve across block size × queue depth.
 
+use super::io::IoAdapter;
 use super::io::{FakeIoAdapter, FakeIoConfig, IoMode, SyncMode};
 use super::l0::{run_l0_calibration, L0Config, L0Report};
 use super::l1::{run_l1_with_fake, ColdState, L1Config, L1Point};
 use super::EnvelopeError;
 use crate::metrics::ProbeMode;
-use super::io::IoAdapter;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,12 +78,7 @@ mod tests {
 
     #[test]
     fn matrix_covers_curve() {
-        let report = run_l1_matrix_fake(
-            &[4096, 16384],
-            &[1, 4],
-            FakeIoConfig::default(),
-        )
-        .unwrap();
+        let report = run_l1_matrix_fake(&[4096, 16384], &[1, 4], FakeIoConfig::default()).unwrap();
         assert_eq!(report.points.len(), 4);
         assert!(report.no_raw_device);
         assert_eq!(report.l0.layer, "L0");

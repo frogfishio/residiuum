@@ -32,9 +32,8 @@ fn sda_bench_skeleton_parse_eval_classes() {
     let n = 200usize;
     for (name, source, input) in cases {
         let t0 = Instant::now();
-        let program = Program::parse(source).unwrap_or_else(|e| {
-            panic!("{name}: parse failed: {e}")
-        });
+        let program =
+            Program::parse(source).unwrap_or_else(|e| panic!("{name}: parse failed: {e}"));
         let parse_once = t0.elapsed();
 
         // Warmth + correctness (value shape varies by program class).

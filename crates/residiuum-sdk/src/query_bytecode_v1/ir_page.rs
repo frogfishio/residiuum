@@ -87,6 +87,7 @@ pub(crate) fn mint_page_cursor(
     page_size: u32,
     coverage: CoveragePolicy,
     consistency: ConsistencyMode,
+    group_spool_id: Option<&str>,
 ) -> Result<Continuation, Error> {
     // APB-7 T10: product ring when installed; otherwise vector-lock default.
     let ring = active_cursor_key_ring();
@@ -104,7 +105,10 @@ pub(crate) fn mint_page_cursor(
         parameter_hash: parameter_hash.to_string(),
         order_normalized: order_normalized_json(order),
         last_sort_tuple: last_sort_tuple.clone(),
-        source_frontier: serde_json::json!({"generation": 0}),
+        source_frontier: match group_spool_id {
+            Some(id) => serde_json::json!({"generation": 0, "group_spool_id": id}),
+            None => serde_json::json!({"generation": 0}),
+        },
         remaining_limit: remaining_limit.unwrap_or(u64::MAX),
         page_size,
         coverage_mode: match coverage {
@@ -121,14 +125,14 @@ pub(crate) fn mint_page_cursor(
     mint(&logical, &ring)
 }
 
-/// Decode continuation → (`last_sort_tuple`, remaining limit).
+/// Decode continuation → (`last_sort_tuple`, remaining limit, group spool id).
 pub(crate) fn decode_after(
     cont: &Continuation,
     heap_id: HeapId,
     collection_id: CollectionId,
     plan_hash: &[u8; 32],
     parameter_hash: &str,
-) -> Result<(Option<JsonValue>, Option<u64>), Error> {
+) -> Result<(Option<JsonValue>, Option<u64>, Option<String>), Error> {
     let ring = active_cursor_key_ring();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -147,7 +151,12 @@ pub(crate) fn decode_after(
     } else {
         Some(logical.remaining_limit)
     };
-    Ok((Some(logical.last_sort_tuple), rem))
+    let group_spool_id = logical
+        .source_frontier
+        .get("group_spool_id")
+        .and_then(JsonValue::as_str)
+        .map(str::to_string);
+    Ok((Some(logical.last_sort_tuple), rem, group_spool_id))
 }
 
 fn order_normalized_json(order: &[OrderTerm]) -> JsonValue {

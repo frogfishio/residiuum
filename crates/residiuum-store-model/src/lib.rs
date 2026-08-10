@@ -273,7 +273,14 @@ impl ModelStore {
         operation_id: String,
         event_id: Id16,
     ) -> Result<ModelReceipt, ModelError> {
-        self.apply_mutation(subject, EventKind::Put, value, operation_id, event_id, DurabilityAck::Durable)
+        self.apply_mutation(
+            subject,
+            EventKind::Put,
+            value,
+            operation_id,
+            event_id,
+            DurabilityAck::Durable,
+        )
     }
 
     /// Apply a delete that receives a durable receipt.
@@ -435,7 +442,11 @@ impl ModelStore {
         for e in &self.events {
             subjects.insert(e.subject.clone());
         }
-        for sk in self.known_damage.keys().chain(self.unavailable_coverage.iter()) {
+        for sk in self
+            .known_damage
+            .keys()
+            .chain(self.unavailable_coverage.iter())
+        {
             if let Ok(bytes) = hex::decode(sk) {
                 subjects.insert(bytes);
             }
@@ -569,10 +580,7 @@ mod tests {
         m.put_durable(sub.clone(), b"x".to_vec(), "op".into(), eid(3))
             .unwrap();
         m.mark_damage(&sub, "bitrot");
-        assert!(matches!(
-            m.get(&sub),
-            ValueObservation::Unavailable { .. }
-        ));
+        assert!(matches!(m.get(&sub), ValueObservation::Unavailable { .. }));
         let obs = m.observe();
         let cheat = known_bad_absence_from_damage(&obs);
         assert!(detects_absence_from_damage_cheat(&obs, &cheat));
@@ -583,13 +591,16 @@ mod tests {
         let mut m = ModelStore::new(sid());
         let sub = b"c".to_vec();
         let r = m
-            .interrupted_put(sub.clone(), b"z".to_vec(), "opx".into(), eid(9), CrashOutcome::Unknown)
+            .interrupted_put(
+                sub.clone(),
+                b"z".to_vec(),
+                "opx".into(),
+                eid(9),
+                CrashOutcome::Unknown,
+            )
             .unwrap();
         assert!(r.is_none());
-        assert!(matches!(
-            m.get(&sub),
-            ValueObservation::Unavailable { .. }
-        ));
+        assert!(matches!(m.get(&sub), ValueObservation::Unavailable { .. }));
         assert!(!m.receipts.contains_key("opx"));
     }
 

@@ -43,7 +43,10 @@ impl StageId {
     }
 
     pub fn order_index(self) -> usize {
-        STAGE_ORDER.iter().position(|s| *s == self).unwrap_or(usize::MAX)
+        STAGE_ORDER
+            .iter()
+            .position(|s| *s == self)
+            .unwrap_or(usize::MAX)
     }
 }
 
@@ -236,13 +239,7 @@ pub fn run_l3_pipeline(cfg: &L3Config) -> Result<L3Report, PipelineError> {
 
         let key = generate_key(cfg.seed, seq);
         let mut buf = vec![0u8; cfg.payload_len.max(1)];
-        fill_payload(
-            cfg.seed,
-            seq,
-            0,
-            PayloadProfile::Incompressible,
-            &mut buf,
-        );
+        fill_payload(cfg.seed, seq, 0, PayloadProfile::Incompressible, &mut buf);
 
         for (stage, acc) in stage_ns.iter_mut() {
             let start = t;
@@ -283,7 +280,10 @@ pub fn run_l3_pipeline(cfg: &L3Config) -> Result<L3Report, PipelineError> {
         .collect();
     let stage_sum: u64 = stage_ns.iter().map(|(_, n)| *n).sum();
     // Residual relative to e2e after queue+lock+stages.
-    let residual = residual_from_stage_ns(e2e_ns, stage_sum.saturating_add(queue_ns).saturating_add(lock_ns));
+    let residual = residual_from_stage_ns(
+        e2e_ns,
+        stage_sum.saturating_add(queue_ns).saturating_add(lock_ns),
+    );
 
     let mut validity = "valid".to_string();
     if sink.filesystem_touched() {

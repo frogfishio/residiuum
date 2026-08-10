@@ -15,8 +15,7 @@ use std::sync::OnceLock;
 pub const ISOLATION_PROFILES_REL: &str = "spec/heap/isolation-profiles-v1.json";
 
 /// Embedded registry bytes (crate-local `spec/` so crates.io packages verify).
-pub const ISOLATION_PROFILES_JSON: &str =
-    include_str!("../spec/isolation-profiles-v1.json");
+pub const ISOLATION_PROFILES_JSON: &str = include_str!("../spec/isolation-profiles-v1.json");
 
 /// Named isolation profile id (`HEAP_SPEC` §13.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
@@ -145,9 +144,8 @@ fn parse_doc(raw: &str) -> Result<(ProfilesDoc, String), HeapError> {
         h.update(raw.as_bytes());
         format!("{:x}", h.finalize())
     };
-    let doc: ProfilesDoc = serde_json::from_str(raw).map_err(|_| {
-        HeapError::InvalidArgument("isolation-profiles-v1.json parse failed")
-    })?;
+    let doc: ProfilesDoc = serde_json::from_str(raw)
+        .map_err(|_| HeapError::InvalidArgument("isolation-profiles-v1.json parse failed"))?;
     if doc.format != "residiuum-heap-isolation-profiles-v1" {
         return Err(HeapError::InvalidArgument(
             "unexpected isolation profiles format",
@@ -294,10 +292,7 @@ impl IsolationProfile {
 
 /// Profile-aware unauthenticated field check (defaults to reference profile).
 #[must_use]
-pub fn unauthenticated_field_allowed_for(
-    profile: IsolationProfileId,
-    field: &str,
-) -> bool {
+pub fn unauthenticated_field_allowed_for(profile: IsolationProfileId, field: &str) -> bool {
     load_isolation_profiles()
         .ok()
         .and_then(|r| r.get(profile).ok())

@@ -34,9 +34,7 @@ impl FalseNarrative {
                 "higher_throughput_from_weaker_durability"
             }
             Self::MultiStoreAsSingleStoreScaling => "multi_store_as_single_store_scaling",
-            Self::QueueStarvationCalledDiskSaturation => {
-                "queue_starvation_called_disk_saturation"
-            }
+            Self::QueueStarvationCalledDiskSaturation => "queue_starvation_called_disk_saturation",
             Self::LifecycleSpikesHiddenByMeans => "lifecycle_spikes_hidden_by_means",
             Self::ObserverOverheadAsDbCost => "observer_overhead_as_db_cost",
             Self::TwoChangedVariablesAsCausal => "two_changed_variables_as_causal",
@@ -109,9 +107,7 @@ pub fn coverage_complete(findings: &[NarrativeFinding]) -> bool {
 
 fn check_one(n: FalseNarrative, ctx: &NarrativeContext) -> NarrativeFinding {
     let (detected, detail) = match n {
-        FalseNarrative::IdleAggregateHidesSaturatedCore => {
-            idle_aggregate_hides_core(ctx)
-        }
+        FalseNarrative::IdleAggregateHidesSaturatedCore => idle_aggregate_hides_core(ctx),
         FalseNarrative::PageCacheBurstAsSustained => page_cache_burst(ctx),
         FalseNarrative::PerOpSyncHiddenByAggregateBw => per_op_sync_hidden(ctx),
         FalseNarrative::FailedOpsExcludedFromDenominator => failed_ops_excluded(ctx),
@@ -161,7 +157,8 @@ fn page_cache_burst(ctx: &NarrativeContext) -> (bool, String) {
     {
         (
             true,
-            "page-cache warm / burst window cannot support sustained device throughput claim".into(),
+            "page-cache warm / burst window cannot support sustained device throughput claim"
+                .into(),
         )
     } else if ctx.page_cache_warm_only && s.device_util.unwrap_or(0.0) > 0.8 {
         (
@@ -192,7 +189,10 @@ fn per_op_sync_hidden(ctx: &NarrativeContext) -> (bool, String) {
                     .into(),
             )
         } else {
-            (false, "buffered match available for sync attribution".into())
+            (
+                false,
+                "buffered match available for sync attribution".into(),
+            )
         }
     } else {
         (false, "no per-op sync".into())
@@ -286,9 +286,7 @@ fn multi_store_scaling(ctx: &NarrativeContext) -> (bool, String) {
         let claims_scale = ctx
             .claimed_verdict
             .as_deref()
-            .map(|v| {
-                v.contains("scale") || v == "io_bandwidth_bound" || v == "serialized_writer"
-            })
+            .map(|v| v.contains("scale") || v == "io_bandwidth_bound" || v == "serialized_writer")
             .unwrap_or(false);
         // Always flag multi-store when present for single-store scaling claims
         (
@@ -323,7 +321,10 @@ fn queue_as_disk(ctx: &NarrativeContext) -> (bool, String) {
     } else if low_q && device_idle && s.device_util.is_some() {
         // Even without explicit claim, surface the hazard when someone might call it disk
         if claims_disk {
-            (true, "queue starvation mislabeled as disk saturation".into())
+            (
+                true,
+                "queue starvation mislabeled as disk saturation".into(),
+            )
         } else {
             (false, "underdriven queue without disk claim".into())
         }
@@ -409,7 +410,10 @@ fn two_vars_causal(ctx: &NarrativeContext) -> (bool, String) {
     };
     match validate_matched_runs(a, b) {
         Ok(m) => match causal_ok(&m) {
-            Ok(()) => (false, "single control variable (or layer ladder only)".into()),
+            Ok(()) => (
+                false,
+                "single control variable (or layer ladder only)".into(),
+            ),
             Err(_) => (
                 true,
                 format!(

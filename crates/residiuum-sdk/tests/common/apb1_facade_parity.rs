@@ -44,7 +44,9 @@ pub fn scenario_create_open_list(client: &mut HeapClient, name: &str) -> Collect
         .list_collections()
         .unwrap_or_else(|e| panic!("parity list_collections: {e:?}"));
     assert!(
-        listed.iter().any(|e| e.name == name && e.collection_id == created.collection.id()),
+        listed
+            .iter()
+            .any(|e| e.name == name && e.collection_id == created.collection.id()),
         "parity list must include {name}: {listed:?}"
     );
 
@@ -78,11 +80,10 @@ pub fn scenario_put_get_delete(col: &mut CollectionClient) {
         .delete("k1")
         .unwrap_or_else(|e| panic!("parity delete k1: {e:?}"));
     assert!(del.removed, "parity delete should report removed=true");
-    assert!(
-        col.get("k1")
-            .unwrap_or_else(|e| panic!("parity get after delete: {e:?}"))
-            .is_none()
-    );
+    assert!(col
+        .get("k1")
+        .unwrap_or_else(|e| panic!("parity get after delete: {e:?}"))
+        .is_none());
 }
 
 /// Multi-version history after put/put/delete/put.
@@ -124,11 +125,10 @@ pub fn scenario_index_lifecycle(col: &mut CollectionClient) {
         .unwrap_or_else(|e| panic!("parity idx put ib: {e:?}"));
 
     let mut im = col.indexes();
-    assert!(
-        im.list()
-            .unwrap_or_else(|e| panic!("parity index list empty: {e:?}"))
-            .is_empty()
-    );
+    assert!(im
+        .list()
+        .unwrap_or_else(|e| panic!("parity index list empty: {e:?}"))
+        .is_empty());
     let created = im
         .create("by-status", &["status"])
         .unwrap_or_else(|e| panic!("parity index create: {e:?}"));
@@ -153,11 +153,10 @@ pub fn scenario_index_lifecycle(col: &mut CollectionClient) {
 
     im.drop("by-status")
         .unwrap_or_else(|e| panic!("parity index drop: {e:?}"));
-    assert!(
-        im.list()
-            .unwrap_or_else(|e| panic!("parity index list after drop: {e:?}"))
-            .is_empty()
-    );
+    assert!(im
+        .list()
+        .unwrap_or_else(|e| panic!("parity index list after drop: {e:?}"))
+        .is_empty());
 }
 
 /// APB-2 safe single-key mutations (create / upsert / list_keys / replace /
@@ -175,7 +174,10 @@ pub fn scenario_apb2_mutations(col: &mut CollectionClient) {
     let up2 = col
         .upsert("apb2-k1", &serde_json::json!({"n": 2}))
         .unwrap_or_else(|e| panic!("parity apb2 upsert replace: {e:?}"));
-    assert!(!up2.inserted, "parity apb2 second upsert must report !inserted");
+    assert!(
+        !up2.inserted,
+        "parity apb2 second upsert must report !inserted"
+    );
 
     match col.create("apb2-k1", &serde_json::json!({"n": 9})) {
         Ok(_) => panic!("parity apb2 create on present key must fail"),

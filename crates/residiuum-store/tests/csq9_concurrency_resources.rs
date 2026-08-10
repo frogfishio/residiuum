@@ -64,7 +64,10 @@ fn csq_con_concurrent_readers_see_complete_generation() {
             let inspect = Store::open_inspect(&path_c).unwrap();
             // May observe gen0 or a later complete gen after writer publishes.
             let v = inspect.get("stable").unwrap();
-            assert!(v.is_some(), "subject must not vanish under concurrent writes");
+            assert!(
+                v.is_some(),
+                "subject must not vanish under concurrent writes"
+            );
             let body = v.unwrap();
             assert!(
                 body == b"gen0"
@@ -189,7 +192,9 @@ fn csq_res_size_limit_fails_before_effect() {
     let before = store.live_count();
     let max = store.large_value_policy().max_logical_payload_bytes as usize;
     let too_big = vec![9u8; max + 1];
-    let err = store.put("big", &too_big, DurabilityMode::Durable).unwrap_err();
+    let err = store
+        .put("big", &too_big, DurabilityMode::Durable)
+        .unwrap_err();
     assert!(matches!(err, StoreError::PayloadTooLarge));
     assert_eq!(store.live_count(), before);
     assert!(store.get("big").unwrap().is_none());
@@ -203,9 +208,7 @@ fn csq_res_read_budget_stops_explicitly() {
     let mut store = Store::create(dir.path().join("s")).unwrap();
     // Many rewrites create a long history stream.
     for i in 0..30u8 {
-        store
-            .put("h", &[i; 16], DurabilityMode::Durable)
-            .unwrap();
+        store.put("h", &[i; 16], DurabilityMode::Durable).unwrap();
     }
     let hist = store.history("h").unwrap();
     assert!(hist.events.len() >= 30);
@@ -222,7 +225,11 @@ fn csq_res_read_budget_stops_explicitly() {
         .expect("budgeted projection must not error as storage failure");
     // Latest event body is small; projection should still complete.
     assert!(
-        projected.selected.as_ref().map(|p| p.is_complete()).unwrap_or(false)
+        projected
+            .selected
+            .as_ref()
+            .map(|p| p.is_complete())
+            .unwrap_or(false)
             || projected.bytes_examined <= 64
             || projected.events_examined <= 2,
         "budget path must remain explicit: {projected:?}"
@@ -280,7 +287,10 @@ fn csq_con_shard_home_stable_and_reopen() {
             store
                 .put(&k, format!("v{i}").as_bytes(), DurabilityMode::Durable)
                 .unwrap();
-            assert_eq!(subject_writer_shard(k.as_bytes(), store.writer_shards()), home);
+            assert_eq!(
+                subject_writer_shard(k.as_bytes(), store.writer_shards()),
+                home
+            );
         }
     }
     let store = Store::open(&root).unwrap();
@@ -306,8 +316,9 @@ fn csq_res_drop_releases_lock_for_reopen() {
     let mut reopened = Store::open(&path).unwrap();
     assert!(reopened.holds_writer_lock());
     assert_eq!(reopened.get("k").unwrap().as_deref(), Some(b"v".as_slice()));
-    reopened
-        .put("k", b"v2", DurabilityMode::Durable)
-        .unwrap();
-    assert_eq!(reopened.get("k").unwrap().as_deref(), Some(b"v2".as_slice()));
+    reopened.put("k", b"v2", DurabilityMode::Durable).unwrap();
+    assert_eq!(
+        reopened.get("k").unwrap().as_deref(),
+        Some(b"v2".as_slice())
+    );
 }

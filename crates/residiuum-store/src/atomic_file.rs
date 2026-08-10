@@ -106,10 +106,7 @@ pub fn write_atomic_with_timed_ex(
 
     let mut timing = AtomicWriteTiming::default();
     {
-        let mut f = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&tmp)?;
+        let mut f = OpenOptions::new().create_new(true).write(true).open(&tmp)?;
         // DEF-022: optional short-write of control-document temp body.
         if crate::failpoint::consume_short_write("atomic.tmp.short_write") {
             let n = crate::failpoint::short_write_len(bytes.len());

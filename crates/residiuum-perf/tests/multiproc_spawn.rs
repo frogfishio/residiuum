@@ -3,9 +3,7 @@
 //! Uses the built `residiuum-perf` binary so children understand the `worker`
 //! subcommand. Unit tests keep sequential process slots for speed.
 
-use residiuum_perf::campaign::{
-    campaign_plan_synthetic, run_campaign, CampaignConfig, RunClass,
-};
+use residiuum_perf::campaign::{campaign_plan_synthetic, run_campaign, CampaignConfig, RunClass};
 use residiuum_perf::store_driver::DriverKind;
 use std::path::PathBuf;
 
@@ -31,8 +29,8 @@ fn spawned_workers_have_distinct_pids() {
         spawn_workers: true,
         worker_bin: Some(worker_bin()),
         require_qualification_preflight: false,
-            awo_mode: residiuum_perf::store_driver::AwoMode::Disabled,
-            presentation: Default::default(),
+        awo_mode: residiuum_perf::store_driver::AwoMode::Disabled,
+        presentation: Default::default(),
     })
     .expect("spawned multiproc campaign");
 

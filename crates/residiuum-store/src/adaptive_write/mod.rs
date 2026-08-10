@@ -10,8 +10,8 @@
 
 pub mod collection;
 pub mod controller;
-pub mod coordinator;
 pub mod cooker;
+pub mod coordinator;
 pub mod credits;
 pub mod estimator;
 pub mod model;
@@ -28,27 +28,19 @@ pub use controller::{
     AwoClock, ControllerPolicy, ControllerSignals, InstantClock, ManualClock, ScaleController,
     ScaleDecision,
 };
-pub use coordinator::{
-    PipelineCoordinator, PipelineError, PipelineStatus, ReservationId, ReservationPhase,
-};
 pub use cooker::{
     cook_item_frame, CookOutcome, CookTask, CookedMutation, FrameBufferPool, PersistentCookerPool,
 };
-pub use estimator::{
-    payload_bucket, EwmaEstimate, ServiceEstimator, ALPHA_DENOMINATOR, DEVIATION_MULTIPLIER,
-    MIN_SAMPLES_DEFAULT, STALE_AFTER_NS_DEFAULT,
-};
-pub use selector::{
-    candidate_entry_counts, collection_delay_ns, select_plan, CandidateBounds, Selection,
-    CANDIDATE_POW2,
-};
-pub use telemetry::{
-    AdaptiveWriteInspect, ScaleTelemetry, BENCHMARK_DISCLOSURE, SUPPORT_MATRIX,
-    UPGRADE_ROLLBACK_NOTE,
+pub use coordinator::{
+    PipelineCoordinator, PipelineError, PipelineStatus, ReservationId, ReservationPhase,
 };
 pub use credits::{
     mutation_credit, CreditError, CreditLedger, COMPLETION_SLOT_OVERHEAD, ENVELOPE_FIXED_OVERHEAD,
     FRAME_FRAMING_OVERHEAD, REQUEST_META_OVERHEAD,
+};
+pub use estimator::{
+    payload_bucket, EwmaEstimate, ServiceEstimator, ALPHA_DENOMINATOR, DEVIATION_MULTIPLIER,
+    MIN_SAMPLES_DEFAULT, STALE_AFTER_NS_DEFAULT,
 };
 pub use model::{decide, Decision, GoldenDecisionInput};
 pub use ordered_ready::{OrderedReadyRing, ReadyError};
@@ -59,6 +51,12 @@ pub use runtime::{
     classify_delete, classify_put, AdaptiveWriteError, AdaptiveWriteHandle, AdaptiveWriteRuntime,
     AdaptiveWriteStatus, AdmissionResult, EligibilityClass, WriteCompletion,
 };
-pub use types::{
-    decision_reason_ids, AwoPlan, AWO_PROFILE, DECISION_MARGIN_PPM_DEFAULT,
+pub use selector::{
+    candidate_entry_counts, collection_delay_ns, select_plan, CandidateBounds, Selection,
+    CANDIDATE_POW2,
 };
+pub use telemetry::{
+    AdaptiveWriteInspect, ScaleTelemetry, BENCHMARK_DISCLOSURE, SUPPORT_MATRIX,
+    UPGRADE_ROLLBACK_NOTE,
+};
+pub use types::{decision_reason_ids, AwoPlan, AWO_PROFILE, DECISION_MARGIN_PPM_DEFAULT};

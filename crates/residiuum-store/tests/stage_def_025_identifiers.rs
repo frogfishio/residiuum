@@ -54,9 +54,7 @@ fn event_ids_are_random_not_counter_prefixed() {
     let mut event_ids = Vec::new();
     for i in 0..32 {
         let key = format!("k{i}");
-        let r = store
-            .put(&key, b"v", DurabilityMode::Durable)
-            .unwrap();
+        let r = store.put(&key, b"v", DurabilityMode::Durable).unwrap();
         assert_ne!(r.event_id, [0u8; 16]);
         event_ids.push(r.event_id);
     }
@@ -83,24 +81,16 @@ fn segment_ids_sortable_and_recover_after_reopen() {
     let root = dir.path().join("s");
     let mut store = Store::create(&root).unwrap();
 
-    store
-        .put("a", b"1", DurabilityMode::Durable)
-        .unwrap();
+    store.put("a", b"1", DurabilityMode::Durable).unwrap();
     store.seal_active().unwrap();
-    store
-        .put("b", b"2", DurabilityMode::Durable)
-        .unwrap();
+    store.put("b", b"2", DurabilityMode::Durable).unwrap();
     store.seal_active().unwrap();
-    store
-        .put("c", b"3", DurabilityMode::Durable)
-        .unwrap();
+    store.put("c", b"3", DurabilityMode::Durable).unwrap();
     drop(store);
 
     let mut store = Store::open(&root).unwrap();
     // Next segment after reopen continues past recovered max seq.
-    store
-        .put("d", b"4", DurabilityMode::Durable)
-        .unwrap();
+    store.put("d", b"4", DurabilityMode::Durable).unwrap();
     store.seal_active().unwrap();
 
     // Synthetic check of mint helper shape.

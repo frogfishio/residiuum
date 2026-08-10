@@ -5,13 +5,13 @@
 //!
 //! Default rights_mask is 13 = Read | Write | IndexAdmin.
 
+use ed25519_dalek::{Signer, SigningKey};
 use residiuum_format::{encode_deterministic_uint_map, CborValue};
 use residiuum_heap::{
     build_holder_proof, inspect_certificate, sig_structure_for, verify_certificate,
     verify_holder_proof, AUDIENCE_DATA_V1, CONTENT_TYPE_CERTIFICATE, EXTERNAL_AAD_CERTIFICATE,
     PROFILE_VERSION,
 };
-use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs;
@@ -137,7 +137,11 @@ fn main() {
 
     // Rebuild rejected corpus from accepted materials (same mutation catalog).
     let mut rejected = Vec::new();
-    rejected.push(flip_last(&cose, "cert_flip_last_sig_byte", "heap_key_certificate"));
+    rejected.push(flip_last(
+        &cose,
+        "cert_flip_last_sig_byte",
+        "heap_key_certificate",
+    ));
     rejected.push(flip_at(
         &cose,
         40,
@@ -155,7 +159,12 @@ fn main() {
         "proof_flip_last_sig_byte",
         "holder_proof",
     ));
-    rejected.push(flip_at(&proof_cose, 80, "proof_flip_byte_80", "holder_proof"));
+    rejected.push(flip_at(
+        &proof_cose,
+        80,
+        "proof_flip_byte_80",
+        "holder_proof",
+    ));
     rejected.push(truncate_bytes(
         &proof_cose,
         2,

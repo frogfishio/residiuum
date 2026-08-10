@@ -73,9 +73,7 @@ fn run_campaign(target_bytes: u64) -> Step7CampaignReport {
     let ack_t0 = Instant::now();
     while written < target_bytes {
         let k = format!("step7/{ops:020}");
-        store
-            .put(&k, &payload, DurabilityMode::Buffered)
-            .unwrap();
+        store.put(&k, &payload, DurabilityMode::Buffered).unwrap();
         expect.insert(k.into_bytes(), payload.clone());
         ops += 1;
         written += PAYLOAD as u64;
@@ -95,8 +93,8 @@ fn run_campaign(target_bytes: u64) -> Step7CampaignReport {
         !sealed.is_empty(),
         "expected ≥1 sealed segment at target={target_bytes}"
     );
-    let shadow_prepublished = dual
-        || every_protected_has_verified_rsh(&paths, store_id).unwrap_or(false);
+    let shadow_prepublished =
+        dual || every_protected_has_verified_rsh(&paths, store_id).unwrap_or(false);
 
     let mut samples: Vec<ShadowStageSample> = Vec::new();
     let shadow_t0 = Instant::now();

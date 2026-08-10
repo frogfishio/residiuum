@@ -19,7 +19,10 @@ fn run_input(src: &str, input: serde_json::Value) -> serde_json::Value {
 #[test]
 fn enr1_profile_tag_is_stable() {
     assert_eq!(ENR1_PROFILE_TAG, "sda-enr1-v0.1");
-    assert_eq!(residiuum_sda::SdaRuntime::enr1_profile_tag(), ENR1_PROFILE_TAG);
+    assert_eq!(
+        residiuum_sda::SdaRuntime::enr1_profile_tag(),
+        ENR1_PROFILE_TAG
+    );
 }
 
 #[test]
@@ -216,12 +219,8 @@ fn null_row_is_still_a_match() {
 #[test]
 fn compile_once_enr1_program() {
     let prog = Program::parse(r#"one!(Bag{input})"#).expect("parse");
-    let a = prog
-        .run_json("input", json!(1))
-        .expect("eval a");
-    let b = prog
-        .run_json("input", json!(2))
-        .expect("eval b");
+    let a = prog.run_json("input", json!(1)).expect("eval a");
+    let b = prog.run_json("input", json!(2)).expect("eval b");
     assert_eq!(a, json!(1));
     assert_eq!(b, json!(2));
     // Format preserves sugar name for one!.
@@ -405,10 +404,7 @@ fn source_declarations_are_annotations() {
     assert!(formatted.contains("source items : MultiIndex[Str, Item]"));
     assert!(formatted.contains("source raw : Dataset"));
     // Declarations do not affect evaluation of subsequent expressions.
-    assert_eq!(
-        prog.run_json("input", json!(null)).unwrap(),
-        json!(42)
-    );
+    assert_eq!(prog.run_json("input", json!(null)).unwrap(), json!(42));
 }
 
 #[test]

@@ -24,11 +24,7 @@ fn put_many_persist_fail_publishes_nothing() {
     enable_failpoint_hit_proof();
     arm_failpoint_once("awo.persist.before", FailpointAction::Error);
 
-    let items: Vec<(&str, &[u8])> = vec![
-        ("awo/k1", b"v1"),
-        ("awo/k2", b"v2"),
-        ("awo/k3", b"v3"),
-    ];
+    let items: Vec<(&str, &[u8])> = vec![("awo/k1", b"v1"), ("awo/k2", b"v2"), ("awo/k3", b"v3")];
     let err = store
         .put_many(&items, DurabilityMode::Buffered)
         .expect_err("persist failpoint must fail batch");

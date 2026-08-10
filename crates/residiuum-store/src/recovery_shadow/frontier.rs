@@ -265,11 +265,7 @@ fn encode_coverage(cov: &ProtectedCoverage) -> Vec<u8> {
     out.extend_from_slice(&(shards.len() as u16).to_le_bytes());
     for shard in shards {
         out.extend_from_slice(&shard.to_le_bytes());
-        let sealed = cov
-            .sealed_by_shard
-            .get(&shard)
-            .cloned()
-            .unwrap_or_default();
+        let sealed = cov.sealed_by_shard.get(&shard).cloned().unwrap_or_default();
         let durable = cov
             .durable_by_shard
             .get(&shard)
@@ -318,8 +314,7 @@ fn decode_coverage(bytes: &[u8], expect_store: [u8; 16]) -> Option<ProtectedCove
         if cursor + 4 > body_end {
             return None;
         }
-        let n_sealed =
-            u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().ok()?) as usize;
+        let n_sealed = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().ok()?) as usize;
         cursor += 4;
         for _ in 0..n_sealed {
             if cursor + 8 > body_end {
@@ -332,8 +327,7 @@ fn decode_coverage(bytes: &[u8], expect_store: [u8; 16]) -> Option<ProtectedCove
         if cursor + 4 > body_end {
             return None;
         }
-        let n_durable =
-            u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().ok()?) as usize;
+        let n_durable = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().ok()?) as usize;
         cursor += 4;
         for _ in 0..n_durable {
             if cursor + 8 > body_end {

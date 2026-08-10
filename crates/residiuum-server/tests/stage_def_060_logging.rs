@@ -9,7 +9,8 @@
 //! - end-to-end SDK traffic emits correlated `rpc.complete` lines
 
 use residiuum_sdk::{
-    client_handshake, json, read_frame, write_frame, ConnectOptions, Residiuum, DEFAULT_MAX_FRAME_BYTES,
+    client_handshake, json, read_frame, write_frame, ConnectOptions, Residiuum,
+    DEFAULT_MAX_FRAME_BYTES,
 };
 use residiuum_server::{
     log_events, serve_store_with, AdmissionController, AdmissionLimits, LogSink, Logger,
@@ -144,7 +145,11 @@ fn put_rpc_emits_correlated_ndjson_without_payloads() {
         .shared();
 
     let secret = "super-secret-token-value";
-    let (bind, stop, handle) = start_server(&dir, logger, ServeOptions::new().legacy_token_server().auth_token(secret));
+    let (bind, stop, handle) = start_server(
+        &dir,
+        logger,
+        ServeOptions::new().legacy_token_server().auth_token(secret),
+    );
 
     let op_id = "aabbccddeeff00112233445566778899";
     {
@@ -176,7 +181,12 @@ fn put_rpc_emits_correlated_ndjson_without_payloads() {
     let rpc = lines
         .iter()
         .find(|v| v["event"] == log_events::RPC_COMPLETE && v["op"] == "put")
-        .unwrap_or_else(|| panic!("missing rpc.complete for put; events={:?}", event_names(&sink)));
+        .unwrap_or_else(|| {
+            panic!(
+                "missing rpc.complete for put; events={:?}",
+                event_names(&sink)
+            )
+        });
 
     assert_eq!(rpc["profile"], LOG_PROFILE);
     assert_eq!(rpc["request_id"], 7);
@@ -204,8 +214,13 @@ fn auth_failure_logs_error_code_not_token() {
         .mode("serve")
         .shared();
 
-    let (bind, stop, handle) =
-        start_server(&dir, logger, ServeOptions::new().legacy_token_server().auth_token("expected-token"));
+    let (bind, stop, handle) = start_server(
+        &dir,
+        logger,
+        ServeOptions::new()
+            .legacy_token_server()
+            .auth_token("expected-token"),
+    );
 
     {
         let (mut stream, mut reader) = framed_connect(&bind);
@@ -253,7 +268,8 @@ fn connection_churn_reject_emits_connection_rejected() {
     let path_c = store_path.clone();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_c = Arc::clone(&stop);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .admission(admission)
         .logger(logger)
         .shutdown_flag(Arc::clone(&stop))
@@ -303,7 +319,8 @@ fn sdk_put_get_emits_rpc_complete() {
         .mode("serve")
         .shared();
 
-    let (bind, stop, handle) = start_server(&dir, logger, ServeOptions::new().legacy_token_server());
+    let (bind, stop, handle) =
+        start_server(&dir, logger, ServeOptions::new().legacy_token_server());
 
     let uri = format!("residiuum://{bind}/app");
     let mut db = Residiuum::connect_with(&uri, ConnectOptions::new()).expect("connect");

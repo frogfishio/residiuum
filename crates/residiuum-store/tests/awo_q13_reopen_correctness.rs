@@ -51,9 +51,7 @@ fn fill_body(seed: u64, seq: u64, len: usize) -> Vec<u8> {
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
         .wrapping_add(seq.wrapping_mul(0xBF58_476D_1CE4_E5B9));
     for b in &mut out {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         *b = (state >> 33) as u8;
     }
     out
@@ -76,7 +74,8 @@ fn chain_digest(ops: &[(u64, &[u8], [u8; 32], u64)]) -> String {
         h.update(&len.to_le_bytes());
         prev = Some(*h.finalize().as_bytes());
     }
-    prev.map(|p| hex_encode(&p)).unwrap_or_else(|| "empty".into())
+    prev.map(|p| hex_encode(&p))
+        .unwrap_or_else(|| "empty".into())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -126,7 +125,14 @@ fn mint_cap(heap: HeapId, deployment: DeploymentId) -> HeapCap {
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn provision(root: &Path) -> GenesisIds {
@@ -165,10 +171,7 @@ fn policy_for(mode: AdaptiveWriteMode) -> AdaptiveWritePolicy {
 }
 
 /// Full coverage-aware scan: pages until `!has_more`; requires `complete`.
-fn scan_all_complete(
-    heap: &residiuum_store::HeapStore,
-    coll: &[u8; 16],
-) -> CollectionScanPage {
+fn scan_all_complete(heap: &residiuum_store::HeapStore, coll: &[u8; 16]) -> CollectionScanPage {
     let mut entries = Vec::new();
     let mut incomplete = Vec::new();
     let mut after: Option<Vec<u8>> = None;
@@ -281,8 +284,7 @@ fn run_cell(
     );
 
     // Multi-terminal detector: seq → first ack only.
-    let acked: Arc<Mutex<Vec<bool>>> =
-        Arc::new(Mutex::new(vec![false; total_ops as usize]));
+    let acked: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(vec![false; total_ops as usize]));
     let barrier = Arc::new(Barrier::new(concurrency));
     let mut joins = Vec::new();
 
@@ -301,10 +303,7 @@ fn run_cell(
                     .unwrap_or_else(|e| panic!("put_collection seq={seq}: {e}"));
                 {
                     let mut g = acked.lock().unwrap();
-                    assert!(
-                        !g[seq as usize],
-                        "double-ack for seq={seq}"
-                    );
+                    assert!(!g[seq as usize], "double-ack for seq={seq}");
                     g[seq as usize] = true;
                 }
                 seq += concurrency as u64;
@@ -361,8 +360,7 @@ fn run_cell(
     let host2 = StoreHost::open_with_adaptive_write(&root, policy).unwrap();
     let heap2 = host2.open_heap(ids.cap);
 
-    let mut reopen_chain: Vec<(u64, Vec<u8>, [u8; 32], u64)> =
-        Vec::with_capacity(all_ops.len());
+    let mut reopen_chain: Vec<(u64, Vec<u8>, [u8; 32], u64)> = Vec::with_capacity(all_ops.len());
     for op in &all_ops {
         let got = heap2
             .get_collection(&coll, &op.key)

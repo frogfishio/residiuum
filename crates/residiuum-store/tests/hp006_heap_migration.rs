@@ -68,14 +68,9 @@ fn sample_inventory(unlabelled: usize, labelled: usize, quarantine: usize) -> So
 }
 
 fn run_to_dual_read(root: &std::path::Path, inv: SourceInventory) -> HeapMigrationJob {
-    let mut job = HeapMigrationJob::begin_preflight(
-        root,
-        uuidish(0x01),
-        uuidish(0x02),
-        uuidish(0x03),
-        inv,
-    )
-    .unwrap();
+    let mut job =
+        HeapMigrationJob::begin_preflight(root, uuidish(0x01), uuidish(0x02), uuidish(0x03), inv)
+            .unwrap();
     job.run_establish_and_identify(&["users", "orders"])
         .unwrap();
     assert_eq!(job.state().phase, MigrationPhase::DualRead);

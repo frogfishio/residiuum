@@ -36,8 +36,13 @@ impl std::fmt::Display for PathRejectReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkPathClass {
-    Allowed { resolved: PathBuf },
-    Rejected { reason: PathRejectReason, path: PathBuf },
+    Allowed {
+        resolved: PathBuf,
+    },
+    Rejected {
+        reason: PathRejectReason,
+        path: PathBuf,
+    },
 }
 
 /// Classify a candidate dedicated work root.
@@ -207,9 +212,8 @@ fn resolve_for_guard(path: &Path) -> Result<PathBuf, RunnerError> {
 }
 
 fn fs_canonicalize(path: &Path) -> Result<PathBuf, RunnerError> {
-    std::fs::canonicalize(path).map_err(|e| {
-        RunnerError::InvalidPath(format!("canonicalize {}: {e}", path.display()))
-    })
+    std::fs::canonicalize(path)
+        .map_err(|e| RunnerError::InvalidPath(format!("canonicalize {}: {e}", path.display())))
 }
 
 #[cfg(test)]

@@ -220,7 +220,10 @@ impl CampaignReport {
         for l in &self.lanes {
             if l.status == "skipped" {
                 assert!(
-                    l.reason.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false),
+                    l.reason
+                        .as_ref()
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false),
                     "silent skip forbidden for lane {}",
                     l.lane
                 );
@@ -243,9 +246,7 @@ pub fn load_failure_combinations(path: &Path) -> Result<FailureCombinationDoc, S
 }
 
 /// Build composed-failure schedule decisions for the campaign.
-pub fn composed_schedule(
-    doc: &FailureCombinationDoc,
-) -> Result<Vec<ScheduleDecision>, String> {
+pub fn composed_schedule(doc: &FailureCombinationDoc) -> Result<Vec<ScheduleDecision>, String> {
     schedule(doc, false)
 }
 
@@ -335,18 +336,9 @@ mod tests {
 
     #[test]
     fn classify_old_new_unknown() {
-        assert_eq!(
-            classify_outcome(false, false, true),
-            CrashOutcomeClass::Old
-        );
-        assert_eq!(
-            classify_outcome(true, true, true),
-            CrashOutcomeClass::New
-        );
-        assert_eq!(
-            classify_outcome(false, true, true),
-            CrashOutcomeClass::New
-        );
+        assert_eq!(classify_outcome(false, false, true), CrashOutcomeClass::Old);
+        assert_eq!(classify_outcome(true, true, true), CrashOutcomeClass::New);
+        assert_eq!(classify_outcome(false, true, true), CrashOutcomeClass::New);
         assert_eq!(
             classify_outcome(false, false, false),
             CrashOutcomeClass::Unknown

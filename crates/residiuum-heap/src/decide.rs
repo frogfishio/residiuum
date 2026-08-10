@@ -312,12 +312,12 @@ pub fn refresh_capability_or_terminate(cap: &HeapCap) -> Result<(), HeapError> {
 mod tests {
     use super::*;
     use crate::certificate::VerifiedCertificate;
-    use crate::snapshot::HeapAdministrativeState;
     use crate::constraints::Constraints;
     use crate::ids::{
         AuthorityEpoch, AuthorityGeneration, CertificateId, DeploymentId, HeapId, SecurityRevision,
     };
     use crate::rights::Rights;
+    use crate::snapshot::HeapAdministrativeState;
 
     fn sample_snap(heap: HeapId, dep: DeploymentId, master: [u8; 32]) -> HeapSecuritySnapshot {
         HeapSecuritySnapshot {
@@ -354,7 +354,14 @@ mod tests {
             expires_at: 4_000_000_000,
             issuer_master_key_id: [5u8; 32],
         };
-        mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+        mint_capability(
+            slot,
+            &cert,
+            TrustedInstant {
+                unix_s: 1_700_000_000,
+            },
+        )
+        .unwrap()
     }
 
     #[test]

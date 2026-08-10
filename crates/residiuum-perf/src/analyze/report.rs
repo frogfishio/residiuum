@@ -3,7 +3,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::classify::AttributionResult;
-use super::falsify::{falsification_experiments, FalsificationExperiment, TuningCandidateComparison};
+use super::falsify::{
+    falsification_experiments, FalsificationExperiment, TuningCandidateComparison,
+};
 use super::narratives::NarrativeFinding;
 
 pub const REPORT_PROFILE: &str = "residiuum-performance-attribution-v1";
@@ -44,11 +46,11 @@ pub fn render_markdown(report: &AttributionReport) -> String {
     let mut md = String::new();
     md.push_str("# Attribution report\n\n");
     md.push_str(&format!("Profile: `{}`\n\n", report.profile));
-    md.push_str(&format!("## Verdict\n\n**{}** ({})\n\n", a.verdict, a.confidence));
     md.push_str(&format!(
-        "- Run IDs: {}\n",
-        a.run_ids.join(", ")
+        "## Verdict\n\n**{}** ({})\n\n",
+        a.verdict, a.confidence
     ));
+    md.push_str(&format!("- Run IDs: {}\n", a.run_ids.join(", ")));
     if let Some(e) = a.effect_size {
         md.push_str(&format!("- Effect size (relative throughput): {e:.4}\n"));
     }
@@ -115,23 +117,26 @@ pub fn render_markdown(report: &AttributionReport) -> String {
         md.push_str("No plan-required false narratives detected.\n\n");
     } else {
         for f in detected {
-            md.push_str(&format!(
-                "- **{}**: {}\n",
-                f.narrative_id, f.detail
-            ));
+            md.push_str(&format!("- **{}**: {}\n", f.narrative_id, f.detail));
         }
         md.push('\n');
     }
 
     md.push_str("## Falsification experiments\n\n");
     for e in &report.falsification_experiments {
+        md.push_str(&format!("### {}. {} (`{}`)\n\n", e.rank, e.title, e.id));
         md.push_str(&format!(
-            "### {}. {} (`{}`)\n\n",
-            e.rank, e.title, e.id
+            "- Change one variable: `{}`\n",
+            e.changes_one_variable
         ));
-        md.push_str(&format!("- Change one variable: `{}`\n", e.changes_one_variable));
-        md.push_str(&format!("- If verdict true: {}\n", e.expected_if_verdict_true));
-        md.push_str(&format!("- If verdict false: {}\n\n", e.expected_if_verdict_false));
+        md.push_str(&format!(
+            "- If verdict true: {}\n",
+            e.expected_if_verdict_true
+        ));
+        md.push_str(&format!(
+            "- If verdict false: {}\n\n",
+            e.expected_if_verdict_false
+        ));
     }
 
     md.push_str("## Tuning candidates\n\n");

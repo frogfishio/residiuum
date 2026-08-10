@@ -69,7 +69,12 @@ fn default_key_space() -> u64 {
 }
 
 impl WorkloadManifest {
-    pub fn fixed_size_insert(workload_id: impl Into<String>, seed: u64, size: u64, op_count: u64) -> Self {
+    pub fn fixed_size_insert(
+        workload_id: impl Into<String>,
+        seed: u64,
+        size: u64,
+        op_count: u64,
+    ) -> Self {
         Self {
             schema: "residiuum-pqh2-workload-manifest-v1".into(),
             workload_id: workload_id.into(),
@@ -105,9 +110,7 @@ impl WorkloadManifest {
 
     /// Build the full logical op plan (descriptors only — no payload bodies).
     pub fn build_ops(&self) -> Result<Vec<LogicalOp>, WorkloadError> {
-        self.schedule
-            .validate()
-            .map_err(WorkloadError::Msg)?;
+        self.schedule.validate().map_err(WorkloadError::Msg)?;
         if self.op_count == 0 {
             return Ok(Vec::new());
         }
@@ -185,9 +188,7 @@ impl WorkloadManifest {
             return Ok(());
         }
         // Streaming path: same logic as build_ops without Vec retention of all.
-        self.schedule
-            .validate()
-            .map_err(WorkloadError::Msg)?;
+        self.schedule.validate().map_err(WorkloadError::Msg)?;
         let sampler = self.sampler();
         let key_space = self.key_space.max(1);
         for seq in 0..self.op_count {

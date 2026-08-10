@@ -33,7 +33,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-fn policy(mode: AdaptiveWriteMode, min_samples: u32, collection_delay_ms: u64) -> AdaptiveWritePolicy {
+fn policy(
+    mode: AdaptiveWriteMode,
+    min_samples: u32,
+    collection_delay_ms: u64,
+) -> AdaptiveWritePolicy {
     let mut p = AdaptiveWritePolicy::machine_defaults();
     p.mode = mode;
     p.maximum_cookers = 2;
@@ -75,7 +79,14 @@ fn mint_cap(heap: HeapId, deployment: DeploymentId) -> HeapCap {
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 struct Genesis {
@@ -168,9 +179,7 @@ fn run_facade_cell(
     let file_sync = {
         let physical = host.physical();
         let g = physical.lock().unwrap();
-        g.boundary_snapshot()
-            .counters
-            .count(BoundaryKind::FileSync)
+        g.boundary_snapshot().counters.count(BoundaryKind::FileSync)
     };
     let logical_ack = total_ops;
     let sync_per = if logical_ack > 0 {
@@ -311,10 +320,7 @@ fn q2_adaptive_warm_can_select_batch_on_multi_item() {
                 sel.entries > 1 && receipts.len() as u64 == sel.entries,
                 "Batch selection must install more than one item"
             );
-            assert!(
-                receipts.len() > 1,
-                "warm Batch diverges from cold take-1"
-            );
+            assert!(receipts.len() > 1, "warm Batch diverges from cold take-1");
         }
         AwoPlan::Natural => {
             assert_eq!(receipts.len(), 1);
@@ -393,10 +399,7 @@ fn q2_concurrent_facade_sparse_adaptive_latency_envelope() {
     );
     eprintln!(
         "q2 sparse adaptive acks={} file_sync={} sync/ack={:.3} wall_ms={}",
-        adaptive_c.logical_ack,
-        adaptive_c.file_sync,
-        adaptive_c.sync_per_ack,
-        adaptive_c.wall_ms
+        adaptive_c.logical_ack, adaptive_c.file_sync, adaptive_c.sync_per_ack, adaptive_c.wall_ms
     );
 
     assert_eq!(static_c.logical_ack, ops);

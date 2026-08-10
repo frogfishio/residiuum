@@ -131,7 +131,13 @@ fn csq4_every_ordinary_transition_reached() {
     assert!(!h.is_empty());
     cov.record(TransitionClass::HistoryWalk);
     let hv = store.historical_get(b"b", eid(3));
-    assert!(matches!(hv, HistoricalValue::Found { is_current: false, .. }));
+    assert!(matches!(
+        hv,
+        HistoricalValue::Found {
+            is_current: false,
+            ..
+        }
+    ));
     cov.record(TransitionClass::HistoricalGet);
     let lc = store.last_complete(b"b", 8);
     assert!(lc.complete.is_some() || !lc.partials.is_empty() || lc.tombstone_stop);
@@ -157,7 +163,10 @@ fn csq4_every_ordinary_transition_reached() {
     // Derived cache fail does not roll back (PUB-002 model): authority intact
     let before = restored.observe();
     // simulate failed derived update: no-op on events
-    assert_eq!(before.history_event_ids, restored.observe().history_event_ids);
+    assert_eq!(
+        before.history_event_ids,
+        restored.observe().history_event_ids
+    );
     cov.record(TransitionClass::DerivedCacheFailNoRollback);
     cov.record(TransitionClass::PublishAfterDurableBytes);
 
@@ -166,7 +175,10 @@ fn csq4_every_ordinary_transition_reached() {
     restored
         .put_durable(b"z".to_vec(), b"only-z".to_vec(), "opz".into(), eid(10))
         .unwrap();
-    assert_eq!(format!("{:?}", bob_before), format!("{:?}", restored.get(b"b")));
+    assert_eq!(
+        format!("{:?}", bob_before),
+        format!("{:?}", restored.get(b"b"))
+    );
     cov.record(TransitionClass::NonInterference);
 
     let missing = cov.missing_ordinary();
@@ -280,7 +292,10 @@ fn csq_gen_hist_abs_obs() {
     // ABS-002 scan still lists key under damage
     let page = m.scan_keys();
     assert_eq!(page.completeness, ScanCompleteness::Incomplete);
-    assert!(page.rows.iter().any(|r| r.subject == b"s" && r.key_survives));
+    assert!(page
+        .rows
+        .iter()
+        .any(|r| r.subject == b"s" && r.key_survives));
 
     // OBS false harnesses
     let obs = m.observe();
@@ -294,7 +309,7 @@ fn csq_pub_and_id_writer() {
     let mut m = ModelStore::new(sid());
     assert!(m.try_acquire_writer(1));
     assert!(!m.try_acquire_writer(2)); // no effect
-    // Contender must not put under our policy when caller checks first
+                                       // Contender must not put under our policy when caller checks first
     assert!(!m.try_acquire_writer(2));
     store_put_as_holder(&mut m, 1);
     // ID-005 non-interference
@@ -397,8 +412,5 @@ fn csq4_existing_unit_tests_still_green() {
     let mut m = ModelStore::new(sid());
     m.put_durable(b"alice".to_vec(), b"v1".to_vec(), "op1".into(), eid(1))
         .unwrap();
-    assert!(matches!(
-        m.get(b"alice"),
-        ValueObservation::Present { .. }
-    ));
+    assert!(matches!(m.get(b"alice"), ValueObservation::Present { .. }));
 }

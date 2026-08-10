@@ -54,11 +54,7 @@ fn inventory_descriptor_ids(root: &Path, store_id: [u8; 16]) -> BTreeMap<[u8; 16
     let mut add = |p: PathBuf| {
         if let Some(id) = decode_descriptor_id(&p, store_id) {
             if let Some(name_id) = segment_id_from_filename(&p) {
-                assert_eq!(
-                    name_id, id,
-                    "filename/descriptor mismatch: {}",
-                    p.display()
-                );
+                assert_eq!(name_id, id, "filename/descriptor mismatch: {}", p.display());
             }
             map.entry(id).or_default().push(p);
         }
@@ -132,10 +128,7 @@ fn run_reproducer(root: &Path, shards: usize, async_seal: bool) {
     if !async_seal {
         store.set_async_lifecycle(false);
     }
-    assert_eq!(
-        store.get(VICTIM_KEY).unwrap().as_deref(),
-        Some(VICTIM_BODY)
-    );
+    assert_eq!(store.get(VICTIM_KEY).unwrap().as_deref(), Some(VICTIM_BODY));
 
     store
         .put("after-reopen/0", b"rot1", DurabilityMode::Buffered)
@@ -162,10 +155,7 @@ fn run_reproducer(root: &Path, shards: usize, async_seal: bool) {
             path.display()
         );
     }
-    assert_eq!(
-        store.get(VICTIM_KEY).unwrap().as_deref(),
-        Some(VICTIM_BODY)
-    );
+    assert_eq!(store.get(VICTIM_KEY).unwrap().as_deref(), Some(VICTIM_BODY));
 }
 
 #[test]
@@ -197,8 +187,7 @@ fn p0_reproducer_cache_miss_rebuild() {
         for ent in fs::read_dir(&idx).unwrap() {
             let p = ent.unwrap().path();
             if p.extension().and_then(|e| e.to_str()) == Some("idx")
-                || p
-                    .file_name()
+                || p.file_name()
                     .and_then(|n| n.to_str())
                     .map(|n| n.contains("primary"))
                     .unwrap_or(false)
@@ -208,10 +197,7 @@ fn p0_reproducer_cache_miss_rebuild() {
         }
     }
     let store = Store::open(root).unwrap();
-    assert_eq!(
-        store.get(VICTIM_KEY).unwrap().as_deref(),
-        Some(VICTIM_BODY)
-    );
+    assert_eq!(store.get(VICTIM_KEY).unwrap().as_deref(), Some(VICTIM_BODY));
     assert_unique_descriptors(root, store.store_id());
 }
 
@@ -220,13 +206,9 @@ fn p0_planted_active_sealed_collision_refuses_open() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let mut store = Store::create_with_shards(root, 1).unwrap();
-    store
-        .put("a", b"1", DurabilityMode::Buffered)
-        .unwrap();
+    store.put("a", b"1", DurabilityMode::Buffered).unwrap();
     seal_wait(&mut store);
-    store
-        .put("b", b"2", DurabilityMode::Buffered)
-        .unwrap();
+    store.put("b", b"2", DurabilityMode::Buffered).unwrap();
     seal_wait(&mut store);
     let store_id = store.store_id();
     let paths = StorePaths::new(root);
@@ -269,9 +251,7 @@ fn p0_publish_dest_exists_is_collision_bytes_unchanged() {
     let root = dir.path();
     let mut store = Store::create_with_shards(root, 1).unwrap();
     store.set_async_lifecycle(false);
-    store
-        .put("x", b"1", DurabilityMode::Buffered)
-        .unwrap();
+    store.put("x", b"1", DurabilityMode::Buffered).unwrap();
     seal_wait(&mut store);
     let paths = StorePaths::new(root);
     let sealed = list_sealed_segment_files(&paths).unwrap();
@@ -366,7 +346,14 @@ fn two_sealed_segments(root: &Path) -> (StorePaths, [u8; 16], PathBuf, Vec<u8>, 
     assert!(sealed.len() >= 2);
     let a = sealed[0].clone();
     let b = sealed[1].clone();
-    (paths, store_id, a.clone(), fs::read(&a).unwrap(), b.clone(), fs::read(&b).unwrap())
+    (
+        paths,
+        store_id,
+        a.clone(),
+        fs::read(&a).unwrap(),
+        b.clone(),
+        fs::read(&b).unwrap(),
+    )
 }
 
 fn open_err(root: &Path) -> StoreError {
@@ -443,14 +430,9 @@ fn p0_summary_frame_publish_refuses_existing_sealed() {
     let pending = paths.pending_segment(&id_a);
     fs::create_dir_all(paths.pending_seal_dir()).unwrap();
     fs::write(&pending, &bytes_b).unwrap();
-    let err = publish_sealed_from_summary_frame(
-        &pending,
-        &sealed_a,
-        bytes_b.len() as u64,
-        &[],
-        false,
-    )
-    .unwrap_err();
+    let err =
+        publish_sealed_from_summary_frame(&pending, &sealed_a, bytes_b.len() as u64, &[], false)
+            .unwrap_err();
     assert_typed_collision(err);
     assert_eq!(fs::read(&sealed_a).unwrap(), bytes_a);
     assert!(pending.is_file());
@@ -568,10 +550,12 @@ fn p0_shadow_publish_refuses_existing() {
 fn p0_filename_descriptor_mismatch_refuses() {
     let dir = tempfile::tempdir().unwrap();
     let (paths, store_id, sealed_a, bytes_a, ..) = two_sealed_segments(dir.path());
-    let wrong = paths.segments_dir().join(format!("{}.residiuum", hex16(&[0xABu8; 16])));
+    let wrong = paths
+        .segments_dir()
+        .join(format!("{}.residiuum", hex16(&[0xABu8; 16])));
     fs::write(&wrong, &bytes_a).unwrap();
-    let err = refuse_authoritative_collisions(&paths, store_id, 1, SafetyLimits::default())
-        .unwrap_err();
+    let err =
+        refuse_authoritative_collisions(&paths, store_id, 1, SafetyLimits::default()).unwrap_err();
     assert!(
         matches!(err, StoreError::CorruptMeta(_))
             || matches!(err, StoreError::SegmentIdCollision { .. }),
@@ -664,16 +648,21 @@ fn p0_disk_pread_rejects_wrong_record_at_offset() {
             if frame.header.known_kind() != Some(FrameKind::ItemEvent) {
                 continue;
             }
-            if let Ok((header, envelope, _body, _, _)) =
-                residiuum_format::verify_frame_at(&bytes[range.start as usize..], SafetyLimits::default())
-            {
+            if let Ok((header, envelope, _body, _, _)) = residiuum_format::verify_frame_at(
+                &bytes[range.start as usize..],
+                SafetyLimits::default(),
+            ) {
                 if let Some(env) = decode_item_envelope(envelope) {
                     items.push((range.start, header.event_id, env.item_id, env.subject));
                 }
             }
         }
     }
-    assert!(items.len() >= 2, "need two item frames, got {}", items.len());
+    assert!(
+        items.len() >= 2,
+        "need two item frames, got {}",
+        items.len()
+    );
     let (off_b, _, _, _) = &items[1];
     let (_off_a, ev_a, item_a, subj_a) = &items[0];
     let expect = LocatorExpect {

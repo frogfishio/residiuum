@@ -10,8 +10,8 @@
 
 use residiuum_cluster::raft::LogCommand;
 use residiuum_cluster::{
-    ClusterId, ElectError, MemoryRaftNetwork, NetworkRaftNode, NodeId, PartitionId,
-    PlacementEpoch, ProposeError, RaftPeerStore, RequestVoteRequest, RAFT_RPC_PROFILE,
+    ClusterId, ElectError, MemoryRaftNetwork, NetworkRaftNode, NodeId, PartitionId, PlacementEpoch,
+    ProposeError, RaftPeerStore, RequestVoteRequest, RAFT_RPC_PROFILE,
 };
 use tempfile::tempdir;
 
@@ -81,8 +81,8 @@ fn old_leader_fenced_after_new_term() {
     net.mark_offline(old);
     let (new_leader, new_term) = net.campaign(p, voters[1]).unwrap();
     assert!(new_term.0 > old_term.0);
-    assert!(net
-        .propose(
+    assert!(
+        net.propose(
             p,
             new_leader,
             LogCommand::Put {
@@ -92,7 +92,8 @@ fn old_leader_fenced_after_new_term() {
             None,
         )
         .unwrap()
-        .committed);
+        .committed
+    );
 
     net.mark_online(old);
     match net.propose(
@@ -120,9 +121,7 @@ fn operation_id_retry_same_log_index() {
         subject: "idem".into(),
         value: b"once".to_vec(),
     };
-    let a = net
-        .propose(p, leader, cmd.clone(), Some(oid))
-        .unwrap();
+    let a = net.propose(p, leader, cmd.clone(), Some(oid)).unwrap();
     let b = net.propose(p, leader, cmd, Some(oid)).unwrap();
     assert!(a.committed && b.committed);
     assert_eq!(a.position, b.position);

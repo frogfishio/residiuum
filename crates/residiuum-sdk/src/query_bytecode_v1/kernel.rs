@@ -26,18 +26,47 @@ pub struct CompiledKernelWhere {
     pub source: String,
     prog: sda_core::Program,
     constant: Option<bool>,
+    direct: Option<DirectPredicate>,
+    requires_logical_key: bool,
+}
+
+#[derive(Debug)]
+enum DirectPredicate {
+    Cmp {
+        op: CompareOp,
+        path: Vec<String>,
+        literal: JsonValue,
+    },
+    And(Vec<DirectPredicate>),
+}
+
+impl DirectPredicate {
+    fn eval(&self, doc: &JsonValue) -> bool {
+        match self {
+            Self::Cmp { op, path, literal } => {
+                resolve_ref(doc, path).is_some_and(|value| direct_compare(*op, value, literal))
+            }
+            Self::And(args) => args.iter().all(|arg| arg.eval(doc)),
+        }
+    }
 }
 
 impl CompiledKernelWhere {
-    /// Whether evaluation is independent of the input document.
-    pub(crate) fn is_constant(&self) -> bool {
-        self.constant.is_some()
+    pub(crate) fn constant_value(&self) -> Option<bool> {
+        self.constant
+    }
+
+    pub(crate) fn requires_logical_key(&self) -> bool {
+        self.requires_logical_key
     }
 
     /// Evaluate against one document (`input` binding).
     pub fn eval_doc(&self, doc: &JsonValue) -> Result<bool, Error> {
         if let Some(value) = self.constant {
             return Ok(value);
+        }
+        if let Some(direct) = &self.direct {
+            return Ok(direct.eval(doc));
         }
         match self.prog.run_json("input", doc.clone()) {
             Ok(JsonValue::Bool(b)) => Ok(b),
@@ -65,12 +94,138 @@ pub fn compile_where(
         "false" => Some(false),
         _ => None,
     };
+    let direct = compile_direct(pred, params);
+    let requires_logical_key = predicate_uses_logical_key(pred);
     Ok(CompiledKernelWhere {
         profile: KERNEL_PROFILE,
         source,
         prog,
         constant,
+        direct,
+        requires_logical_key,
     })
+}
+
+fn predicate_uses_logical_key(predicate: &Predicate) -> bool {
+    let operand_uses_key = |operand: &Operand| matches!(operand, Operand::Path { path } if matches!(path.0.first().map(String::as_str), Some("_key" | "$key")));
+    match predicate {
+        Predicate::Cmp { left, right, .. } => operand_uses_key(left) || operand_uses_key(right),
+        Predicate::In { left, .. } => operand_uses_key(left),
+        Predicate::Present { path }
+        | Predicate::Missing { path }
+        | Predicate::IsNull { path, .. }
+        | Predicate::StartsWith { path, .. }
+        | Predicate::Contains { path, .. } => {
+            matches!(path.0.first().map(String::as_str), Some("_key" | "$key"))
+        }
+        Predicate::And { args } | Predicate::Or { args } => {
+            args.iter().any(predicate_uses_logical_key)
+        }
+        Predicate::Not { arg } => predicate_uses_logical_key(arg),
+        Predicate::True | Predicate::False => false,
+    }
+}
+
+fn compile_direct(
+    pred: &Predicate,
+    params: &BTreeMap<String, JsonValue>,
+) -> Option<DirectPredicate> {
+    match pred {
+        Predicate::Cmp { cmp, left, right } => match (
+            direct_operand(left, params)?,
+            direct_operand(right, params)?,
+        ) {
+            (DirectOperand::Path(path), DirectOperand::Literal(literal)) => {
+                Some(DirectPredicate::Cmp {
+                    op: *cmp,
+                    path,
+                    literal,
+                })
+            }
+            (DirectOperand::Literal(literal), DirectOperand::Path(path)) => {
+                Some(DirectPredicate::Cmp {
+                    op: reverse_compare(*cmp),
+                    path,
+                    literal,
+                })
+            }
+            _ => None,
+        },
+        Predicate::And { args } if !args.is_empty() => args
+            .iter()
+            .map(|arg| compile_direct(arg, params))
+            .collect::<Option<Vec<_>>>()
+            .map(DirectPredicate::And),
+        _ => None,
+    }
+}
+
+enum DirectOperand {
+    Path(Vec<String>),
+    Literal(JsonValue),
+}
+
+fn direct_operand(
+    operand: &Operand,
+    params: &BTreeMap<String, JsonValue>,
+) -> Option<DirectOperand> {
+    match operand {
+        Operand::Path { path } => Some(DirectOperand::Path(path.0.clone())),
+        Operand::Literal { value } => Some(DirectOperand::Literal(value.clone())),
+        Operand::Param { name } => params.get(name).cloned().map(DirectOperand::Literal),
+    }
+}
+
+fn reverse_compare(op: CompareOp) -> CompareOp {
+    match op {
+        CompareOp::Eq => CompareOp::Eq,
+        CompareOp::Ne => CompareOp::Ne,
+        CompareOp::Lt => CompareOp::Gt,
+        CompareOp::Lte => CompareOp::Gte,
+        CompareOp::Gt => CompareOp::Lt,
+        CompareOp::Gte => CompareOp::Lte,
+    }
+}
+
+fn resolve_ref<'a>(doc: &'a JsonValue, path: &[String]) -> Option<&'a JsonValue> {
+    let mut current = doc;
+    for segment in path {
+        current = current.as_object()?.get(segment)?;
+    }
+    Some(current)
+}
+
+fn direct_compare(op: CompareOp, left: &JsonValue, right: &JsonValue) -> bool {
+    match op {
+        CompareOp::Eq => left == right,
+        CompareOp::Ne => left != right,
+        CompareOp::Lt | CompareOp::Lte | CompareOp::Gt | CompareOp::Gte => {
+            direct_order_compare(op, left, right)
+        }
+    }
+}
+
+fn direct_order_compare(op: CompareOp, left: &JsonValue, right: &JsonValue) -> bool {
+    let compare = |ordering: std::cmp::Ordering| match op {
+        CompareOp::Lt => ordering.is_lt(),
+        CompareOp::Lte => ordering.is_le(),
+        CompareOp::Gt => ordering.is_gt(),
+        CompareOp::Gte => ordering.is_ge(),
+        _ => false,
+    };
+    match (left, right) {
+        (JsonValue::Number(left), JsonValue::Number(right)) => {
+            match (left.as_f64(), right.as_f64()) {
+                (Some(left), Some(right)) => left.partial_cmp(&right).is_some_and(compare),
+                _ => match (left.as_i64(), right.as_i64()) {
+                    (Some(left), Some(right)) => compare(left.cmp(&right)),
+                    _ => false,
+                },
+            }
+        }
+        (JsonValue::String(left), JsonValue::String(right)) => compare(left.cmp(right)),
+        _ => false,
+    }
 }
 
 /// Lower predicate AST → SDA boolean expression (no trailing `;`).
@@ -499,5 +654,50 @@ mod tests {
         };
         eq_oracle(&pred, &json!({"tags": ["x", "y"]}), &params);
         eq_oracle(&pred, &json!({"tags": ["z"]}), &params);
+    }
+
+    #[test]
+    fn direct_kernel_admits_nested_compound_and_matches_oracle() {
+        let pred = Predicate::And {
+            args: vec![
+                Predicate::Cmp {
+                    cmp: CompareOp::Gte,
+                    left: Operand::path(Path::parse_dotted("amount").unwrap()),
+                    right: Operand::literal(json!(100)),
+                },
+                Predicate::Cmp {
+                    cmp: CompareOp::Lt,
+                    left: Operand::path(Path::parse_dotted("amount").unwrap()),
+                    right: Operand::literal(json!(500)),
+                },
+                Predicate::Cmp {
+                    cmp: CompareOp::Eq,
+                    left: Operand::path(Path::parse_dotted("nested.l1.flag").unwrap()),
+                    right: Operand::literal(json!(true)),
+                },
+            ],
+        };
+        let params = BTreeMap::new();
+        let kernel = compile_where(&pred, &params).unwrap();
+        assert!(kernel.direct.is_some());
+        for doc in [
+            json!({"amount": 100, "nested": {"l1": {"flag": true}}}),
+            json!({"amount": 499.5, "nested": {"l1": {"flag": true}}}),
+            json!({"amount": 500, "nested": {"l1": {"flag": true}}}),
+            json!({"amount": 200, "nested": {"l1": {}}}),
+            json!({}),
+        ] {
+            eq_oracle(&pred, &doc, &params);
+        }
+    }
+
+    #[test]
+    fn unsupported_predicate_retains_sda_fallback() {
+        let pred = Predicate::Contains {
+            path: Path::parse_dotted("tags").unwrap(),
+            needle: json!("x"),
+        };
+        let kernel = compile_where(&pred, &BTreeMap::new()).unwrap();
+        assert!(kernel.direct.is_none());
     }
 }

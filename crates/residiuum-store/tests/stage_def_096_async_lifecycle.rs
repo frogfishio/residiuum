@@ -55,9 +55,7 @@ fn explicit_seal_active_still_sync_and_drains() {
     let root = dir.path().join("s");
     let mut store = Store::create(&root).unwrap();
     store.set_seal_threshold(64 * 1024 * 1024); // avoid auto-seal
-    store
-        .put("a", b"1", DurabilityMode::Durable)
-        .unwrap();
+    store.put("a", b"1", DurabilityMode::Durable).unwrap();
     store.seal_active().unwrap();
     assert_eq!(store.pending_seal_inflight(), 0);
     assert_eq!(store.get("a").unwrap().as_deref(), Some(b"1".as_slice()));

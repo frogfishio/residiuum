@@ -48,7 +48,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -204,7 +211,11 @@ fn live_collection_rql_still_works_without_view() {
     let mut col = client.create_collection("docs").unwrap().collection;
     col.put("k", &serde_json::json!({"v": 1})).unwrap();
     let page = col
-        .rql("from docs", &Parameters::default(), QueryRunOptions::default())
+        .rql(
+            "from docs",
+            &Parameters::default(),
+            QueryRunOptions::default(),
+        )
         .expect("live rql");
     assert_eq!(page.rows.len(), 1);
 }

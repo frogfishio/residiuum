@@ -7,18 +7,19 @@
 //! In-process cluster (`Residiuum::create_cluster`) already shares the same logical
 //! commit model; this suite proves the network path matches that contract.
 
-
 use residiuum_cluster::ClusterConfig;
-use residiuum_sdk::{json, ConnectOptions, Residiuum, PutOptions, RemoteClient};
+use residiuum_sdk::{json, ConnectOptions, PutOptions, RemoteClient, Residiuum};
 
-
+use residiuum_server::{
+    serve_cluster_node, serve_store_with, AuthzPolicy, ServeOptions, CLUSTER_COMMIT_PROFILE,
+    FEATURE_CLUSTER_COMMIT_V1, FEATURE_RAFT_RPC_V1,
+};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
-use residiuum_server::{AuthzPolicy, CLUSTER_COMMIT_PROFILE, FEATURE_CLUSTER_COMMIT_V1, FEATURE_RAFT_RPC_V1, ServeOptions, serve_cluster_node, serve_store_with};
 
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -42,7 +43,11 @@ fn start_cluster_nodes(
     root: &std::path::Path,
     token: &str,
     n: u32,
-) -> (Vec<String>, Vec<Arc<AtomicBool>>, Vec<thread::JoinHandle<()>>) {
+) -> (
+    Vec<String>,
+    Vec<Arc<AtomicBool>>,
+    Vec<thread::JoinHandle<()>>,
+) {
     let mut binds = Vec::new();
     let mut stops = Vec::new();
     let mut handles = Vec::new();
@@ -56,7 +61,8 @@ fn start_cluster_nodes(
         let stop_c = Arc::clone(&stop);
         let handle = thread::spawn(move || {
             let policy = AuthzPolicy::shared_superuser(&token_c);
-            let opts = ServeOptions::new().legacy_token_server()
+            let opts = ServeOptions::new()
+                .legacy_token_server()
                 .experimental_network_cluster(true)
                 .auth_token(token_c.clone())
                 .authz(policy)
@@ -161,10 +167,7 @@ fn in_process_and_network_share_commit_semantics() {
         "network put ack must be committed after quorum (not routing-only)"
     );
 
-    let v = client
-        .get_json("docs", "net")
-        .expect("get")
-        .expect("found");
+    let v = client.get_json("docs", "net").expect("get").expect("found");
     assert_eq!(v["via"], "network");
 
     // Prior in-process key remains visible on a linearizable read path.
@@ -282,10 +285,7 @@ fn operation_id_retry_preserves_one_network_write() {
         r1.event_id, r2.event_id,
         "distinct client ops must yield distinct events"
     );
-    assert_eq!(
-        client.get_json("c", "idem").unwrap().unwrap()["n"],
-        2
-    );
+    assert_eq!(client.get_json("c", "idem").unwrap().unwrap()["n"], 2);
 
     stop_nodes(&stops, handles);
 }
@@ -305,16 +305,20 @@ fn single_node_serve_without_raft_still_local_commit() {
     let path_c = path.clone();
     let bind_c = bind.clone();
     let h = thread::spawn(move || {
-        let opts = ServeOptions::new().legacy_token_server()
+        let opts = ServeOptions::new()
+            .legacy_token_server()
             .shutdown_flag(stop_c)
             .suppress_startup_report(true);
         let _ = serve_store_with(path_c, &bind_c, opts);
     });
     wait_for(&bind);
 
-    let mut client =
-        RemoteClient::connect_with(&bind, format!("residiuum://{bind}/s"), ConnectOptions::new())
-            .unwrap();
+    let mut client = RemoteClient::connect_with(
+        &bind,
+        format!("residiuum://{bind}/s"),
+        ConnectOptions::new(),
+    )
+    .unwrap();
     let r = client
         .put_json("x", "k", &json!(1), PutOptions::default())
         .unwrap();

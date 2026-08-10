@@ -14,9 +14,7 @@ fn reopen_exact_while_content_hash_pending() {
     // Force multiple mid-run auto-rotations without enrichment.
     for i in 0..80 {
         let key = format!("k{i:04}");
-        store
-            .put(&key, &payload, DurabilityMode::Buffered)
-            .unwrap();
+        store.put(&key, &payload, DurabilityMode::Buffered).unwrap();
     }
     // Do **not** call seal_active (that fills Known synchronously). Drain only
     // authoritative publishes so Pending digests remain from meta-publish.

@@ -748,9 +748,7 @@ mod tests {
         let log = Logger::with_sink(Arc::clone(&sink) as Arc<dyn LogSink>)
             .min_level(LogLevel::Info)
             .shared();
-        log.info(events::SERVER_START)
-            .reason("listening")
-            .emit();
+        log.info(events::SERVER_START).reason("listening").emit();
         // Debug below min — should not appear. Use builder with Debug level.
         log.info(events::RPC_COMPLETE)
             .level(LogLevel::Debug)

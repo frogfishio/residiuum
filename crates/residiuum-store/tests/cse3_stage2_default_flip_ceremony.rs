@@ -5,9 +5,7 @@
 //!   --test cse3_stage2_default_flip_ceremony -- --test-threads=1
 //! ```
 
-use residiuum_store::{
-    recovery_mode_path, DurabilityMode, RecoveryMode, Store, StorePaths,
-};
+use residiuum_store::{recovery_mode_path, DurabilityMode, RecoveryMode, Store, StorePaths};
 use std::fs;
 use tempfile::tempdir;
 
@@ -26,9 +24,7 @@ fn legacy_missing_marker_stays_materialized_on_open() {
     {
         let mut store =
             Store::create_with_shards_mode(dir.path(), 1, RecoveryMode::Materialized).unwrap();
-        store
-            .put("k", b"v", DurabilityMode::Buffered)
-            .unwrap();
+        store.put("k", b"v", DurabilityMode::Buffered).unwrap();
         store.seal_active().unwrap();
         store.wait_seals_applied().unwrap();
     }

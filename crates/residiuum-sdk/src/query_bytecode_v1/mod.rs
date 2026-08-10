@@ -21,6 +21,8 @@ mod core_phases;
 mod full_attach;
 mod full_imm_json;
 mod group_agg;
+mod group_spool;
+pub(crate) use group_agg::GroupAccumulator;
 mod ir_attach;
 mod ir_order;
 pub(crate) use ir_order::ordered_index_request;
@@ -64,20 +66,64 @@ use crate::rql_app_core::{compile_app_core, CompiledAppCore};
 use residiuum_heap::{CollectionId, HeapId};
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// Architecture freeze profile id.
 pub const BYTECODE_PROFILE: &str = "residiuum-query-bytecode-v1";
 
+/// Ownership form of a decoded value supplied by a query host.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HostJsonValue {
+    /// Independently owned JSON tree.
+    Owned(JsonValue),
+    /// Immutable deployment-cache value. Query execution clones it only when
+    /// an accepted result must become independently owned.
+    Shared(Arc<JsonValue>),
+}
+
+impl HostJsonValue {
+    pub(crate) fn as_value(&self) -> &JsonValue {
+        match self {
+            Self::Owned(value) => value,
+            Self::Shared(value) => value.as_ref(),
+        }
+    }
+
+    pub(crate) fn into_owned(self) -> JsonValue {
+        match self {
+            Self::Owned(value) => value,
+            Self::Shared(value) => value.as_ref().clone(),
+        }
+    }
+}
+
+impl From<JsonValue> for HostJsonValue {
+    fn from(value: JsonValue) -> Self {
+        Self::Owned(value)
+    }
+}
+
+impl From<Arc<JsonValue>> for HostJsonValue {
+    fn from(value: Arc<JsonValue>) -> Self {
+        Self::Shared(value)
+    }
+}
+
 /// Coverage-aware result of a host document read.
 ///
 /// `Hole` means the key is known to the host but its value cannot be supplied
-/// honestly (for example because an on-disk frame failed verification).  Query
+/// honestly (for example because an on-disk frame failed verification). Query
 /// execution may retain healthy rows only when its coverage policy explicitly
 /// allows incomplete results; complete coverage still fails closed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HostDocument {
     /// A verified, decodable JSON document.
-    Present(JsonValue),
+    Present {
+        /// Decoded application value.
+        value: HostJsonValue,
+        /// Original encoded logical body bytes when the host preserved them.
+        logical_bytes: Option<u64>,
+    },
     /// The key is absent at the requested consistency point.
     Absent,
     /// The key exists, but its value is an explicit coverage hole.
@@ -85,6 +131,17 @@ pub enum HostDocument {
         /// Stable machine-readable reason.
         code: String,
     },
+}
+
+/// Finished authoritative group/aggregate pushdown result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostGroupAggregate {
+    /// Deterministic aggregate rows.
+    pub rows: Vec<(String, JsonValue)>,
+    /// Number of authoritative documents examined.
+    pub examined_documents: u64,
+    /// Logical document bytes examined.
+    pub examined_bytes: u64,
 }
 
 /// Host data-access capabilities only (Decision 0 / RQL-X1 / **RQL-P1b**).
@@ -119,7 +176,10 @@ pub trait HostCapabilities {
         key: &str,
     ) -> Result<HostDocument, Error> {
         Ok(match self.get_json(collection_id, key)? {
-            Some(value) => HostDocument::Present(value),
+            Some(value) => HostDocument::Present {
+                value: value.into(),
+                logical_bytes: None,
+            },
             None => HostDocument::Absent,
         })
     }
@@ -166,6 +226,27 @@ pub trait HostCapabilities {
         Ok(None)
     }
 
+    /// Optional deduplicated candidate union for several equality values on
+    /// one field. `Some`, including an empty vector, must be exclusive and
+    /// complete; callers re-evaluate resolved documents.
+    fn lookup_index_keys_many(
+        &mut self,
+        collection_id: CollectionId,
+        field: &str,
+        values: &[JsonValue],
+    ) -> Result<Option<Vec<String>>, Error> {
+        let mut union = std::collections::BTreeSet::new();
+        for value in values {
+            let Some(keys) =
+                self.lookup_index_keys(collection_id, &[(field.to_string(), value.clone())])?
+            else {
+                return Ok(None);
+            };
+            union.extend(keys);
+        }
+        Ok(Some(union.into_iter().collect()))
+    }
+
     /// Candidate lookup using equality prefixes plus all constrained paths.
     /// Hosts without compound-prefix support retain exact-equality behaviour.
     fn lookup_index_keys_with_constraints(
@@ -184,6 +265,45 @@ pub trait HostCapabilities {
         _collection_id: CollectionId,
         _order: &[crate::plan_v1::OrderTerm],
     ) -> Result<Option<Vec<String>>, Error> {
+        Ok(None)
+    }
+
+    /// Optional authoritative source frontier for continuation-state fencing.
+    /// A conservative heap-wide frontier is admissible: drift merely disables
+    /// the optimization and never changes query meaning.
+    fn source_frontier(&mut self, _collection_id: CollectionId) -> Result<Option<[u8; 32]>, Error> {
+        Ok(None)
+    }
+
+    /// Optional complete rows of field values supplied exclusively by a
+    /// validated covering secondary index.
+    fn lookup_covering_index_values(
+        &mut self,
+        _collection_id: CollectionId,
+        _fields: &[String],
+    ) -> Result<Option<Vec<Vec<JsonValue>>>, Error> {
+        Ok(None)
+    }
+
+    /// Optional authoritative full scan projected to the requested JSON paths.
+    /// Implementations must return `None` rather than hide coverage holes.
+    fn scan_projected_values(
+        &mut self,
+        _collection_id: CollectionId,
+        _fields: &[String],
+    ) -> Result<Option<Vec<Vec<JsonValue>>>, Error> {
+        Ok(None)
+    }
+
+    /// Optional authoritative group/aggregate pushdown. Implementations must
+    /// return `None` rather than conceal coverage holes or identity drift.
+    fn scan_group_aggregate(
+        &mut self,
+        _collection_id: CollectionId,
+        _spec: &crate::plan_v1::GroupAggSpec,
+        _where_k: &CompiledKernelWhere,
+        _candidate_keys: Option<&[String]>,
+    ) -> Result<Option<HostGroupAggregate>, Error> {
         Ok(None)
     }
 }

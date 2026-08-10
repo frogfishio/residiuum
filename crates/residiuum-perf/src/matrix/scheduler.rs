@@ -1,7 +1,9 @@
 //! Seeded / counterbalanced matrix cell construction (SPEC §6.3.1 subset).
 
 use super::driver::{DatabaseState, DurabilityMode, LayerProfile};
-use super::profiles::{AdditiveFeature, BackgroundInterference, FeatureProfile, InterferenceProfile};
+use super::profiles::{
+    AdditiveFeature, BackgroundInterference, FeatureProfile, InterferenceProfile,
+};
 use crate::workload::{fixed_size_series, threshold_probes, DistributionId};
 use serde::{Deserialize, Serialize};
 
@@ -274,16 +276,14 @@ mod tests {
     #[test]
     fn includes_threshold_probes() {
         let m = build_matrix_cells(ScheduleSeed { seed: 1 });
-        let sizes: std::collections::HashSet<_> =
-            m.cells.iter().map(|c| c.payload_size).collect();
+        let sizes: std::collections::HashSet<_> = m.cells.iter().map(|c| c.payload_size).collect();
         assert!(sizes.contains(&4095) || sizes.contains(&4096) || sizes.contains(&4097));
     }
 
     #[test]
     fn includes_all_durability_modes() {
         let m = build_matrix_cells(ScheduleSeed { seed: 1 });
-        let durs: std::collections::HashSet<_> =
-            m.cells.iter().map(|c| c.durability).collect();
+        let durs: std::collections::HashSet<_> = m.cells.iter().map(|c| c.durability).collect();
         assert!(durs.contains(&DurabilityMode::Memory));
         assert!(durs.contains(&DurabilityMode::Buffered));
         assert!(durs.contains(&DurabilityMode::Durable));

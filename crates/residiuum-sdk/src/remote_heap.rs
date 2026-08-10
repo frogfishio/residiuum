@@ -75,9 +75,9 @@ pub struct FindWirePage {
 
 /// Parse and validate op 116 `find` result (DEF-SCAN-001 T9).
 pub fn parse_find_wire(result: &Value) -> Result<FindWirePage, Error> {
-    let obj = result.as_object().ok_or_else(|| {
-        Error::ProtocolViolation("find result must be object".into())
-    })?;
+    let obj = result
+        .as_object()
+        .ok_or_else(|| Error::ProtocolViolation("find result must be object".into()))?;
     let arr = obj
         .get("rows")
         .and_then(|v| v.as_array())
@@ -98,9 +98,7 @@ pub fn parse_find_wire(result: &Value) -> Result<FindWirePage, Error> {
     let incomplete = obj
         .get("incomplete")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            Error::ProtocolViolation("find missing required field incomplete".into())
-        })?
+        .ok_or_else(|| Error::ProtocolViolation("find missing required field incomplete".into()))?
         .clone();
     let coverage_complete = obj
         .get("coverage_complete")
@@ -129,9 +127,9 @@ pub fn parse_find_wire(result: &Value) -> Result<FindWirePage, Error> {
 ///
 /// Rejects missing required fields and contradictory pagination metadata.
 pub fn parse_scan_json_wire(result: &Value) -> Result<ScanJsonWirePage, Error> {
-    let obj = result.as_object().ok_or_else(|| {
-        Error::ProtocolViolation("scan_json result must be object".into())
-    })?;
+    let obj = result
+        .as_object()
+        .ok_or_else(|| Error::ProtocolViolation("scan_json result must be object".into()))?;
     let arr = obj
         .get("rows")
         .and_then(|v| v.as_array())
@@ -282,9 +280,8 @@ impl HeapCredential {
         certificate_cose: &[u8],
         signer: Arc<dyn HolderSigner>,
     ) -> Result<Self, CredentialError> {
-        let inspected = inspect_certificate(certificate_cose).map_err(|e| {
-            CredentialError::MalformedCertificate(e.to_string())
-        })?;
+        let inspected = inspect_certificate(certificate_cose)
+            .map_err(|e| CredentialError::MalformedCertificate(e.to_string()))?;
         if inspected.holder_public_key != signer.public_key() {
             return Err(CredentialError::HolderKeyMismatch);
         }
@@ -521,7 +518,9 @@ impl RemoteHeap {
         let collection_id = result
             .get("collection_id")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| Error::ProtocolViolation("collection_create missing collection_id".into()))?
+            .ok_or_else(|| {
+                Error::ProtocolViolation("collection_create missing collection_id".into())
+            })?
             .to_string();
         let descriptor_hash = result
             .get("descriptor_hash")
@@ -530,7 +529,10 @@ impl RemoteHeap {
                 Error::ProtocolViolation("collection_create missing descriptor_hash".into())
             })?
             .to_string();
-        let replayed = result.get("replayed").and_then(|v| v.as_bool()).unwrap_or(false);
+        let replayed = result
+            .get("replayed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let receipt_id = result
             .pointer("/receipt/receipt_id")
             .and_then(|v| v.as_str())
@@ -624,13 +626,8 @@ impl RemoteHeap {
     }
 
     /// Get JSON for `key` (op_id = 111). `None` when not found.
-    pub fn get_json(
-        &mut self,
-        collection_id: &str,
-        key: &str,
-    ) -> Result<Option<Value>, Error> {
-        let result =
-            self.call_args(111, Some(collection_id), serde_json::json!({ "key": key }))?;
+    pub fn get_json(&mut self, collection_id: &str, key: &str) -> Result<Option<Value>, Error> {
+        let result = self.call_args(111, Some(collection_id), serde_json::json!({ "key": key }))?;
         match result.get("found") {
             Some(Value::Bool(false)) => Ok(None),
             Some(Value::Bool(true)) => Ok(result.get("json").cloned()),
@@ -639,20 +636,17 @@ impl RemoteHeap {
     }
 
     /// Get opaque bytes for `key` (op_id = 112).
-    pub fn get_bytes(
-        &mut self,
-        collection_id: &str,
-        key: &str,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        let result =
-            self.call_args(112, Some(collection_id), serde_json::json!({ "key": key }))?;
+    pub fn get_bytes(&mut self, collection_id: &str, key: &str) -> Result<Option<Vec<u8>>, Error> {
+        let result = self.call_args(112, Some(collection_id), serde_json::json!({ "key": key }))?;
         match result.get("found") {
             Some(Value::Bool(false)) => Ok(None),
             Some(Value::Bool(true)) => {
                 let b64 = result
                     .get("bytes_b64")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| Error::ProtocolViolation("get_bytes missing bytes_b64".into()))?;
+                    .ok_or_else(|| {
+                        Error::ProtocolViolation("get_bytes missing bytes_b64".into())
+                    })?;
                 residiuum_client::b64u_decode(b64)
                     .map(Some)
                     .map_err(|e| Error::ProtocolViolation(format!("bytes_b64: {e}")))
@@ -761,13 +755,8 @@ impl RemoteHeap {
     ///
     /// Each version is a JSON object with `kind`, `event_id`, `item_id`,
     /// `segment_id`, `known_gap_before`, and optional `json` for put events.
-    pub fn history(
-        &mut self,
-        collection_id: &str,
-        key: &str,
-    ) -> Result<(Vec<Value>, bool), Error> {
-        let result =
-            self.call_args(117, Some(collection_id), serde_json::json!({ "key": key }))?;
+    pub fn history(&mut self, collection_id: &str, key: &str) -> Result<(Vec<Value>, bool), Error> {
+        let result = self.call_args(117, Some(collection_id), serde_json::json!({ "key": key }))?;
         let holes = result
             .get("has_known_holes")
             .and_then(|v| v.as_bool())
@@ -866,11 +855,7 @@ impl RemoteHeap {
     ///
     /// APP-7 T6: product wire path. Server recompiles `source` and returns a
     /// page object matching `rql_query.response.json`. Not a package-accept claim.
-    pub fn rql_query(
-        &mut self,
-        collection_id: &str,
-        args: Value,
-    ) -> Result<Value, Error> {
+    pub fn rql_query(&mut self, collection_id: &str, args: Value) -> Result<Value, Error> {
         self.call_args(118, Some(collection_id), args)
     }
 
@@ -1012,10 +997,7 @@ pub struct RemoteCreatedCollection {
 /// The URL path label is an expected human name only when
 /// [`RemoteHeapOptions::expected_heap_name`] is not set; when both are set the
 /// option wins. Authority comes solely from the credential certificate.
-pub fn connect_heap(
-    url: impl AsRef<str>,
-    options: RemoteHeapOptions,
-) -> Result<RemoteHeap, Error> {
+pub fn connect_heap(url: impl AsRef<str>, options: RemoteHeapOptions) -> Result<RemoteHeap, Error> {
     let url = url.as_ref();
     let parsed = parse_residiuum_url(url)?;
     if parsed.seeds.is_empty() {
@@ -1089,9 +1071,8 @@ fn connect_heap_once(
             });
         }
     }
-    let challenge: HeapChallenge = serde_json::from_slice(&challenge_bytes).map_err(|e| {
-        Error::ProtocolViolation(format!("heap_challenge decode: {e}"))
-    })?;
+    let challenge: HeapChallenge = serde_json::from_slice(&challenge_bytes)
+        .map_err(|e| Error::ProtocolViolation(format!("heap_challenge decode: {e}")))?;
     if challenge.msg != "heap_challenge" {
         return Err(Error::ProtocolViolation(format!(
             "expected heap_challenge, got {}",

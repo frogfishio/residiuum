@@ -101,7 +101,9 @@ impl AwsKmsDataKeyProvider {
         let secret_access_key = std::env::var("AWS_SECRET_ACCESS_KEY").map_err(|_| {
             StoreError::HeapAdmit("AWS_SECRET_ACCESS_KEY not set (required for live KMS)".into())
         })?;
-        let session_token = std::env::var("AWS_SESSION_TOKEN").ok().filter(|s| !s.is_empty());
+        let session_token = std::env::var("AWS_SESSION_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
         let endpoint = endpoint
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| format!("https://kms.{region}.amazonaws.com"));
@@ -120,7 +122,8 @@ impl AwsKmsDataKeyProvider {
     pub fn from_env() -> Result<Self, StoreError> {
         let cfg = HsmDataKeyConfig::aws_kms_from_env().ok_or_else(|| {
             StoreError::HeapAdmit(
-                "AWS KMS env not set (need RESIDIUUM_AWS_KMS_KEY_ID or RESIDIUUM_KMS_KEY_ARN)".into(),
+                "AWS KMS env not set (need RESIDIUUM_AWS_KMS_KEY_ID or RESIDIUUM_KMS_KEY_ARN)"
+                    .into(),
             )
         })?;
         Self::from_config(&cfg)
@@ -227,20 +230,15 @@ impl AwsKmsDataKeyProvider {
             .iter()
             .map(|(k, v)| format!("{k}:{}\n", v.trim()))
             .collect::<String>();
-        let canonical_request = format!(
-            "POST\n/\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
-        );
+        let canonical_request =
+            format!("POST\n/\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
         let credential_scope = format!("{date_stamp}/{}/kms/aws4_request", self.region);
         let string_to_sign = format!(
             "AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{}",
             hex::encode(Sha256::digest(canonical_request.as_bytes()))
         );
-        let signing_key = aws4_signing_key(
-            &self.secret_access_key,
-            date_stamp,
-            &self.region,
-            "kms",
-        )?;
+        let signing_key =
+            aws4_signing_key(&self.secret_access_key, date_stamp, &self.region, "kms")?;
         let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes())?);
         let auth = format!(
             "AWS4-HMAC-SHA256 Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
@@ -256,9 +254,9 @@ impl AwsKmsDataKeyProvider {
         if let Some(ref tok) = self.session_token {
             req = req.set("X-Amz-Security-Token", tok);
         }
-        let resp = req.send_bytes(body).map_err(|e| {
-            StoreError::HeapAdmit(format!("AWS KMS HTTP: {e}"))
-        })?;
+        let resp = req
+            .send_bytes(body)
+            .map_err(|e| StoreError::HeapAdmit(format!("AWS KMS HTTP: {e}")))?;
         let status = resp.status();
         let text = resp
             .into_string()

@@ -18,7 +18,11 @@ use std::path::{Path, PathBuf};
 mod console;
 use std::process::ExitCode;
 
-const APP_VERSION: &str = concat!(env!("RESIDIUUM_VERSION"), "-build ", env!("RESIDIUUM_BUILD"));
+const APP_VERSION: &str = concat!(
+    env!("RESIDIUUM_VERSION"),
+    "-build ",
+    env!("RESIDIUUM_BUILD")
+);
 const CLI_ABOUT: &str = "Residiuum command-line interface";
 const CLI_LONG_ABOUT: &str = "Residiuum command-line interface\n\nEveryday put/get/list, read-only doctor diagnostics, evidence-preserving salvage (and explicit export-live materialization), full backup/restore with verified manifests (DEF-050), integrity scrub (DEF-051), format migration preflight/plan/apply/verify/rollback (DEF-052), versioned config validate/show (DEF-054), single-node TCP serve (development), and experimental multi-node serve-cluster (Raft control + data-plane commit when attached; not production-ready).";
 const LICENSE_TEXT: &str = "Copyright (c) 2026 Alexander R. Croft\nGNU Affero General Public License v3.0 or later\n\nThis program (`residiuum`) is offered under the AGPL-3.0-or-later.\nSee LICENSE-AGPL-3.0 and doc/reference/operations/LICENSING.md in the repository for full terms.\n\nResidiuum is multi-licensed by crate: MIT (SDA/format), MPL-2.0 (store/examine),\nAGPL-3.0-or-later (cluster, server, this CLI; SDK remains AGPL until embedded-only).";
@@ -469,21 +473,14 @@ fn run() -> Result<(), String> {
                 } else {
                     None
                 },
-                qualified_heap_key: if qualified_heap_key {
-                    Some(true)
-                } else {
-                    None
-                },
+                qualified_heap_key: if qualified_heap_key { Some(true) } else { None },
                 deployment_id,
                 ..Default::default()
             };
             let validated = load_and_validate(config.as_deref(), ConfigMode::Serve, overrides)
                 .map_err(|e| e.to_string())?;
             let bind = validated.bind.clone();
-            let store_path = validated
-                .store_path
-                .clone()
-                .unwrap_or(store);
+            let store_path = validated.store_path.clone().unwrap_or(store);
             let _ = json_out; // serve is long-running; use `residiuum config show` for reports
             for w in &validated.warnings {
                 eprintln!("config warning: {w}");
@@ -532,11 +529,7 @@ fn run() -> Result<(), String> {
                 } else {
                     None
                 },
-                qualified_heap_key: if qualified_heap_key {
-                    Some(true)
-                } else {
-                    None
-                },
+                qualified_heap_key: if qualified_heap_key { Some(true) } else { None },
                 deployment_id,
                 ..Default::default()
             };
@@ -544,10 +537,7 @@ fn run() -> Result<(), String> {
                 load_and_validate(config.as_deref(), ConfigMode::ServeCluster, overrides)
                     .map_err(|e| e.to_string())?;
             let bind = validated.bind.clone();
-            let cluster_root = validated
-                .cluster_root
-                .clone()
-                .unwrap_or(cluster);
+            let cluster_root = validated.cluster_root.clone().unwrap_or(cluster);
             let node_index = validated.node_index;
             let _ = json_out;
             for w in &validated.warnings {
@@ -557,9 +547,7 @@ fn run() -> Result<(), String> {
             serve_cluster_node(&cluster_root, node_index, &bind, opts).map_err(|e| e.to_string())
         }
         Command::Config { action } => match action {
-            ConfigAction::Validate { file, mode } => {
-                cmd_config_validate(&file, &mode, json_out)
-            }
+            ConfigAction::Validate { file, mode } => cmd_config_validate(&file, &mode, json_out),
             ConfigAction::Show { file, mode } => cmd_config_show(&file, &mode, json_out),
         },
         Command::Collections { store } => cmd_list(&store, None, json_out),
@@ -601,11 +589,7 @@ fn cmd_config_validate(file: &Path, mode: &str, json_out: bool) -> Result<(), St
         for w in &report.warnings {
             println!("warning: {w}");
         }
-        println!(
-            "settings={} bind={}",
-            report.settings.len(),
-            validated.bind
-        );
+        println!("settings={} bind={}", report.settings.len(), validated.bind);
     }
     Ok(())
 }
@@ -618,9 +602,7 @@ fn cmd_config_show(file: &Path, mode: &str, json_out: bool) -> Result<(), String
         Ok(v) => v,
         Err(e) if mode != ConfigMode::Validate => {
             // Retry in pure validate mode for partial documents.
-            eprintln!(
-                "note: full mode validation failed ({e}); showing validate-mode report"
-            );
+            eprintln!("note: full mode validation failed ({e}); showing validate-mode report");
             load_and_validate(Some(file), ConfigMode::Validate, ConfigOverrides::default())
                 .map_err(|e| e.to_string())?
         }
@@ -639,10 +621,7 @@ fn cmd_config_show(file: &Path, mode: &str, json_out: bool) -> Result<(), String
         }
         println!("mode={}", report.mode);
         for s in &report.settings {
-            println!(
-                "  {} = {} ({:?}, {:?})",
-                s.path, s.value, s.class, s.source
-            );
+            println!("  {} = {} ({:?}, {:?})", s.path, s.value, s.class, s.source);
         }
         for w in &report.warnings {
             println!("warning: {w}");
@@ -1145,14 +1124,8 @@ fn cmd_restore(
     if package == dest {
         return Err("restore backup and --output must differ".into());
     }
-    let report = restore_full_backup(
-        package,
-        dest,
-        RestoreOptions {
-            reassign_identity,
-        },
-    )
-    .map_err(|e| e.to_string())?;
+    let report = restore_full_backup(package, dest, RestoreOptions { reassign_identity })
+        .map_err(|e| e.to_string())?;
     if json_out {
         emit_json(sjson!({
             "ok": true,
@@ -1266,7 +1239,10 @@ fn cmd_migrate(
         println!("migrate_preflight");
         println!("  source: {}", pre.source_root);
         println!("  destination: {}", pre.dest_root);
-        println!("  writer_wire: {} ({})", pre.writer_wire, pre.writer_wire_profile);
+        println!(
+            "  writer_wire: {} ({})",
+            pre.writer_wire, pre.writer_wire_profile
+        );
         println!("  files_classified: {}", pre.files_classified);
         println!("  supported_segments: {}", pre.supported_segments);
         println!("  unsupported_segments: {}", pre.unsupported_segments);

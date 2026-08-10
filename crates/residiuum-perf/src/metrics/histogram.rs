@@ -20,7 +20,10 @@ pub struct LatencyHistogram {
     pub min_ns: u64,
     pub max_ns: u64,
     /// Saturating sum for mean (may saturate at u128::MAX conceptually via u64 cap flag).
-    #[serde(serialize_with = "ser_u128_as_str", deserialize_with = "de_u128_from_str")]
+    #[serde(
+        serialize_with = "ser_u128_as_str",
+        deserialize_with = "de_u128_from_str"
+    )]
     pub sum_ns: u128,
     /// True when a counter bucket hit u64::MAX (overflow).
     pub saturated: bool,

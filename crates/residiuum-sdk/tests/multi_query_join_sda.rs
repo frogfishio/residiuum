@@ -9,7 +9,7 @@
 //! Complements `multi_collection_sda_join` (which joins *inside* SDA). Here the
 //! join axis is the SDK; SDA only shapes the result.
 
-use residiuum_sdk::{json, Residiuum, Filter, MULTI_QUERY_PROFILE};
+use residiuum_sdk::{json, Filter, Residiuum, MULTI_QUERY_PROFILE};
 use serde_json::Value as JsonValue;
 use tempfile::tempdir;
 
@@ -229,8 +229,11 @@ fn multi_query_on_from_explicit_left() {
     let mut db = Residiuum::open(dir.path().join("e.residiuum")).unwrap();
     {
         let mut o = db.collection("orders").unwrap();
-        o.put("o1", &json!({"id": "o1", "customer_id": "c1", "product_id": "p1"}))
-            .unwrap();
+        o.put(
+            "o1",
+            &json!({"id": "o1", "customer_id": "c1", "product_id": "p1"}),
+        )
+        .unwrap();
     }
     {
         let mut c = db.collection("customers").unwrap();
@@ -459,7 +462,10 @@ fn run_multi_query_scale(
     let collect_once_ms = t0.elapsed().as_secs_f64() * 1e3;
     progress(
         label,
-        &format!("join_collect_once done {collect_once_ms:.1} ms (bag={})", bag.len()),
+        &format!(
+            "join_collect_once done {collect_once_ms:.1} ms (bag={})",
+            bag.len()
+        ),
     );
 
     let join_iters = join_iters.max(1);
@@ -539,10 +545,7 @@ fn run_multi_query_scale(
         &format!("map_sda_once done {map_sda_once_ms:.1} ms (hits={map_hits})"),
     );
 
-    progress(
-        label,
-        &format!("map_sda_loop ×{join_iters} product path…"),
-    );
+    progress(label, &format!("map_sda_loop ×{join_iters} product path…"));
     let t0 = Instant::now();
     for _ in 0..join_iters {
         let _ = db
@@ -594,7 +597,10 @@ fn run_multi_query_scale(
 
     // CI absurdity bounds only (not performance gates).
     assert!(seed_ms < 120_000.0, "{label}: seed absurdly slow");
-    assert!(collect_once_ms < 60_000.0, "{label}: host join absurdly slow");
+    assert!(
+        collect_once_ms < 60_000.0,
+        "{label}: host join absurdly slow"
+    );
     assert!(map_sda_once_ms < 60_000.0, "{label}: map_sda absurdly slow");
 }
 

@@ -12,7 +12,7 @@ use crate::store::WriteReceipt;
 use residiuum_format::{decode_subject_v2, encode_subject_v2, SubjectObjectKind};
 use residiuum_heap::{refresh_capability_or_terminate, HeapCap, Rights};
 use serde_json::Value as JsonValue;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, Mutex};
 
 use super::commit_coordinator::OperationCommitCoordinator;
@@ -223,6 +223,17 @@ pub struct VersionedCollectionScanPage {
     /// More subjects may exist after this page (complete-row budget filled).
     pub has_more: bool,
     /// Last examined collection key (complete or hole), for continuation.
+    pub last_key: Option<Vec<u8>>,
+}
+
+/// Bounded live-key inventory carrying establishing event ids but no bodies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionVersionPage {
+    /// `(application key, establishing event id)` in key order.
+    pub entries: Vec<(Vec<u8>, [u8; 16])>,
+    /// More live keys exist after this page.
+    pub has_more: bool,
+    /// Last returned key for continuation.
     pub last_key: Option<Vec<u8>>,
 }
 
@@ -583,6 +594,28 @@ impl HeapStore {
         collection_id: &[u8; 16],
         keys: &[Vec<u8>],
     ) -> Result<Vec<(Vec<u8>, Option<Vec<u8>>, Option<CollectionScanHoleReason>)>, StoreError> {
+        Ok(self
+            .get_collection_many_versioned(collection_id, keys)?
+            .into_iter()
+            .map(|(key, body, _version, hole)| (key, body, hole))
+            .collect())
+    }
+
+    /// Version-bearing bounded collection point batch under one capability
+    /// check and store lock. Every complete body/version pair is coherent.
+    pub fn get_collection_many_versioned(
+        &self,
+        collection_id: &[u8; 16],
+        keys: &[Vec<u8>],
+    ) -> Result<
+        Vec<(
+            Vec<u8>,
+            Option<Vec<u8>>,
+            Option<[u8; 16]>,
+            Option<CollectionScanHoleReason>,
+        )>,
+        StoreError,
+    > {
         self.gate()?;
         self.require_right(Rights::READ)?;
         if keys.len() > 4096 {
@@ -611,16 +644,66 @@ impl HeapStore {
             .collect();
         let resolved = guard.get_subject_bytes_many(&subject_values);
         let mut out = Vec::with_capacity(subjects.len());
-        for ((key, _), (_, outcome)) in subjects.into_iter().zip(resolved) {
+        for ((key, subject), (_, outcome)) in subjects.into_iter().zip(resolved) {
+            let version = guard.live_event_id(&subject);
             match outcome {
-                Ok(body) => out.push((key, body, None)),
+                Ok(Some(body)) => match version {
+                    Some(version) => out.push((key, Some(body), Some(version), None)),
+                    None => {
+                        return Err(StoreError::CorruptMeta(
+                            "live collection body/version invariant violated",
+                        ))
+                    }
+                },
+                Ok(None) if version.is_none() => out.push((key, None, None, None)),
+                Ok(None) => {
+                    return Err(StoreError::CorruptMeta(
+                        "live collection body/version invariant violated",
+                    ))
+                }
                 Err(error) => match CollectionScanHoleReason::from_store_error(&error) {
-                    Some(reason) => out.push((key, None, Some(reason))),
+                    Some(reason) => out.push((key, None, version, Some(reason))),
                     None => return Err(error),
                 },
             }
         }
         Ok(out)
+    }
+
+    /// Bounded collection point identity batch under one capability check and
+    /// store lock. Returns the current establishing event id without resolving
+    /// any body bytes; `None` is an authoritative absence at this observation.
+    pub fn get_collection_versions(
+        &self,
+        collection_id: &[u8; 16],
+        keys: &[Vec<u8>],
+    ) -> Result<Vec<(Vec<u8>, Option<[u8; 16]>)>, StoreError> {
+        self.gate()?;
+        self.require_right(Rights::READ)?;
+        if keys.len() > 4096 {
+            return Err(StoreError::HeapAdmit(
+                "collection get-versions exceeds 4096 keys".into(),
+            ));
+        }
+        let mut subjects = Vec::with_capacity(keys.len());
+        for key in keys {
+            let subject = residiuum_format::encode_subject_v2(
+                self.cap.heap_id().as_bytes(),
+                SubjectObjectKind::Collection,
+                collection_id,
+                key,
+            )
+            .map_err(|error| StoreError::HeapAdmit(format!("subject v2 encode: {error}")))?;
+            subjects.push((key.clone(), subject));
+        }
+        let guard = self
+            .physical
+            .lock()
+            .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
+        Ok(subjects
+            .into_iter()
+            .map(|(key, subject)| (key, guard.live_event_id(&subject)))
+            .collect())
     }
 
     /// Get a collection value and its establishing event id atomically.
@@ -1179,6 +1262,64 @@ impl HeapStore {
         })
     }
 
+    /// Inventory live collection keys and versions without resolving bodies.
+    /// Cache-aware callers must still resolve every version miss normally;
+    /// this method provides identity, not payload or damage coverage.
+    pub fn scan_collection_versions_page(
+        &self,
+        collection_id: &[u8; 16],
+        limit: usize,
+        after_key: Option<&[u8]>,
+    ) -> Result<CollectionVersionPage, StoreError> {
+        self.gate()?;
+        self.require_right(Rights::READ)?;
+        let limit = limit.clamp(1, 4096);
+        let prefix = self.collection_subject_prefix(collection_id);
+        let after_subject = match after_key {
+            Some(key) => Some(
+                residiuum_format::encode_subject_v2(
+                    self.cap.heap_id().as_bytes(),
+                    SubjectObjectKind::Collection,
+                    collection_id,
+                    key,
+                )
+                .map_err(|error| StoreError::HeapAdmit(format!("subject v2 encode: {error}")))?,
+            ),
+            None => None,
+        };
+        let guard = self
+            .physical
+            .lock()
+            .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
+        let subjects = guard.index_live_after_bounded(
+            after_subject.as_deref(),
+            Some(&prefix),
+            limit.saturating_add(1),
+        );
+        let mut entries = Vec::with_capacity(subjects.len().min(limit));
+        for subject in subjects.iter().take(limit) {
+            let decoded = decode_subject_v2(subject)
+                .map_err(|_| StoreError::CorruptMeta("live collection subject failed v2 decode"))?;
+            if decoded.heap_id != self.cap.heap_id().as_bytes()
+                || decoded.object_kind != SubjectObjectKind::Collection
+                || decoded.object_id != collection_id
+            {
+                return Err(StoreError::CorruptMeta(
+                    "live collection subject escaped requested scope",
+                ));
+            }
+            let version = guard.live_event_id(subject).ok_or(StoreError::CorruptMeta(
+                "live collection subject has no establishing event",
+            ))?;
+            entries.push((decoded.key.to_vec(), version));
+        }
+        Ok(CollectionVersionPage {
+            has_more: subjects.len() > limit,
+            last_key: entries.last().map(|(key, _)| key.clone()),
+            entries,
+        })
+    }
+
     /// Legacy compatibility wrapper over [`Self::scan_collection_page`].
     ///
     /// Return type is the historical `Vec<(key, body)>`. Behavior is
@@ -1222,6 +1363,78 @@ impl HeapStore {
         self.lookup_index_keys_with_constraints(collection_id, equalities, &constrained_fields)
     }
 
+    /// Lookup the deduplicated union of candidate keys for several equality
+    /// values under one capability check and secondary-index inventory load.
+    ///
+    /// This deliberately accepts only a Ready, complete, single-field index:
+    /// every returned union is therefore exclusive, including an empty union.
+    /// Callers must still evaluate the join/predicate against resolved bodies.
+    pub fn lookup_index_keys_many(
+        &self,
+        collection_id: &[u8; 16],
+        field: &str,
+        values: &[JsonValue],
+    ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
+        self.gate()?;
+        self.require_right(Rights::READ)?;
+        if values.is_empty() {
+            return Ok(None);
+        }
+        if values.len() > 4_096 {
+            return Err(StoreError::HeapAdmit(
+                "index lookup-many exceeds 4096 values".into(),
+            ));
+        }
+
+        let scope = self.index_scope_key(collection_id);
+        let indexes = {
+            let guard = self
+                .physical
+                .lock()
+                .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
+            guard.cached_secondary_indexes(&scope)?
+        };
+        let Some(index) = indexes.iter().find(|index| {
+            index.meta.may_supply_exclusive_candidates()
+                && index.meta.fields.len() == 1
+                && index.meta.fields[0] == field
+        }) else {
+            return Ok(None);
+        };
+
+        let mut keys = BTreeSet::new();
+        let mut key_charge = 0usize;
+        const MAX_KEY_UNION_CHARGE: usize = 64 * 1024 * 1024;
+        for value in values {
+            let Some(index_key) = index_key_from_values(std::slice::from_ref(value)) else {
+                continue;
+            };
+            for subject in index.lookup(&index_key) {
+                let sv2 = match decode_subject_v2(subject) {
+                    Ok(s)
+                        if s.heap_id == self.cap.heap_id().as_bytes()
+                            && s.object_kind == SubjectObjectKind::Collection
+                            && s.object_id == collection_id =>
+                    {
+                        s
+                    }
+                    _ => continue,
+                };
+                let key = sv2.key.to_vec();
+                let charge = 32 + key.len();
+                if keys.insert(key) {
+                    key_charge = key_charge.saturating_add(charge);
+                    if key_charge > MAX_KEY_UNION_CHARGE {
+                        return Err(StoreError::HeapAdmit(
+                            "index lookup-many candidate union exceeds 64 MiB".into(),
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(Some(keys.into_iter().collect()))
+    }
+
     /// Lookup an exclusive candidate set using the longest equality prefix of
     /// a compound index. Every trailing index field must still be constrained
     /// by the query, so documents omitted for a missing trailing field cannot
@@ -1243,10 +1456,10 @@ impl HeapStore {
                 .physical
                 .lock()
                 .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
-            guard.list_secondary_indexes(&scope)?
+            guard.cached_secondary_indexes(&scope)?
         };
         let mut best: Option<Vec<Vec<u8>>> = None;
-        for idx in indexes {
+        for idx in indexes.iter() {
             // Exclusive candidate sets only — Partial hits are incomplete.
             if !idx.meta.may_supply_exclusive_candidates() || idx.meta.fields.is_empty() {
                 continue;
@@ -1340,11 +1553,11 @@ impl HeapStore {
         {
             return Ok(Some(keys));
         }
-        let indexes = guard.list_secondary_indexes(&scope)?;
+        let indexes = guard.cached_secondary_indexes(&scope)?;
         let live_count =
             guard.index_live_count_with_prefix(&self.collection_subject_prefix(collection_id));
 
-        for idx in indexes {
+        for idx in indexes.iter() {
             if !idx.meta.may_supply_exclusive_candidates()
                 || idx.meta.fields.as_slice() != [field]
                 || idx.meta.entry_count as usize != live_count
@@ -1412,6 +1625,128 @@ impl HeapStore {
                 keys.clone(),
             );
             return Ok(Some(keys));
+        }
+        Ok(None)
+    }
+
+    /// Return one row of decoded field values per live document when a Ready,
+    /// complete secondary index contains every requested field.
+    ///
+    /// Admission additionally proves one unique, currently-live posting per
+    /// collection document. Any malformed key, foreign subject, duplicate, or
+    /// coverage mismatch refuses the path and leaves the caller to scan.
+    pub fn lookup_covering_index_values(
+        &self,
+        collection_id: &[u8; 16],
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<JsonValue>>>, StoreError> {
+        self.gate()?;
+        self.require_right(Rights::READ)?;
+        if fields.is_empty() {
+            return Ok(None);
+        }
+        let scope = self.index_scope_key(collection_id);
+        let guard = self
+            .physical
+            .lock()
+            .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
+        if let Some(rows) = guard.covering_secondary_cache_get(&scope, fields) {
+            return Ok(Some(rows));
+        }
+        let indexes = guard.cached_secondary_indexes(&scope)?;
+        let live_count =
+            guard.index_live_count_with_prefix(&self.collection_subject_prefix(collection_id));
+
+        for idx in indexes.iter() {
+            if !idx.meta.may_supply_exclusive_candidates()
+                || idx.meta.entry_count as usize != live_count
+            {
+                continue;
+            }
+            let requested_positions: Option<Vec<usize>> =
+                fields
+                    .iter()
+                    .map(|field| {
+                        let mut positions = idx.meta.fields.iter().enumerate().filter_map(
+                            |(position, candidate)| (candidate == field).then_some(position),
+                        );
+                        let position = positions.next()?;
+                        positions.next().is_none().then_some(position)
+                    })
+                    .collect();
+            let Some(requested_positions) = requested_positions else {
+                continue;
+            };
+            let mut rows = Vec::with_capacity(live_count);
+            let mut cache_charge = scope
+                .len()
+                .saturating_add(fields.iter().map(String::len).sum::<usize>())
+                .saturating_add(128);
+            let mut posted_subjects = HashSet::with_capacity(live_count);
+            let mut valid = true;
+            for (encoded_values, subjects) in &idx.entries {
+                // JSON trees and their Vec/String allocation metadata exceed
+                // the compact index bytes. Charge three times the encoded
+                // values per posting plus row bookkeeping conservatively.
+                cache_charge = cache_charge.saturating_add(
+                    encoded_values
+                        .len()
+                        .saturating_mul(subjects.len())
+                        .saturating_mul(3)
+                        .saturating_add(subjects.len().saturating_mul(
+                            64usize.saturating_add(requested_positions.len().saturating_mul(48)),
+                        )),
+                );
+                let parts: Vec<&[u8]> = encoded_values.split(|byte| *byte == 0x1f).collect();
+                if parts.len() != idx.meta.fields.len() {
+                    valid = false;
+                    break;
+                }
+                let mut decoded = Vec::with_capacity(parts.len());
+                for part in parts {
+                    match serde_json::from_slice::<JsonValue>(part) {
+                        Ok(value) => decoded.push(value),
+                        Err(_) => {
+                            valid = false;
+                            break;
+                        }
+                    }
+                }
+                if !valid {
+                    break;
+                }
+                let values: Vec<JsonValue> = requested_positions
+                    .iter()
+                    .map(|position| decoded[*position].clone())
+                    .collect();
+                for subject in subjects {
+                    if !posted_subjects.insert(subject.clone())
+                        || guard.live_event_id(subject).is_none()
+                    {
+                        valid = false;
+                        break;
+                    }
+                    let belongs = matches!(
+                        decode_subject_v2(subject),
+                        Ok(sv2)
+                            if sv2.heap_id == self.cap.heap_id().as_bytes()
+                                && sv2.object_kind == SubjectObjectKind::Collection
+                                && sv2.object_id == collection_id
+                    );
+                    if !belongs {
+                        valid = false;
+                        break;
+                    }
+                    rows.push(values.clone());
+                }
+                if !valid {
+                    break;
+                }
+            }
+            if valid && rows.len() == live_count {
+                guard.covering_secondary_cache_put(&scope, fields, rows.clone(), cache_charge);
+                return Ok(Some(rows));
+            }
         }
         Ok(None)
     }

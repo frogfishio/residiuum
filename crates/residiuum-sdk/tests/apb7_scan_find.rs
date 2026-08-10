@@ -5,9 +5,7 @@ use residiuum_heap::{
     HeapAdministrativeState, HeapId, HeapSecuritySnapshot, HeapSlot, Rights, SecurityRevision,
     TrustedInstant, VerifiedCertificate,
 };
-use residiuum_sdk::{
-    ErrorCode, FindJsonOptions, HeapClient, ResidiuumDeployment, ScanJsonOptions,
-};
+use residiuum_sdk::{ErrorCode, FindJsonOptions, HeapClient, ResidiuumDeployment, ScanJsonOptions};
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -44,7 +42,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -155,9 +160,7 @@ fn find_json_respects_limit() {
     let rows = col
         .find_json(
             &serde_json::json!({"status": "open"}),
-            FindJsonOptions {
-                limit: Some(2),
-            },
+            FindJsonOptions { limit: Some(2) },
         )
         .expect("find");
     assert_eq!(rows.len(), 2);

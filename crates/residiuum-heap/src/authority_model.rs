@@ -245,9 +245,7 @@ impl AuthorityModel {
         // (current, or previous during grace and not blacklisted).
         for c in &self.admitted {
             let ok_current = self.admission_ok(*c, self.current_gen);
-            let ok_prev = self
-                .previous_gen
-                .is_some_and(|g| self.admission_ok(*c, g));
+            let ok_prev = self.previous_gen.is_some_and(|g| self.admission_ok(*c, g));
             if !ok_current && !ok_prev {
                 // After time advances past grace without ExpireGrace, Inv still
                 // holds only because Next would clear via ExpireGrace; we allow

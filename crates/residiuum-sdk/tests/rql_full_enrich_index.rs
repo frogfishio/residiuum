@@ -6,8 +6,8 @@ use residiuum_heap::{
     TrustedInstant, VerifiedCertificate,
 };
 use residiuum_sdk::{
-    execute_rql_full, execute_rql_full_with, EnrichAttachMode, HeapClient, Parameters,
-    QueryRunOptions, ResidiuumDeployment, RqlFullExecuteOptions, IndexState,
+    execute_rql_full, execute_rql_full_with, EnrichAttachMode, HeapClient, IndexState, Parameters,
+    QueryRunOptions, ResidiuumDeployment, RqlFullExecuteOptions,
 };
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
 use std::sync::Arc;
@@ -45,7 +45,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -88,6 +95,21 @@ fn enrich_index_matches_scan_oracle() {
     customers
         .put("c3", &serde_json::json!({"id": "c3", "name": "unused"}))
         .unwrap();
+    for index in 0..50 {
+        let id = format!("x{index:02}");
+        orders
+            .put(
+                &format!("ox{index:02}"),
+                &serde_json::json!({"customer_id": id}),
+            )
+            .unwrap();
+        customers
+            .put(
+                &id,
+                &serde_json::json!({"id": id, "name": format!("Customer {index}")}),
+            )
+            .unwrap();
+    }
 
     let info = customers
         .indexes()
@@ -106,12 +128,28 @@ fn enrich_index_matches_scan_oracle() {
         &mut client,
         src,
         &Parameters::default(),
-        QueryRunOptions::default(),
+        QueryRunOptions {
+            diagnostics: true,
+            ..Default::default()
+        },
     )
     .expect("index path");
     assert_eq!(indexed.enrich_loads.len(), 1);
-    assert_eq!(indexed.enrich_loads[0].mode, EnrichAttachMode::EqualityIndex);
+    assert_eq!(
+        indexed.enrich_loads[0].mode,
+        EnrichAttachMode::EqualityIndex
+    );
     assert_eq!(indexed.enrich_loads[0].using, "customers");
+    assert!(
+        indexed
+            .base
+            .diagnostics
+            .as_ref()
+            .expect("diagnostics")
+            .host_read_calls
+            < 20,
+        "distinct join values must not restore an N+1 probe/read loop"
+    );
 
     let scanned = execute_rql_full_with(
         &mut client,

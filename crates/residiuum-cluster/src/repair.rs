@@ -277,9 +277,7 @@ impl RepairAuditFile {
     /// Validate format + checksum when present.
     pub fn validate(&self) -> Result<(), ClusterError> {
         if self.format != ANTI_ENTROPY_PROFILE && !self.format.is_empty() {
-            return Err(ClusterError::CorruptMeta(
-                "unsupported repair_audit format",
-            ));
+            return Err(ClusterError::CorruptMeta("unsupported repair_audit format"));
         }
         if !self.content_blake3.is_empty() {
             let expect = entries_content_hash(&self.entries);
@@ -328,7 +326,11 @@ impl RepairAuditFile {
         new_entries: &[RepairAuditEntry],
     ) -> Result<Self, ClusterError> {
         let mut file = Self::load(root)?;
-        let mut next_seq = file.entries.last().map(|e| e.seq.saturating_add(1)).unwrap_or(1);
+        let mut next_seq = file
+            .entries
+            .last()
+            .map(|e| e.seq.saturating_add(1))
+            .unwrap_or(1);
         for e in new_entries {
             let mut e = e.clone();
             e.seq = next_seq;
@@ -448,7 +450,10 @@ pub fn select_repair_source(
     }
 
     if !any_readable {
-        if corrupt_only && views.iter().any(|v| v.observation == ReplicaObservation::Corrupt)
+        if corrupt_only
+            && views
+                .iter()
+                .any(|v| v.observation == ReplicaObservation::Corrupt)
         {
             return Err(SourceSelectError::Irrecoverable);
         }

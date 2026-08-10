@@ -81,7 +81,10 @@ fn partial_query_when_partition_replicas_all_offline() {
     let report = cluster
         .rebalance_partition(target, vec![NodeId::new(0)])
         .unwrap();
-    assert_eq!(report.job.phase, residiuum_cluster::RebalancePhase::Reclaimed);
+    assert_eq!(
+        report.job.phase,
+        residiuum_cluster::RebalancePhase::Reclaimed
+    );
     assert_eq!(
         cluster.directory().get(target).unwrap().replicas,
         vec![NodeId::new(0)]

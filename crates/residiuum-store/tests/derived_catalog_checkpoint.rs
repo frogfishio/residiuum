@@ -1,17 +1,13 @@
 //! Derived catalog checkpointing: memory SealDone, lagging/rebuildable disk.
 
-use residiuum_store::{
-    DurabilityMode, Store, SEGMENT_CATALOG_FILE, TIER_PLACEMENT_FILE,
-};
+use residiuum_store::{DurabilityMode, Store, SEGMENT_CATALOG_FILE, TIER_PLACEMENT_FILE};
 use std::fs;
 use std::time::Instant;
 
 fn put_until_sealed(store: &mut Store, n_keys: usize, payload: &[u8]) {
     for i in 0..n_keys {
         let key = format!("k{i:06}");
-        store
-            .put(&key, payload, DurabilityMode::Buffered)
-            .unwrap();
+        store.put(&key, payload, DurabilityMode::Buffered).unwrap();
     }
 }
 
@@ -69,7 +65,10 @@ fn reopen_exact_after_deleting_derived_catalogs() {
     let store = Store::open(&store_path).unwrap();
     for i in 0..keys {
         let key = format!("k{i:06}");
-        let got = store.get(&key).unwrap().expect("missing after catalog wipe");
+        let got = store
+            .get(&key)
+            .unwrap()
+            .expect("missing after catalog wipe");
         assert_eq!(got.as_slice(), payload.as_slice());
     }
 }
@@ -93,9 +92,7 @@ fn catalog_apply_cost_flat_across_segment_counts() {
         let mut i = 0usize;
         loop {
             let key = format!("k{i:08}");
-            store
-                .put(&key, &payload, DurabilityMode::Buffered)
-                .unwrap();
+            store.put(&key, &payload, DurabilityMode::Buffered).unwrap();
             i += 1;
             if i % 64 == 0 {
                 let _ = store.wait_seals_applied();

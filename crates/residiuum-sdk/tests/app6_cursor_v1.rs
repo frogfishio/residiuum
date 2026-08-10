@@ -110,10 +110,7 @@ fn vector_heap_mismatch_fail_closed() {
     logical.heap_id = bad_heap.into();
     let cont2 = mint(&logical, &ring).unwrap();
     let ctx_ok = VerifyContext {
-        heap_id: base["token_logical"]["heap_id"]
-            .as_str()
-            .unwrap()
-            .into(),
+        heap_id: base["token_logical"]["heap_id"].as_str().unwrap().into(),
         collection_id: base["token_logical"]["collection_id"]
             .as_str()
             .unwrap()

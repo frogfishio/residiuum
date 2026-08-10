@@ -135,6 +135,9 @@ pub fn run_game_dipstick(
     let loader_docs: DriverCollection<Value> =
         block_on(loader_heap.create_collection("docs", CreateCollectionOptions::default()))
             .map_err(|error| AdapterError::Execute(format!("create docs: {error}")))?;
+    let loader_customers: DriverCollection<Value> =
+        block_on(loader_heap.create_collection("customers", CreateCollectionOptions::default()))
+            .map_err(|error| AdapterError::Execute(format!("create customers: {error}")))?;
     let all_docs: Vec<_> = dataset.collections.get("docs").unwrap().iter().collect();
     for chunk in all_docs.chunks(1_000) {
         let entries = chunk
@@ -155,9 +158,35 @@ pub fn run_game_dipstick(
             })?;
         }
     }
+    let all_customers: Vec<_> = dataset
+        .collections
+        .get("customers")
+        .unwrap()
+        .iter()
+        .collect();
+    for chunk in all_customers.chunks(1_000) {
+        let entries = chunk
+            .iter()
+            .map(|(key, document)| {
+                let mut body = (*document).clone();
+                if let Value::Object(map) = &mut body {
+                    map.remove("_key");
+                }
+                PutManyEntry::new((*key).clone(), body)
+            })
+            .collect();
+        let outcomes = block_on(loader_customers.put_many(entries))
+            .map_err(|error| AdapterError::Execute(format!("bulk customers: {error}")))?;
+        for outcome in outcomes {
+            outcome.result.map_err(|error| {
+                AdapterError::Execute(format!("bulk customer {}: {error}", outcome.key))
+            })?;
+        }
+    }
     block_on(loader.close())
         .map_err(|error| AdapterError::Execute(format!("loader close: {error}")))?;
     drop(loader_docs);
+    drop(loader_customers);
     drop(loader_heap);
     drop(loader);
 
@@ -179,9 +208,21 @@ pub fn run_game_dipstick(
         .map_err(|error| AdapterError::Execute(format!("index region amount: {error}")))?;
     collection
         .indexes()
+        .create("by_region", &["region"])
+        .map_err(|error| AdapterError::Execute(format!("index region: {error}")))?;
+    collection
+        .indexes()
         .create("by_score", &["score"])
         .map_err(|error| AdapterError::Execute(format!("index score: {error}")))?;
     drop(collection);
+    let mut customers = heap
+        .open_collection("customers")
+        .map_err(|error| AdapterError::Execute(format!("open customers for indexes: {error}")))?;
+    customers
+        .indexes()
+        .create("by_customer_id", &["id"])
+        .map_err(|error| AdapterError::Execute(format!("index customer id: {error}")))?;
+    drop(customers);
     drop(heap);
     drop(deployment);
 
@@ -201,6 +242,10 @@ pub fn run_game_dipstick(
         ("deterministic_topk", "from docs order by score desc, _key asc limit 10", true, None),
         ("group_count", "from docs group by status project status, count() as count", false, Some("status")),
         ("aggregate_five", "from docs group by region project region, count() as count, sum(amount) as sum, min(amount) as min, max(amount) as max, avg(amount) as avg", false, Some("region")),
+        ("full_scan_materialize", "from docs", false, None),
+        ("filtered_group_count", "from docs where region = \"r0\" group by status project status, count() as count", false, Some("status")),
+        ("high_cardinality_group", "from docs group by _key project _key, count() as count", false, Some("_key")),
+        ("indexed_enrich_many", "from docs enrich customer using customers matching customer_id = id expect many", false, None),
     ];
     let mut queries = Vec::new();
     for (name, source, order_sensitive, group_key) in cases {
@@ -212,10 +257,43 @@ pub fn run_game_dipstick(
             let mut examined = 0u64;
             let mut phases = BTreeMap::<String, u64>::new();
             loop {
-                let page = block_on(docs.rql(source, &Parameters::default(), options.clone()))
+                let (page_rows, page_examined, diagnostics, exhausted, next) = if name
+                    == "indexed_enrich_many"
+                {
+                    let page = block_on(heap.rql_full(
+                        source,
+                        &Parameters::default(),
+                        RqlFullExecuteOptions {
+                            query: options.clone(),
+                            ..Default::default()
+                        },
+                    ))
                     .map_err(|error| AdapterError::Execute(format!("dipstick {name}: {error}")))?;
-                examined = examined.saturating_add(page.coverage.examined_documents);
-                if let Some(d) = &page.diagnostics {
+                    (
+                        page.rows,
+                        page.base.coverage.examined_documents,
+                        page.base.diagnostics,
+                        page.base.exhausted,
+                        page.base.next,
+                    )
+                } else {
+                    let page = block_on(docs.rql(source, &Parameters::default(), options.clone()))
+                        .map_err(|error| {
+                            AdapterError::Execute(format!("dipstick {name}: {error}"))
+                        })?;
+                    (
+                        page.rows
+                            .into_iter()
+                            .map(|row| (row.key, row.value))
+                            .collect(),
+                        page.coverage.examined_documents,
+                        page.diagnostics,
+                        page.exhausted,
+                        page.next,
+                    )
+                };
+                examined = examined.saturating_add(page_examined);
+                if let Some(d) = &diagnostics {
                     for (phase, elapsed) in [
                         ("compile", d.compile_ns),
                         ("lower", d.lower_ns),
@@ -239,21 +317,20 @@ pub fn run_game_dipstick(
                             .or_insert(elapsed);
                     }
                 }
-                rows.extend(page.rows.into_iter().map(|row| {
-                    let mut value = row.value;
+                rows.extend(page_rows.into_iter().map(|(row_key, mut value)| {
                     let key = group_key
                         .and_then(|field| value.get(field))
                         .map(|value| value.to_string())
-                        .unwrap_or(row.key);
+                        .unwrap_or(row_key);
                     if let Value::Object(map) = &mut value {
                         map.remove("_key");
                     }
                     ResultRow { key, value }
                 }));
-                if page.exhausted || page.next.is_none() {
+                if exhausted || next.is_none() {
                     break;
                 }
-                options.after = page.next;
+                options.after = next;
             }
             Ok((rows, examined, phases))
         };

@@ -1,9 +1,7 @@
 //! Two-slot durable selector algorithm (`HEAP_SPEC` §35).
 
 use crate::error::AuthorityStoreError;
-use residiuum_format::{
-    decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue,
-};
+use residiuum_format::{decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;

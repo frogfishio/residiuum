@@ -20,6 +20,10 @@ pub use bundle::{verify_bundle_hashes, write_evidence_bundle, EvidenceBundle, BU
 pub use disclosure::{
     build_disclosure, render_disclosure_markdown, ChecklistItem, DisclosureSummary,
 };
+pub use multiproc::{
+    build_worker_jobs, current_worker_bin, run_spawned_workers, run_worker_job, WorkerJob,
+    WorkerResult,
+};
 pub use plan::{
     campaign_plan_linux, campaign_plan_macos_apple_silicon, campaign_plan_synthetic, CampaignPlan,
     PlatformClass, MIN_PROCESSES, MIN_REPETITIONS,
@@ -31,10 +35,6 @@ pub use reports::{
 pub use run::{
     attach_primary_bottleneck, run_campaign, run_qualification_preflight, CampaignConfig,
     CampaignResult, CellRepetition, PresentationPin, ProcessSlot,
-};
-pub use multiproc::{
-    build_worker_jobs, current_worker_bin, run_spawned_workers, run_worker_job, WorkerJob,
-    WorkerResult,
 };
 pub use run_class::RunClass;
 

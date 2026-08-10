@@ -246,9 +246,7 @@ fn resolve_sample_keys(manifest: &Option<WorkloadManifest>, n: usize) -> Vec<Str
         return m.sample_keys(n);
     }
     // Fallback: probe a few sequential load keys.
-    (0..n.min(32))
-        .map(|i| format!("load/{i:020}"))
-        .collect()
+    (0..n.min(32)).map(|i| format!("load/{i:020}")).collect()
 }
 
 fn latency_stats(samples: &[Duration]) -> Value {
@@ -329,7 +327,9 @@ pub fn evaluate_run(
         reasons.push("post-chaos live_subjects=0 after non-empty baseline (total loss)".into());
     }
     if reasons.is_empty() {
-        reasons.push("pass: pump target met, baseline healthy, chaos landed, salvage still speaks".into());
+        reasons.push(
+            "pass: pump target met, baseline healthy, chaos landed, salvage still speaks".into(),
+        );
     }
     (ok, reasons)
 }

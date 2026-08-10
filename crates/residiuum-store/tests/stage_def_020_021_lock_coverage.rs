@@ -24,9 +24,7 @@ fn inspect_can_run_while_writer_holds_lock() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s");
     let mut writer = Store::create(&path).unwrap();
-    writer
-        .put("k", b"v", DurabilityMode::Durable)
-        .unwrap();
+    writer.put("k", b"v", DurabilityMode::Durable).unwrap();
     assert!(writer.holds_writer_lock());
 
     let inspect = Store::open_inspect(&path).unwrap();
@@ -73,7 +71,10 @@ sys.exit(2)  # unexpected: acquired lock while holder alive
         ])
         .status()
         .expect("python3 available for flock probe");
-    assert!(status.success(), "cross-process flock probe failed: {status}");
+    assert!(
+        status.success(),
+        "cross-process flock probe failed: {status}"
+    );
 }
 
 #[test]

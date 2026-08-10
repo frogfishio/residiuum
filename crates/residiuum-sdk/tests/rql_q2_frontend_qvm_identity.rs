@@ -15,7 +15,7 @@ use residiuum_heap::CollectionId;
 use residiuum_sdk::plan_v1::{CollectionBindings, OrderDir, PlanBuilder};
 use residiuum_sdk::predicate::{field, param, Operand, Predicate};
 use residiuum_sdk::{
-    compile_app_core, compile_sql_to_rql, lower_core_source, CoveragePolicy, ConsistencyMode,
+    compile_app_core, compile_sql_to_rql, lower_core_source, ConsistencyMode, CoveragePolicy,
     QueryBytecodeV1, SqlToRqlResult, BYTECODE_PROFILE,
 };
 use std::str::FromStr;
@@ -149,7 +149,11 @@ fn q23_three_frontends_same_simple_eq() {
     // Builder + RQL + SQL for a minimal selection identity cell.
     let b = bindings();
     let builder = PlanBuilder::from_source("orders")
-        .where_(field("status").unwrap().eq(Operand::literal(serde_json::json!("paid"))))
+        .where_(
+            field("status")
+                .unwrap()
+                .eq(Operand::literal(serde_json::json!("paid"))),
+        )
         .page_size(64)
         .unwrap()
         .compile(&b)
@@ -159,15 +163,21 @@ fn q23_three_frontends_same_simple_eq() {
     let from_rql = compile_app_core(rql, &b).expect("rql").plan;
 
     let sql = "SELECT * FROM orders WHERE status = 'paid' PAGE SIZE 64";
-    let SqlToRqlResult::Emit(e) =
-        compile_sql_to_rql(sql, Some(&b)).expect("sql")
-    else {
+    let SqlToRqlResult::Emit(e) = compile_sql_to_rql(sql, Some(&b)).expect("sql") else {
         panic!("sql refuse");
     };
     let from_sql = e.compiled.expect("compiled").plan;
 
-    assert_eq!(builder.plan_hash_hex(), from_rql.plan_hash_hex(), "builder vs rql plan");
-    assert_eq!(from_rql.plan_hash_hex(), from_sql.plan_hash_hex(), "rql vs sql plan");
+    assert_eq!(
+        builder.plan_hash_hex(),
+        from_rql.plan_hash_hex(),
+        "builder vs rql plan"
+    );
+    assert_eq!(
+        from_rql.plan_hash_hex(),
+        from_sql.plan_hash_hex(),
+        "rql vs sql plan"
+    );
 
     let (qh_b, bytes_b) = qvm_from_plan(builder);
     let (qh_r, bytes_r) = qvm_from_plan(from_rql);
@@ -184,7 +194,8 @@ fn q23_lower_core_source_matches_from_core_plan() {
     let source = r#"from orders where status = $st limit 10 page size 8"#;
     let via_source = lower_core_source(source, cid(), "orders").expect("lower_core_source");
     let compiled = compile_app_core(source, &bindings()).expect("compile");
-    let via_plan = QueryBytecodeV1::from_core_plan(compiled.plan, compiled.budget).expect("from plan");
+    let via_plan =
+        QueryBytecodeV1::from_core_plan(compiled.plan, compiled.budget).expect("from plan");
     assert_eq!(via_source.qvm_hash(), via_plan.qvm_hash());
     assert_eq!(via_source.qvm_bytes(), via_plan.qvm_bytes());
 }
@@ -229,7 +240,9 @@ fn q23_product_qvm_path_no_rqb1_symbols() {
 fn q23_predicate_builder_path_matches_rql_cmp() {
     // Predicate builder (`field().eq(lit)`) is the Rust-builder surface for where.
     let b = bindings();
-    let pred: Predicate = field("amount").unwrap().gt(Operand::literal(serde_json::json!(99)));
+    let pred: Predicate = field("amount")
+        .unwrap()
+        .gt(Operand::literal(serde_json::json!(99)));
     let builder = PlanBuilder::from_source("orders")
         .where_(pred)
         .compile(&b)

@@ -20,7 +20,10 @@ fn keyring_file_created_and_not_public_derivable() {
     let path = dir.path().join("s");
     let store = Store::create(&path).unwrap();
     let key_path = path.join("store-info").join(CURSOR_TOKEN_KEYS_FILE);
-    assert!(key_path.is_file(), "cursor_token_keys.v1 must exist after create");
+    assert!(
+        key_path.is_file(),
+        "cursor_token_keys.v1 must exist after create"
+    );
     let bytes = fs::read(&key_path).unwrap();
     assert!(bytes.len() >= 8 + 4 + 4 + 32);
     // File must not be empty of entropy / not equal to store_id alone.
@@ -42,9 +45,7 @@ fn paged_scan_survives_reopen_with_same_keyring() {
             )
             .unwrap();
     }
-    let page = store
-        .scan_live_page(&LiveScanPageOptions::new(5))
-        .unwrap();
+    let page = store.scan_live_page(&LiveScanPageOptions::new(5)).unwrap();
     assert!(page.has_more);
     let tok = page.continuation.unwrap();
     // Resume on the same writer (keyring still loaded) — reopen path covered by
@@ -65,16 +66,10 @@ fn rotation_grace_and_retire() {
     let mut store = Store::create(&path).unwrap();
     for i in 0..20 {
         store
-            .put(
-                &format!("n{i:02}"),
-                b"x",
-                DurabilityMode::Durable,
-            )
+            .put(&format!("n{i:02}"), b"x", DurabilityMode::Durable)
             .unwrap();
     }
-    let page = store
-        .scan_live_page(&LiveScanPageOptions::new(5))
-        .unwrap();
+    let page = store.scan_live_page(&LiveScanPageOptions::new(5)).unwrap();
     let tok = page.continuation.expect("more");
     let g0 = store.continuation_key_generation();
     let g1 = store.rotate_continuation_keys().unwrap();

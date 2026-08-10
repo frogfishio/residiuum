@@ -334,9 +334,8 @@ pub fn read_frame_or_detect_legacy<R: Read>(
 
 /// Parse a handshake JSON payload.
 pub fn parse_handshake(bytes: &[u8]) -> Result<Handshake, Error> {
-    serde_json::from_slice(bytes).map_err(|e| {
-        Error::ProtocolViolation(format!("invalid handshake JSON: {e}"))
-    })
+    serde_json::from_slice(bytes)
+        .map_err(|e| Error::ProtocolViolation(format!("invalid handshake JSON: {e}")))
 }
 
 /// Intersect client-offered features with server-required features.
@@ -376,8 +375,8 @@ pub fn negotiate_features_with_optional(
 ///
 /// Requires the base RPC features plus `heap-key-v1`.
 pub fn negotiate_qualified_features(client_features: &[String]) -> Result<Vec<String>, Error> {
-    negotiate_features_with_optional(client_features, &[crate::FEATURE_HEAP_KEY_V1])
-        .and_then(|granted| {
+    negotiate_features_with_optional(client_features, &[crate::FEATURE_HEAP_KEY_V1]).and_then(
+        |granted| {
             if granted.iter().any(|f| f == crate::FEATURE_HEAP_KEY_V1) {
                 Ok(granted)
             } else {
@@ -386,7 +385,8 @@ pub fn negotiate_qualified_features(client_features: &[String]) -> Result<Vec<St
                     crate::FEATURE_HEAP_KEY_V1
                 )))
             }
-        })
+        },
+    )
 }
 
 /// Negotiate max frame: min(client offer, DEFAULT).

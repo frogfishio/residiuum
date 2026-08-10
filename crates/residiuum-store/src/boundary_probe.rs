@@ -846,8 +846,25 @@ mod tests {
     fn enabled_records_kinds_and_digest() {
         let mut p = BoundaryProbe::disabled();
         p.enable();
-        p.record_append(164, 100, 0, DurabilityMode::Buffered, false, false, 0, 50, 0);
-        p.record_file_write(164, 164, 100, BoundaryOutcome::Ok, DurabilityMode::Buffered, 0);
+        p.record_append(
+            164,
+            100,
+            0,
+            DurabilityMode::Buffered,
+            false,
+            false,
+            0,
+            50,
+            0,
+        );
+        p.record_file_write(
+            164,
+            164,
+            100,
+            BoundaryOutcome::Ok,
+            DurabilityMode::Buffered,
+            0,
+        );
         p.record_file_sync(200, BoundaryOutcome::Ok, DurabilityMode::Durable, 0);
         p.record_encode_envelope(40, 12, DurabilityMode::Buffered, 0);
         p.record_publish(0, DurabilityMode::Buffered, 0, 25);

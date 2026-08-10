@@ -88,9 +88,7 @@ impl SegmentGrowthPolicy {
     pub fn initial_zeroed_thru(self) -> u64 {
         match self {
             Self::GrowOnAppend => 0,
-            Self::Watermark {
-                capacity_bytes, ..
-            } => capacity_bytes,
+            Self::Watermark { capacity_bytes, .. } => capacity_bytes,
         }
     }
 
@@ -282,7 +280,10 @@ mod tests {
         file.seek(SeekFrom::Start(cap - 1024 * 1024)).expect("seek");
         let mut buf = vec![0xff; 1024 * 1024];
         file.read_exact(&mut buf).expect("read");
-        assert!(buf.iter().all(|&b| b == 0), "tail of capacity must be zeroed");
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "tail of capacity must be zeroed"
+        );
     }
 
     #[test]

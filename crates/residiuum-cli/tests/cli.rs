@@ -178,7 +178,10 @@ fn doctor_is_read_only_on_healthy_store() {
     assert!(out.contains("read_only: true"));
     assert!(out.contains("healthy: true"));
     // DEF-102: primary.idx is derived; doctor classifies without size-as-health.
-    assert!(out.contains("primary_cache:"), "doctor should report primary_cache");
+    assert!(
+        out.contains("primary_cache:"),
+        "doctor should report primary_cache"
+    );
     assert!(out.contains("authoritative=false"));
     assert!(out.contains("lifecycle:"), "doctor should report lifecycle");
 
@@ -262,7 +265,10 @@ fn backup_and_restore_roundtrip() {
     let restore = run_ok(&["restore", bak_s, "--output", dst_s]);
     assert!(restore.contains("restore"), "restore={restore}");
     assert!(restore.contains("live_subjects: 2"), "restore={restore}");
-    assert!(restore.contains("identity_reassigned: false"), "restore={restore}");
+    assert!(
+        restore.contains("identity_reassigned: false"),
+        "restore={restore}"
+    );
 
     let alice = run_ok(&["get", dst_s, "users/alice"]);
     assert!(alice.contains("Alice"), "alice={alice}");
@@ -282,14 +288,11 @@ fn restore_reassign_identity_clone() {
 
     run_ok(&["put", src_s, "k/x", "--json", r#"{"v":1}"#]);
     run_ok(&["backup", src_s, "--output", bak_s]);
-    let restore = run_ok(&[
-        "restore",
-        bak_s,
-        "--output",
-        clone_s,
-        "--reassign-identity",
-    ]);
-    assert!(restore.contains("identity_reassigned: true"), "restore={restore}");
+    let restore = run_ok(&["restore", bak_s, "--output", clone_s, "--reassign-identity"]);
+    assert!(
+        restore.contains("identity_reassigned: true"),
+        "restore={restore}"
+    );
     let got = run_ok(&["get", clone_s, "k/x"]);
     assert!(got.contains(r#""v":1"#) || got.contains("1"), "got={got}");
 }
@@ -344,11 +347,17 @@ fn config_validate_show_and_unsafe_reject() {
 
     let out = run_ok(&["config", "validate", good_s, "--mode", "serve"]);
     assert!(out.contains("config ok"), "out={out}");
-    assert!(out.contains("residiuum-config-v1") || out.contains("profile="), "out={out}");
+    assert!(
+        out.contains("residiuum-config-v1") || out.contains("profile="),
+        "out={out}"
+    );
 
     let show = run_ok(&["--json-out", "config", "show", good_s, "--mode", "serve"]);
     assert!(show.contains("residiuum-config-v1"), "show={show}");
-    assert!(show.contains("[redacted]") || show.contains("<unset>"), "show={show}");
+    assert!(
+        show.contains("[redacted]") || show.contains("<unset>"),
+        "show={show}"
+    );
     assert!(show.contains("serve.bind"), "show={show}");
 
     let bad = dir.path().join("bad.json");
@@ -432,8 +441,7 @@ fn serve_and_sdk_connect_parity() {
     let bind = format!("127.0.0.1:{port}");
 
     let mut child = residiuum_bin()
-        .args(["serve",
-            "--legacy-token-server", store_s, "--bind", &bind])
+        .args(["serve", "--legacy-token-server", store_s, "--bind", &bind])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -497,8 +505,15 @@ fn serve_auth_token_required() {
     let bind = format!("127.0.0.1:{port}");
 
     let mut child = residiuum_bin()
-        .args(["serve",
-            "--legacy-token-server", store_s, "--bind", &bind, "--token", "s3cret"])
+        .args([
+            "serve",
+            "--legacy-token-server",
+            store_s,
+            "--bind",
+            &bind,
+            "--token",
+            "s3cret",
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -516,8 +531,10 @@ fn serve_auth_token_required() {
     assert_eq!(err.code(), ErrorCode::AuthenticationFailed);
 
     // Wrong token → authentication_failed.
-    let err = match residiuum_sdk::Residiuum::connect_with(&url, ConnectOptions::new().auth_token("wrong"))
-    {
+    let err = match residiuum_sdk::Residiuum::connect_with(
+        &url,
+        ConnectOptions::new().auth_token("wrong"),
+    ) {
         Ok(_) => panic!("must reject wrong token"),
         Err(e) => e,
     };
@@ -635,16 +652,15 @@ fn serve_refuses_public_plaintext_bind_without_override() {
     let store = dir.path().join("app.residiuum");
     let store_s = store.to_str().unwrap();
     // Create a store first so failure is about bind policy, not missing path.
-    run_ok(&[
-        "put",
-        store_s,
-        "t/k",
-        "--json",
-        r#"{"ok":true}"#,
-    ]);
+    run_ok(&["put", store_s, "t/k", "--json", r#"{"ok":true}"#]);
     let out = residiuum_bin()
-        .args(["serve",
-            "--legacy-token-server", store_s, "--bind", "0.0.0.0:17434"])
+        .args([
+            "serve",
+            "--legacy-token-server",
+            store_s,
+            "--bind",
+            "0.0.0.0:17434",
+        ])
         .output()
         .expect("run serve with public bind");
     assert!(!out.status.success(), "public bind must fail closed");
@@ -670,8 +686,7 @@ fn serve_loopback_bind_is_allowed() {
     let bind = format!("127.0.0.1:{port}");
 
     let mut child = residiuum_bin()
-        .args(["serve",
-            "--legacy-token-server", store_s, "--bind", &bind])
+        .args(["serve", "--legacy-token-server", store_s, "--bind", &bind])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -703,7 +718,8 @@ fn capability_matrix_document_present() {
         text.contains("Experimental network cluster is not production")
             || text.contains("not a production release claim")
             || text.contains("do not provide replicated durability")
-            || text.contains("Three `serve-cluster` processes do not provide replicated durability"),
+            || text
+                .contains("Three `serve-cluster` processes do not provide replicated durability"),
         "matrix must keep honest maturity labels for network multi-node"
     );
     assert!(text.contains("DEF-002") || text.contains("allow-insecure-bind"));
@@ -788,7 +804,9 @@ fn serve_cluster_advertises_placement_and_endpoints() {
             &root_thread,
             0,
             &bind_thread,
-            ServeOptions::new().legacy_token_server().experimental_network_cluster(true),
+            ServeOptions::new()
+                .legacy_token_server()
+                .experimental_network_cluster(true),
         );
     });
 

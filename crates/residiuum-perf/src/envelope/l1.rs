@@ -167,7 +167,12 @@ pub fn run_l1_envelope<A: IoAdapter>(
 
     // Optional sequential read pass (small).
     if bytes > 0 {
-        let _ = adapter.read_block(&cfg.file_id, 0, cfg.block_size.min(bytes as usize), cfg.io_mode);
+        let _ = adapter.read_block(
+            &cfg.file_id,
+            0,
+            cfg.block_size.min(bytes as usize),
+            cfg.io_mode,
+        );
     }
 
     let tput = if total_lat == 0 {

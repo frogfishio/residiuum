@@ -138,11 +138,7 @@ fn main() {
     for s in 0..6 {
         for k in 0..1100 {
             store
-                .put(
-                    &format!("seal/{s}/{k:05}"),
-                    &fill,
-                    DurabilityMode::Buffered,
-                )
+                .put(&format!("seal/{s}/{k:05}"), &fill, DurabilityMode::Buffered)
                 .expect("put fill");
         }
         let t0 = Instant::now();
@@ -156,7 +152,9 @@ fn main() {
 
     eprintln!();
     eprintln!("Interpretation:");
-    eprintln!("  Steady-state buffered puts: data path (encode/append/write) + dual in-memory index.");
+    eprintln!(
+        "  Steady-state buffered puts: data path (encode/append/write) + dual in-memory index."
+    );
     eprintln!("  Dual-index model: memory×2 ≈ index publish cost; remainder ≈ data I/O.");
     eprintln!("  Asymptotic indexing failure (full rewrite on seal / every few puts): FIXED.");
     eprintln!("  Remaining bottleneck: synchronous lifecycle when it fires —");

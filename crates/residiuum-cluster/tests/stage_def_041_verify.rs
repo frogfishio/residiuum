@@ -49,7 +49,12 @@ fn same_seed_same_campaign_and_put_history() {
         let mut w = SimWorld::three_node(seed);
         let (leader, _) = w.elect_any().expect("elect");
         let r = w
-            .client_put("replay/k", b"v", Some("op-replay-aaaaaaaaaaaaaaaaaaaa"), leader)
+            .client_put(
+                "replay/k",
+                b"v",
+                Some("op-replay-aaaaaaaaaaaaaaaaaaaa"),
+                leader,
+            )
             .expect("put");
         w.history
             .iter()
@@ -60,7 +65,10 @@ fn same_seed_same_campaign_and_put_history() {
                 };
                 let committed = matches!(
                     h.outcome,
-                    Some(OpOutcome::PutOk { committed: true, .. })
+                    Some(OpOutcome::PutOk {
+                        committed: true,
+                        ..
+                    })
                 );
                 (h.call_id, sub, committed)
             })
@@ -99,7 +107,11 @@ fn leader_loss_after_quorum_preserves_commit_and_continues() {
     // All online peers should have the commit.
     for n in w.online_voters() {
         let ci = w.commit_index(n).unwrap();
-        assert!(ci >= r1.position.0, "peer {n} commit={ci} dump={}", w.dump());
+        assert!(
+            ci >= r1.position.0,
+            "peer {n} commit={ci} dump={}",
+            w.dump()
+        );
     }
     w.crash(leader);
     let (new_leader, _) = w.elect_any().unwrap();
@@ -149,7 +161,10 @@ fn minority_partition_cannot_elect_majority_can() {
         Err(ElectError::NoQuorum { votes, need }) => {
             assert!(votes < need);
         }
-        other => panic!("expected NoQuorum for minority, got {other:?}\n{}", w.dump()),
+        other => panic!(
+            "expected NoQuorum for minority, got {other:?}\n{}",
+            w.dump()
+        ),
     }
     let (leader, _) = w
         .campaign(rest[0])
@@ -208,7 +223,8 @@ fn chaos_seed_replays_and_stays_linearizable() {
     w2.set_drop_prob(0.08);
     let c2 = w2.run_chaos(48);
     assert_eq!(
-        c1, c2,
+        c1,
+        c2,
         "same seed must produce same committed-put count\n--- w1 ---\n{}\n--- w2 ---\n{}",
         w1.dump(),
         w2.dump()
@@ -301,11 +317,7 @@ fn conformance_matrix_all_pass() {
             "seed={seed}"
         );
         for r in &reports {
-            assert!(
-                r.ok,
-                "seed={seed} case={} failed:\n{}",
-                r.case, r.detail
-            );
+            assert!(r.ok, "seed={seed} case={} failed:\n{}", r.case, r.detail);
         }
     }
 }
@@ -367,7 +379,8 @@ fn stale_placement_epoch_is_fenced() {
     let mut w = SimWorld::three_node(32);
     let old = w.placement_epoch().expect("epoch");
     let (leader, _) = w.elect_any().unwrap();
-    w.client_put("place/k", b"v", Some("op-pl-1"), leader).unwrap();
+    w.client_put("place/k", b"v", Some("op-pl-1"), leader)
+        .unwrap();
 
     w.advance_placement_epoch();
     let new = w.placement_epoch().expect("new epoch");
@@ -392,7 +405,9 @@ fn stale_placement_epoch_is_fenced() {
 #[test]
 fn soak_put_get_stays_linearizable() {
     let mut w = SimWorld::three_node(0x50a1u64);
-    let (puts, gets) = w.run_soak(32, 8).unwrap_or_else(|e| panic!("{e}\n{}", w.dump()));
+    let (puts, gets) = w
+        .run_soak(32, 8)
+        .unwrap_or_else(|e| panic!("{e}\n{}", w.dump()));
     // After heal we expect some successful post-ops when leadership forms.
     assert!(
         puts + gets > 0 || w.history.iter().any(|h| h.is_committed_put()),

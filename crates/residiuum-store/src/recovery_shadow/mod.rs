@@ -24,13 +24,15 @@ mod frontier;
 mod integrate;
 mod mirror;
 mod policy;
-mod recovery_mode;
 pub mod qualify;
+mod recovery_mode;
 mod stager;
 mod wire;
 
-pub use crypto::{
-    contains_plaintext, envelope_open, envelope_seal, ENVELOPE_MAGIC,
+pub use crypto::{contains_plaintext, envelope_open, envelope_seal, ENVELOPE_MAGIC};
+pub use dual_stream::{
+    decode_dual_mirror, is_dual_magic, publish_prepared_shadow, DualStreamFinalizeTiming,
+    PreparedShadowPublish, ShadowDualStream, RSH_MAGIC_V4,
 };
 pub use frontier::{
     load_protected_coverage, load_protected_frontier, protection_lag, protection_lag_from_coverage,
@@ -38,30 +40,20 @@ pub use frontier::{
     ProtectionLag, FRONTIER_FILE,
 };
 pub use integrate::{
-    build_and_publish_mirror_shadow, build_and_publish_shadow, current_protection_lag, delete_shadow,
-    is_recovery_shadow_path, note_segment_sealed, publish_shadow_claiming_protection,
-    rebuild_coverage_from_shadows, retire_shadows_after_replacement,
-    retire_shadows_after_replacement_with_policy, secure_erase_shadow, snapshot_telemetry,
-    ShadowTelemetry,
-};
-pub use policy::{
-    reset_shadow_reclaim_policy_for_tests, set_shadow_reclaim_policy, shadow_reclaim_policy,
-    ShadowReclaimPolicy,
-};
-pub use dual_stream::{
-    decode_dual_mirror, is_dual_magic, publish_prepared_shadow, DualStreamFinalizeTiming,
-    PreparedShadowPublish, ShadowDualStream, RSH_MAGIC_V4,
-};
-pub use recovery_mode::{
-    activate_compact_shadow_mode, backfill_shadows_for_sealed, load_recovery_mode,
-    persist_recovery_mode, prepare_flip_to_compact_shadow, protected_frontier_gap_free,
-    recovery_mode_path, rollback_to_materialized_mode, RecoveryMode, RECOVERY_MODE_FILE,
-    RECOVERY_MODE_MAGIC,
+    build_and_publish_mirror_shadow, build_and_publish_shadow, current_protection_lag,
+    delete_shadow, is_recovery_shadow_path, note_segment_sealed,
+    publish_shadow_claiming_protection, rebuild_coverage_from_shadows,
+    retire_shadows_after_replacement, retire_shadows_after_replacement_with_policy,
+    secure_erase_shadow, snapshot_telemetry, ShadowTelemetry,
 };
 pub use mirror::{
     decode_mirror_to_struct, encode_mirror_shadow, is_mirror_magic, mirror_to_decoded_shadow,
     publish_mirror_shadow, publish_mirror_shadow_from_path, publish_mirror_shadow_timed,
     try_load_mirror, MirrorPublishTiming, MirroredShadow, MIRROR_ENVELOPE_LEN, RSH_MAGIC_V3,
+};
+pub use policy::{
+    reset_shadow_reclaim_policy_for_tests, set_shadow_reclaim_policy, shadow_reclaim_policy,
+    ShadowReclaimPolicy,
 };
 pub use qualify::{
     candidate_config_label, decode_segment_for_candidate, enrich_segment_candidate, evaluate_gates,
@@ -69,11 +61,17 @@ pub use qualify::{
     publish_shadow_timed, range_f64, recovery_after_auth_compact_delete, stage_medians,
     QualifyOptions, ShadowStageSample, Step7CampaignReport, Step7Gates, HARNESS_ENVELOPE_KEY,
 };
+pub use recovery_mode::{
+    activate_compact_shadow_mode, backfill_shadows_for_sealed, load_recovery_mode,
+    persist_recovery_mode, prepare_flip_to_compact_shadow, protected_frontier_gap_free,
+    recovery_mode_path, rollback_to_materialized_mode, RecoveryMode, RECOVERY_MODE_FILE,
+    RECOVERY_MODE_MAGIC,
+};
 pub use stager::{ShadowStageHandle, ShadowStagePipeline};
 pub use wire::{
     decode_shadow, encode_shadow, encode_shadow_from_live_map, project_live, publish_shadow,
     shadow_dir, shadow_path, try_load_shadow, DecodedShadow, LiveMap, LiveState, ShadowLoad,
-    ShadowRecord, ShadowWriter, TAG_PUT, TAG_TOMBSTONE, RSH_MAGIC, RSH_MAGIC_V1,
+    ShadowRecord, ShadowWriter, RSH_MAGIC, RSH_MAGIC_V1, TAG_PUT, TAG_TOMBSTONE,
 };
 
 use crate::layout::StorePaths;

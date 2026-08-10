@@ -137,22 +137,22 @@ fn run_step9(target_bytes: u64) -> Step9Report {
     let ack_t0 = Instant::now();
     while written < target_bytes {
         let k = format!("step9/{ops:020}");
-        store
-            .put(&k, &payload, DurabilityMode::Buffered)
-            .unwrap();
+        store.put(&k, &payload, DurabilityMode::Buffered).unwrap();
         expect.insert(k.into_bytes(), payload.clone());
         ops += 1;
         written += PAYLOAD as u64;
         since_seal += PAYLOAD as u64;
         if since_seal >= SEAL_EVERY {
             let b = store.seal_active_with_breakdown().unwrap();
-            seal_breakdown.drain_lifecycle_ns =
-                seal_breakdown.drain_lifecycle_ns.saturating_add(b.drain_lifecycle_ns);
+            seal_breakdown.drain_lifecycle_ns = seal_breakdown
+                .drain_lifecycle_ns
+                .saturating_add(b.drain_lifecycle_ns);
             seal_breakdown.final_active_seal_ns = seal_breakdown
                 .final_active_seal_ns
                 .saturating_add(b.final_active_seal_ns);
-            seal_breakdown.shadow_dual_ns =
-                seal_breakdown.shadow_dual_ns.saturating_add(b.shadow_dual_ns);
+            seal_breakdown.shadow_dual_ns = seal_breakdown
+                .shadow_dual_ns
+                .saturating_add(b.shadow_dual_ns);
             seal_breakdown.catalog_publication_ns = seal_breakdown
                 .catalog_publication_ns
                 .saturating_add(b.catalog_publication_ns);
@@ -160,8 +160,7 @@ fn run_step9(target_bytes: u64) -> Step9Report {
                 .content_hash_ns
                 .saturating_add(b.content_hash_ns);
             seal_breakdown.hydra_ns = seal_breakdown.hydra_ns.saturating_add(b.hydra_ns);
-            seal_breakdown.chimera_ns =
-                seal_breakdown.chimera_ns.saturating_add(b.chimera_ns);
+            seal_breakdown.chimera_ns = seal_breakdown.chimera_ns.saturating_add(b.chimera_ns);
             seal_breakdown.reopen_active_ns = seal_breakdown
                 .reopen_active_ns
                 .saturating_add(b.reopen_active_ns);
@@ -170,20 +169,20 @@ fn run_step9(target_bytes: u64) -> Step9Report {
     }
     for i in 0..16u64 {
         let k = format!("continue/{i:04}");
-        store
-            .put(&k, &payload, DurabilityMode::Buffered)
-            .unwrap();
+        store.put(&k, &payload, DurabilityMode::Buffered).unwrap();
         expect.insert(k.into_bytes(), payload.clone());
     }
     {
         let b = store.seal_active_with_breakdown().unwrap();
-        seal_breakdown.drain_lifecycle_ns =
-            seal_breakdown.drain_lifecycle_ns.saturating_add(b.drain_lifecycle_ns);
+        seal_breakdown.drain_lifecycle_ns = seal_breakdown
+            .drain_lifecycle_ns
+            .saturating_add(b.drain_lifecycle_ns);
         seal_breakdown.final_active_seal_ns = seal_breakdown
             .final_active_seal_ns
             .saturating_add(b.final_active_seal_ns);
-        seal_breakdown.shadow_dual_ns =
-            seal_breakdown.shadow_dual_ns.saturating_add(b.shadow_dual_ns);
+        seal_breakdown.shadow_dual_ns = seal_breakdown
+            .shadow_dual_ns
+            .saturating_add(b.shadow_dual_ns);
         seal_breakdown.catalog_publication_ns = seal_breakdown
             .catalog_publication_ns
             .saturating_add(b.catalog_publication_ns);
@@ -217,8 +216,7 @@ fn run_step9(target_bytes: u64) -> Step9Report {
     );
 
     let total_ops = ops + 16;
-    let lifecycle_ops_per_sec =
-        total_ops as f64 / lifecycle_wall.as_secs_f64().max(1e-12);
+    let lifecycle_ops_per_sec = total_ops as f64 / lifecycle_wall.as_secs_f64().max(1e-12);
     // Ack ≈ lifecycle when seal tax is small; report both from the same wall
     // so excluding seals cannot inflate "ack" (principal: burst ≠ sustainable).
     let ack_ops_per_sec = lifecycle_ops_per_sec;
@@ -310,8 +308,8 @@ fn run_step9(target_bytes: u64) -> Step9Report {
     }
     let last_k = format!("step9/{:020}", ops.saturating_sub(1));
     reopen_query_ok &= store.get(&last_k).ok().flatten().as_deref() == Some(payload.as_slice());
-    reopen_query_ok &= store.get("continue/0015").ok().flatten().as_deref()
-        == Some(payload.as_slice());
+    reopen_query_ok &=
+        store.get("continue/0015").ok().flatten().as_deref() == Some(payload.as_slice());
     drop(store);
 
     let recovery_ok = recovery_after_auth_compact_delete(&paths, store_id, &expect).unwrap();
@@ -467,9 +465,7 @@ fn step9_reopen_continue_write_preserves_shadows() {
         store.set_seal_threshold(256 * 1024);
         for i in 0..20u64 {
             let k = format!("a/{i:04}");
-            store
-                .put(&k, &payload, DurabilityMode::Buffered)
-                .unwrap();
+            store.put(&k, &payload, DurabilityMode::Buffered).unwrap();
             expect.insert(k.into_bytes(), payload.clone());
         }
         store.seal_active().unwrap();
@@ -484,9 +480,7 @@ fn step9_reopen_continue_write_preserves_shadows() {
     store.set_seal_threshold(256 * 1024);
     for i in 0..12u64 {
         let k = format!("b/{i:04}");
-        store
-            .put(&k, &payload, DurabilityMode::Buffered)
-            .unwrap();
+        store.put(&k, &payload, DurabilityMode::Buffered).unwrap();
         expect.insert(k.into_bytes(), payload.clone());
     }
     store.seal_active().unwrap();
@@ -582,8 +576,14 @@ fn step9_buffered_64mib_then_continue_seal() {
     let sid = store.store_id();
     drop(store);
     let store = Store::open(dir.path()).unwrap();
-    assert!(store.get("k00000000").unwrap().is_some(), "reopen loses early key");
-    assert!(store.get("c0015").unwrap().is_some(), "reopen loses continue key");
+    assert!(
+        store.get("k00000000").unwrap().is_some(),
+        "reopen loses early key"
+    );
+    assert!(
+        store.get("c0015").unwrap().is_some(),
+        "reopen loses continue key"
+    );
     let mut expect = std::collections::BTreeMap::new();
     // sample oracle only
     expect.insert(b"k00000000".to_vec(), payload.clone());

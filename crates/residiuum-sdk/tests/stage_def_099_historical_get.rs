@@ -33,10 +33,7 @@ fn collection_get_version_and_find_last_complete() {
         .find_last_complete("k", RecoveryReadOptions::default())
         .unwrap();
     assert!(found.found.is_some());
-    assert_eq!(
-        found.found.as_ref().unwrap().selected_event_id,
-        eid
-    );
+    assert_eq!(found.found.as_ref().unwrap().selected_event_id, eid);
     let _ = BeforeEvent::Current;
 }
 

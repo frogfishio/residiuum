@@ -107,10 +107,7 @@ pub fn compile_sql_to_rql(
                 notes,
             }))
         }
-        Err(RefuseErr { diagnostic, detail }) => Ok(SqlToRqlResult::Refuse {
-            diagnostic,
-            detail,
-        }),
+        Err(RefuseErr { diagnostic, detail }) => Ok(SqlToRqlResult::Refuse { diagnostic, detail }),
     }
 }
 
@@ -130,8 +127,8 @@ fn refuse_statement_shape(sql: &str) -> Option<SqlToRqlResult> {
     let lower = sql.to_ascii_lowercase();
     let first = lower.split_whitespace().next().unwrap_or("");
     let banned_lead = [
-        "insert", "update", "delete", "merge", "create", "drop", "alter",
-        "truncate", "grant", "revoke", "begin", "commit", "rollback", "with",
+        "insert", "update", "delete", "merge", "create", "drop", "alter", "truncate", "grant",
+        "revoke", "begin", "commit", "rollback", "with",
     ];
     if banned_lead.contains(&first) {
         return Some(SqlToRqlResult::Refuse {
@@ -219,9 +216,9 @@ fn emit_select(sql: &str) -> Result<(String, Vec<String>), RefuseErr> {
     // Optional AS alias — ignored for Core (single source).
     if p.eat_kw("as") {
         let _alias = p.parse_ident()?;
-    } else if p.peek_ident().is_some() && !p.peek_is_kw(&[
-        "where", "order", "limit", "page", "access", "continue",
-    ]) {
+    } else if p.peek_ident().is_some()
+        && !p.peek_is_kw(&["where", "order", "limit", "page", "access", "continue"])
+    {
         let _alias = p.parse_ident()?;
     }
 
@@ -310,10 +307,7 @@ fn emit_select(sql: &str) -> Result<(String, Vec<String>), RefuseErr> {
     }
     if !star {
         if project.is_empty() {
-            return Err(refuse(
-                DIAG_SQL_RQL_PARSE_ERROR,
-                "SELECT list is empty",
-            ));
+            return Err(refuse(DIAG_SQL_RQL_PARSE_ERROR, "SELECT list is empty"));
         }
         out.push_str(" project ");
         out.push_str(&project.join(", "));
@@ -640,7 +634,8 @@ impl<'a> SqlParser<'a> {
             self.expect_kw("null")?;
             // SQL document view collapses missing and Null → emit OR / AND.
             let notes = vec![
-                "sql+ IS NULL maps missing∨Null (SQL document view collapse); Core retains both".into(),
+                "sql+ IS NULL maps missing∨Null (SQL document view collapse); Core retains both"
+                    .into(),
             ];
             let expr = if neg {
                 format!("present({col}) and {col} is not null")
@@ -663,7 +658,10 @@ impl<'a> SqlParser<'a> {
                 }
             }
             if !self.eat_char(')') {
-                return Err(refuse(DIAG_SQL_RQL_PARSE_ERROR, "expected `)` after IN list"));
+                return Err(refuse(
+                    DIAG_SQL_RQL_PARSE_ERROR,
+                    "expected `)` after IN list",
+                ));
             }
             let list = vals.join(", ");
             let expr = if not_in {

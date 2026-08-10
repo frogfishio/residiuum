@@ -1,6 +1,6 @@
 //! DEF-100 — Collection coverage-aware key / document scans (embedded).
 
-use residiuum_sdk::{json, Residiuum, Error};
+use residiuum_sdk::{json, Error, Residiuum};
 use tempfile::tempdir;
 
 #[test]
@@ -15,7 +15,10 @@ fn scan_keys_lists_verified_keys_around_chunked_values() {
     coll.put("c", &json!({"t": 2})).unwrap();
 
     let keys = coll.scan_keys().unwrap();
-    assert_eq!(keys, vec!["a".to_string(), "big".to_string(), "c".to_string()]);
+    assert_eq!(
+        keys,
+        vec!["a".to_string(), "big".to_string(), "c".to_string()]
+    );
 }
 
 #[test]

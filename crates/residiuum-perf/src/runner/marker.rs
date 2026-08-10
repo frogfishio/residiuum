@@ -27,9 +27,8 @@ pub fn marker_path(work_root: &Path) -> PathBuf {
 
 pub fn read_marker(work_root: &Path) -> Result<WorkRootMarker, RunnerError> {
     let path = marker_path(work_root);
-    let raw = fs::read_to_string(&path).map_err(|e| {
-        RunnerError::InvalidMarker(format!("read {}: {e}", path.display()))
-    })?;
+    let raw = fs::read_to_string(&path)
+        .map_err(|e| RunnerError::InvalidMarker(format!("read {}: {e}", path.display())))?;
     let m: WorkRootMarker = serde_json::from_str(&raw)?;
     if m.schema != MARKER_SCHEMA {
         return Err(RunnerError::InvalidMarker(format!(
@@ -45,7 +44,10 @@ pub fn read_marker(work_root: &Path) -> Result<WorkRootMarker, RunnerError> {
     Ok(m)
 }
 
-pub fn verify_marker(work_root: &Path, expected_work_root_id: Option<&str>) -> Result<WorkRootMarker, RunnerError> {
+pub fn verify_marker(
+    work_root: &Path,
+    expected_work_root_id: Option<&str>,
+) -> Result<WorkRootMarker, RunnerError> {
     let m = read_marker(work_root)?;
     if let Some(exp) = expected_work_root_id {
         if m.work_root_id != exp {

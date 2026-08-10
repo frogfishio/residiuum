@@ -4,9 +4,9 @@
 use residiuum_format::{HeapDescriptorState, ObjectDescriptorState};
 use residiuum_store::{
     create_object, delete_rebuildable_catalogs, publish_staged_genesis,
-    rebuild_and_persist_all_catalogs, rename_heap, rename_object, retire_object, stage_heap_genesis,
-    try_load_collections_catalog, try_load_heap_catalog, try_load_streams_catalog, HeapMetaLayout,
-    ObjectKind,
+    rebuild_and_persist_all_catalogs, rename_heap, rename_object, retire_object,
+    stage_heap_genesis, try_load_collections_catalog, try_load_heap_catalog,
+    try_load_streams_catalog, HeapMetaLayout, ObjectKind,
 };
 use tempfile::tempdir;
 
@@ -68,9 +68,7 @@ fn delete_catalogs_rebuilds_identical_names_aliases_ids_owners() {
     let cols_before = try_load_collections_catalog(&layout, &heap_a)
         .unwrap()
         .unwrap();
-    let streams_before = try_load_streams_catalog(&layout, &heap_a)
-        .unwrap()
-        .unwrap();
+    let streams_before = try_load_streams_catalog(&layout, &heap_a).unwrap().unwrap();
 
     assert_eq!(heaps_before, cat_before);
     assert_eq!(cols_before.len(), 1);
@@ -106,9 +104,7 @@ fn delete_catalogs_rebuilds_identical_names_aliases_ids_owners() {
     );
     assert_eq!(
         streams_before,
-        try_load_streams_catalog(&layout, &heap_a)
-            .unwrap()
-            .unwrap()
+        try_load_streams_catalog(&layout, &heap_a).unwrap().unwrap()
     );
 
     // Cross-heap isolation of collection namespaces survives rebuild.

@@ -3,9 +3,9 @@
 //! Capture stdout and paste into `spec/heap/vectors-v1.json` under `format_vectors`.
 
 use residiuum_format::{
-    descriptor_hash, encode_heap_binding_envelope, encode_heap_descriptor, encode_object_descriptor,
-    encode_subject_v2, HeapDescriptor, HeapDescriptorState, ObjectDescriptor,
-    ObjectDescriptorState, SubjectObjectKind,
+    descriptor_hash, encode_heap_binding_envelope, encode_heap_descriptor,
+    encode_object_descriptor, encode_subject_v2, HeapDescriptor, HeapDescriptorState,
+    ObjectDescriptor, ObjectDescriptorState, SubjectObjectKind,
 };
 
 fn hex(b: &[u8]) -> String {
@@ -29,12 +29,11 @@ fn main() {
     let collection = [0xaau8; 16];
     let stream = [0xbbu8; 16];
 
-    let subj_meta = encode_subject_v2(&heap, SubjectObjectKind::HeapMetadata, &[0u8; 16], b"\x01")
-        .unwrap();
-    let subj_coll = encode_subject_v2(&heap, SubjectObjectKind::Collection, &collection, b"user-1")
-        .unwrap();
-    let subj_stream =
-        encode_subject_v2(&heap, SubjectObjectKind::Stream, &stream, b"evt").unwrap();
+    let subj_meta =
+        encode_subject_v2(&heap, SubjectObjectKind::HeapMetadata, &[0u8; 16], b"\x01").unwrap();
+    let subj_coll =
+        encode_subject_v2(&heap, SubjectObjectKind::Collection, &collection, b"user-1").unwrap();
+    let subj_stream = encode_subject_v2(&heap, SubjectObjectKind::Stream, &stream, b"evt").unwrap();
 
     let heap_desc = HeapDescriptor {
         origin_deployment_id: deployment,

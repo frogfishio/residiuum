@@ -2,8 +2,8 @@
 
 use super::{DriverCellReport, DriverError, DriverRunConfig};
 use crate::matrix::{run_cell, RunCellConfig};
-use crate::store_driver::kinds::{DriverKind, MeasurementSurface};
 use crate::store_driver::emitter::{emit_plan_from_receipts, WriteReceiptFact};
+use crate::store_driver::kinds::{DriverKind, MeasurementSurface};
 
 pub fn run_synthetic(cfg: &DriverRunConfig) -> Result<DriverCellReport, DriverError> {
     let mut cell = cfg.cell.clone();

@@ -37,10 +37,7 @@ fn sql_plus_corpus_emit_and_refuse() {
 
     let mut bindings = CollectionBindings::default();
     for (name, id) in doc["default_bindings"].as_object().unwrap() {
-        bindings.bind(
-            name,
-            CollectionId::from_str(id.as_str().unwrap()).unwrap(),
-        );
+        bindings.bind(name, CollectionId::from_str(id.as_str().unwrap()).unwrap());
     }
 
     let emit = doc["emit"].as_array().unwrap();
@@ -55,11 +52,7 @@ fn sql_plus_corpus_emit_and_refuse() {
         };
         for needle in v["expect_rql_contains"].as_array().unwrap() {
             let n = needle.as_str().unwrap();
-            assert!(
-                e.rql.contains(n),
-                "{id}: rql `{}` missing `{n}`",
-                e.rql
-            );
+            assert!(e.rql.contains(n), "{id}: rql `{}` missing `{n}`", e.rql);
         }
         if v.get("expect_notes_nonempty").and_then(|x| x.as_bool()) == Some(true) {
             assert!(!e.notes.is_empty(), "{id}: expected honesty notes");

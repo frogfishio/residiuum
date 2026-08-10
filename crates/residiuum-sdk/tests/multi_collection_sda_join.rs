@@ -26,7 +26,7 @@
 //! only if the host includes them in the combined value — drop garbage before
 //! the join when bandwidth matters.
 
-use residiuum_sdk::{json, Residiuum, Filter};
+use residiuum_sdk::{json, Filter, Residiuum};
 use sda_core::Program;
 use serde_json::Value as JsonValue;
 use tempfile::tempdir;
@@ -55,9 +55,13 @@ fn find_via_sda(
     col: &mut residiuum_sdk::Collection<'_>,
     filter: &Filter,
 ) -> Vec<(String, JsonValue)> {
-    let program = filter
-        .compile_sda()
-        .unwrap_or_else(|e| panic!("SDA compile failed for {}: {e}; src={}", col.name(), filter.to_sda()));
+    let program = filter.compile_sda().unwrap_or_else(|e| {
+        panic!(
+            "SDA compile failed for {}: {e}; src={}",
+            col.name(),
+            filter.to_sda()
+        )
+    });
     let candidates = col
         .find(&Filter::always())
         .unwrap_or_else(|e| panic!("scan {}: {e}", col.name()));
@@ -65,7 +69,11 @@ fn find_via_sda(
         .into_iter()
         .filter(|(_, doc)| {
             Filter::matches_compiled_sda(&program, doc).unwrap_or_else(|e| {
-                panic!("SDA match failed on {}: {e}; src={}", col.name(), filter.to_sda())
+                panic!(
+                    "SDA match failed on {}: {e}; src={}",
+                    col.name(),
+                    filter.to_sda()
+                )
             })
         })
         .collect()
@@ -254,7 +262,9 @@ fn three_collections_sda_query_combine_join_filter() {
         .get("$value")
         .cloned()
         .unwrap_or_else(|| panic!("expected Opt Some wrapper, got {out}"));
-    let rows = rows.as_array().unwrap_or_else(|| panic!("expected array, got {rows}"));
+    let rows = rows
+        .as_array()
+        .unwrap_or_else(|| panic!("expected array, got {rows}"));
 
     // Expected after join filter (paid ∧ qty > 1) against *active* customers
     // and *in-stock* products:
@@ -271,12 +281,7 @@ fn three_collections_sda_query_combine_join_filter() {
         let product = first_some_str(row.get("product").expect("product"));
         let qty = unwrap_some_i64(row.get("qty").expect("qty"));
         if customer.is_some() && product.is_some() {
-            hits.push((
-                order_id,
-                customer.unwrap(),
-                product.unwrap(),
-                qty,
-            ));
+            hits.push((order_id, customer.unwrap(), product.unwrap(), qty));
         }
     }
 
@@ -571,9 +576,7 @@ fn run_scale(
     // Warmup pure eval (clones input each time — env takes ownership).
     progress(
         label,
-        &format!(
-            "join warmup eval (nested O(orders×lookups); multi-second is normal at mod)…"
-        ),
+        &format!("join warmup eval (nested O(orders×lookups); multi-second is normal at mod)…"),
     );
     let _ = program
         .eval("input", input_val.clone())
@@ -581,9 +584,7 @@ fn run_scale(
 
     progress(label, "join_once (pure eval)…");
     let t0 = Instant::now();
-    let out_val = program
-        .eval("input", input_val.clone())
-        .expect("join eval");
+    let out_val = program.eval("input", input_val.clone()).expect("join eval");
     let join_once_ms = t0.elapsed().as_secs_f64() * 1e3;
     progress(label, &format!("join_once done {join_once_ms:.1} ms"));
 
@@ -600,9 +601,7 @@ fn run_scale(
     let t0 = Instant::now();
     let mut last_beat = Instant::now();
     for i in 0..join_iters {
-        let _ = program
-            .eval("input", input_val.clone())
-            .expect("join loop");
+        let _ = program.eval("input", input_val.clone()).expect("join loop");
         // Heartbeat when an iter is long or every second so kills aren't "premature".
         if last_beat.elapsed().as_millis() >= 1000 || join_once_ms > 500.0 {
             progress(

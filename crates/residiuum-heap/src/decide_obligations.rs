@@ -88,10 +88,8 @@ pub mod obligations {
     pub fn unknown_constraints_cannot_allow_foreign() -> bool {
         let allowed = CollectionId::from_bytes(uuidish(0xf3)).unwrap();
         let foreign = CollectionId::from_bytes(uuidish(0xf4)).unwrap();
-        let constraints = Constraints::from_sorted(vec![Constraint::CollectionAllowlist(vec![
-            allowed,
-        ])])
-        .unwrap();
+        let constraints =
+            Constraints::from_sorted(vec![Constraint::CollectionAllowlist(vec![allowed])]).unwrap();
         constraints.allows_collection(allowed) && !constraints.allows_collection(foreign)
     }
 
@@ -108,9 +106,14 @@ pub mod obligations {
         ] {
             let slot = Arc::new(HeapSlot::new(snap(heap, dep, master, state)));
             let cert = cert_for(&slot.load(), heap);
-            let cap =
-                mint_capability(Arc::clone(&slot), &cert, TrustedInstant { unix_s: 1_700_000_000 })
-                    .unwrap();
+            let cap = mint_capability(
+                Arc::clone(&slot),
+                &cert,
+                TrustedInstant {
+                    unix_s: 1_700_000_000,
+                },
+            )
+            .unwrap();
             if refresh_capability_or_terminate(&cap).is_ok() {
                 return false;
             }
@@ -123,7 +126,14 @@ pub mod obligations {
             HeapAdministrativeState::Active,
         )));
         let cert = cert_for(&slot.load(), heap);
-        let cap = mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap();
+        let cap = mint_capability(
+            slot,
+            &cert,
+            TrustedInstant {
+                unix_s: 1_700_000_000,
+            },
+        )
+        .unwrap();
         refresh_capability_or_terminate(&cap).is_ok()
     }
 
@@ -136,11 +146,10 @@ pub mod obligations {
         let mut cert = cert_for(&snapshot, heap);
         assert!(authority_binding_holds(&snapshot, &cert));
         cert.authority_epoch = AuthorityEpoch::new(2).unwrap();
-        !authority_binding_holds(&snapshot, &cert)
-            && {
-                snapshot.authority_epoch = AuthorityEpoch::new(2).unwrap();
-                authority_binding_holds(&snapshot, &cert)
-            }
+        !authority_binding_holds(&snapshot, &cert) && {
+            snapshot.authority_epoch = AuthorityEpoch::new(2).unwrap();
+            authority_binding_holds(&snapshot, &cert)
+        }
     }
 
     /// O6: previous generation accepted during grace; refused after deadline

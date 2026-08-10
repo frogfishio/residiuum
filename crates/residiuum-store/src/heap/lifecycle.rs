@@ -181,11 +181,7 @@ impl RetentionScheduler {
     }
 
     /// Whether purge may start at `now_unix_s` for `heap_id`.
-    pub fn purge_allowed_at(
-        &self,
-        heap_id: &[u8; 16],
-        now_unix_s: u64,
-    ) -> Result<(), StoreError> {
+    pub fn purge_allowed_at(&self, heap_id: &[u8; 16], now_unix_s: u64) -> Result<(), StoreError> {
         if let Some(pol) = self.policies.get(heap_id) {
             if now_unix_s < pol.minimum_retain_until_unix_s {
                 return Err(StoreError::HeapAdmit(format!(
@@ -230,8 +226,8 @@ fn encode_retention_policy(policy: &HeapRetentionPolicy) -> Result<Vec<u8>, Stor
 }
 
 fn decode_retention_policy(bytes: &[u8]) -> Result<HeapRetentionPolicy, StoreError> {
-    let map = decode_deterministic_uint_map(bytes)
-        .map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
+    let map =
+        decode_deterministic_uint_map(bytes).map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
     let mut by = BTreeMap::new();
     for (k, v) in map {
         by.insert(k, v);
@@ -428,9 +424,7 @@ impl DataKeyProvider for InProcessDataKeyProvider {
     fn generate(&self, heap_id: [u8; 16]) -> Result<DataKeyHandle, StoreError> {
         // 32-byte secret from OS entropy (not HSM-backed).
         let mut secret = [0u8; 32];
-        getrandom::fill(&mut secret).map_err(|e| {
-            StoreError::HeapAdmit(format!("entropy: {e}"))
-        })?;
+        getrandom::fill(&mut secret).map_err(|e| StoreError::HeapAdmit(format!("entropy: {e}")))?;
         DataKeyHandle::generate(heap_id, &secret)
     }
 
@@ -867,9 +861,10 @@ impl HeapLifecycle {
                 "invalid transition: resume requires suspended".into(),
             ));
         }
-        let target = self.resume_state.take().ok_or_else(|| {
-            StoreError::HeapAdmit("missing remembered resume state".into())
-        })?;
+        let target = self
+            .resume_state
+            .take()
+            .ok_or_else(|| StoreError::HeapAdmit("missing remembered resume state".into()))?;
         self.transition(target, operation_id, "resume")?;
         Ok(())
     }
@@ -937,7 +932,11 @@ impl HeapLifecycle {
         };
         self.purge_plan = Some(plan.clone());
         self.destroyed.clear();
-        self.transition(HeapAdministrativeState::Purging, operation_id, "begin_purge")?;
+        self.transition(
+            HeapAdministrativeState::Purging,
+            operation_id,
+            "begin_purge",
+        )?;
         self.persist_plan(&plan)?;
         failpoint::hit("heap_lifecycle.after_purge_plan")?;
         Ok(plan)
@@ -979,7 +978,11 @@ impl HeapLifecycle {
         };
         self.purge_plan = Some(plan.clone());
         self.destroyed.clear();
-        self.transition(HeapAdministrativeState::Purging, operation_id, "begin_purge")?;
+        self.transition(
+            HeapAdministrativeState::Purging,
+            operation_id,
+            "begin_purge",
+        )?;
         self.persist_plan(&plan)?;
         failpoint::hit("heap_lifecycle.after_purge_plan")?;
         Ok(plan)
@@ -1035,7 +1038,9 @@ impl HeapLifecycle {
             return Err(StoreError::HeapAdmit("destroy requires purging".into()));
         }
         if !plan.coverage_ids.contains(&object_id) {
-            return Err(StoreError::HeapAdmit("object outside purge coverage".into()));
+            return Err(StoreError::HeapAdmit(
+                "object outside purge coverage".into(),
+            ));
         }
         if !plan.units.is_empty() {
             let unit = plan
@@ -1092,11 +1097,13 @@ impl HeapLifecycle {
         done.sort();
         let got = coverage_hash(&done);
         if got != plan.coverage_hash {
-            return Err(StoreError::HeapAdmit(
-                "purge coverage hash mismatch".into(),
-            ));
+            return Err(StoreError::HeapAdmit("purge coverage hash mismatch".into()));
         }
-        self.transition(HeapAdministrativeState::Purged, operation_id, "complete_purge")?;
+        self.transition(
+            HeapAdministrativeState::Purged,
+            operation_id,
+            "complete_purge",
+        )?;
         let snap = self.slot.load();
         write_identity_tombstone(
             &self.layout_root,
@@ -1129,7 +1136,11 @@ impl HeapLifecycle {
         }
         self.purge_plan = None;
         self.destroyed.clear();
-        self.transition(HeapAdministrativeState::Retired, operation_id, "abort_purge")?;
+        self.transition(
+            HeapAdministrativeState::Retired,
+            operation_id,
+            "abort_purge",
+        )?;
         Ok(())
     }
 
@@ -1251,9 +1262,7 @@ pub fn restore_payload_to_new_heap(
     label: &str,
 ) -> Result<PayloadOnlyRestore, StoreError> {
     let new_heap_id = random_id()?;
-    let dir = data_root
-        .join("restore")
-        .join(hex16(&new_heap_id));
+    let dir = data_root.join("restore").join(hex16(&new_heap_id));
     fs::create_dir_all(&dir)?;
     write_atomic(&dir.join("payload.bin"), payload)?;
     let meta = encode_deterministic_uint_map(&[
@@ -1273,9 +1282,7 @@ pub fn restore_payload_to_new_heap(
 }
 
 /// Payload-only restore MUST NOT grant ordinary or derived access.
-pub fn refuse_access_from_payload_restore(
-    restored: &PayloadOnlyRestore,
-) -> Result<(), StoreError> {
+pub fn refuse_access_from_payload_restore(restored: &PayloadOnlyRestore) -> Result<(), StoreError> {
     let _ = restored;
     Err(StoreError::HeapAdmit(
         "payload-only restore cannot grant access".into(),
@@ -1285,10 +1292,12 @@ pub fn refuse_access_from_payload_restore(
 /// Live filesystem layout for heap object media under a tier/replica root.
 ///
 /// `{media_root}/{heap_id_hex}/{object_id_hex}/`
-pub fn heap_object_media_dir(media_root: &Path, heap_id: &[u8; 16], object_id: &[u8; 16]) -> PathBuf {
-    media_root
-        .join(hex16(heap_id))
-        .join(hex16(object_id))
+pub fn heap_object_media_dir(
+    media_root: &Path,
+    heap_id: &[u8; 16],
+    object_id: &[u8; 16],
+) -> PathBuf {
+    media_root.join(hex16(heap_id)).join(hex16(object_id))
 }
 
 /// Remove heap-scoped object media on a live filesystem root (idempotent).
@@ -1327,9 +1336,10 @@ pub fn destroy_data_key(
     data_root: &Path,
     handle: &mut DataKeyHandle,
 ) -> Result<DataKeyDestructionReceipt, StoreError> {
-    let material = handle.material.take().ok_or_else(|| {
-        StoreError::HeapAdmit("data key already destroyed".into())
-    })?;
+    let material = handle
+        .material
+        .take()
+        .ok_or_else(|| StoreError::HeapAdmit("data key already destroyed".into()))?;
     let mut fingerprint_body = Vec::with_capacity(32 + material.len());
     fingerprint_body.extend_from_slice(&handle.heap_id);
     fingerprint_body.extend_from_slice(&handle.key_id);
@@ -1427,11 +1437,10 @@ pub fn load_identity_tombstone(
         .join(LIFECYCLE_DIR)
         .join(hex16(heap_id))
         .join("identity-tombstone.v1.cbor");
-    let bytes = fs::read(&path).map_err(|e| {
-        StoreError::HeapAdmit(format!("identity tombstone missing: {e}"))
-    })?;
-    let map = decode_deterministic_uint_map(&bytes)
-        .map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
+    let bytes = fs::read(&path)
+        .map_err(|e| StoreError::HeapAdmit(format!("identity tombstone missing: {e}")))?;
+    let map =
+        decode_deterministic_uint_map(&bytes).map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
     let mut by = BTreeMap::new();
     for (k, v) in map {
         by.insert(k, v);
@@ -1543,8 +1552,8 @@ pub fn disaster_recovery_restore_retaining_id(
         // enforced by the checks above; install fenced takeover onto the slot.
     }
 
-    let heap_id = HeapId::from_bytes(package.heap_id)
-        .map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
+    let heap_id =
+        HeapId::from_bytes(package.heap_id).map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
     let new_deployment = DeploymentId::from_bytes(ceremony.new_deployment_id)
         .map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
     let new_epoch = AuthorityEpoch::new(ceremony.new_authority_epoch)
@@ -1602,7 +1611,10 @@ pub fn disaster_recovery_restore_retaining_id(
         (5, CborValue::Uint(ceremony.old_authority_epoch)),
         (6, CborValue::Uint(ceremony.new_authority_epoch)),
         (7, CborValue::Bytes(ceremony.new_master_public_key.to_vec())),
-        (8, CborValue::Bytes(ceremony.recovery_authority_evidence.to_vec())),
+        (
+            8,
+            CborValue::Bytes(ceremony.recovery_authority_evidence.to_vec()),
+        ),
         (9, CborValue::Bytes(takeover_evidence_hash.to_vec())),
         (10, CborValue::Uint(now_secs())),
     ])
@@ -1793,8 +1805,8 @@ pub fn encode_purge_receipt(receipt: &PurgeReceipt) -> Result<Vec<u8>, StoreErro
 
 /// Decode a purge receipt.
 pub fn decode_purge_receipt(bytes: &[u8]) -> Result<PurgeReceipt, StoreError> {
-    let map = decode_deterministic_uint_map(bytes)
-        .map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
+    let map =
+        decode_deterministic_uint_map(bytes).map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
     let mut by = BTreeMap::new();
     for (k, v) in map {
         by.insert(k, v);

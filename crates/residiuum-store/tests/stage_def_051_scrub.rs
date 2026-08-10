@@ -33,9 +33,7 @@ fn clean_store_scrub_completes_without_findings() {
         .put("users/c", br#"{"ok":true}"#, DurabilityMode::Durable)
         .unwrap();
 
-    let report = store
-        .scrub_to_completion(ScrubOptions::default())
-        .unwrap();
+    let report = store.scrub_to_completion(ScrubOptions::default()).unwrap();
     assert!(report.cycle_completed, "expected full cycle");
     assert_eq!(report.failures_this_call, 0);
     assert!(report.status.coverage_ratio >= 1.0 - f64::EPSILON);
@@ -48,8 +46,10 @@ fn clean_store_scrub_completes_without_findings() {
     // Durable state documents exist.
     assert!(scrub_state_path(store.paths()).is_file());
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&fs::read(scrub_state_path(store.paths())).unwrap())
-            .unwrap()["profile"],
+        serde_json::from_slice::<serde_json::Value>(
+            &fs::read(scrub_state_path(store.paths())).unwrap()
+        )
+        .unwrap()["profile"],
         SCRUB_PROFILE
     );
 }
@@ -82,10 +82,7 @@ fn injected_corruption_detected_and_quarantined() {
 
     // Overwrite middle bytes with non-frame garbage (keeps file present).
     {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .open(victim)
-            .unwrap();
+        let mut f = fs::OpenOptions::new().write(true).open(victim).unwrap();
         f.write_all(b"CORRUPT_SCRUB_INJECTION!!!!!!!!!!").unwrap();
         f.sync_all().unwrap();
     }
@@ -100,7 +97,9 @@ fn injected_corruption_detected_and_quarantined() {
         .unwrap();
     assert!(report.cycle_completed);
     assert!(
-        report.status.failures_total > 0 || report.failures_this_call > 0 || !store.list_scrub_findings().unwrap().is_empty(),
+        report.status.failures_total > 0
+            || report.failures_this_call > 0
+            || !store.list_scrub_findings().unwrap().is_empty(),
         "expected failures; status={:?}",
         report.status
     );
@@ -124,10 +123,7 @@ fn injected_corruption_detected_and_quarantined() {
     assert!(any_quarantine, "expected quarantine path on findings");
     for f in &findings {
         if let Some(ref qp) = f.quarantine_path {
-            assert!(
-                root.join(qp).is_file(),
-                "quarantine file missing: {qp}"
-            );
+            assert!(root.join(qp).is_file(), "quarantine file missing: {qp}");
         }
     }
 
@@ -158,17 +154,12 @@ fn content_hash_mismatch_against_placement() {
     // Append one byte — changes BLAKE3 without necessarily destroying all frames
     // if we append at end; for hash mismatch placement expects old hash.
     {
-        let mut f = fs::OpenOptions::new()
-            .append(true)
-            .open(victim)
-            .unwrap();
+        let mut f = fs::OpenOptions::new().append(true).open(victim).unwrap();
         f.write_all(b"X").unwrap();
         f.sync_all().unwrap();
     }
 
-    let report = store
-        .scrub_to_completion(ScrubOptions::default())
-        .unwrap();
+    let report = store.scrub_to_completion(ScrubOptions::default()).unwrap();
     assert!(report.cycle_completed);
 
     let findings = store.list_scrub_findings().unwrap();
@@ -267,15 +258,9 @@ fn clean_rescrub_clears_resolved_findings() {
     let remaining = store.list_scrub_findings().unwrap();
     // Findings for restored target should be gone; active may still be clean.
     assert!(
-        remaining
-            .iter()
-            .all(|f| !f.relative_path.contains(
-                victim
-                    .file_name()
-                    .unwrap()
-                    .to_str()
-                    .unwrap()
-            )),
+        remaining.iter().all(|f| !f
+            .relative_path
+            .contains(victim.file_name().unwrap().to_str().unwrap())),
         "remaining={remaining:?}"
     );
 }

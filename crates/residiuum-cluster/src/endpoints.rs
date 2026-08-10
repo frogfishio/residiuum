@@ -197,9 +197,7 @@ pub fn load_endpoints(root: &Path) -> Result<HashMap<u32, String>, ClusterError>
 
 /// Save endpoints from a dense-index map.
 pub fn save_endpoints(root: &Path, map: &HashMap<u32, String>) -> Result<(), ClusterError> {
-    let _guard = process_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = process_lock().lock().unwrap_or_else(|e| e.into_inner());
     let _os = endpoints_os_lock(root)?;
     EndpointsFile::from_u32_map(map).save(root)
 }
@@ -253,9 +251,7 @@ fn upsert_endpoint_unlocked(
     node_index: u32,
     hostport: impl Into<String>,
 ) -> Result<HashMap<u32, String>, ClusterError> {
-    let _guard = process_lock()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let _guard = process_lock().lock().unwrap_or_else(|e| e.into_inner());
     let _os = endpoints_os_lock(root)?;
     let mut file = EndpointsFile::load(root)?;
     file.set(node_index, hostport);
@@ -282,7 +278,8 @@ fn endpoints_os_lock(root: &Path) -> Result<EndpointsOsLock, ClusterError> {
     std::fs::create_dir_all(root)?;
     let path: PathBuf = root.join(ENDPOINTS_LOCK);
     let file = OpenOptions::new()
-        .create(true).truncate(true)
+        .create(true)
+        .truncate(true)
         .read(true)
         .write(true)
         .open(&path)?;

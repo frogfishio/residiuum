@@ -1,5 +1,6 @@
 //! HP-008 Accept: uniform reject, proof replay, zero authority-store hot path.
 
+use ed25519_dalek::{Signer, SigningKey};
 use residiuum_client::{b64u_encode, HeapAuth, HeapReject, FEATURE_HEAP_KEY_V1};
 use residiuum_format::{encode_deterministic_uint_map, CborValue};
 use residiuum_heap::{
@@ -12,7 +13,6 @@ use residiuum_server::{
     HeapAuthInternalCause, HeapAuthOutcome, HeapDispatchResult, PendingChallenge, ResidentHeap,
     ResidentHeapRegistry,
 };
-use ed25519_dalek::{Signer, SigningKey};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::PathBuf;
@@ -155,12 +155,7 @@ fn registry_with(snap: HeapSecuritySnapshot, name: Option<&str>) -> ResidentHeap
     reg
 }
 
-fn auth_bytes(
-    heap_id: HeapId,
-    cert: &[u8],
-    proof: &[u8],
-    expected_name: Option<&str>,
-) -> Vec<u8> {
+fn auth_bytes(heap_id: HeapId, cert: &[u8], proof: &[u8], expected_name: Option<&str>) -> Vec<u8> {
     let auth = HeapAuth {
         v: 1,
         msg: "heap_auth".into(),
@@ -207,7 +202,14 @@ fn uniform_reject_for_unknown_heap_and_bad_cert() {
         now_unix,
     );
     let body = auth_bytes(foreign_id, &cose, &proof, None);
-    let out = authenticate_heap_auth(&reg, &mut pending, &body, &exporter, now_unix, Instant::now());
+    let out = authenticate_heap_auth(
+        &reg,
+        &mut pending,
+        &body,
+        &exporter,
+        now_unix,
+        Instant::now(),
+    );
     match out {
         HeapAuthOutcome::Reject { reject, cause } => {
             assert_eq!(reject, HeapReject::uniform());
@@ -403,9 +405,8 @@ fn qualified_session_welcome_and_reject_are_indistinguishable_on_wire() {
         FEATURE_IDEMPOTENCY_V1, FEATURE_JSON_RPC_V1, FEATURE_RECEIPTS_V1, REQUIRED_FEATURES,
     };
     use residiuum_server::{
-        run_qualified_handshake, validate_qualified_listener, HeapAuthAuditEvent,
-        HeapAuthAuditLog, HeapAuthInternalCause, QualifiedHandshakeParams,
-        QualifiedHandshakeResult,
+        run_qualified_handshake, validate_qualified_listener, HeapAuthAuditEvent, HeapAuthAuditLog,
+        HeapAuthInternalCause, QualifiedHandshakeParams, QualifiedHandshakeResult,
     };
     use std::io::Cursor;
     use std::sync::Arc;
@@ -481,10 +482,7 @@ fn qualified_session_welcome_and_reject_are_indistinguishable_on_wire() {
     match result {
         QualifiedHandshakeResult::Established(session) => {
             assert_eq!(session.welcome.msg, "welcome");
-            assert!(session
-                .features
-                .iter()
-                .any(|f| f == FEATURE_HEAP_KEY_V1));
+            assert!(session.features.iter().any(|f| f == FEATURE_HEAP_KEY_V1));
         }
         QualifiedHandshakeResult::Rejected { cause, .. } => panic!("expected welcome: {cause:?}"),
     }
@@ -553,9 +551,19 @@ fn qualified_session_welcome_and_reject_are_indistinguishable_on_wire() {
     );
 
     // Listener constraints: token + no TLS forbidden.
-    assert!(validate_qualified_listener(false, None, false, Some(&Arc::new(reg)), Some(&deployment)).is_err());
+    assert!(validate_qualified_listener(
+        false,
+        None,
+        false,
+        Some(&Arc::new(reg)),
+        Some(&deployment)
+    )
+    .is_err());
     let reg2 = Arc::new(ResidentHeapRegistry::new());
-    assert!(validate_qualified_listener(true, Some("tok"), false, Some(&reg2), Some(&deployment)).is_err());
+    assert!(
+        validate_qualified_listener(true, Some("tok"), false, Some(&reg2), Some(&deployment))
+            .is_err()
+    );
     assert!(validate_qualified_listener(true, None, true, Some(&reg2), Some(&deployment)).is_err());
     assert!(validate_qualified_listener(true, None, false, Some(&reg2), Some(&deployment)).is_ok());
 }

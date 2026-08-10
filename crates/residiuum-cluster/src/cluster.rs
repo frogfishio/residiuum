@@ -1352,9 +1352,7 @@ impl Cluster {
             coverage.note("development profile: replicated durability unavailable");
         }
         if cont.is_some() {
-            coverage.note(format!(
-                "resumed via continuation (query_id={query_id})"
-            ));
+            coverage.note(format!("resumed via continuation (query_id={query_id})"));
         }
 
         let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
@@ -1453,8 +1451,7 @@ impl Cluster {
                             remaining_limit,
                             remaining_max_docs,
                         };
-                        continuation =
-                            Some(next.encode(self.cluster_id, &self.token_keyring)?);
+                        continuation = Some(next.encode(self.cluster_id, &self.token_keyring)?);
                     }
                 }
             }

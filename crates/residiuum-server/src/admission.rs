@@ -484,9 +484,7 @@ impl AdmissionController {
     /// Cheap ops return a no-op guard. Call on the shared [`Arc`] from the serve path.
     pub fn try_begin_expensive(self: &Arc<Self>, op: &str) -> Result<ExpensiveGuard, Error> {
         if !is_expensive_op(op) {
-            return Ok(ExpensiveGuard {
-                controller: None,
-            });
+            return Ok(ExpensiveGuard { controller: None });
         }
         {
             let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
@@ -539,8 +537,7 @@ impl AdmissionController {
             }
             // Expired entry still in map until eviction — treat as fresh.
         }
-        if g.replay_index.len() >= self.limits.replay_capacity
-            && !g.replay_index.contains_key(&key)
+        if g.replay_index.len() >= self.limits.replay_capacity && !g.replay_index.contains_key(&key)
         {
             self.replay_rejected.fetch_add(1, Ordering::Relaxed);
             return Err(Error::ResourceLimit(format!(

@@ -32,7 +32,9 @@ fn diag_watermark_seal_succeeds_without_clobbering_prefix() {
         .set_diagnostic_io_sink(DiagnosticIoSink::RealPreallocWatermark)
         .unwrap();
     put_n(&mut store, 1000);
-    store.seal_active().expect("diag watermark seal must succeed");
+    store
+        .seal_active()
+        .expect("diag watermark seal must succeed");
     let sizes = sealed_sizes(&root);
     assert_eq!(sizes.len(), 1, "expected one sealed segment, got {sizes:?}");
     // Must not rename the full 512 MiB prealloc tail.

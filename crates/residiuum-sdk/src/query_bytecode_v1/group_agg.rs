@@ -11,7 +11,8 @@ use crate::error::Error;
 use crate::plan_v1::{AggFn, GroupAggSpec};
 use crate::predicate::{resolve_path, Path, Resolve};
 use serde_json::{Map, Number, Value as JsonValue};
-use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 /// IR profile id for group/aggregate.
 pub const GROUP_AGG_IR_PROFILE: &str = "residiuum-query-ir-group-agg-v1";
@@ -105,17 +106,109 @@ impl AggregateState {
 
 #[derive(Debug)]
 struct GroupState {
-    key_values: Vec<JsonValue>,
     aggregates: Vec<AggregateState>,
+}
+
+#[derive(Debug)]
+struct GroupKey(Vec<JsonValue>);
+
+impl PartialEq for GroupKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self
+                .0
+                .iter()
+                .zip(&other.0)
+                .all(|(left, right)| json_group_value_eq(left, right))
+    }
+}
+
+fn json_group_value_eq(left: &JsonValue, right: &JsonValue) -> bool {
+    match (left, right) {
+        (JsonValue::Null, JsonValue::Null) => true,
+        (JsonValue::Bool(left), JsonValue::Bool(right)) => left == right,
+        (JsonValue::Number(left), JsonValue::Number(right)) => {
+            left.to_string() == right.to_string()
+        }
+        (JsonValue::String(left), JsonValue::String(right)) => left == right,
+        (JsonValue::Array(left), JsonValue::Array(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| json_group_value_eq(left, right))
+        }
+        (JsonValue::Object(left), JsonValue::Object(right)) => {
+            left.len() == right.len()
+                && left.iter().zip(right).all(
+                    |((left_key, left_value), (right_key, right_value))| {
+                        left_key == right_key && json_group_value_eq(left_value, right_value)
+                    },
+                )
+        }
+        _ => false,
+    }
+}
+
+impl Eq for GroupKey {}
+
+impl Hash for GroupKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        hash_group_values(&self.0, state);
+    }
+}
+
+fn hash_group_values<H: Hasher>(values: &[JsonValue], state: &mut H) {
+    values.len().hash(state);
+    for value in values {
+        hash_json_value(value, state);
+    }
+}
+
+fn hash_json_value<H: Hasher>(value: &JsonValue, state: &mut H) {
+    match value {
+        JsonValue::Null => 0u8.hash(state),
+        JsonValue::Bool(value) => {
+            1u8.hash(state);
+            value.hash(state);
+        }
+        JsonValue::Number(value) => {
+            2u8.hash(state);
+            value.to_string().hash(state);
+        }
+        JsonValue::String(value) => {
+            3u8.hash(state);
+            value.hash(state);
+        }
+        JsonValue::Array(values) => {
+            4u8.hash(state);
+            hash_group_values(values, state);
+        }
+        JsonValue::Object(fields) => {
+            5u8.hash(state);
+            fields.len().hash(state);
+            for (key, value) in fields {
+                key.hash(state);
+                hash_json_value(value, state);
+            }
+        }
+    }
+}
+
+struct CoveringSlots {
+    fields: Vec<String>,
+    group: Vec<usize>,
+    numeric: Vec<usize>,
 }
 
 /// One-pass group accumulator. It retains group keys and scalar accumulator
 /// state only; full input documents are consumed and released immediately.
 pub(crate) struct GroupAccumulator<'a> {
     spec: &'a GroupAggSpec,
-    groups: BTreeMap<Vec<u8>, GroupState>,
+    groups: HashMap<GroupKey, GroupState>,
     numeric_paths: Vec<&'a Path>,
     aggregate_source_slots: Vec<Option<usize>>,
+    covering_slots: Option<CoveringSlots>,
 }
 
 impl<'a> GroupAccumulator<'a> {
@@ -142,9 +235,10 @@ impl<'a> GroupAccumulator<'a> {
         }
         Self {
             spec,
-            groups: BTreeMap::new(),
+            groups: HashMap::new(),
             numeric_paths,
             aggregate_source_slots,
+            covering_slots: None,
         }
     }
 
@@ -163,6 +257,98 @@ impl<'a> GroupAccumulator<'a> {
             .any(is_logical_key_path)
     }
 
+    /// Exact field order requested from a covering secondary index.
+    pub(crate) fn covering_fields(&self) -> Option<Vec<String>> {
+        let mut fields = Vec::new();
+        for path in self
+            .spec
+            .group_by
+            .iter()
+            .chain(self.numeric_paths.iter().copied())
+        {
+            if is_logical_key_path(path) {
+                return None;
+            }
+            let field = path.dotted();
+            if !fields.contains(&field) {
+                fields.push(field);
+            }
+        }
+        (!fields.is_empty()).then_some(fields)
+    }
+
+    /// Ingest values supplied by an exact covering index without constructing
+    /// or resolving a full JSON document.
+    pub(crate) fn ingest_covering(
+        &mut self,
+        fields: &[String],
+        values: Vec<JsonValue>,
+    ) -> Result<(), Error> {
+        if fields.len() != values.len() {
+            return Err(Error::Internal(
+                "covering aggregate row width mismatch".into(),
+            ));
+        }
+        if self.covering_slots.is_none() {
+            let resolve_slots = |paths: &[&Path]| -> Result<Vec<usize>, Error> {
+                paths
+                    .iter()
+                    .map(|path| {
+                        let dotted = path.dotted();
+                        fields
+                            .iter()
+                            .position(|field| field == &dotted)
+                            .ok_or_else(|| {
+                                Error::Internal(format!(
+                                    "covering aggregate omitted requested field `{dotted}`"
+                                ))
+                            })
+                    })
+                    .collect()
+            };
+            let group_paths = self.spec.group_by.iter().collect::<Vec<_>>();
+            self.covering_slots = Some(CoveringSlots {
+                fields: fields.to_vec(),
+                group: resolve_slots(&group_paths)?,
+                numeric: resolve_slots(&self.numeric_paths)?,
+            });
+        }
+        let slots = self.covering_slots.as_ref().expect("covering slots set");
+        if slots.fields != fields {
+            return Err(Error::Internal(
+                "covering aggregate fields changed within one scan".into(),
+            ));
+        }
+        let numeric_values = slots
+            .numeric
+            .iter()
+            .map(|slot| match &values[*slot] {
+                JsonValue::Number(number) => number.as_f64().map(Some).ok_or_else(|| {
+                    Error::QueryInvalid(format!(
+                        "aggregate field `{}` is not numeric",
+                        fields[*slot]
+                    ))
+                }),
+                JsonValue::Null => Ok(None),
+                _ => Err(Error::QueryInvalid(format!(
+                    "aggregate field `{}` is not numeric",
+                    fields[*slot]
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut values = values.into_iter().map(Some).collect::<Vec<_>>();
+        let key_values = slots
+            .group
+            .iter()
+            .map(|slot| {
+                values[*slot]
+                    .take()
+                    .expect("covering group fields are unique")
+            })
+            .collect::<Vec<_>>();
+        self.ingest_resolved(key_values, &numeric_values)
+    }
+
     pub(crate) fn ingest(&mut self, doc: &JsonValue) -> Result<(), Error> {
         let mut key_values = Vec::with_capacity(self.spec.group_by.len());
         for path in &self.spec.group_by {
@@ -171,21 +357,30 @@ impl<'a> GroupAccumulator<'a> {
                 Resolve::Absent => JsonValue::Null,
             });
         }
-        let canonical = canonical_group_key_bytes(&key_values);
-        let group = self.groups.entry(canonical).or_insert_with(|| GroupState {
-            key_values,
-            aggregates: self
-                .spec
-                .aggregates
-                .iter()
-                .map(|aggregate| AggregateState::new(aggregate.fun))
-                .collect(),
-        });
         let numeric_values = self
             .numeric_paths
             .iter()
             .map(|path| numeric_present(doc, path))
             .collect::<Result<Vec<_>, _>>()?;
+        self.ingest_resolved(key_values, &numeric_values)
+    }
+
+    fn ingest_resolved(
+        &mut self,
+        key_values: Vec<JsonValue>,
+        numeric_values: &[Option<f64>],
+    ) -> Result<(), Error> {
+        let group = self
+            .groups
+            .entry(GroupKey(key_values))
+            .or_insert_with(|| GroupState {
+                aggregates: self
+                    .spec
+                    .aggregates
+                    .iter()
+                    .map(|aggregate| AggregateState::new(aggregate.fun))
+                    .collect(),
+            });
         for ((aggregate, source_slot), state) in self
             .spec
             .aggregates
@@ -212,10 +407,19 @@ impl<'a> GroupAccumulator<'a> {
 
     pub(crate) fn finish(self) -> Result<Vec<(String, JsonValue)>, Error> {
         let mut output = Vec::with_capacity(self.groups.len());
-        for (canonical_bytes, group) in self.groups {
+        let mut groups = self
+            .groups
+            .into_iter()
+            .map(|(key, group)| {
+                let canonical = canonical_group_key_bytes(&key.0);
+                (canonical, key.0, group)
+            })
+            .collect::<Vec<_>>();
+        groups.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+        for (canonical_bytes, key_values, group) in groups {
             let mut object = Map::new();
             for (index, path) in self.spec.group_by.iter().enumerate() {
-                object.insert(output_field_name(path), group.key_values[index].clone());
+                object.insert(output_field_name(path), key_values[index].clone());
             }
             for (aggregate, state) in self.spec.aggregates.iter().zip(group.aggregates) {
                 object.insert(aggregate.output.clone(), state.finish()?);
@@ -310,9 +514,46 @@ fn json_number(v: f64) -> Result<JsonValue, Error> {
 mod tests {
     use super::*;
     use crate::plan_v1::AggregateSpec;
+    use std::collections::hash_map::DefaultHasher;
+    use std::collections::BTreeMap;
 
     fn path(s: &str) -> Path {
         Path::parse_dotted(s).unwrap()
+    }
+
+    #[test]
+    fn semantic_group_key_matches_canonical_json_identity() {
+        let values = [
+            vec![],
+            vec![JsonValue::Null],
+            vec![serde_json::json!(true)],
+            vec![serde_json::json!(1)],
+            vec![serde_json::json!(1.0)],
+            vec![serde_json::json!("x")],
+            vec![serde_json::json!([1, "x", null])],
+            vec![serde_json::json!({"a": 1, "b": [false]})],
+            vec![serde_json::json!("x"), serde_json::json!(2)],
+        ];
+        for left in &values {
+            for right in &values {
+                let left_key = GroupKey(left.clone());
+                let right_key = GroupKey(right.clone());
+                let canonical_equal =
+                    canonical_group_key_bytes(left) == canonical_group_key_bytes(right);
+                assert_eq!(
+                    left_key == right_key,
+                    canonical_equal,
+                    "{left:?} vs {right:?}"
+                );
+                if canonical_equal {
+                    let mut left_hash = DefaultHasher::new();
+                    let mut right_hash = DefaultHasher::new();
+                    left_key.hash(&mut left_hash);
+                    right_key.hash(&mut right_hash);
+                    assert_eq!(left_hash.finish(), right_hash.finish());
+                }
+            }
+        }
     }
 
     #[test]

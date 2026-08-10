@@ -75,9 +75,7 @@ fn filter_uses_is_null_style_or(f: &Filter) -> bool {
         Filter::Or(parts) if parts.len() == 2 => {
             is_null_pair(&parts[0], &parts[1]) || is_null_pair(&parts[1], &parts[0])
         }
-        Filter::And(parts) | Filter::Or(parts) => {
-            parts.iter().any(filter_uses_is_null_style_or)
-        }
+        Filter::And(parts) | Filter::Or(parts) => parts.iter().any(filter_uses_is_null_style_or),
         Filter::Not(inner) => filter_uses_is_null_style_or(inner),
         _ => false,
     }
@@ -531,13 +529,9 @@ impl Parser {
                 if let Ok(i) = n.parse::<i64>() {
                     Ok(JsonValue::Number(i.into()))
                 } else if let Ok(f) = n.parse::<f64>() {
-                    Number::from_f64(f)
-                        .map(JsonValue::Number)
-                        .ok_or_else(|| {
-                            Error::QueryInvalid(format!(
-                                "dialect 'sql': invalid number literal {n}"
-                            ))
-                        })
+                    Number::from_f64(f).map(JsonValue::Number).ok_or_else(|| {
+                        Error::QueryInvalid(format!("dialect 'sql': invalid number literal {n}"))
+                    })
                 } else {
                     Err(Error::QueryInvalid(format!(
                         "dialect 'sql': invalid number literal {n}"
@@ -581,7 +575,9 @@ mod tests {
     fn is_null_missing() {
         let c = compile_sql("nickname IS NULL").unwrap();
         assert!(
-            c.notes.iter().any(|n| n.contains("Null") || n.contains("absence")),
+            c.notes
+                .iter()
+                .any(|n| n.contains("Null") || n.contains("absence")),
             "expected null-vs-absence note, got {:?}",
             c.notes
         );

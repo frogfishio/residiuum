@@ -62,7 +62,12 @@ pub fn mean_mad(samples: &[f64]) -> Option<SampleStats> {
 }
 
 /// Deterministic bootstrap CI for the mean using a seed (no OS RNG).
-pub fn bootstrap_ci_mean(samples: &[f64], replicates: usize, seed: u64, level: f64) -> Option<BootstrapCi> {
+pub fn bootstrap_ci_mean(
+    samples: &[f64],
+    replicates: usize,
+    seed: u64,
+    level: f64,
+) -> Option<BootstrapCi> {
     let v: Vec<f64> = samples.iter().copied().filter(|x| x.is_finite()).collect();
     if v.is_empty() || replicates == 0 {
         return None;

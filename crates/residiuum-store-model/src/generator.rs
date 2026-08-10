@@ -1,9 +1,7 @@
 //! CSQ-4 command/state history generator and shrinker.
 
 use crate::transition::{TransitionClass, TransitionCoverage};
-use crate::{
-    CrashOutcome, DurabilityAck, Id16, ModelError, ModelStore, ValueObservation,
-};
+use crate::{CrashOutcome, DurabilityAck, Id16, ModelError, ModelStore, ValueObservation};
 use serde::{Deserialize, Serialize};
 
 /// One command in a generated history.
@@ -168,7 +166,13 @@ pub fn apply_command(
             // Exact retry: second successful put with same op
             let class = if r.is_ok() {
                 let n = store.receipts.get(op).map(|x| x.event_id == *event);
-                if n == Some(true) && store.events.iter().filter(|e| e.operation_id == *op).count() <= 1
+                if n == Some(true)
+                    && store
+                        .events
+                        .iter()
+                        .filter(|e| e.operation_id == *op)
+                        .count()
+                        <= 1
                 {
                     // Check if this was a pure retry: event already present before? hard — use PutDurable default
                     class
@@ -187,11 +191,7 @@ pub fn apply_command(
                 error: r.err().map(|e| e.to_string()),
             }
         }
-        Command::DeleteDurable {
-            subject,
-            op,
-            event,
-        } => {
+        Command::DeleteDurable { subject, op, event } => {
             let r = store.delete_durable(subject.clone(), op.clone(), *event);
             let class = if matches!(r, Err(ModelError::OperationIdConflict)) {
                 TransitionClass::OpIdConflict
@@ -254,13 +254,8 @@ pub fn apply_command(
                 CrashOutcome::New => TransitionClass::InterruptNew,
                 CrashOutcome::Unknown => TransitionClass::InterruptUnknown,
             };
-            let r = store.interrupted_put(
-                subject.clone(),
-                value.clone(),
-                op.clone(),
-                *event,
-                *outcome,
-            );
+            let r =
+                store.interrupted_put(subject.clone(), value.clone(), op.clone(), *event, *outcome);
             coverage.record(class);
             StepResult {
                 class,
@@ -358,11 +353,7 @@ pub fn generate_history(seed: u64, n: usize) -> Vec<Command> {
                 op,
                 event,
             },
-            3 => Command::DeleteDurable {
-                subject,
-                op,
-                event,
-            },
+            3 => Command::DeleteDurable { subject, op, event },
             4 => Command::PutBuffered {
                 subject,
                 value: b"buf".to_vec(),
@@ -469,11 +460,7 @@ pub fn check_invariants(store: &ModelStore) -> Option<String> {
 }
 
 /// Shrink a failing history while preserving the invariant violation message.
-pub fn shrink_history(
-    store_id: Id16,
-    cmds: &[Command],
-    violation: &str,
-) -> Vec<Command> {
+pub fn shrink_history(store_id: Id16, cmds: &[Command], violation: &str) -> Vec<Command> {
     let mut current = cmds.to_vec();
     let mut improved = true;
     while improved {

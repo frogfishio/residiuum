@@ -109,7 +109,11 @@ fn reassign_identity_produces_distinct_store() {
     assert_ne!(restored.restored_store_id, sid);
     assert!(restored.identity_reassigned);
 
-    let opened = Store::open_with_options(&dst, residiuum_store::StoreOpenOptions::default().tolerate_unidentified_inventory()).unwrap();
+    let opened = Store::open_with_options(
+        &dst,
+        residiuum_store::StoreOpenOptions::default().tolerate_unidentified_inventory(),
+    )
+    .unwrap();
     assert_eq!(opened.store_id(), restored.restored_store_id);
     assert_eq!(
         opened.get("users/x").unwrap().as_deref(),
@@ -230,5 +234,8 @@ fn source_unchanged_after_backup() {
     assert_eq!(store.get("k").unwrap(), before);
     // Source still accepts writes after backup.
     store.put("k", b"after", DurabilityMode::Durable).unwrap();
-    assert_eq!(store.get("k").unwrap().as_deref(), Some(b"after".as_slice()));
+    assert_eq!(
+        store.get("k").unwrap().as_deref(),
+        Some(b"after".as_slice())
+    );
 }

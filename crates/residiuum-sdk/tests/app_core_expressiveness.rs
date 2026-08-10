@@ -48,7 +48,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -57,10 +64,7 @@ fn uuid() -> [u8; 16] {
         .as_bytes()
 }
 
-fn keys(
-    col: &mut residiuum_sdk::CollectionClient,
-    source: &str,
-) -> Vec<String> {
+fn keys(col: &mut residiuum_sdk::CollectionClient, source: &str) -> Vec<String> {
     let page = col
         .rql(source, &Parameters::default(), QueryRunOptions::default())
         .unwrap_or_else(|e| panic!("rql `{source}`: {e:?}"));
@@ -93,22 +97,20 @@ fn absent_neq_null_predicate_gotcha() {
     col.put("a", &serde_json::json!({"id": "a"})).unwrap();
     col.put("b", &serde_json::json!({"id": "b", "nickname": null}))
         .unwrap();
-    col.put(
-        "c",
-        &serde_json::json!({"id": "c", "nickname": "ace"}),
-    )
-    .unwrap();
+    col.put("c", &serde_json::json!({"id": "c", "nickname": "ace"}))
+        .unwrap();
 
     let missing = keys(&mut col, &format!("from {name} where missing(nickname)"));
     let is_null = keys(&mut col, &format!("from {name} where nickname is null"));
-    let is_not_null = keys(
-        &mut col,
-        &format!("from {name} where nickname is not null"),
-    );
+    let is_not_null = keys(&mut col, &format!("from {name} where nickname is not null"));
     let present = keys(&mut col, &format!("from {name} where present(nickname)"));
 
     assert_eq!(missing, vec!["a".to_string()], "missing ≠ null");
-    assert_eq!(is_null, vec!["b".to_string()], "is null requires present Null");
+    assert_eq!(
+        is_null,
+        vec!["b".to_string()],
+        "is null requires present Null"
+    );
     assert_eq!(is_not_null, vec!["c".to_string()]);
     assert_eq!(present, vec!["b".to_string(), "c".to_string()]);
 
@@ -151,8 +153,7 @@ fn coverage_incomplete_allows_holes_grade() {
         )
         .expect("rql incomplete_allowed");
     assert!(
-        matches!(page.coverage.mode, CoveragePolicy::IncompleteAllowed)
-            || page.coverage.complete,
+        matches!(page.coverage.mode, CoveragePolicy::IncompleteAllowed) || page.coverage.complete,
         "incomplete_allowed on quiet collection still reports complete rows"
     );
     assert_eq!(page.rows.len(), 1);

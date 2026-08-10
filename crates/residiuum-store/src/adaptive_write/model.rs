@@ -273,7 +273,8 @@ mod tests {
                 item.id
             );
             assert_eq!(
-                d.reason, item.expected_reason.as_str(),
+                d.reason,
+                item.expected_reason.as_str(),
                 "vector {} reason mismatch",
                 item.id
             );

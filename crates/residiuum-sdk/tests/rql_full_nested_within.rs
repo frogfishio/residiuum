@@ -45,7 +45,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -77,10 +84,7 @@ fn execute_rql_full_nested_within() {
         .put("o1", &serde_json::json!({"order_id": "o1"}))
         .unwrap();
     lines
-        .put(
-            "l1",
-            &serde_json::json!({"order_id": "o1", "sku": "A"}),
-        )
+        .put("l1", &serde_json::json!({"order_id": "o1", "sku": "A"}))
         .unwrap();
     components
         .put(

@@ -31,7 +31,7 @@ use std::time::Instant;
 
 use super::core_page::{constrained_paths, equality_constraints, DocScan};
 use super::kernel::CompiledKernelWhere;
-use super::HostDocument;
+use super::{HostDocument, HostJsonValue};
 
 /// Bind the immutable document key for RQL `_key` path predicates and projects.
 ///
@@ -49,8 +49,85 @@ fn with_logical_key(key: &str, doc: JsonValue) -> JsonValue {
     }
 }
 
+fn filter_document(
+    where_k: &CompiledKernelWhere,
+    key: &str,
+    doc: JsonValue,
+) -> Result<Option<JsonValue>, Error> {
+    if where_k.requires_logical_key() {
+        let doc = with_logical_key(key, doc);
+        return Ok(where_k.eval_doc(&doc)?.then_some(doc));
+    }
+    if where_k.eval_doc(&doc)? {
+        Ok(Some(with_logical_key(key, doc)))
+    } else {
+        Ok(None)
+    }
+}
+
+fn filter_host_document(
+    where_k: &CompiledKernelWhere,
+    key: &str,
+    doc: HostJsonValue,
+) -> Result<Option<JsonValue>, Error> {
+    if where_k.requires_logical_key() {
+        return filter_document(where_k, key, doc.into_owned());
+    }
+    if where_k.eval_doc(doc.as_value())? {
+        Ok(Some(with_logical_key(key, doc.into_owned())))
+    } else {
+        Ok(None)
+    }
+}
+
 fn json_byte_len(v: &JsonValue) -> u64 {
-    serde_json::to_vec(v).map(|b| b.len() as u64).unwrap_or(0)
+    match v {
+        JsonValue::Null => 4,
+        JsonValue::Bool(true) => 4,
+        JsonValue::Bool(false) => 5,
+        JsonValue::Number(number) => number.to_string().len() as u64,
+        JsonValue::String(value) => json_string_byte_len(value),
+        JsonValue::Array(items) => {
+            let separators = items.len().saturating_sub(1) as u64;
+            2u64.saturating_add(separators).saturating_add(
+                items
+                    .iter()
+                    .map(json_byte_len)
+                    .fold(0u64, u64::saturating_add),
+            )
+        }
+        JsonValue::Object(fields) => {
+            let separators = fields.len().saturating_sub(1) as u64;
+            let colons = fields.len() as u64;
+            2u64.saturating_add(separators)
+                .saturating_add(colons)
+                .saturating_add(fields.iter().fold(0u64, |total, (key, value)| {
+                    total
+                        .saturating_add(json_string_byte_len(key))
+                        .saturating_add(json_byte_len(value))
+                }))
+        }
+    }
+}
+
+fn json_array_values_byte_len(values: &[JsonValue]) -> u64 {
+    2u64.saturating_add(values.iter().map(json_byte_len).sum::<u64>())
+        .saturating_add(values.len().saturating_sub(1) as u64)
+}
+
+fn document_byte_len(value: &JsonValue, preserved: Option<u64>) -> u64 {
+    preserved.unwrap_or_else(|| json_byte_len(value))
+}
+
+fn json_string_byte_len(value: &str) -> u64 {
+    2u64.saturating_add(value.chars().fold(0u64, |length, character| {
+        let encoded = match character {
+            '"' | '\\' | '\u{0008}' | '\t' | '\n' | '\u{000c}' | '\r' => 2,
+            '\u{0000}'..='\u{001f}' => 6,
+            other => other.len_utf8() as u64,
+        };
+        length.saturating_add(encoded)
+    }))
 }
 
 fn check_governance(options: &QueryRunOptions, started: Instant) -> Result<(), Error> {
@@ -85,9 +162,13 @@ fn has_later_match<S: DocScan>(
             after = Some(key.clone());
             probes += 1;
             match scan.get_json_covered(&key)? {
-                HostDocument::Present(doc) => {
+                HostDocument::Present {
+                    value: doc,
+                    logical_bytes,
+                } => {
                     examined_docs += 1;
-                    examined_bytes = examined_bytes.saturating_add(json_byte_len(&doc));
+                    examined_bytes = examined_bytes
+                        .saturating_add(document_byte_len(doc.as_value(), logical_bytes));
                     if budget
                         .and_then(|b| b.max_documents)
                         .is_some_and(|m| examined_docs > m)
@@ -100,8 +181,7 @@ fn has_later_match<S: DocScan>(
                     {
                         return Ok(false);
                     }
-                    let doc = with_logical_key(&key, doc);
-                    if where_k.eval_doc(&doc)? {
+                    if filter_host_document(where_k, &key, doc)?.is_some() {
                         return Ok(true);
                     }
                 }
@@ -138,6 +218,14 @@ fn has_later_match<S: DocScan>(
 enum PendingKeys {
     /// Field-order: docs already in `working`; Filter only applies where.
     Materialized,
+    /// Group input supplied as exact projected field rows by either a validated
+    /// covering index or an authoritative projected document scan.
+    ProjectedGroup {
+        fields: Vec<String>,
+        rows: Vec<Vec<JsonValue>>,
+    },
+    /// Host completed an authoritative aggregate pushdown.
+    Aggregated,
     /// Key-stream index path: sorted candidate keys (after resume).
     Index(Vec<String>),
     /// Key-stream full scan: resume cursor for `list_keys`.
@@ -173,6 +261,8 @@ pub(crate) struct CoreFrame<'a> {
     param_hash: String,
     last_sort_tuple_resume: Option<JsonValue>,
     remaining_limit: Option<u64>,
+    resume_group_spool_id: Option<String>,
+    next_group_spool_id: Option<String>,
     key_only_order: bool,
     /// `None` until [`Self::index_eq`].
     index_keys: Option<Option<Vec<String>>>,
@@ -189,6 +279,7 @@ pub(crate) struct CoreFrame<'a> {
     examined_docs: u64,
     examined_bytes: u64,
     used_index: bool,
+    force_scan: bool,
     /// Key-stream / index early-stop: more candidates remain.
     index_more: bool,
     /// Field-order: truncated for page size.
@@ -292,11 +383,18 @@ impl<'a> CoreFrame<'a> {
         let budget = merge_budgets(source_budget, options.budget);
         let page_size = super::ir_page::resolve_page_size(core.page_size, options.page_size);
         let param_hash = cursor_parameter_hash(params);
-        let (last_sort_tuple_resume, remaining_limit) = if let Some(ref cont) = options.after {
-            super::ir_page::decode_after(cont, heap_id, collection_id, &program_hash, &param_hash)?
-        } else {
-            (None, core.limit)
-        };
+        let (last_sort_tuple_resume, remaining_limit, resume_group_spool_id) =
+            if let Some(ref cont) = options.after {
+                super::ir_page::decode_after(
+                    cont,
+                    heap_id,
+                    collection_id,
+                    &program_hash,
+                    &param_hash,
+                )?
+            } else {
+                (None, core.limit, None)
+            };
         let key_only_order = core
             .order
             .iter()
@@ -318,6 +416,8 @@ impl<'a> CoreFrame<'a> {
             param_hash,
             last_sort_tuple_resume,
             remaining_limit,
+            resume_group_spool_id,
+            next_group_spool_id: None,
             key_only_order,
             index_keys: None,
             index_keys_ordered: false,
@@ -328,6 +428,7 @@ impl<'a> CoreFrame<'a> {
             examined_docs: 0,
             examined_bytes: 0,
             used_index: false,
+            force_scan: false,
             index_more: false,
             field_order_more: false,
             saw_scan: false,
@@ -345,6 +446,13 @@ impl<'a> CoreFrame<'a> {
         where_pred: &Predicate,
         force_scan: bool,
     ) -> Result<(), Error> {
+        self.force_scan = force_scan;
+        if self.project.group_agg.is_active() && self.resume_group_spool_id.is_some() {
+            // Scan will attempt the authenticated continuation spool first.
+            // On a miss it safely falls back to an ordinary full aggregate.
+            self.index_keys = Some(None);
+            return Ok(());
+        }
         let mut ordered = false;
         let mut keys = if force_scan {
             None
@@ -379,11 +487,73 @@ impl<'a> CoreFrame<'a> {
             .index_keys
             .as_ref()
             .ok_or_else(|| Error::QueryInvalid("core frame: Scan before IndexEq".into()))?;
+        if self.project.group_agg.is_active() {
+            if let Some(spool_id) = self.resume_group_spool_id.take() {
+                let frontier = scan.try_source_frontier()?;
+                if let Some(rows) = super::group_spool::take(&spool_id, frontier) {
+                    self.working = rows;
+                    self.pre_aggregated = true;
+                    self.pending_keys = Some(PendingKeys::Aggregated);
+                    self.saw_scan = true;
+                    return Ok(());
+                }
+            }
+        }
         self.used_index = index_keys.is_some();
-        let after_key = self
-            .last_sort_tuple_resume
-            .as_ref()
-            .and_then(super::ir_order::key_from_sort_tuple);
+        // Aggregate cursors resume the completed group bag in ProjectPaths.
+        // Applying a synthetic `g:` group key to the source collection would
+        // skip every base document before aggregation.
+        let after_key = (!self.project.group_agg.is_active())
+            .then(|| {
+                self.last_sort_tuple_resume
+                    .as_ref()
+                    .and_then(super::ir_order::key_from_sort_tuple)
+            })
+            .flatten();
+
+        if !self.force_scan
+            && self.project.group_agg.is_active()
+            && self.budget.is_none()
+            && !self.where_k.requires_logical_key()
+        {
+            let constant_true = self.where_k.constant_value() == Some(true);
+            let accumulator = super::group_agg::GroupAccumulator::new(&self.project.group_agg);
+            if let Some(fields) = accumulator.covering_fields() {
+                if constant_true {
+                    if let Some(rows) = scan.try_covering_index_values(&fields)? {
+                        self.examined_docs = rows.len() as u64;
+                        self.examined_bytes =
+                            rows.iter().map(|row| json_array_values_byte_len(row)).sum();
+                        self.used_index = true;
+                        self.pending_keys = Some(PendingKeys::ProjectedGroup { fields, rows });
+                        self.saw_scan = true;
+                        return Ok(());
+                    }
+                }
+                if let Some(result) = scan.try_group_aggregate(
+                    &self.project.group_agg,
+                    &self.where_k,
+                    index_keys.as_deref(),
+                )? {
+                    self.examined_docs = result.examined_documents;
+                    self.examined_bytes = result.examined_bytes;
+                    self.working = result.rows;
+                    self.pending_keys = Some(PendingKeys::Aggregated);
+                    self.saw_scan = true;
+                    return Ok(());
+                }
+                if constant_true {
+                    if let Some(rows) = scan.try_projected_values(&fields)? {
+                        self.examined_docs = rows.len() as u64;
+                        self.examined_bytes =
+                            rows.iter().map(|row| json_array_values_byte_len(row)).sum();
+                        self.pending_keys = Some(PendingKeys::ProjectedGroup { fields, rows });
+                        self.saw_scan = true;
+                        return Ok(());
+                    }
+                }
+            }
+        }
 
         if let Some(mut candidates) = index_keys.clone() {
             if !self.index_keys_ordered {
@@ -427,11 +597,15 @@ impl<'a> CoreFrame<'a> {
                 check_governance(self.options, self.started)?;
                 for (key, document) in scan.get_json_covered_many(keys)? {
                     match document {
-                        HostDocument::Present(doc) => {
+                        HostDocument::Present {
+                            value: doc,
+                            logical_bytes,
+                        } => {
                             self.examined_docs += 1;
-                            self.examined_bytes =
-                                self.examined_bytes.saturating_add(json_byte_len(&doc));
-                            self.working.push((key, doc));
+                            self.examined_bytes = self
+                                .examined_bytes
+                                .saturating_add(document_byte_len(doc.as_value(), logical_bytes));
+                            self.working.push((key, doc.into_owned()));
                         }
                         HostDocument::Absent => {
                             self.examined_docs += 1;
@@ -458,14 +632,17 @@ impl<'a> CoreFrame<'a> {
                 return Ok(());
             }
             match scan.get_json_covered(&key)? {
-                HostDocument::Present(doc) => {
-                    let blen = json_byte_len(&doc);
+                HostDocument::Present {
+                    value: doc,
+                    logical_bytes,
+                } => {
+                    let blen = document_byte_len(doc.as_value(), logical_bytes);
                     if self.stop_if_bytes_would_exceed(blen)? {
                         return Ok(());
                     }
                     self.examined_docs += 1;
                     self.examined_bytes = self.examined_bytes.saturating_add(blen);
-                    self.working.push((key, doc));
+                    self.working.push((key, doc.into_owned()));
                 }
                 HostDocument::Absent => {
                     self.examined_docs += 1;
@@ -504,14 +681,17 @@ impl<'a> CoreFrame<'a> {
                 }
                 after = Some(key.clone());
                 match document {
-                    HostDocument::Present(doc) => {
-                        let blen = json_byte_len(&doc);
+                    HostDocument::Present {
+                        value: doc,
+                        logical_bytes,
+                    } => {
+                        let blen = document_byte_len(doc.as_value(), logical_bytes);
                         if self.stop_if_bytes_would_exceed(blen)? {
                             return Ok(());
                         }
                         self.examined_docs += 1;
                         self.examined_bytes = self.examined_bytes.saturating_add(blen);
-                        self.working.push((key, doc));
+                        self.working.push((key, doc.into_owned()));
                     }
                     HostDocument::Absent => {
                         self.examined_docs += 1;
@@ -554,12 +734,21 @@ impl<'a> CoreFrame<'a> {
             super::ir_page::rows_needed(self.remaining_limit, self.page_size)
         };
         match pending {
+            PendingKeys::Aggregated => {
+                return Err(Error::Internal(
+                    "aggregate pushdown reached a non-aggregate filter".into(),
+                ));
+            }
+            PendingKeys::ProjectedGroup { .. } => {
+                return Err(Error::QueryInvalid(
+                    "core frame: covering group source without aggregation".into(),
+                ));
+            }
             PendingKeys::Materialized => {
                 let mut kept = Vec::with_capacity(self.working.len());
                 for (key, doc) in self.working.drain(..) {
                     check_governance(self.options, self.started)?;
-                    let doc = with_logical_key(&key, doc);
-                    if self.where_k.eval_doc(&doc)? {
+                    if let Some(doc) = filter_document(&self.where_k, &key, doc)? {
                         kept.push((key, doc));
                     }
                 }
@@ -592,8 +781,19 @@ impl<'a> CoreFrame<'a> {
     ) -> Result<(), Error> {
         let spec = self.project.group_agg.clone();
         let mut accumulator = super::group_agg::GroupAccumulator::new(&spec);
-        let needs_logical_key = !self.where_k.is_constant() || accumulator.requires_logical_key();
+        let needs_logical_key =
+            self.where_k.requires_logical_key() || accumulator.requires_logical_key();
         match pending {
+            PendingKeys::Aggregated => {
+                self.pre_aggregated = true;
+                return Ok(());
+            }
+            PendingKeys::ProjectedGroup { fields, rows } => {
+                for row in rows {
+                    check_governance(self.options, self.started)?;
+                    accumulator.ingest_covering(&fields, row)?;
+                }
+            }
             PendingKeys::Materialized => {
                 for (key, doc) in self.working.drain(..) {
                     check_governance(self.options, self.started)?;
@@ -616,15 +816,25 @@ impl<'a> CoreFrame<'a> {
                         check_governance(self.options, self.started)?;
                         for (key, document) in scan.get_json_covered_many(keys)? {
                             match document {
-                                HostDocument::Present(doc) => {
+                                HostDocument::Present {
+                                    value: doc,
+                                    logical_bytes,
+                                } => {
+                                    let preserved_length = logical_bytes;
+                                    let doc = doc.into_owned();
                                     let doc = if needs_logical_key {
                                         with_logical_key(&key, doc)
                                     } else {
                                         doc
                                     };
                                     self.examined_docs += 1;
+                                    let length = if needs_logical_key {
+                                        json_byte_len(&doc)
+                                    } else {
+                                        document_byte_len(&doc, preserved_length)
+                                    };
                                     self.examined_bytes =
-                                        self.examined_bytes.saturating_add(json_byte_len(&doc));
+                                        self.examined_bytes.saturating_add(length);
                                     if self.where_k.eval_doc(&doc)? {
                                         accumulator.ingest(&doc)?;
                                     }
@@ -653,13 +863,22 @@ impl<'a> CoreFrame<'a> {
                             break;
                         }
                         match scan.get_json_covered(&key)? {
-                            HostDocument::Present(doc) => {
+                            HostDocument::Present {
+                                value: doc,
+                                logical_bytes,
+                            } => {
+                                let preserved_length = logical_bytes;
+                                let doc = doc.into_owned();
                                 let doc = if needs_logical_key {
                                     with_logical_key(&key, doc)
                                 } else {
                                     doc
                                 };
-                                let length = json_byte_len(&doc);
+                                let length = if needs_logical_key {
+                                    json_byte_len(&doc)
+                                } else {
+                                    document_byte_len(&doc, preserved_length)
+                                };
                                 if self.stop_if_bytes_would_exceed(length)? {
                                     break;
                                 }
@@ -705,13 +924,22 @@ impl<'a> CoreFrame<'a> {
                         }
                         after = Some(key.clone());
                         match document {
-                            HostDocument::Present(doc) => {
+                            HostDocument::Present {
+                                value: doc,
+                                logical_bytes,
+                            } => {
+                                let preserved_length = logical_bytes;
+                                let doc = doc.into_owned();
                                 let doc = if needs_logical_key {
                                     with_logical_key(&key, doc)
                                 } else {
                                     doc
                                 };
-                                let length = json_byte_len(&doc);
+                                let length = if needs_logical_key {
+                                    json_byte_len(&doc)
+                                } else {
+                                    document_byte_len(&doc, preserved_length)
+                                };
                                 if self.stop_if_bytes_would_exceed(length)? {
                                     break 'pages;
                                 }
@@ -820,12 +1048,14 @@ impl<'a> CoreFrame<'a> {
                 check_governance(self.options, self.started)?;
                 for (key, document) in scan.get_json_covered_many(keys)? {
                     match document {
-                        HostDocument::Present(doc) => {
-                            let blen = json_byte_len(&doc);
-                            let doc = with_logical_key(&key, doc);
+                        HostDocument::Present {
+                            value: doc,
+                            logical_bytes,
+                        } => {
+                            let blen = document_byte_len(doc.as_value(), logical_bytes);
                             self.examined_docs += 1;
                             self.examined_bytes = self.examined_bytes.saturating_add(blen);
-                            if self.where_k.eval_doc(&doc)? {
+                            if let Some(doc) = filter_host_document(&self.where_k, &key, doc)? {
                                 self.push_field_order_match(key, doc, keep);
                             }
                         }
@@ -853,15 +1083,17 @@ impl<'a> CoreFrame<'a> {
                     break;
                 }
                 match scan.get_json_covered(&key)? {
-                    HostDocument::Present(doc) => {
-                        let blen = json_byte_len(&doc);
+                    HostDocument::Present {
+                        value: doc,
+                        logical_bytes,
+                    } => {
+                        let blen = document_byte_len(doc.as_value(), logical_bytes);
                         if self.stop_if_bytes_would_exceed(blen)? {
                             break;
                         }
-                        let doc = with_logical_key(&key, doc);
                         self.examined_docs += 1;
                         self.examined_bytes = self.examined_bytes.saturating_add(blen);
-                        if self.where_k.eval_doc(&doc)? {
+                        if let Some(doc) = filter_host_document(&self.where_k, &key, doc)? {
                             self.push_field_order_match(key, doc, keep);
                         }
                     }
@@ -916,15 +1148,17 @@ impl<'a> CoreFrame<'a> {
                     return Ok(());
                 }
                 match document {
-                    HostDocument::Present(doc) => {
-                        let blen = json_byte_len(&doc);
+                    HostDocument::Present {
+                        value: doc,
+                        logical_bytes,
+                    } => {
+                        let blen = document_byte_len(doc.as_value(), logical_bytes);
                         if self.stop_if_bytes_would_exceed(blen)? {
                             return Ok(());
                         }
-                        let doc = with_logical_key(&key, doc);
                         self.examined_docs += 1;
                         self.examined_bytes = self.examined_bytes.saturating_add(blen);
-                        if self.where_k.eval_doc(&doc)? {
+                        if let Some(doc) = filter_host_document(&self.where_k, &key, doc)? {
                             self.push_field_order_match(key, doc, keep);
                             if self.working.len() >= keep {
                                 return Ok(());
@@ -971,16 +1205,18 @@ impl<'a> CoreFrame<'a> {
                 }
                 after = Some(key.clone());
                 match document {
-                    HostDocument::Present(doc) => {
-                        let blen = json_byte_len(&doc);
+                    HostDocument::Present {
+                        value: doc,
+                        logical_bytes,
+                    } => {
+                        let blen = document_byte_len(doc.as_value(), logical_bytes);
                         if self.stop_if_bytes_would_exceed(blen)? {
                             self.retain_field_order_bound(keep, true);
                             return Ok(());
                         }
-                        let doc = with_logical_key(&key, doc);
                         self.examined_docs += 1;
                         self.examined_bytes = self.examined_bytes.saturating_add(blen);
-                        if self.where_k.eval_doc(&doc)? {
+                        if let Some(doc) = filter_host_document(&self.where_k, &key, doc)? {
                             self.push_field_order_match(key, doc, keep);
                         }
                     }
@@ -1034,12 +1270,14 @@ impl<'a> CoreFrame<'a> {
                                 key: Some(key),
                             });
                         }
-                        HostDocument::Present(doc) => {
-                            let doc = with_logical_key(&key, doc);
+                        HostDocument::Present {
+                            value: doc,
+                            logical_bytes,
+                        } => {
+                            let blen = document_byte_len(doc.as_value(), logical_bytes);
                             self.examined_docs += 1;
-                            self.examined_bytes =
-                                self.examined_bytes.saturating_add(json_byte_len(&doc));
-                            if self.where_k.eval_doc(&doc)? {
+                            self.examined_bytes = self.examined_bytes.saturating_add(blen);
+                            if let Some(doc) = filter_host_document(&self.where_k, &key, doc)? {
                                 self.working.push((key, doc));
                             }
                         }
@@ -1069,15 +1307,17 @@ impl<'a> CoreFrame<'a> {
                         key: Some(key),
                     });
                 }
-                HostDocument::Present(doc) => {
-                    let doc = with_logical_key(&key, doc);
-                    let blen = json_byte_len(&doc);
+                HostDocument::Present {
+                    value: doc,
+                    logical_bytes,
+                } => {
+                    let blen = document_byte_len(doc.as_value(), logical_bytes);
                     if self.stop_if_bytes_would_exceed(blen)? {
                         return Ok(());
                     }
                     self.examined_docs += 1;
                     self.examined_bytes = self.examined_bytes.saturating_add(blen);
-                    if self.where_k.eval_doc(&doc)? {
+                    if let Some(doc) = filter_host_document(&self.where_k, &key, doc)? {
                         self.working.push((key, doc));
                         if self.working.len() >= need {
                             self.index_more = iter.next().is_some();
@@ -1097,12 +1337,16 @@ impl<'a> CoreFrame<'a> {
         need: usize,
     ) -> Result<(), Error> {
         let mut after = after_key;
+        // Small result pages retain the established bounded over-read. Large
+        // scans amortize version inventory and cache-lock overhead across the
+        // largest store-supported page without weakening per-row governance.
+        let scan_batch_size = need.clamp(256, 4_096);
         'outer: loop {
             check_governance(self.options, self.started)?;
             if self.budget_truncated {
                 break;
             }
-            let batch = scan.scan_json_covered_page(Some(256), after.as_deref())?;
+            let batch = scan.scan_json_covered_page(Some(scan_batch_size), after.as_deref())?;
             if batch.is_empty() {
                 break;
             }
@@ -1127,15 +1371,17 @@ impl<'a> CoreFrame<'a> {
                         });
                         self.examined_docs += 1;
                     }
-                    HostDocument::Present(doc) => {
-                        let doc = with_logical_key(&key, doc);
-                        let blen = json_byte_len(&doc);
+                    HostDocument::Present {
+                        value: doc,
+                        logical_bytes,
+                    } => {
+                        let blen = document_byte_len(doc.as_value(), logical_bytes);
                         if self.stop_if_bytes_would_exceed(blen)? {
                             return Ok(());
                         }
                         self.examined_docs += 1;
                         self.examined_bytes = self.examined_bytes.saturating_add(blen);
-                        if self.where_k.eval_doc(&doc)? {
+                        if let Some(doc) = filter_host_document(&self.where_k, &key, doc)? {
                             self.working.push((key, doc));
                             if self.working.len() >= need {
                                 break 'outer;
@@ -1225,32 +1471,57 @@ impl<'a> CoreFrame<'a> {
             }
             if self.working.len() > self.page_size {
                 self.field_order_more = true;
-                self.working.truncate(self.page_size);
+                let remainder = self.working.split_off(self.page_size);
+                if self.budget.is_none() && self.known_holes.is_empty() {
+                    if let Some(frontier) = scan.try_source_frontier()? {
+                        self.next_group_spool_id = super::group_spool::store(remainder, frontier);
+                    }
+                }
             }
         }
 
         let mut matched: Vec<(String, JsonValue)> = Vec::with_capacity(self.working.len());
         let mut result_bytes: u64 = 0;
+        let measures_result_bytes = self
+            .budget
+            .and_then(|budget| budget.max_result_bytes)
+            .is_some();
         let mut last_full_for_cursor: Option<(String, JsonValue)> = None;
 
         let bag = std::mem::take(&mut self.working);
         for (key, doc) in bag {
             check_governance(self.options, self.started)?;
-            last_full_for_cursor = Some((key.clone(), doc.clone()));
-            let value = super::ir_project::apply_project_paths(&doc, self.project.paths.as_ref())?;
-            let row_len = json_byte_len(&value);
-            let next_result = result_bytes.saturating_add(row_len);
-            if self.stop_if_result_would_exceed(next_result)? {
-                // Soft: omit this and remaining rows; hard already returned Err.
-                break;
+            let (value, full_for_cursor) = match self.project.paths.as_ref() {
+                // Identity projection already owns the complete document. Move
+                // it directly into the result; if a cursor is needed, the
+                // accepted result row itself contains every order field.
+                None => (doc, None),
+                // A field projection may omit an order field. Retain ownership
+                // of only the latest accepted complete document instead of
+                // deep-cloning every candidate row.
+                Some(paths) => (
+                    super::ir_project::apply_project_paths(&doc, Some(paths))?,
+                    Some(doc),
+                ),
+            };
+            if measures_result_bytes {
+                let row_len = json_byte_len(&value);
+                let next_result = result_bytes.saturating_add(row_len);
+                if self.stop_if_result_would_exceed(next_result)? {
+                    // Soft: omit this and remaining rows; hard already returned Err.
+                    break;
+                }
+                result_bytes = next_result;
             }
-            result_bytes = next_result;
+            last_full_for_cursor = full_for_cursor.map(|document| (key.clone(), document));
             matched.push((key, value));
         }
 
         let took = matched.len();
         let need = super::ir_page::rows_needed(self.remaining_limit, self.page_size);
-        let exhausted = if self.used_index {
+        let exhausted = if self.project.group_agg.is_active() {
+            !self.field_order_more
+        } else if self.used_index {
             if self.key_only_order {
                 !self.index_more && took <= need
             } else {
@@ -1262,7 +1533,11 @@ impl<'a> CoreFrame<'a> {
             !self.field_order_more
         };
 
-        let exhausted = if !self.used_index && self.key_only_order && took == need {
+        let exhausted = if !self.project.group_agg.is_active()
+            && !self.used_index
+            && self.key_only_order
+            && took == need
+        {
             if let Some((last_k, _)) = matched.last() {
                 let more = scan.list_keys(Some(1), Some(last_k.as_str()))?;
                 if more.is_empty() {
@@ -1301,13 +1576,14 @@ impl<'a> CoreFrame<'a> {
         let next = if exhausted || rows.is_empty() {
             None
         } else {
-            let (last_key, last_doc) = last_full_for_cursor.unwrap_or_else(|| {
-                (
-                    rows.last().map(|r| r.key.clone()).unwrap_or_default(),
-                    JsonValue::Null,
-                )
-            });
-            let last_tuple = super::ir_order::build_sort_tuple(&last_key, &last_doc, &self.order);
+            let (last_key, last_doc) = match last_full_for_cursor.as_ref() {
+                Some((key, document)) => (key.as_str(), document),
+                None => {
+                    let row = rows.last().expect("non-empty rows checked above");
+                    (row.key.as_str(), &row.value)
+                }
+            };
+            let last_tuple = super::ir_order::build_sort_tuple(last_key, last_doc, &self.order);
             Some(super::ir_page::mint_page_cursor(
                 self.heap_id,
                 self.collection_id,
@@ -1319,6 +1595,7 @@ impl<'a> CoreFrame<'a> {
                 self.page_size as u32,
                 self.coverage,
                 self.consistency,
+                self.next_group_spool_id.as_deref(),
             )?)
         };
 
@@ -1356,5 +1633,36 @@ impl<'a> CoreFrame<'a> {
             logical_bytes_examined: 0,
             diagnostics: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod encoded_length_tests {
+    use super::json_byte_len;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn allocation_free_length_matches_serde_json_encoding() {
+        let values = [
+            Value::Null,
+            json!(true),
+            json!(false),
+            json!(0),
+            json!(-12.5),
+            json!("plain"),
+            json!("quote\" slash\\ controls\n\t\u{0001}"),
+            json!("ไทย 🐸 \u{2028}"),
+            json!([]),
+            json!([null, true, 12, "x"]),
+            json!({}),
+            json!({"a": 1, "quoted\"key": ["x", {"nested": false}]}),
+        ];
+        for value in values {
+            assert_eq!(
+                json_byte_len(&value),
+                serde_json::to_vec(&value).unwrap().len() as u64,
+                "{value}"
+            );
+        }
     }
 }

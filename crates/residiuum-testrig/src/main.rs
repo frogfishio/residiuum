@@ -24,9 +24,7 @@ use ack_finalize::{
 };
 use chaos::{run_chaos, ChaosConfig};
 use clap::{Parser, Subcommand};
-use manifest::{
-    manifest_path_for_store, per_store_manifest_path, store_path_for, MAX_STORES,
-};
+use manifest::{manifest_path_for_store, per_store_manifest_path, store_path_for, MAX_STORES};
 use monitor::{evaluate_run, run_monitor, MonitorConfig};
 use peer::{
     parse_awo_mode, parse_diag_io, parse_engine, parse_mode, parse_segment_growth, run_peer_pump,
@@ -1233,11 +1231,8 @@ fn cmd_run(
     });
 
     let summary_path = work.join("testrig-summary.v1.json");
-    std::fs::write(
-        &summary_path,
-        serde_json::to_vec_pretty(&summary).unwrap(),
-    )
-    .map_err(|e| format!("write summary: {e}"))?;
+    std::fs::write(&summary_path, serde_json::to_vec_pretty(&summary).unwrap())
+        .map_err(|e| format!("write summary: {e}"))?;
 
     if json_out {
         println!("{}", serde_json::to_string_pretty(&summary).unwrap());

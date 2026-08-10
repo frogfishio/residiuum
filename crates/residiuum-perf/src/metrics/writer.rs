@@ -108,8 +108,7 @@ mod tests {
         let h1 = write_result_json(&tmp.path().join("result.json"), &result).unwrap();
         let h2 = write_histograms_json(&tmp.path().join("histograms.json"), &s.agg).unwrap();
         let points = vec![json!({"t": 1, "ops": 1}), json!({"t": 2, "ops": 2})];
-        let h3 =
-            write_timeseries_ndjson(&tmp.path().join("timeseries.ndjson"), &points).unwrap();
+        let h3 = write_timeseries_ndjson(&tmp.path().join("timeseries.ndjson"), &points).unwrap();
         assert_eq!(h1.len(), 64);
         assert_eq!(h2.len(), 64);
         assert_eq!(h3.len(), 64);

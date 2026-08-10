@@ -189,10 +189,7 @@ pub fn render_disclosure_markdown(
     md.push_str("## Checklist\n\n");
     md.push_str("| Field | Status | Notes |\n|---|---|---|\n");
     for c in &disclosure.required_fields_checklist {
-        md.push_str(&format!(
-            "| {} | {} | {} |\n",
-            c.field, c.status, c.notes
-        ));
+        md.push_str(&format!("| {} | {} | {} |\n", c.field, c.status, c.notes));
     }
     md.push_str("\n## Runs\n\n");
     md.push_str(&format!(
@@ -268,6 +265,10 @@ mod tests {
         assert!(d.residual_store_driver);
         let md = render_disclosure_markdown(&d, &reports);
         assert!(md.contains("Benchmark Disclosure"));
-        assert!(md.contains("does **not** authorize") || md.contains("does not authorize") || md.contains("**not**"));
+        assert!(
+            md.contains("does **not** authorize")
+                || md.contains("does not authorize")
+                || md.contains("**not**")
+        );
     }
 }

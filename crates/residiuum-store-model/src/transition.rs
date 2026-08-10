@@ -134,10 +134,7 @@ impl TransitionCoverage {
 
     /// Coverage report as sorted class names.
     pub fn report(&self) -> Vec<String> {
-        self.reached
-            .iter()
-            .map(|c| format!("{c:?}"))
-            .collect()
+        self.reached.iter().map(|c| format!("{c:?}")).collect()
     }
 }
 

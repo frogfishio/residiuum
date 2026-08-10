@@ -1,10 +1,12 @@
 # RQL/Mongo game dipstick
 
 This is an intentionally disposable order-of-magnitude check, not Q5 evidence.
-It measures six warm query shapes over one identical generated fixture. Load and
-index construction are excluded. Mongo timings are client-observed and include
-localhost TCP/driver overhead; the report records a separate ping floor but does
-not subtract it from the headline.
+It measures the original six warm query shapes plus four deliberately weak
+cells over one identical generated fixture. Load and index construction are
+excluded. Mongo timings are client-observed and include localhost TCP/driver
+overhead; the report records a separate ping floor but does not subtract it from
+the headline. The weak-cell baseline and standalone lanes are recorded in
+`doc/todo/rql/RQL_MONGO_WEAK_CELL_MATRIX_2026_08_10.md`.
 
 Run Residiuum first so it emits the fixture, then Mongo:
 

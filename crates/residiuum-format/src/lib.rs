@@ -37,9 +37,9 @@ pub use csq_corpus::{
     apply_mutation, apply_pair, bit_flip_mutations, byte_replace_mutations, canonical_microframe,
     canonical_microsegment, content_hash_hex, delete_mutations, frozen_artifacts, hole_mutations,
     insert_mutations, pairwise_fault_covering, survivor_microframe, truncate_mutations,
-    unsupported_kind_microframe, FaultClass, FrozenArtifact, Mutation, PairFault, BYTE_REPLACEMENTS,
-    CANONICAL_BODY, CORPUS_GENERATOR, CORPUS_PROFILE, HOLE_MAX_LEN, HOLE_REGION_CAP,
-    INSERTION_ALPHABET, SURVIVOR_BODY,
+    unsupported_kind_microframe, FaultClass, FrozenArtifact, Mutation, PairFault,
+    BYTE_REPLACEMENTS, CANONICAL_BODY, CORPUS_GENERATOR, CORPUS_PROFILE, HOLE_MAX_LEN,
+    HOLE_REGION_CAP, INSERTION_ALPHABET, SURVIVOR_BODY,
 };
 
 pub use cbor_envelope::{
@@ -61,23 +61,23 @@ pub use events::{group_by_event_id, EventIdOutcome};
 pub use frame::{
     decode_frame, diagnostic_skip_body_hash, encode_frame, encode_frame_into,
     set_diagnostic_skip_body_hash, verify_frame_at, verify_frame_bytes, DecodedFrame, FrameHeader,
-    FrameParts, FrameVerifyError, VerifiedFrameViews, END_MAGIC, FRAME_PREFIX_LEN, FRAME_SUFFIX_LEN,
-    START_MAGIC, WIRE_MAJOR, WIRE_MINOR,
+    FrameParts, FrameVerifyError, VerifiedFrameViews, END_MAGIC, FRAME_PREFIX_LEN,
+    FRAME_SUFFIX_LEN, START_MAGIC, WIRE_MAJOR, WIRE_MINOR,
 };
 // WIRE_PROFILE_LABEL is defined at crate root for packaging / disclosure.
-pub use integrity::{body_hash, prefix_crc32c, suffix_crc32c, BODY_HASH_LEN};
-pub use kinds::{FrameFlags, FrameKind};
-pub use limits::SafetyLimits;
 pub use admit::{admit_frame_to_heap, salvage_admit_frame, AdmitDecision, AdmitError};
 pub use descriptors::{
     decode_heap_descriptor, decode_object_descriptor, descriptor_hash, encode_heap_descriptor,
     encode_object_descriptor, DescriptorError, HeapDescriptor, HeapDescriptorState,
     ObjectDescriptor, ObjectDescriptorState, HEAP_DESCRIPTOR_PROFILE,
 };
+pub use integrity::{body_hash, prefix_crc32c, suffix_crc32c, BODY_HASH_LEN};
+pub use kinds::{FrameFlags, FrameKind};
+pub use limits::SafetyLimits;
 pub use ownership::{
     agree_ownership, encode_collection_binding_envelope, encode_heap_binding_envelope,
-    encode_stream_binding_envelope, parse_ownership_envelope, OwnershipError,
-    OwnershipEvidence, ENV_COLLECTION_ID, ENV_HEAP_ID, ENV_OWNERSHIP_PROFILE, ENV_SOURCE_HEAP_ID,
+    encode_stream_binding_envelope, parse_ownership_envelope, OwnershipError, OwnershipEvidence,
+    ENV_COLLECTION_ID, ENV_HEAP_ID, ENV_OWNERSHIP_PROFILE, ENV_SOURCE_HEAP_ID,
     ENV_SOURCE_OBJECT_ID, ENV_STREAM_ID, OWNERSHIP_PROFILE_V1,
 };
 pub use scan::{

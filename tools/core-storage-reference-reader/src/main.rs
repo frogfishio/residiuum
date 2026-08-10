@@ -79,10 +79,8 @@ fn scan_bytes(data: &[u8]) -> Vec<FrameHit> {
             i += 1;
             continue;
         }
-        let frame_len = FRAME_PREFIX_LEN as u64
-            + envelope_len as u64
-            + body_len
-            + FRAME_SUFFIX_LEN as u64;
+        let frame_len =
+            FRAME_PREFIX_LEN as u64 + envelope_len as u64 + body_len + FRAME_SUFFIX_LEN as u64;
         if i as u64 + frame_len > data.len() as u64 {
             // Truncated candidate — still report header evidence, mark end magic false.
             hits.push(FrameHit {
@@ -161,7 +159,7 @@ mod tests {
         buf[10] = 1; // kind
         buf[12..16].copy_from_slice(&0u32.to_le_bytes()); // env
         buf[16..24].copy_from_slice(&0u64.to_le_bytes()); // body
-        // event id
+                                                          // event id
         buf[40] = 0xab;
         // fake end magic at suffix start for env=0 body=0
         let suffix = 64;

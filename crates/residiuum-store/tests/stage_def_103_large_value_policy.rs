@@ -16,9 +16,7 @@ fn threshold_minus_exact_plus_one_layout() {
     let exact = vec![2u8; thr];
     let over = vec![3u8; thr + 1];
 
-    let r0 = store
-        .put("a", &below, DurabilityMode::Durable)
-        .unwrap();
+    let r0 = store.put("a", &below, DurabilityMode::Durable).unwrap();
     assert_eq!(r0.layout, PayloadLayout::Inline);
     assert_eq!(r0.chunk_count, 0);
     assert_eq!(r0.profile_id, LARGE_VALUE_PROFILE_ID);
@@ -110,10 +108,7 @@ fn rewrite_heavy_key_helpers() {
         rewrite_heavy::transcript_turn("t1", "42"),
         "transcript/t1/turn/42"
     );
-    assert_eq!(
-        rewrite_heavy::transcript_meta("t1"),
-        "transcript/t1/meta"
-    );
+    assert_eq!(rewrite_heavy::transcript_meta("t1"), "transcript/t1/meta");
     assert!(rewrite_heavy::transcript_snapshot("t1", "g3").contains("snapshot"));
 }
 

@@ -67,7 +67,9 @@ impl LargeValuePolicy {
             ));
         }
         if self.chunk_payload_bytes == 0 {
-            return Err(StoreError::CorruptMeta("chunk_payload_bytes must be non-zero"));
+            return Err(StoreError::CorruptMeta(
+                "chunk_payload_bytes must be non-zero",
+            ));
         }
         if self.chunk_threshold_bytes == 0 {
             return Err(StoreError::CorruptMeta(
@@ -115,7 +117,9 @@ impl LargeValuePolicy {
     /// `Store::set_large_value_policy`.
     pub fn admit(&self, logical_len: usize) -> Result<AdmitDecision, StoreError> {
         if self.chunk_payload_bytes == 0 || self.chunk_threshold_bytes == 0 {
-            return Err(StoreError::CorruptMeta("chunk size/threshold must be non-zero"));
+            return Err(StoreError::CorruptMeta(
+                "chunk size/threshold must be non-zero",
+            ));
         }
         let len = logical_len as u64;
         if len > self.max_logical_payload_bytes {

@@ -1,9 +1,7 @@
 //! Stage 8e — SDK distributed find coverage honesty.
 
 use residiuum_cluster::{ClusterConfig, NodeId, PartitionId};
-use residiuum_sdk::{json, Residiuum, ErrorCode, Filter, QueryOptions};
-
-
+use residiuum_sdk::{json, ErrorCode, Filter, QueryOptions, Residiuum};
 
 #[test]
 fn cluster_find_complete_when_healthy() {

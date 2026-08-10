@@ -396,10 +396,7 @@ impl NetworkRaftNode {
         voters: Vec<NodeId>,
         placement_epoch: PlacementEpoch,
     ) -> Self {
-        assert!(
-            voters.contains(&local),
-            "local node must be a voter"
-        );
+        assert!(voters.contains(&local), "local node must be a voter");
         // Full voter set for quorum math; only the local peer's log/hard state
         // is used. Remotes are contacted exclusively via [`RaftTransport`].
         let group = PartitionRaft::new(partition, voters, placement_epoch);
@@ -548,9 +545,7 @@ impl NetworkRaftNode {
             req.leader_commit,
         );
         let match_index = if res.success {
-            self.group
-                .peer(self.local)
-                .map(|p| p.last_log_index())
+            self.group.peer(self.local).map(|p| p.last_log_index())
         } else {
             None
         };
@@ -929,10 +924,7 @@ impl NetworkRaftNode {
     ) -> Result<(), ProposeError> {
         for _ in 0..self.config.replicate_attempts {
             let (term, prev_idx, prev_term, entries, leader_commit) = {
-                let peer = self
-                    .group
-                    .peer(self.local)
-                    .ok_or(ProposeError::NotLeader)?;
+                let peer = self.group.peer(self.local).ok_or(ProposeError::NotLeader)?;
                 if peer.role != RaftRole::Leader {
                     return Err(ProposeError::NotLeader);
                 }
@@ -1254,9 +1246,9 @@ impl MemoryRaftNetwork {
     pub fn current_leader(&self, partition: PartitionId) -> Option<(NodeId, Term)> {
         let online = self.online_voters(partition);
         for n in online {
-            if let Some((is_leader, term, local)) =
-                self.with_node(partition, n, |node| (node.is_leader(), node.term(), node.local))
-            {
+            if let Some((is_leader, term, local)) = self.with_node(partition, n, |node| {
+                (node.is_leader(), node.term(), node.local)
+            }) {
                 if is_leader {
                     return Some((local, term));
                 }
@@ -1345,13 +1337,8 @@ mod tests {
         let voters: Vec<NodeId> = (0..3).map(NodeId::new).collect();
         let net = MemoryRaftNetwork::new();
         for v in &voters {
-            let node = NetworkRaftNode::new(
-                cluster_id,
-                partition,
-                *v,
-                voters.clone(),
-                PlacementEpoch(1),
-            );
+            let node =
+                NetworkRaftNode::new(cluster_id, partition, *v, voters.clone(), PlacementEpoch(1));
             net.register(node);
         }
         (net, cluster_id, voters)
@@ -1381,9 +1368,7 @@ mod tests {
 
         // All online followers should have commit advanced.
         for v in &voters {
-            let ci = net
-                .with_node(p, *v, |n| n.commit_index())
-                .expect("node");
+            let ci = net.with_node(p, *v, |n| n.commit_index()).expect("node");
             assert!(ci >= res.position.0, "node {v} commit {ci}");
         }
     }

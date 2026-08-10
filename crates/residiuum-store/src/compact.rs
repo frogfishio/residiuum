@@ -116,10 +116,7 @@ pub enum CompactPhase {
 impl CompactPhase {
     /// Whether this phase is terminal.
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Reclaimed | Self::Cancelled | Self::Failed
-        )
+        matches!(self, Self::Reclaimed | Self::Cancelled | Self::Failed)
     }
 
     /// Stable ASCII name.
@@ -246,12 +243,10 @@ pub fn write_compact_job(paths: &StorePaths, job: &CompactJob) -> Result<PathBuf
         .job_id_bytes()
         .ok_or(StoreError::CorruptMeta("compact job id"))?;
     let path = compaction_job_path(paths, &job_id);
-    let bytes = serde_json::to_vec_pretty(job).map_err(|e| {
-        StoreError::CorruptControl {
-            path: path.display().to_string(),
-            detail: e.to_string(),
-            recovery: "fix job or cancel compaction".into(),
-        }
+    let bytes = serde_json::to_vec_pretty(job).map_err(|e| StoreError::CorruptControl {
+        path: path.display().to_string(),
+        detail: e.to_string(),
+        recovery: "fix job or cancel compaction".into(),
     })?;
     crate::failpoint::hit("store.compact.job_write")?;
     crate::atomic_file::write_atomic_keep_previous(&path, &bytes)?;
@@ -361,7 +356,8 @@ pub fn resolve_live_body(
         }
     }
     for path in &candidates {
-        if let Ok(body) = pread_item_body_if_segment(path, lv.frame_offset, &lv.segment_id, limits) {
+        if let Ok(body) = pread_item_body_if_segment(path, lv.frame_offset, &lv.segment_id, limits)
+        {
             return Ok(body);
         }
     }
@@ -427,9 +423,7 @@ pub(crate) fn pread_item_bodies_matching(
                 expect.segment_id,
                 limits,
             )?;
-            validate_item_body_matching(
-                path, *offset, expect, header, envelope, body, file_len,
-            )
+            validate_item_body_matching(path, *offset, expect, header, envelope, body, file_len)
         })
         .collect())
 }
@@ -531,14 +525,7 @@ fn pread_item_frame_full(
         )))
     })?;
     let file_len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    pread_item_frame_full_open(
-        &mut file,
-        file_len,
-        path,
-        offset,
-        expect_segment_id,
-        limits,
-    )
+    pread_item_frame_full_open(&mut file, file_len, path, offset, expect_segment_id, limits)
 }
 
 fn pread_item_frame_full_open(

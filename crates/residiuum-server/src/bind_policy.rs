@@ -37,7 +37,9 @@ pub fn host_is_loopback(host: &str) -> bool {
 pub fn bind_host(bind: &str) -> Result<&str, Error> {
     let bind = bind.trim();
     if bind.is_empty() {
-        return Err(Error::ValidationMsg("bind address must not be empty".into()));
+        return Err(Error::ValidationMsg(
+            "bind address must not be empty".into(),
+        ));
     }
     if let Some(rest) = bind.strip_prefix('[') {
         let end = rest

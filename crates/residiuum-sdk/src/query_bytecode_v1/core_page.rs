@@ -24,7 +24,7 @@
 //! **Not claimed:** product query qualification (APB-7 package accept), product
 //! cursor secrets, remote op 118, snapshot reads.
 
-use super::HostDocument;
+use super::{HostDocument, HostGroupAggregate};
 use crate::app_v1::QueryExplanation;
 use crate::error::Error;
 use crate::plan_v1::CollectionBindings;
@@ -54,7 +54,10 @@ pub(crate) trait DocScan {
     /// hole evidence instead of aborting an incomplete-allowed query.
     fn get_json_covered(&mut self, key: &str) -> Result<HostDocument, Error> {
         Ok(match self.get_json(key)? {
-            Some(value) => HostDocument::Present(value),
+            Some(value) => HostDocument::Present {
+                value: value.into(),
+                logical_bytes: None,
+            },
             None => HostDocument::Absent,
         })
     }
@@ -110,6 +113,33 @@ pub(crate) trait DocScan {
         &mut self,
         _order: &[crate::plan_v1::OrderTerm],
     ) -> Result<Option<Vec<String>>, Error> {
+        Ok(None)
+    }
+
+    fn try_source_frontier(&mut self) -> Result<Option<[u8; 32]>, Error> {
+        Ok(None)
+    }
+
+    fn try_covering_index_values(
+        &mut self,
+        _fields: &[String],
+    ) -> Result<Option<Vec<Vec<JsonValue>>>, Error> {
+        Ok(None)
+    }
+
+    fn try_projected_values(
+        &mut self,
+        _fields: &[String],
+    ) -> Result<Option<Vec<Vec<JsonValue>>>, Error> {
+        Ok(None)
+    }
+
+    fn try_group_aggregate(
+        &mut self,
+        _spec: &crate::plan_v1::GroupAggSpec,
+        _where_k: &super::CompiledKernelWhere,
+        _candidate_keys: Option<&[String]>,
+    ) -> Result<Option<HostGroupAggregate>, Error> {
         Ok(None)
     }
 }

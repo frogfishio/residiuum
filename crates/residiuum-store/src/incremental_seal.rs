@@ -215,7 +215,11 @@ impl IncrementalSealState {
     }
 
     /// Observe contiguous durable bytes starting at `logical_off`.
-    pub fn observe_durable_bytes(&mut self, logical_off: u64, bytes: &[u8]) -> Result<(), StoreError> {
+    pub fn observe_durable_bytes(
+        &mut self,
+        logical_off: u64,
+        bytes: &[u8],
+    ) -> Result<(), StoreError> {
         if bytes.is_empty() {
             return Ok(());
         }
@@ -225,9 +229,7 @@ impl IncrementalSealState {
             ));
         }
         self.hasher.update(bytes);
-        self.hashed_thru = self
-            .hashed_thru
-            .saturating_add(bytes.len() as u64);
+        self.hashed_thru = self.hashed_thru.saturating_add(bytes.len() as u64);
         Ok(())
     }
 
@@ -270,12 +272,7 @@ mod tests {
         let ids = SegmentId::new([1u8; 16], [2u8; 16]);
         let mut active = ActiveSegment::create(ids, SafetyLimits::default(), 1).unwrap();
         active
-            .append(
-                FrameKind::ItemEvent,
-                EMPTY_ENVELOPE,
-                b"hello",
-                [9u8; 16],
-            )
+            .append(FrameKind::ItemEvent, EMPTY_ENVELOPE, b"hello", [9u8; 16])
             .unwrap();
         let prefix = active.as_bytes().to_vec();
         let frame_count = active.frame_count();
@@ -297,12 +294,7 @@ mod tests {
 
         let mut active2 = ActiveSegment::create(ids, SafetyLimits::default(), 1).unwrap();
         active2
-            .append(
-                FrameKind::ItemEvent,
-                EMPTY_ENVELOPE,
-                b"hello",
-                [9u8; 16],
-            )
+            .append(FrameKind::ItemEvent, EMPTY_ENVELOPE, b"hello", [9u8; 16])
             .unwrap();
         let sealed2 = active2.seal().unwrap().into_bytes();
         assert_eq!(sealed2, sealed);
@@ -313,12 +305,7 @@ mod tests {
         let ids = SegmentId::new([1u8; 16], [2u8; 16]);
         let mut active = ActiveSegment::create(ids, SafetyLimits::default(), 1).unwrap();
         active
-            .append(
-                FrameKind::ItemEvent,
-                EMPTY_ENVELOPE,
-                b"hello",
-                [9u8; 16],
-            )
+            .append(FrameKind::ItemEvent, EMPTY_ENVELOPE, b"hello", [9u8; 16])
             .unwrap();
         let prefix_len = active.as_bytes().len() as u64;
         let plan = meta_publish_plan(

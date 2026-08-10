@@ -2,14 +2,16 @@
 //!
 //! Uses an ephemeral private PKI (rcgen) — not system roots.
 
-
-use residiuum_sdk::{cluster_urn, node_urn, ConnectOptions, Residiuum, Error, PeerIdentity, RemoteClient, TlsClientOptions, TlsServerOptions, TlsServerState};
-
+use residiuum_sdk::{
+    cluster_urn, node_urn, ConnectOptions, Error, PeerIdentity, RemoteClient, Residiuum,
+    TlsClientOptions, TlsServerOptions, TlsServerState,
+};
 
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa,
     KeyPair, KeyUsagePurpose, SanType,
 };
+use residiuum_server::{serve_store_with, validate_bind, ServeOptions};
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
@@ -18,7 +20,6 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 use tempfile::TempDir;
-use residiuum_server::{ServeOptions, serve_store_with, validate_bind};
 
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -83,9 +84,7 @@ impl Pki {
         let key = KeyPair::generate().unwrap();
         let names: Vec<String> = dns_names.iter().map(|s| (*s).to_string()).collect();
         let mut params = CertificateParams::new(names).unwrap();
-        params
-            .distinguished_name
-            .push(DnType::CommonName, name);
+        params.distinguished_name.push(DnType::CommonName, name);
         params.use_authority_key_identifier_extension = true;
         params.key_usages = vec![
             KeyUsagePurpose::DigitalSignature,
@@ -112,9 +111,7 @@ impl Pki {
         if let Some(t) = not_after {
             params.not_after = t.into();
         }
-        let cert = params
-            .signed_by(&key, &self.ca_cert, &self.ca_key)
-            .unwrap();
+        let cert = params.signed_by(&key, &self.ca_cert, &self.ca_key).unwrap();
         let cert_pem = cert.pem();
         let key_pem = key.serialize_pem();
         let cert_path = self.dir.path().join(format!("{name}.crt"));
@@ -180,7 +177,9 @@ fn tls_happy_path_ping() {
     let shutdown = spawn_server(
         store,
         &bind,
-        ServeOptions::new().legacy_token_server().tls(TlsServerOptions::new(&cert, &key)),
+        ServeOptions::new()
+            .legacy_token_server()
+            .tls(TlsServerOptions::new(&cert, &key)),
     );
 
     let mut client = RemoteClient::connect_with(
@@ -209,7 +208,9 @@ fn wrong_hostname_fails() {
     let shutdown = spawn_server(
         store,
         &bind,
-        ServeOptions::new().legacy_token_server().tls(TlsServerOptions::new(&cert, &key)),
+        ServeOptions::new()
+            .legacy_token_server()
+            .tls(TlsServerOptions::new(&cert, &key)),
     );
 
     assert_auth_err(
@@ -227,7 +228,14 @@ fn wrong_hostname_fails() {
 #[test]
 fn wrong_cluster_id_fails() {
     let pki = Pki::new();
-    let (cert, key, _) = pki.issue("server", &["localhost"], Some("cluster-a"), None, None, None);
+    let (cert, key, _) = pki.issue(
+        "server",
+        &["localhost"],
+        Some("cluster-a"),
+        None,
+        None,
+        None,
+    );
     let tmp = TempDir::new().unwrap();
     let store = open_store(tmp.path());
     let port = free_port();
@@ -235,7 +243,9 @@ fn wrong_cluster_id_fails() {
     let shutdown = spawn_server(
         store,
         &bind,
-        ServeOptions::new().legacy_token_server().tls(TlsServerOptions::new(&cert, &key)),
+        ServeOptions::new()
+            .legacy_token_server()
+            .tls(TlsServerOptions::new(&cert, &key)),
     );
 
     assert_auth_err(
@@ -273,15 +283,16 @@ fn expired_certificate_fails() {
     let shutdown = spawn_server(
         store,
         &bind,
-        ServeOptions::new().legacy_token_server().tls(TlsServerOptions::new(&cert, &key)),
+        ServeOptions::new()
+            .legacy_token_server()
+            .tls(TlsServerOptions::new(&cert, &key)),
     );
 
     assert_auth_err(
         RemoteClient::connect_with(
             &bind,
             format!("residiuum://localhost:{port}/"),
-            ConnectOptions::new()
-                .tls(TlsClientOptions::new("localhost").ca_path(pki.ca_path())),
+            ConnectOptions::new().tls(TlsClientOptions::new("localhost").ca_path(pki.ca_path())),
         ),
         "expired cert",
     );
@@ -300,7 +311,9 @@ fn mitm_wrong_ca_fails() {
     let shutdown = spawn_server(
         store,
         &bind,
-        ServeOptions::new().legacy_token_server().tls(TlsServerOptions::new(&cert, &key)),
+        ServeOptions::new()
+            .legacy_token_server()
+            .tls(TlsServerOptions::new(&cert, &key)),
     );
 
     assert_auth_err(
@@ -318,8 +331,7 @@ fn mitm_wrong_ca_fails() {
 #[test]
 fn revoked_serial_fails() {
     let pki = Pki::new();
-    let (cert, key, serial) =
-        pki.issue("server", &["localhost"], Some("c1"), None, None, None);
+    let (cert, key, serial) = pki.issue("server", &["localhost"], Some("c1"), None, None, None);
     let tmp = TempDir::new().unwrap();
     let store = open_store(tmp.path());
     let port = free_port();
@@ -327,7 +339,9 @@ fn revoked_serial_fails() {
     let shutdown = spawn_server(
         store,
         &bind,
-        ServeOptions::new().legacy_token_server().tls(TlsServerOptions::new(&cert, &key)),
+        ServeOptions::new()
+            .legacy_token_server()
+            .tls(TlsServerOptions::new(&cert, &key)),
     );
 
     assert_auth_err(
@@ -350,8 +364,14 @@ fn mtls_requires_client_cert() {
     let pki = Pki::new();
     let (srv_cert, srv_key, _) =
         pki.issue("server", &["localhost"], Some("c1"), Some("n0"), None, None);
-    let (cli_cert, cli_key, _) =
-        pki.issue("client", &["client.local"], Some("c1"), Some("client"), None, None);
+    let (cli_cert, cli_key, _) = pki.issue(
+        "client",
+        &["client.local"],
+        Some("c1"),
+        Some("client"),
+        None,
+        None,
+    );
     let tmp = TempDir::new().unwrap();
     let store = open_store(tmp.path());
     let port = free_port();
@@ -370,8 +390,7 @@ fn mtls_requires_client_cert() {
         RemoteClient::connect_with(
             &bind,
             format!("residiuum://localhost:{port}/"),
-            ConnectOptions::new()
-                .tls(TlsClientOptions::new("localhost").ca_path(pki.ca_path())),
+            ConnectOptions::new().tls(TlsClientOptions::new("localhost").ca_path(pki.ca_path())),
         ),
         "mTLS without client cert",
     );
@@ -410,7 +429,8 @@ fn cert_rotation_keeps_new_handshakes_healthy() {
     let shutdown = spawn_server(
         store,
         &bind,
-        ServeOptions::new().legacy_token_server()
+        ServeOptions::new()
+            .legacy_token_server()
             .tls(TlsServerOptions::new(&live_cert, &live_key))
             .tls_state_slot(Arc::clone(&slot)),
     );

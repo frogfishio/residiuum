@@ -40,9 +40,9 @@ pub use bind_policy::{
 pub use config::{
     load_and_validate, redact_json_value, resolve_secret_ref, setting_class, validate_document,
     AdmissionConfigSection, ClusterConfigSection, ConfigError, ConfigLayer, ConfigMode,
-    ConfigOverrides, ResidiuumConfigFile, EffectiveConfigReport, EffectiveSetting, ServeConfigSection,
-    SettingClass, StoreConfigSection, TlsConfigSection, ValidatedConfig, CONFIG_FORMAT_VERSION,
-    CONFIG_PROFILE, DEFAULT_TOKEN_ENV,
+    ConfigOverrides, EffectiveConfigReport, EffectiveSetting, ResidiuumConfigFile,
+    ServeConfigSection, SettingClass, StoreConfigSection, TlsConfigSection, ValidatedConfig,
+    CONFIG_FORMAT_VERSION, CONFIG_PROFILE, DEFAULT_TOKEN_ENV,
 };
 pub use heap_audit::{HeapAuthAuditEvent, HeapAuthAuditLog, DEFAULT_HEAP_AUDIT_CAPACITY};
 pub use heap_auth::{
@@ -51,15 +51,14 @@ pub use heap_auth::{
 };
 pub use heap_dispatch::{
     dispatch_heap_request, dispatch_heap_request_with, layout_for_root, request_registry_allows,
-    HeapDataCtx, HeapDispatchResult, HeapRpcError,
-    HeapRpcRequest, HeapRpcResponse, HEAP_UNAVAILABLE,
+    HeapDataCtx, HeapDispatchResult, HeapRpcError, HeapRpcRequest, HeapRpcResponse,
+    HEAP_UNAVAILABLE,
 };
 pub use heap_registry::{ResidentHeap, ResidentHeapRegistry};
 pub use heap_session::{
     run_qualified_handshake, run_qualified_handshake_buffered, serve_qualified_requests,
     serve_qualified_requests_with_host, validate_qualified_listener, QualifiedHandshakeParams,
-    QualifiedHandshakeResult,
-    QualifiedSession,
+    QualifiedHandshakeResult, QualifiedSession,
 };
 pub use metrics::{
     evaluate_health, is_public_probe_op, AdmissionStatsWire, EdgeMetrics, GuaranteeMetrics,

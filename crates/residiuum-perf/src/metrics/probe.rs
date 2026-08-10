@@ -58,7 +58,11 @@ impl InstrumentationBudget {
         }
     }
 
-    pub fn validity_if_exceeded(&self, mode: ProbeMode, loss_fraction: f64) -> Option<&'static str> {
+    pub fn validity_if_exceeded(
+        &self,
+        mode: ProbeMode,
+        loss_fraction: f64,
+    ) -> Option<&'static str> {
         if self.exceeds(mode, loss_fraction) {
             Some("invalid_instrumentation")
         } else {
@@ -141,10 +145,7 @@ impl ProbeSession {
 }
 
 /// Synthetic overhead fixture: compare ops/s with probes off vs on.
-pub fn measure_probe_overhead_fixture(
-    ops: u64,
-    body_ns: u64,
-) -> (f64, f64, f64) {
+pub fn measure_probe_overhead_fixture(ops: u64, body_ns: u64) -> (f64, f64, f64) {
     // Returns (off_ops_per_ns_proxy, on_ops_per_ns_proxy, loss_fraction)
     // Uses synthetic work units, not wall clock, for determinism.
     let off_cost = ops.saturating_mul(body_ns);
@@ -196,8 +197,8 @@ mod tests {
 
     #[test]
     fn sampled_counts_samples() {
-        let mut s = ProbeSession::new(ProbeMode::Sampled, 0)
-            .with_sampler(SamplerConfig { rate: 4 });
+        let mut s =
+            ProbeSession::new(ProbeMode::Sampled, 0).with_sampler(SamplerConfig { rate: 4 });
         for i in 0..16 {
             s.on_ack(i, 10, 1);
         }

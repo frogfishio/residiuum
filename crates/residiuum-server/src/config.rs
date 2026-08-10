@@ -479,13 +479,13 @@ pub fn validate_document(
     let cluster = document.cluster.clone().unwrap_or_default();
 
     // --- bind ---
-    let (bind, bind_src) = match (
-        overrides.bind.clone(),
-        serve.bind.clone(),
-    ) {
+    let (bind, bind_src) = match (overrides.bind.clone(), serve.bind.clone()) {
         (Some(b), _) => (b, ConfigLayer::Flag),
         (None, Some(b)) => (b, ConfigLayer::File),
-        (None, None) => (format!("127.0.0.1:{}", residiuum_sdk::DEFAULT_PORT), ConfigLayer::Default),
+        (None, None) => (
+            format!("127.0.0.1:{}", residiuum_sdk::DEFAULT_PORT),
+            ConfigLayer::Default,
+        ),
     };
     sources.bind = bind_src;
     if bind.trim().is_empty() {
@@ -504,10 +504,7 @@ pub fn validate_document(
         .cluster_root
         .clone()
         .or_else(|| cluster.root.clone());
-    let node_index = overrides
-        .node_index
-        .or(cluster.node_index)
-        .unwrap_or(0);
+    let node_index = overrides.node_index.or(cluster.node_index).unwrap_or(0);
 
     match mode {
         ConfigMode::Serve => {
@@ -530,14 +527,12 @@ pub fn validate_document(
     }
 
     // --- allow_insecure_bind ---
-    let (allow_insecure_bind, aib_src) = match (
-        overrides.allow_insecure_bind,
-        serve.allow_insecure_bind,
-    ) {
-        (Some(v), _) => (v, ConfigLayer::Flag),
-        (None, Some(v)) => (v, ConfigLayer::File),
-        (None, None) => (false, ConfigLayer::Default),
-    };
+    let (allow_insecure_bind, aib_src) =
+        match (overrides.allow_insecure_bind, serve.allow_insecure_bind) {
+            (Some(v), _) => (v, ConfigLayer::Flag),
+            (None, Some(v)) => (v, ConfigLayer::File),
+            (None, None) => (false, ConfigLayer::Default),
+        };
     sources.allow_insecure_bind = aib_src;
 
     // --- experimental cluster ---
@@ -651,10 +646,7 @@ pub fn validate_document(
 
     // --- TLS ---
     let file_tls = serve.tls.clone().unwrap_or_default();
-    let cert = overrides
-        .tls_cert
-        .clone()
-        .or(file_tls.cert_path.clone());
+    let cert = overrides.tls_cert.clone().or(file_tls.cert_path.clone());
     let key = overrides.tls_key.clone().or(file_tls.key_path.clone());
     let client_ca = overrides
         .tls_client_ca
@@ -687,13 +679,19 @@ pub fn validate_document(
             if !c.is_file() {
                 return Err(ConfigError::validation(
                     "tls_cert_missing",
-                    format!("TLS cert path does not exist or is not a file: {}", c.display()),
+                    format!(
+                        "TLS cert path does not exist or is not a file: {}",
+                        c.display()
+                    ),
                 ));
             }
             if !k.is_file() {
                 return Err(ConfigError::validation(
                     "tls_key_missing",
-                    format!("TLS key path does not exist or is not a file: {}", k.display()),
+                    format!(
+                        "TLS key path does not exist or is not a file: {}",
+                        k.display()
+                    ),
                 ));
             }
             let mut opts = TlsServerOptions::new(c, k);
@@ -725,9 +723,8 @@ pub fn validate_document(
     sources.auth_token = token_src;
 
     // --- bind policy (same rules as DEF-002/032) ---
-    validate_bind(&bind, allow_insecure_bind, tls_enabled).map_err(|e| {
-        ConfigError::unsafe_cfg("insecure_bind", e.to_string())
-    })?;
+    validate_bind(&bind, allow_insecure_bind, tls_enabled)
+        .map_err(|e| ConfigError::unsafe_cfg("insecure_bind", e.to_string()))?;
 
     // --- replication honesty ---
     let claim_replication = cluster.claim_replication.unwrap_or(false);
@@ -776,11 +773,12 @@ pub fn validate_document(
         ));
     }
 
-    if allow_insecure_bind && !host_is_loopback(
-        crate::bind_policy::bind_host(&bind).map_err(|e| {
-            ConfigError::validation("bad_bind", e.to_string())
-        })?,
-    ) {
+    if allow_insecure_bind
+        && !host_is_loopback(
+            crate::bind_policy::bind_host(&bind)
+                .map_err(|e| ConfigError::validation("bad_bind", e.to_string()))?,
+        )
+    {
         warnings.push(
             "allow_insecure_bind is set for a non-loopback address: plaintext traffic \
              is development-only and must not be used for production (DEF-002)"
@@ -857,14 +855,12 @@ fn resolve_auth_path(
         None if serve.qualified_heap_key.is_some() => (file_qualified, ConfigLayer::File),
         None => (false, ConfigLayer::Default),
     };
-    let (deployment_id, dep_src) = match (
-        overrides.deployment_id.clone(),
-        serve.deployment_id.clone(),
-    ) {
-        (Some(d), _) => (Some(d), ConfigLayer::Flag),
-        (None, Some(d)) => (Some(d), ConfigLayer::File),
-        (None, None) => (None, ConfigLayer::Default),
-    };
+    let (deployment_id, dep_src) =
+        match (overrides.deployment_id.clone(), serve.deployment_id.clone()) {
+            (Some(d), _) => (Some(d), ConfigLayer::Flag),
+            (None, Some(d)) => (Some(d), ConfigLayer::File),
+            (None, None) => (None, ConfigLayer::Default),
+        };
     let mut path_src = match (legacy_src, qual_src) {
         (ConfigLayer::Flag, _) | (_, ConfigLayer::Flag) => ConfigLayer::Flag,
         (ConfigLayer::File, _) | (_, ConfigLayer::File) => ConfigLayer::File,
@@ -963,10 +959,7 @@ fn resolve_auth_token(
         let resolved = resolve_secret_ref(ref_name)?;
         return Ok((Some(resolved), ConfigLayer::Env));
     }
-    let env_name = serve
-        .token_env
-        .as_deref()
-        .unwrap_or(DEFAULT_TOKEN_ENV);
+    let env_name = serve.token_env.as_deref().unwrap_or(DEFAULT_TOKEN_ENV);
     match std::env::var(env_name) {
         Ok(v) if !v.is_empty() => Ok((Some(v), ConfigLayer::Env)),
         Ok(_) => Err(ConfigError::Secret(format!(
@@ -997,31 +990,30 @@ pub fn resolve_secret_ref(spec: &str) -> Result<String, ConfigError> {
         if name.is_empty() {
             return Err(ConfigError::Secret("env: secret ref missing name".into()));
         }
-        return std::env::var(name).map_err(|e| {
-            ConfigError::Secret(format!("environment variable {name} unavailable: {e}"))
-        }).and_then(|v| {
-            if v.is_empty() {
-                Err(ConfigError::Secret(format!(
-                    "environment variable {name} is empty"
-                )))
-            } else {
-                Ok(v)
-            }
-        });
+        return std::env::var(name)
+            .map_err(|e| {
+                ConfigError::Secret(format!("environment variable {name} unavailable: {e}"))
+            })
+            .and_then(|v| {
+                if v.is_empty() {
+                    Err(ConfigError::Secret(format!(
+                        "environment variable {name} is empty"
+                    )))
+                } else {
+                    Ok(v)
+                }
+            });
     }
     if let Some(path) = spec.strip_prefix("file:") {
         let path = path.trim();
         if path.is_empty() {
             return Err(ConfigError::Secret("file: secret ref missing path".into()));
         }
-        let raw = fs::read_to_string(path).map_err(|e| {
-            ConfigError::Secret(format!("failed to read secret file {path}: {e}"))
-        })?;
+        let raw = fs::read_to_string(path)
+            .map_err(|e| ConfigError::Secret(format!("failed to read secret file {path}: {e}")))?;
         let v = raw.trim_end_matches(['\r', '\n']).to_string();
         if v.is_empty() {
-            return Err(ConfigError::Secret(format!(
-                "secret file {path} is empty"
-            )));
+            return Err(ConfigError::Secret(format!("secret file {path} is empty")));
         }
         return Ok(v);
     }
@@ -1074,9 +1066,7 @@ impl ValidatedConfig {
             // Empty resident registry satisfies listener validation; heaps are
             // admitted by ceremony (HAR-2/3). Same posture as CLI T2.
             if opts.heap_registry.is_none() {
-                opts = opts.heap_registry(std::sync::Arc::new(
-                    crate::ResidentHeapRegistry::new(),
-                ));
+                opts = opts.heap_registry(std::sync::Arc::new(crate::ResidentHeapRegistry::new()));
             }
         }
         opts
@@ -1222,10 +1212,7 @@ impl ValidatedConfig {
         EffectiveConfigReport {
             profile: CONFIG_PROFILE.to_string(),
             format_version: CONFIG_FORMAT_VERSION,
-            config_path: self
-                .config_path
-                .as_ref()
-                .map(|p| p.display().to_string()),
+            config_path: self.config_path.as_ref().map(|p| p.display().to_string()),
             mode: mode_s.into(),
             settings,
             warnings: self.warnings.clone(),
@@ -1241,7 +1228,10 @@ impl ValidatedConfig {
 /// Classify a known setting path (for operator docs / tooling).
 pub fn setting_class(path: &str) -> Option<SettingClass> {
     match path {
-        "store.path" | "cluster.root" | "cluster.node_index" | "cluster.expected_node_count"
+        "store.path"
+        | "cluster.root"
+        | "cluster.node_index"
+        | "cluster.expected_node_count"
         | "cluster.claim_replication" => Some(SettingClass::Static),
         "serve.bind"
         | "serve.allow_insecure_bind"
@@ -1273,9 +1263,7 @@ pub fn redact_json_value(v: &mut serde_json::Value) {
                 if lower.contains("token")
                     || lower.contains("secret")
                     || lower.contains("password")
-                    || lower.ends_with("_key")
-                        && !lower.contains("path")
-                        && lower != "key_path"
+                    || lower.ends_with("_key") && !lower.contains("path") && lower != "key_path"
                 {
                     // Keep *paths* and env *names*; redact only obvious values.
                     if lower.ends_with("_env")
@@ -1326,13 +1314,8 @@ mod tests {
             token_env: Some("RESIDIUUM_TEST_CFG_NO_SUCH_TOKEN".into()),
             ..Default::default()
         });
-        let v = validate_document(
-            doc,
-            None,
-            ConfigMode::Validate,
-            ConfigOverrides::default(),
-        )
-        .unwrap();
+        let v =
+            validate_document(doc, None, ConfigMode::Validate, ConfigOverrides::default()).unwrap();
         assert_eq!(v.bind, format!("127.0.0.1:{}", residiuum_sdk::DEFAULT_PORT));
         assert!(!v.allow_insecure_bind);
         assert!(v.auth_token.is_none());
@@ -1380,8 +1363,13 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let err = validate_document(doc, None, ConfigMode::ServeCluster, ConfigOverrides::default())
-            .unwrap_err();
+        let err = validate_document(
+            doc,
+            None,
+            ConfigMode::ServeCluster,
+            ConfigOverrides::default(),
+        )
+        .unwrap_err();
         match err {
             ConfigError::Unsafe { code, .. } => {
                 assert_eq!(code, "replication_claim_insufficient_nodes");
@@ -1407,8 +1395,8 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let err =
-            validate_document(doc, None, ConfigMode::Serve, ConfigOverrides::default()).unwrap_err();
+        let err = validate_document(doc, None, ConfigMode::Serve, ConfigOverrides::default())
+            .unwrap_err();
         match err {
             ConfigError::Unsafe { code, .. } => {
                 assert_eq!(code, "replication_claim_on_single_node");
@@ -1434,8 +1422,8 @@ mod tests {
             }),
             cluster: None,
         };
-        let err =
-            validate_document(doc, None, ConfigMode::Serve, ConfigOverrides::default()).unwrap_err();
+        let err = validate_document(doc, None, ConfigMode::Serve, ConfigOverrides::default())
+            .unwrap_err();
         assert!(matches!(err, ConfigError::Unsafe { code, .. } if code == "insecure_bind"));
     }
 
@@ -1456,12 +1444,8 @@ mod tests {
               }
             }"#,
         );
-        let v = load_and_validate(
-            Some(&path),
-            ConfigMode::Serve,
-            ConfigOverrides::default(),
-        )
-        .unwrap();
+        let v =
+            load_and_validate(Some(&path), ConfigMode::Serve, ConfigOverrides::default()).unwrap();
         assert_eq!(v.bind, "127.0.0.1:9000");
         assert_eq!(v.server_limits.max_connections, 16);
         assert_eq!(v.admission_limits.global_max_rps, 100);
@@ -1592,8 +1576,8 @@ mod tests {
             }),
             cluster: None,
         };
-        let err =
-            validate_document(doc, None, ConfigMode::Serve, ConfigOverrides::default()).unwrap_err();
+        let err = validate_document(doc, None, ConfigMode::Serve, ConfigOverrides::default())
+            .unwrap_err();
         match err {
             ConfigError::Validation { code, .. } => assert_eq!(code, "bad_range"),
             other => panic!("unexpected {other:?}"),

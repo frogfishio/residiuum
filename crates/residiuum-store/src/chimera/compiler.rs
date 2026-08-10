@@ -7,9 +7,7 @@
 //! write path and a future compiler worker execute [`CompilerOp`]s under
 //! generation-safe locator swaps.
 
-use super::classify::{
-    LocatorKind, TemperatureClass, ValueClass,
-};
+use super::classify::{LocatorKind, TemperatureClass, ValueClass};
 use super::ValueLocator;
 
 /// One planned physical rewrite.

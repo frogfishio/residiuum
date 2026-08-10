@@ -22,7 +22,6 @@ pub use ceremony::{
 pub use error::{AuthorityError, AuthorityStoreError};
 pub use head::{AccessPolicy, AuthorityHead, RecoveryProfile};
 pub use issue::{issue_heap_key, IssueRequest, IssuedHeapKey};
-pub use residiuum_heap::Rights;
 pub use product::{
     bootstrap_development_file_product, DevelopmentFileProductBootstrap, ProductBootstrapResult,
     ProductHeapCapability, ProductHeapDisposition, ProductHeapRequest,
@@ -31,6 +30,7 @@ pub use provider::{EphemeralMasterKeyProvider, MasterKeyProvider};
 pub use reload::{
     apply_reload_request, notify_reload, peek_reload_request, ReloadNotify, ReloadRequest,
 };
+pub use residiuum_heap::Rights;
 pub use store::{AuthorityPaths, MasterAuthorityStore};
 
 /// Test helper: wrap a payload in a §35 slot file.

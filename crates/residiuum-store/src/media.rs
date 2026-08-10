@@ -656,9 +656,14 @@ mod tests {
         let root = dir.path().join("objects");
         let loc = MediaLocator::parse(&format!("object:local:{}", root.display())).unwrap();
         let media = open_media(&loc).unwrap();
-        media.put_object("seg/aa.residiuum", b"hello-object").unwrap();
+        media
+            .put_object("seg/aa.residiuum", b"hello-object")
+            .unwrap();
         assert!(media.object_exists("seg/aa.residiuum").unwrap());
-        assert_eq!(media.get_object("seg/aa.residiuum").unwrap(), b"hello-object");
+        assert_eq!(
+            media.get_object("seg/aa.residiuum").unwrap(),
+            b"hello-object"
+        );
         media.delete_object("seg/aa.residiuum").unwrap();
         assert!(!media.object_exists("seg/aa.residiuum").unwrap());
     }

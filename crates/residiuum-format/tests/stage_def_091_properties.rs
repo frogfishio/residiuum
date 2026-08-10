@@ -4,12 +4,12 @@
 //! fuzz targets live under `fuzz/` and are exercised by nightly + local
 //! `cargo fuzz`.
 
+use proptest::prelude::*;
 use residiuum_format::{
     decode_frame, encode_deterministic_uint_map, encode_frame, scan_forward, scan_reverse,
     validate_deterministic_cbor_envelope, CborValue, FrameHeader, FrameKind, FrameParts,
     SafetyLimits, EMPTY_ENVELOPE, WIRE_MAJOR, WIRE_MINOR,
 };
-use proptest::prelude::*;
 
 /// Tight limits so adversarial length fields cannot allocate multi-GiB buffers.
 fn prop_limits() -> SafetyLimits {

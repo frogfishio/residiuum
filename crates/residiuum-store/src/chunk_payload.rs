@@ -368,10 +368,8 @@ pub fn reassemble_with_manifest(
     match reassemble_chunks(&selected, Some(manifest.content_hash)) {
         ReassemblyState::Complete { body, .. } => PayloadResult::Complete { body },
         ReassemblyState::Partial { extents, missing } => {
-            let present_bodies: Vec<_> = selected
-                .iter()
-                .map(|p| (p.index, p.body.clone()))
-                .collect();
+            let present_bodies: Vec<_> =
+                selected.iter().map(|p| (p.index, p.body.clone())).collect();
             PayloadResult::Partial {
                 extents,
                 missing,

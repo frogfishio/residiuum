@@ -25,9 +25,9 @@ pub use emitter::{
 };
 #[cfg(feature = "store-driver")]
 pub use emitter::{emit_plan_from_store_boundary_events, facts_from_store_boundary_events};
+pub use kinds::{AwoMode, DriverKind, MeasurementSurface, DRIVER_KIND_SYNTHETIC};
 #[cfg(feature = "store-driver")]
 pub use real::measure_probe_observer_overhead;
-pub use kinds::{AwoMode, DriverKind, MeasurementSurface, DRIVER_KIND_SYNTHETIC};
 
 use crate::matrix::{CellRunReport, DurabilityMode, MatrixCell, MatrixError};
 use crate::shadow::PhysicalWritePlan;
@@ -130,6 +130,12 @@ pub fn cell_store_path(work_root: &Path, cell_id: &str, process_tag: &str) -> st
 
 fn sanitize_id(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }

@@ -46,7 +46,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -90,10 +97,7 @@ fn parameter_hash_stable_and_sensitive() {
 
 #[test]
 fn product_ring_multipage_roundtrip() {
-    let _guard = CursorKeyRingGuard::install(CursorKeyRing::product(
-        "prod-ck-1",
-        [0xABu8; 32],
-    ));
+    let _guard = CursorKeyRingGuard::install(CursorKeyRing::product("prod-ck-1", [0xABu8; 32]));
 
     let (_dir, mut client) = open_bound_client();
     let mut col = client.create_collection("docs").unwrap().collection;

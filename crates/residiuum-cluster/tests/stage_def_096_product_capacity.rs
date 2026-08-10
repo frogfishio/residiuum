@@ -6,7 +6,9 @@
 //! - dependable-local profile spreads leaders across nodes
 //! - acks remain honest (replica_acks, committed, leader, partition)
 
-use residiuum_cluster::{Cluster, ClusterConfig, ConsistencyMode, DeploymentProfile, NodeId, ReadMode};
+use residiuum_cluster::{
+    Cluster, ClusterConfig, ConsistencyMode, DeploymentProfile, NodeId, ReadMode,
+};
 use residiuum_store::DurabilityMode;
 use std::collections::{HashMap, HashSet};
 

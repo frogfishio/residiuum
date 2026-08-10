@@ -283,13 +283,7 @@ pub fn decode_frame(bytes: &[u8], limits: SafetyLimits) -> Result<DecodedFrame, 
 }
 
 /// Views into a verified frame: header, envelope, body, body hash, frame length.
-pub type VerifiedFrameViews<'a> = (
-    FrameHeader,
-    &'a [u8],
-    &'a [u8],
-    [u8; BODY_HASH_LEN],
-    u64,
-);
+pub type VerifiedFrameViews<'a> = (FrameHeader, &'a [u8], &'a [u8], [u8; BODY_HASH_LEN], u64);
 
 /// Verify a frame candidate starting at offset 0 of `bytes`.
 ///

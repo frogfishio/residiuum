@@ -9,8 +9,8 @@ use crate::wire::{
     AUDIENCE_DATA_V1, CONTENT_TYPE_HOLDER_PROOF, EXTERNAL_AAD_HOLDER_PROOF, PROFILE_VERSION,
     PROOF_MAX_BYTES,
 };
-use residiuum_format::{decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue};
 use ed25519_dalek::{Signature, VerifyingKey};
+use residiuum_format::{decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue};
 
 /// Verified holder proof claims.
 #[derive(Debug, Clone)]
@@ -45,7 +45,10 @@ pub fn build_holder_proof(
         (2, CborValue::Bytes(proof_id.to_vec())),
         (3, CborValue::Uint(created_at)),
         (4, CborValue::Bytes(certificate.fingerprint.to_vec())),
-        (5, CborValue::Bytes(certificate.deployment_id.as_bytes().to_vec())),
+        (
+            5,
+            CborValue::Bytes(certificate.deployment_id.as_bytes().to_vec()),
+        ),
         (6, CborValue::Bytes(certificate.heap_id.as_bytes().to_vec())),
         (7, CborValue::Uint(certificate.authority_epoch.get())),
         (8, CborValue::Text(AUDIENCE_DATA_V1.into())),

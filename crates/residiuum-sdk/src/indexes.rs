@@ -14,18 +14,18 @@
 //! Absence is never proven from a stale, partial, building, rebuilding, or
 //! failed index — only `ready` with `complete_coverage`.
 
-#[cfg(feature = "legacy-flat-sdk")]
-use crate::residiuum::Backend;
 use crate::error::Error;
 #[cfg(feature = "legacy-flat-sdk")]
 use crate::filter::{resolve_path_value, Filter, Pred};
 #[cfg(feature = "legacy-flat-sdk")]
+use crate::residiuum::Backend;
+#[cfg(feature = "legacy-flat-sdk")]
 use crate::subject::collection_prefix;
 #[cfg(feature = "legacy-flat-sdk")]
 use crate::value::decode_json;
-use residiuum_store::{IndexState, SecondaryIndex};
 #[cfg(feature = "legacy-flat-sdk")]
 use residiuum_store::Store;
+use residiuum_store::{IndexState, SecondaryIndex};
 #[cfg(feature = "legacy-flat-sdk")]
 use serde_json::Value as JsonValue;
 
@@ -232,9 +232,7 @@ fn create_index_on_store_inner(
     let resume = existing
         .as_ref()
         .filter(|idx| {
-            !force_rebuild
-                && idx.is_build_in_progress()
-                && idx.meta.fields == field_owned
+            !force_rebuild && idx.is_build_in_progress() && idx.meta.fields == field_owned
         })
         .cloned();
 
@@ -260,10 +258,7 @@ fn create_index_on_store_inner(
         Err(e) => {
             // Persist Failed with reason so operators and resume paths see it.
             // Failpoints that simulate crash (Panic) will not reach here.
-            if !matches!(
-                &e,
-                Error::Store(residiuum_store::StoreError::Failpoint(_))
-            ) {
+            if !matches!(&e, Error::Store(residiuum_store::StoreError::Failpoint(_))) {
                 idx.mark_failed(e.to_string());
                 let _ = store.write_secondary_index(&idx);
             }
@@ -329,11 +324,8 @@ fn fill_index_from_live(
     let mut saw_incomplete = false;
 
     loop {
-        let page = store.scan_live_bodies_for_build(
-            Some(prefix),
-            after.as_deref(),
-            BUILD_PAGE_SIZE,
-        )?;
+        let page =
+            store.scan_live_bodies_for_build(Some(prefix), after.as_deref(), BUILD_PAGE_SIZE)?;
         if !page.incomplete.is_empty() {
             saw_incomplete = true;
         }

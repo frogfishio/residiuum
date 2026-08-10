@@ -4,10 +4,13 @@
 //! admission enforces limits with typed overload responses, one coordinated
 //! store owner is used, and graceful shutdown drains in-flight work.
 
+use residiuum_sdk::{
+    client_handshake, json, read_frame, write_frame, ErrorCode, Residiuum, DEFAULT_MAX_FRAME_BYTES,
+};
 
-use residiuum_sdk::{client_handshake, json, read_frame, write_frame, Residiuum, ErrorCode, DEFAULT_MAX_FRAME_BYTES};
-
-
+use residiuum_server::{
+    serve_store_with, ServeOptions, ServerLimits, DEFAULT_MAX_CONNECTIONS, SERVER_PROFILE,
+};
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +18,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::tempdir;
-use residiuum_server::{DEFAULT_MAX_CONNECTIONS, SERVER_PROFILE, ServeOptions, ServerLimits, serve_store_with};
 
 fn free_bind() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -34,11 +36,7 @@ fn wait_for(bind: &str) {
     panic!("server did not accept on {bind}");
 }
 
-fn spawn_server(
-    path: std::path::PathBuf,
-    bind: &str,
-    options: ServeOptions,
-) -> Arc<AtomicBool> {
+fn spawn_server(path: std::path::PathBuf, bind: &str, options: ServeOptions) -> Arc<AtomicBool> {
     let shutdown = options
         .shutdown
         .clone()
@@ -98,7 +96,13 @@ fn concurrent_clients_progress_independently() {
     }
 
     let bind = free_bind();
-    let shutdown = spawn_server(path, &bind, ServeOptions::new().legacy_token_server().max_connections(16));
+    let shutdown = spawn_server(
+        path,
+        &bind,
+        ServeOptions::new()
+            .legacy_token_server()
+            .max_connections(16),
+    );
 
     // Hold an idle TCP connection open (slow client) without sending RPCs.
     let _slow = TcpStream::connect(&bind).expect("slow client connect");
@@ -141,11 +145,13 @@ fn connection_limit_returns_resource_limit() {
     let shutdown = spawn_server(
         path,
         &bind,
-        ServeOptions::new().legacy_token_server().server_limits(ServerLimits {
-            max_connections: 2,
-            idle_timeout: Duration::from_secs(30),
-            drain_timeout: Duration::from_secs(5),
-        }),
+        ServeOptions::new()
+            .legacy_token_server()
+            .server_limits(ServerLimits {
+                max_connections: 2,
+                idle_timeout: Duration::from_secs(30),
+                drain_timeout: Duration::from_secs(5),
+            }),
     );
 
     // Hold two live workers (confirmed via ping) so further connects overload.
@@ -208,7 +214,8 @@ fn graceful_shutdown_drains_and_stops_accept() {
     let flag = spawn_server(
         path,
         &bind,
-        ServeOptions::new().legacy_token_server()
+        ServeOptions::new()
+            .legacy_token_server()
             .max_connections(8)
             .drain_timeout(Duration::from_secs(5))
             .shutdown_flag(Arc::clone(&shutdown)),
@@ -284,7 +291,13 @@ fn single_store_owner_survives_many_clients() {
     }
 
     let bind = free_bind();
-    let shutdown = spawn_server(path, &bind, ServeOptions::new().legacy_token_server().max_connections(32));
+    let shutdown = spawn_server(
+        path,
+        &bind,
+        ServeOptions::new()
+            .legacy_token_server()
+            .max_connections(32),
+    );
 
     let mut handles = Vec::new();
     for i in 0..20 {
@@ -316,7 +329,9 @@ fn remote_error_code_for_limit_is_stable() {
 
 #[test]
 fn idle_timeout_is_configurable_on_options() {
-    let opts = ServeOptions::new().legacy_token_server().idle_timeout(Duration::from_secs(3));
+    let opts = ServeOptions::new()
+        .legacy_token_server()
+        .idle_timeout(Duration::from_secs(3));
     assert_eq!(opts.server_limits.idle_timeout, Duration::from_secs(3));
 }
 

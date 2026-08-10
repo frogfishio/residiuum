@@ -44,7 +44,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -144,10 +151,7 @@ fn rql_page_size_and_continuation() {
         .chain(p3.rows.iter())
         .map(|r| r.key.clone())
         .collect();
-    assert_eq!(
-        all,
-        col.list_keys(Some(100), None).unwrap()
-    );
+    assert_eq!(all, col.list_keys(Some(100), None).unwrap());
 }
 
 #[test]

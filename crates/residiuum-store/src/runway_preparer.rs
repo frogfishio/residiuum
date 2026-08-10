@@ -82,15 +82,9 @@ impl RunwayPreparer {
     /// Prefer [`crate::store::Store::warm_segment_runway`] (same-fd) for product
     /// warm; this waits on the preparer's own progress atomics.
     #[allow(dead_code)]
-    pub fn wait_until_zeroed(
-        &self,
-        target: u64,
-        timeout: Duration,
-    ) -> Result<(), StoreError> {
+    pub fn wait_until_zeroed(&self, target: u64, timeout: Duration) -> Result<(), StoreError> {
         let want = target.min(self.capacity_bytes);
-        self.shared
-            .target_floor
-            .store(want, Ordering::Release);
+        self.shared.target_floor.store(want, Ordering::Release);
         let deadline = Instant::now() + timeout;
         loop {
             if self.shared.zeroed_thru.load(Ordering::Acquire) >= want {

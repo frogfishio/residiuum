@@ -160,8 +160,7 @@ pub struct ScaleController {
 impl ScaleController {
     /// Create with initial active count.
     pub fn new(policy: ControllerPolicy, initial_active: usize) -> Self {
-        let active = initial_active
-            .clamp(policy.minimum_active_cookers, policy.maximum_cookers);
+        let active = initial_active.clamp(policy.minimum_active_cookers, policy.maximum_cookers);
         Self {
             policy,
             active_cookers: active,
@@ -194,8 +193,7 @@ impl ScaleController {
             && !signals.writer_saturated
             && self.active_cookers < self.policy.maximum_cookers;
 
-        let want_down = (signals.cooker_utilization_ppm
-            <= self.policy.scale_down_utilization_ppm
+        let want_down = (signals.cooker_utilization_ppm <= self.policy.scale_down_utilization_ppm
             || signals.ready_queue_fill_ppm >= self.policy.ready_queue_scale_down_ppm)
             && !signals.deadline_miss_from_cook
             && self.active_cookers > self.policy.minimum_active_cookers;
@@ -308,7 +306,7 @@ mod tests {
         // At time after third eval: started 0, after first last=0, advance 100 →1, advance 100→2, ScaleUp at 200.
         assert_eq!(c.active_cookers, 2);
         clock.advance(100); // 300 — need 500 dwell from 200 → still blocked at 300+ for consecutive
-        // Build streak again
+                            // Build streak again
         assert_eq!(c.evaluate(&sig, &clock), ScaleDecision::Hold);
         clock.advance(100);
         assert_eq!(c.evaluate(&sig, &clock), ScaleDecision::Hold);
@@ -316,9 +314,9 @@ mod tests {
         // streak 3 but dwell: now=500, last_scale_up=200, delta=300 < 500 → Hold
         assert_eq!(c.evaluate(&sig, &clock), ScaleDecision::Hold);
         clock.advance(200); // now 700, dwell ok, but streak was reset? Hold reset streaks when want_up still true increments
-        // After Hold with want_up, streak was already 3 then Hold due to dwell — looking at code:
-        // want_up true → up_streak += 1 each time. When up_streak >= 3 and dwell fails, return Hold WITHOUT resetting streak.
-        // So next evaluate with dwell ok should ScaleUp.
+                            // After Hold with want_up, streak was already 3 then Hold due to dwell — looking at code:
+                            // want_up true → up_streak += 1 each time. When up_streak >= 3 and dwell fails, return Hold WITHOUT resetting streak.
+                            // So next evaluate with dwell ok should ScaleUp.
         assert_eq!(c.evaluate(&sig, &clock), ScaleDecision::ScaleUp);
         assert_eq!(c.active_cookers, 3);
     }

@@ -9,7 +9,7 @@ use residiuum_client::{
 };
 use residiuum_heap::{
     decide, mint_capability, verify_certificate, verify_holder_proof, AuthorizationDecision,
-    HeapCap, HEAP_PROFILE, OperationDescriptor, TrustedInstant,
+    HeapCap, OperationDescriptor, TrustedInstant, HEAP_PROFILE,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -164,9 +164,7 @@ pub fn authenticate_heap_auth(
         return reject(HeapAuthInternalCause::StaleAuthority);
     }
 
-    let now = TrustedInstant {
-        unix_s: now_unix_s,
-    };
+    let now = TrustedInstant { unix_s: now_unix_s };
     // Handshake itself is gated like admitting a connection: use public ping (op 1)
     // as the decide probe for certificate/slot consistency before minting.
     let probe = OperationDescriptor {
@@ -178,12 +176,7 @@ pub fn authenticate_heap_auth(
         AuthorizationDecision::Deny(_) => return reject(HeapAuthInternalCause::Denied),
     }
 
-    match verify_holder_proof(
-        &proof_bytes,
-        &verified,
-        &pending.server_nonce,
-        tls_exporter,
-    ) {
+    match verify_holder_proof(&proof_bytes, &verified, &pending.server_nonce, tls_exporter) {
         Ok(_proof) => {}
         Err(_) => {
             // Distinguishing exporter vs signature would leak; collapse publicly.

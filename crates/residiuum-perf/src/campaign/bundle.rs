@@ -208,7 +208,8 @@ fn hash_file(path: &Path) -> Result<String, CampaignError> {
 }
 
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<(), CampaignError> {
-    let s = serde_json::to_string_pretty(value).map_err(|e| CampaignError::Bundle(e.to_string()))?;
+    let s =
+        serde_json::to_string_pretty(value).map_err(|e| CampaignError::Bundle(e.to_string()))?;
     fs::write(path, s)?;
     let _ = PathBuf::from(path);
     Ok(())
@@ -285,11 +286,9 @@ mod tests {
         let disclosure = build_disclosure(&result, &reports);
         let camp = dir.path().join("campaign");
         let bundle = write_evidence_bundle(&camp, &result, &reports, &disclosure).unwrap();
-        assert!(
-            bundle
-                .file_hashes
-                .iter()
-                .all(|f| f.relative_path != "observer_overhead.json")
-        );
+        assert!(bundle
+            .file_hashes
+            .iter()
+            .all(|f| f.relative_path != "observer_overhead.json"));
     }
 }

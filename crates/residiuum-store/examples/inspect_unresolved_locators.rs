@@ -42,7 +42,10 @@ fn main() {
                 *by_err.entry(key.clone()).or_default() += 1;
                 if sample.len() < 12 {
                     let subj = String::from_utf8_lossy(subject);
-                    sample.push(format!("{key}: subject_len={} preview={subj:.80?}", subject.len()));
+                    sample.push(format!(
+                        "{key}: subject_len={} preview={subj:.80?}",
+                        subject.len()
+                    ));
                 }
             }
         }
@@ -69,7 +72,10 @@ fn main() {
     // Media inventory vs index (segment files on disk).
     let paths = residiuum_store::StorePaths::new(&path);
     let on_disk = match std::fs::read_dir(paths.segments_dir()) {
-        Ok(rd) => rd.filter_map(|e| e.ok()).filter(|e| e.path().is_file()).count(),
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_file())
+            .count(),
         Err(_) => 0,
     };
     println!("segments_dir_files={on_disk}");

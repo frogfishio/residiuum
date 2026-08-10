@@ -85,7 +85,10 @@ pub fn load_embedded() -> Result<CrashMatrix, String> {
 /// Validate structural rules for the matrix (used by CI).
 pub fn validate(matrix: &CrashMatrix) -> Result<(), String> {
     if matrix.version != 1 {
-        return Err(format!("unsupported crash matrix version {}", matrix.version));
+        return Err(format!(
+            "unsupported crash matrix version {}",
+            matrix.version
+        ));
     }
     if matrix.operations.is_empty() {
         return Err("crash matrix has no operations".into());

@@ -34,12 +34,7 @@ fn with_failpoints<R>(f: impl FnOnce() -> R) -> R {
 
 fn dual_store(root: &std::path::Path, shards: usize) -> Store {
     // Materialized dual-run baseline for RSHD0004 failpoint / flip ceremony.
-    let mut s = Store::create_with_shards_mode(
-        root,
-        shards,
-        RecoveryMode::Materialized,
-    )
-    .unwrap();
+    let mut s = Store::create_with_shards_mode(root, shards, RecoveryMode::Materialized).unwrap();
     s.set_enrichment_enabled(false);
     s.set_seal_threshold(256 * 1024);
     s.attach_shadow_dual_to_actives().unwrap();
@@ -63,9 +58,7 @@ fn r4_f0_healthy_dual_stream_recovery() {
         let mut expect = BTreeMap::new();
         for i in 0..40u64 {
             let k = format!("k{i:04}");
-            store
-                .put(&k, &payload, DurabilityMode::Buffered)
-                .unwrap();
+            store.put(&k, &payload, DurabilityMode::Buffered).unwrap();
             expect.insert(k.into_bytes(), payload.clone());
         }
         seal_pair(&mut store).unwrap();
@@ -177,9 +170,7 @@ fn seal_with_finalize_failpoint(name: &'static str) {
     let cov = load_protected_coverage(&paths, sid).unwrap();
     let lag = residiuum_store::protection_lag_from_coverage(&cov);
     assert!(
-        lag.lag > 0
-            || lag.protected_frontier < lag.sealed_frontier
-            || lag.sealed_frontier == 0,
+        lag.lag > 0 || lag.protected_frontier < lag.sealed_frontier || lag.sealed_frontier == 0,
         "{name}: frontier must not silently advance: {lag:?}"
     );
     drop(store);
@@ -258,9 +249,7 @@ fn r4_overwrite_tombstone_recovery() {
         store
             .put("k", b"v2-final", DurabilityMode::Buffered)
             .unwrap();
-        store
-            .put("t", b"doomed", DurabilityMode::Buffered)
-            .unwrap();
+        store.put("t", b"doomed", DurabilityMode::Buffered).unwrap();
         store.delete("t", DurabilityMode::Buffered).unwrap();
         seal_pair(&mut store).unwrap();
         let sid = store.store_id();
@@ -284,9 +273,7 @@ fn r4_chunked_value_recovery() {
         store.set_chunk_threshold(1024);
         store.set_chunk_size(512);
         let big = vec![0x66u8; 2500];
-        store
-            .put("chunky", &big, DurabilityMode::Buffered)
-            .unwrap();
+        store.put("chunky", &big, DurabilityMode::Buffered).unwrap();
         seal_pair(&mut store).unwrap();
         let sid = store.store_id();
         let paths = StorePaths::new(dir.path());

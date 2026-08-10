@@ -63,8 +63,8 @@ pub fn compare_traces(plan: &PhysicalWritePlan, shadow: &ShadowReport) -> Equiva
     let shape_equal = shapes.len() as u32 == plan.ops.len() as u32
         && shapes.iter().enumerate().all(|(i, s)| s.seq == i as u32);
 
-    let byte_accounting_ok = shadow.stats.bytes_requested == plan.planned_bytes
-        && shadow.requested_vs_planned_match;
+    let byte_accounting_ok =
+        shadow.stats.bytes_requested == plan.planned_bytes && shadow.requested_vs_planned_match;
 
     if !byte_accounting_ok {
         messages.push(format!(

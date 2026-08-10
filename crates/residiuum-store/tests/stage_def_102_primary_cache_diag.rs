@@ -60,9 +60,7 @@ fn absent_cache_reports_absent_and_rebuilds_logically() {
     let root = dir.path().join("s");
     {
         let mut store = Store::create(&root).unwrap();
-        store
-            .put("alpha", b"A", DurabilityMode::Durable)
-            .unwrap();
+        store.put("alpha", b"A", DurabilityMode::Durable).unwrap();
         store.persist_index_cache().unwrap();
     }
     let path = cache_path(&root);
@@ -74,7 +72,10 @@ fn absent_cache_reports_absent_and_rebuilds_logically() {
     let bare = diagnose_primary_cache(&path.join("nope"), store.store_id(), None, Some(100));
     assert_eq!(bare.validation, PrimaryCacheValidation::Absent);
     assert!(!bare.authoritative);
-    assert_eq!(store.get("alpha").unwrap().as_deref(), Some(b"A".as_slice()));
+    assert_eq!(
+        store.get("alpha").unwrap().as_deref(),
+        Some(b"A".as_slice())
+    );
 }
 
 #[test]
@@ -99,9 +100,7 @@ fn corrupt_hash_is_corrupt() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("s");
     let mut store = Store::create(&root).unwrap();
-    store
-        .put("k", b"v", DurabilityMode::Durable)
-        .unwrap();
+    store.put("k", b"v", DurabilityMode::Durable).unwrap();
     store.persist_index_cache().unwrap();
     let path = cache_path(&root);
     let mut bytes = fs::read(&path).unwrap();
@@ -123,9 +122,7 @@ fn foreign_store_id_classified() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("s");
     let mut store = Store::create(&root).unwrap();
-    store
-        .put("k", b"v", DurabilityMode::Durable)
-        .unwrap();
+    store.put("k", b"v", DurabilityMode::Durable).unwrap();
     store.persist_index_cache().unwrap();
     let path = cache_path(&root);
     let mut bytes = fs::read(&path).unwrap();
@@ -164,9 +161,7 @@ fn stale_sealed_fingerprint_classified() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("s");
     let mut store = Store::create(&root).unwrap();
-    store
-        .put("k", b"v", DurabilityMode::Durable)
-        .unwrap();
+    store.put("k", b"v", DurabilityMode::Durable).unwrap();
     store.persist_index_cache().unwrap();
     let path = cache_path(&root);
     let wrong_fp = [0xabu8; 32];
@@ -193,16 +188,17 @@ fn stale_sealed_fingerprint_classified() {
     // Stronger path: seal then leave old cache — open rebuilds, but free diagnose
     // with old expected vs current.
     store.seal_active().unwrap();
-    store
-        .put("k2", b"v2", DurabilityMode::Durable)
-        .unwrap();
+    store.put("k2", b"v2", DurabilityMode::Durable).unwrap();
     store.persist_index_cache().unwrap();
     // Overwrite with a garbage sealed fp expectation that won't match.
     let diag2 = diagnose_primary_cache(
         &path,
         store.store_id(),
         Some([0x11; 32]),
-        store.primary_cache_diag().ok().and_then(|d| d.active_actual_len),
+        store
+            .primary_cache_diag()
+            .ok()
+            .and_then(|d| d.active_actual_len),
     );
     assert_ne!(
         diag2.validation,
@@ -219,9 +215,7 @@ fn ahead_frontier_classified_corrupt() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("s");
     let mut store = Store::create(&root).unwrap();
-    store
-        .put("k", b"v", DurabilityMode::Durable)
-        .unwrap();
+    store.put("k", b"v", DurabilityMode::Durable).unwrap();
     store.persist_index_cache().unwrap();
     let path = cache_path(&root);
     // Claim active file is shorter than covered → ahead frontier.
@@ -249,9 +243,7 @@ fn delete_derived_logically_neutral() {
                 .unwrap();
         }
         store.seal_active().unwrap();
-        store
-            .put("tail", b"T", DurabilityMode::Durable)
-            .unwrap();
+        store.put("tail", b"T", DurabilityMode::Durable).unwrap();
         store.persist_index_cache().unwrap();
         store
             .live_logical_entries()
@@ -294,13 +286,9 @@ fn lifecycle_diag_reports_shards_and_seals() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("s");
     let mut store = Store::create(&root).unwrap();
-    store
-        .put("a", b"1", DurabilityMode::Durable)
-        .unwrap();
+    store.put("a", b"1", DurabilityMode::Durable).unwrap();
     store.seal_active().unwrap();
-    store
-        .put("b", b"2", DurabilityMode::Durable)
-        .unwrap();
+    store.put("b", b"2", DurabilityMode::Durable).unwrap();
 
     let life = store.lifecycle_diag().unwrap();
     assert_eq!(life.active_shards, 1);
@@ -314,9 +302,7 @@ fn diag_matches_measured_file_bytes() {
     let dir = tempdir().unwrap();
     let root = dir.path().join("s");
     let mut store = Store::create(&root).unwrap();
-    store
-        .put("m", b"measure", DurabilityMode::Durable)
-        .unwrap();
+    store.put("m", b"measure", DurabilityMode::Durable).unwrap();
     store.persist_index_cache().unwrap();
     let path = cache_path(&root);
     let measured = fs::metadata(&path).unwrap().len();

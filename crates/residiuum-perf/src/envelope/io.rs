@@ -189,8 +189,7 @@ impl FakeIoAdapter {
         lat = lat.saturating_add(self.cfg.qd_latency_ns.saturating_mul(qd.saturating_sub(1)));
         if self.cfg.bandwidth_bytes_per_sec > 0 && bytes > 0 {
             // ns = bytes * 1e9 / bw
-            let xfer = (bytes as u128)
-                .saturating_mul(1_000_000_000)
+            let xfer = (bytes as u128).saturating_mul(1_000_000_000)
                 / u128::from(self.cfg.bandwidth_bytes_per_sec);
             lat = lat.saturating_add(xfer as u64);
         }
@@ -232,7 +231,9 @@ impl IoAdapter for FakeIoAdapter {
         mode: IoMode,
     ) -> Result<IoResult, IoError> {
         if matches!(mode, IoMode::Direct) && !self.cfg.supports_direct {
-            return Err(IoError::Unsupported("direct I/O not supported on fake".into()));
+            return Err(IoError::Unsupported(
+                "direct I/O not supported on fake".into(),
+            ));
         }
         if offset.is_some() && !self.cfg.supports_positioned {
             return Err(IoError::Unsupported("positioned write unsupported".into()));
@@ -265,10 +266,7 @@ impl IoAdapter for FakeIoAdapter {
         }
 
         let buf = vec![0xABu8; complete];
-        let file = self
-            .files
-            .entry(file_id.to_string())
-            .or_default();
+        let file = self.files.entry(file_id.to_string()).or_default();
         match offset {
             None => file.extend_from_slice(&buf),
             Some(off) => {
@@ -520,12 +518,8 @@ mod tests {
             ..FakeIoConfig::default()
         });
         a.create_file("f").unwrap();
-        let small = a
-            .write_block("f", None, 1000, IoMode::Buffered)
-            .unwrap();
-        let large = a
-            .write_block("f", None, 100_000, IoMode::Buffered)
-            .unwrap();
+        let small = a.write_block("f", None, 1000, IoMode::Buffered).unwrap();
+        let large = a.write_block("f", None, 100_000, IoMode::Buffered).unwrap();
         assert!(large.latency_ns > small.latency_ns);
     }
 

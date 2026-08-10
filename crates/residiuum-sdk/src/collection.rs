@@ -1,11 +1,11 @@
 //! Named collection handle (DX_SPEC §5.2, §6, §7, §8, §10).
 
-use crate::residiuum::Backend;
 use crate::error::Error;
 use crate::filter::{compare_field, Filter, QueryBuilder, QueryOptions};
 use crate::history::KeyHistory;
 use crate::indexes::{mark_indexes_stale, try_index_lookup, IndexInfo, Indexes};
 use crate::receipt::{DeleteReceipt, PutOptions, WriteReceipt};
+use crate::residiuum::Backend;
 use crate::resource::{
     check_json_depth, check_payload_len, check_result_bytes, estimate_row_bytes, host_limits,
 };
@@ -60,13 +60,9 @@ impl<'a> Collection<'a> {
     fn local_store(&mut self) -> Result<&Store, Error> {
         match self.backend {
             Backend::Local(s) => Ok(s),
-            Backend::Remote(_) => {
-                Err(Error::RemoteUnsupported("local store access"))
-            }
+            Backend::Remote(_) => Err(Error::RemoteUnsupported("local store access")),
             #[cfg(feature = "cluster")]
-            Backend::Cluster(_) => {
-                Err(Error::RemoteUnsupported("local store access"))
-            }
+            Backend::Cluster(_) => Err(Error::RemoteUnsupported("local store access")),
         }
     }
 
@@ -389,9 +385,9 @@ impl<'a> Collection<'a> {
         let prefix = collection_prefix(&self.name)?;
         let name = self.name.clone();
         // Validate embedded-only before constructing the iterator.
-        let _ = self.local_store().map_err(|_| {
-            Error::RemoteUnsupported("scan_json_iter (embedded only)")
-        })?;
+        let _ = self
+            .local_store()
+            .map_err(|_| Error::RemoteUnsupported("scan_json_iter (embedded only)"))?;
         let store = match self.backend {
             Backend::Local(s) => &*s,
             Backend::Remote(_) => unreachable!("checked above"),
@@ -554,14 +550,11 @@ impl<'a> Collection<'a> {
         let predicate = compiled.filter.to_predicate()?;
         let store_id = self.durable_store_id_bytes()?;
         // Shape durable store_id into HeapId/CollectionId UUID constraints (v4/RFC).
-        let heap_id = HeapId::from_bytes(uuid_v4_shape(store_id)).map_err(|e| {
-            Error::QueryInvalid(format!("dialect heap id from store_id: {e}"))
-        })?;
-        let collection_id = CollectionId::from_bytes(dialect_collection_id_bytes(
-            store_id,
-            &self.name,
-        ))
-        .map_err(|e| Error::QueryInvalid(format!("dialect collection id: {e}")))?;
+        let heap_id = HeapId::from_bytes(uuid_v4_shape(store_id))
+            .map_err(|e| Error::QueryInvalid(format!("dialect heap id from store_id: {e}")))?;
+        let collection_id =
+            CollectionId::from_bytes(dialect_collection_id_bytes(store_id, &self.name))
+                .map_err(|e| Error::QueryInvalid(format!("dialect collection id: {e}")))?;
 
         let mut bindings = CollectionBindings::default();
         bindings.bind(&self.name, collection_id);
@@ -589,8 +582,7 @@ impl<'a> Collection<'a> {
             page_size = Some((n as u32).clamp(1, MAX_PAGE_SIZE));
         }
         let plan = builder.compile(&bindings)?;
-        let bytecode =
-            QueryBytecodeV1::from_core_plan_force_scan(plan, None, options.force_scan)?;
+        let bytecode = QueryBytecodeV1::from_core_plan_force_scan(plan, None, options.force_scan)?;
 
         let mut run_options = QueryRunOptions::default();
         run_options.page_size = page_size;
@@ -666,7 +658,10 @@ impl<'a> Collection<'a> {
 
                 self.check_id(collection_id)?;
                 match self.collection.get(key) {
-                    Ok(Some(value)) => Ok(HostDocument::Present(value)),
+                    Ok(Some(value)) => Ok(HostDocument::Present {
+                        value: value.into(),
+                        logical_bytes: None,
+                    }),
                     Ok(None) => Ok(HostDocument::Absent),
                     Err(error)
                         if matches!(
@@ -748,11 +743,7 @@ impl<'a> Collection<'a> {
     }
 
     /// Like [`Self::sda`] with scan options (limit / budget / force_scan / …).
-    pub fn sda_with(
-        &mut self,
-        program: &str,
-        options: QueryOptions,
-    ) -> Result<JsonValue, Error> {
+    pub fn sda_with(&mut self, program: &str, options: QueryOptions) -> Result<JsonValue, Error> {
         let rows = self.find_with(&Filter::Always, options)?;
         let docs: Vec<JsonValue> = rows.into_iter().map(|(_, v)| v).collect();
         eval_sda_program(program, JsonValue::Array(docs))
@@ -781,9 +772,7 @@ impl<'a> Collection<'a> {
         options: QueryOptions,
     ) -> Result<Vec<(String, JsonValue)>, Error> {
         let prog = sda_core::Program::parse(predicate).map_err(|e| {
-            Error::QueryInvalid(format!(
-                "filter_sda parse failed: {e}; src={predicate}"
-            ))
+            Error::QueryInvalid(format!("filter_sda parse failed: {e}; src={predicate}"))
         })?;
         let candidates = self.find_with(&Filter::Always, options)?;
         let mut out = Vec::new();
@@ -860,7 +849,10 @@ pub fn find_on_store(
     // DEF-012: offline tiers make ordinary complete find results dishonest.
     let tier_cov = store.tier_coverage();
     if tier_cov.is_incomplete() && !options.allow_partial_coverage {
-        return Err(Error::CoverageIncomplete("find refused: tier coverage incomplete (offline tiers / unavailable segments)".to_string()));
+        return Err(Error::CoverageIncomplete(
+            "find refused: tier coverage incomplete (offline tiers / unavailable segments)"
+                .to_string(),
+        ));
     }
 
     // Try index acceleration when not force-scanning.
@@ -913,10 +905,7 @@ pub fn find_on_store(
             }
             let row_bytes = estimate_row_bytes(&key, &value);
             result_bytes = result_bytes.saturating_add(row_bytes);
-            let budget_cap = options
-                .budget
-                .as_ref()
-                .and_then(|b| b.max_result_bytes);
+            let budget_cap = options.budget.as_ref().and_then(|b| b.max_result_bytes);
             check_result_bytes(result_bytes, budget_cap, &limits)?;
             out.push((key, value));
         }
@@ -994,10 +983,7 @@ fn collect_from_subjects(
         }
         let row_bytes = estimate_row_bytes(key, &value);
         result_bytes = result_bytes.saturating_add(row_bytes);
-        let budget_cap = options
-            .budget
-            .as_ref()
-            .and_then(|b| b.max_result_bytes);
+        let budget_cap = options.budget.as_ref().and_then(|b| b.max_result_bytes);
         check_result_bytes(result_bytes, budget_cap, &limits)?;
         out.push((key.to_string(), value));
     }
@@ -1015,9 +1001,7 @@ fn budget_stop(
     let Some(budget) = &options.budget else {
         return Ok(None);
     };
-    let docs_hit = budget
-        .max_docs_scanned
-        .is_some_and(|max| scanned > max);
+    let docs_hit = budget.max_docs_scanned.is_some_and(|max| scanned > max);
     let bytes_hit = budget
         .max_bytes_scanned
         .is_some_and(|max| bytes_scanned > max);
@@ -1307,7 +1291,9 @@ fn scan_json_partial_page_on_store(
         match decode_subject(&item.subject) {
             Some((coll, key)) if coll == collection => {
                 let (completeness, detail) = match item.reason {
-                    IncompleteReason::PayloadPartial => ("partial", "payload only partially available"),
+                    IncompleteReason::PayloadPartial => {
+                        ("partial", "payload only partially available")
+                    }
                     IncompleteReason::PayloadUnavailable => {
                         ("unavailable", "payload chunks unavailable")
                     }
@@ -1324,9 +1310,7 @@ fn scan_json_partial_page_on_store(
                     IncompleteReason::LocatorSegmentIdMismatch => {
                         ("locator_segment_id_mismatch", "locator segment id mismatch")
                     }
-                    IncompleteReason::SegmentNotFound => {
-                        ("segment_not_found", "segment not found")
-                    }
+                    IncompleteReason::SegmentNotFound => ("segment_not_found", "segment not found"),
                 };
                 incomplete.push(IncompleteDocument {
                     key: key.to_string(),
@@ -1379,10 +1363,7 @@ fn finish_query(
         .iter()
         .map(|(k, v)| estimate_row_bytes(k, v))
         .fold(0u64, u64::saturating_add);
-    let budget_cap = options
-        .budget
-        .as_ref()
-        .and_then(|b| b.max_result_bytes);
+    let budget_cap = options.budget.as_ref().and_then(|b| b.max_result_bytes);
     check_result_bytes(result_bytes, budget_cap, &limits)?;
 
     if let Some((ref field, order)) = options.order_by {

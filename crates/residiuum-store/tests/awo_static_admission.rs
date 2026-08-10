@@ -7,9 +7,7 @@
 use residiuum_store::adaptive_write::{
     classify_put, AdaptiveWriteMode, AdaptiveWritePolicy, AdmissionResult, EligibilityClass,
 };
-use residiuum_store::{
-    BoundaryKind, DurabilityMode, Store, StoreError, StoreHost, WriteCondition,
-};
+use residiuum_store::{BoundaryKind, DurabilityMode, Store, StoreError, StoreHost, WriteCondition};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
@@ -168,10 +166,7 @@ fn independent_puts_collect_amortize_file_sync() {
         file_sync > 0 && file_sync < total,
         "expected file_sync < ops: sync={file_sync} ops={total}"
     );
-    assert!(
-        appends >= total,
-        "append_count {appends} < ops {total}"
-    );
+    assert!(appends >= total, "append_count {appends} < ops {total}");
 
     host.drain_writes(Instant::now() + Duration::from_secs(2))
         .unwrap();
@@ -246,7 +241,11 @@ fn admit_put_batch_under_lease_persist_before_publish() {
     let receipts = handle
         .admit_put_batch(
             &mut guard,
-            &[("awo/batch/a", b"1"), ("awo/batch/b", b"2"), ("awo/batch/c", b"3")],
+            &[
+                ("awo/batch/a", b"1"),
+                ("awo/batch/b", b"2"),
+                ("awo/batch/c", b"3"),
+            ],
             DurabilityMode::Buffered,
         )
         .expect("batch admit");
@@ -307,8 +306,7 @@ fn heap_store_facade_concurrent_put_collection_wait_outside_mutex() {
     let coll = *residiuum_heap::CollectionId::new_random()
         .unwrap()
         .as_bytes();
-    let staged =
-        stage_heap_genesis(&layout, dep, heap_id, [1u8; 16], "q12-facade-heap").unwrap();
+    let staged = stage_heap_genesis(&layout, dep, heap_id, [1u8; 16], "q12-facade-heap").unwrap();
     publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
     create_object(
         &layout,
@@ -351,7 +349,14 @@ fn heap_store_facade_concurrent_put_collection_wait_outside_mutex() {
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    let cap = mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap();
+    let cap = mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap();
     let heap = Arc::new(host.open_heap(cap));
 
     {

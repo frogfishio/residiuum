@@ -35,11 +35,7 @@ const PRE_PUBLISH_CELLS: &[&str] = &[
 const POST_PUBLISH_CELLS: &[&str] = &["awo.publish.after", "awo.complete.before"];
 
 /// Names reserved in the closed set but not yet live on put_many.
-const DEFERRED_CELLS: &[&str] = &[
-    "awo.reserve.after",
-    "awo.cook.before",
-    "awo.cook.after",
-];
+const DEFERRED_CELLS: &[&str] = &["awo.reserve.after", "awo.cook.before", "awo.cook.after"];
 
 #[test]
 fn closed_failpoint_inventory_partition() {
@@ -175,13 +171,17 @@ fn multiprocess_abort_awo_persist_before() {
     let path = dir.path().join("s");
     {
         let mut s = Store::create(&path).unwrap();
-        s.put("prior", b"prior-v1", DurabilityMode::Durable).unwrap();
+        s.put("prior", b"prior-v1", DurabilityMode::Durable)
+            .unwrap();
     }
 
     let bin = crash_child_bin();
     if !bin.is_file() {
         // Profile without crash-child binary: skip honestly (not a silent pass).
-        eprintln!("skip multiprocess: crash-child missing at {}", bin.display());
+        eprintln!(
+            "skip multiprocess: crash-child missing at {}",
+            bin.display()
+        );
         return;
     }
     let status = Command::new(&bin)

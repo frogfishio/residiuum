@@ -29,9 +29,9 @@ use residiuum_heap::{
     SecurityRevision, TrustedInstant, VerifiedCertificate,
 };
 use residiuum_sdk::{
-    compile_app_core, execute_bytecode, validate_qvm, AppQueryBudget, CancelToken, CollectionBindings,
-    ConsistencyMode, CoveragePolicy, Error, ErrorCode, HostCapabilities, Parameters, PlanBuilder,
-    QueryBytecodeV1, QueryPage, QueryRunOptions, ResidiuumDeployment,
+    compile_app_core, execute_bytecode, validate_qvm, AppQueryBudget, CancelToken,
+    CollectionBindings, ConsistencyMode, CoveragePolicy, Error, ErrorCode, HostCapabilities,
+    Parameters, PlanBuilder, QueryBytecodeV1, QueryPage, QueryRunOptions, ResidiuumDeployment,
 };
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
 use serde_json::{json, Map, Value};
@@ -100,10 +100,22 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
-fn open_heap_client() -> (tempfile::TempDir, residiuum_sdk::HeapClient, HeapId, DeploymentId) {
+fn open_heap_client() -> (
+    tempfile::TempDir,
+    residiuum_sdk::HeapClient,
+    HeapId,
+    DeploymentId,
+) {
     let dir = tempdir().unwrap();
     let root = dir.path();
     let deployment = ResidiuumDeployment::create(root).unwrap();
@@ -114,7 +126,8 @@ fn open_heap_client() -> (tempfile::TempDir, residiuum_sdk::HeapClient, HeapId, 
     publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
     let heap_id = HeapId::from_bytes_unchecked_nonzero(heap_bytes).unwrap();
     let dep_id = DeploymentId::from_bytes_unchecked_nonzero(dep).unwrap();
-    let client = residiuum_sdk::HeapClient::from(deployment.open_heap(mint_cap_for(heap_id, dep_id)));
+    let client =
+        residiuum_sdk::HeapClient::from(deployment.open_heap(mint_cap_for(heap_id, dep_id)));
     // Keep dir alive; drop deployment via client ownership of open heap.
     // Re-open path needs same root — return dir + client only for simple tests.
     let _ = deployment; // open_heap holds path via store
@@ -277,7 +290,14 @@ fn run_bc(
     params: &BTreeMap<String, Value>,
 ) -> Result<QueryPage, Error> {
     let bc = QueryBytecodeV1::from_core_plan_force_scan(plan.clone(), opts.budget, force_scan)?;
-    execute_bytecode(host, &bc, params, opts, heap_id_fake(), plan.from.collection_id)
+    execute_bytecode(
+        host,
+        &bc,
+        params,
+        opts,
+        heap_id_fake(),
+        plan.from.collection_id,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -307,8 +327,14 @@ fn q33_sparse_heterogeneous_oracle_equals_force_scan_and_index() {
         ("a".into(), json!({"status": "paid", "amount": 10})),
         ("b".into(), json!({"status": "paid"})), // sparse: no amount
         ("c".into(), json!({"amount": 99})),     // missing status
-        ("d".into(), json!({"status": "open", "extra": {"nested": true}, "tags": []})),
-        ("e".into(), json!({"status": "paid", "amount": "not-a-number"})), // wrong type amount
+        (
+            "d".into(),
+            json!({"status": "open", "extra": {"nested": true}, "tags": []}),
+        ),
+        (
+            "e".into(),
+            json!({"status": "paid", "amount": "not-a-number"}),
+        ), // wrong type amount
         ("f".into(), json!({"status": null, "amount": 1})),
     ]);
     let source = r#"from orders where status = "paid""#;
@@ -340,7 +366,10 @@ fn q33_missing_not_null_and_wrong_type_range() {
     let docs = BTreeMap::from([
         ("live".into(), json!({"status": "open"})), // deleted_at absent
         ("tomb".into(), json!({"status": "open", "deleted_at": null})),
-        ("gone".into(), json!({"status": "open", "deleted_at": "2020-01-01"})),
+        (
+            "gone".into(),
+            json!({"status": "open", "deleted_at": "2020-01-01"}),
+        ),
         ("amt_ok".into(), json!({"amount": 150})),
         ("amt_str".into(), json!({"amount": "150"})),
         ("amt_miss".into(), json!({})),
@@ -396,7 +425,10 @@ fn q33_missing_not_null_and_wrong_type_range() {
     .expect("range");
     let keys: BTreeSet<_> = page_keys(&page).into_iter().collect();
     assert!(keys.contains("amt_ok"));
-    assert!(!keys.contains("amt_str"), "string amount not in numeric range");
+    assert!(
+        !keys.contains("amt_str"),
+        "string amount not in numeric range"
+    );
     assert!(!keys.contains("amt_miss"));
 }
 
@@ -458,7 +490,10 @@ fn q33_order_ties_break_on_immutable_key() {
         .expect("order");
     let keys = page_keys(&page);
     // score 1: a then b; then c with score 2
-    assert_eq!(keys, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    assert_eq!(
+        keys,
+        vec!["a".to_string(), "b".to_string(), "c".to_string()]
+    );
 }
 
 #[test]
@@ -502,10 +537,7 @@ fn q33_stale_partial_index_must_not_false_absence_when_force_scan() {
         bk, sk,
         "partial index must not silently equal full truth — matrix detects under-return"
     );
-    assert!(
-        !bk.contains(&"k2".to_string()),
-        "partial host omitted k2"
-    );
+    assert!(!bk.contains(&"k2".to_string()), "partial host omitted k2");
 }
 
 #[test]
@@ -573,7 +605,10 @@ fn q33_mutated_continuation_token_fails_closed() {
             || err.to_string().to_ascii_lowercase().contains("cursor")
             || err.to_string().to_ascii_lowercase().contains("token")
             || err.to_string().to_ascii_lowercase().contains("mac")
-            || err.to_string().to_ascii_lowercase().contains("continuation"),
+            || err
+                .to_string()
+                .to_ascii_lowercase()
+                .contains("continuation"),
         "expected fail-closed on mutated token, got {err:?} code={code:?}"
     );
 }
@@ -586,7 +621,8 @@ fn q33_reopen_preserves_results() {
     let layout = HeapMetaLayout::new(root);
     let dep = *DeploymentId::new_random().unwrap().as_bytes();
     let heap_bytes = *HeapId::new_random().unwrap().as_bytes();
-    let staged = stage_heap_genesis(&layout, dep, heap_bytes, uuidish(11), "heap-q33-reopen").unwrap();
+    let staged =
+        stage_heap_genesis(&layout, dep, heap_bytes, uuidish(11), "heap-q33-reopen").unwrap();
     publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
     let heap_id = HeapId::from_bytes_unchecked_nonzero(heap_bytes).unwrap();
     let dep_id = DeploymentId::from_bytes_unchecked_nonzero(dep).unwrap();
@@ -741,7 +777,10 @@ fn q33_continuation_token_replay_and_cross_query_misuse() {
         .rql("from docs", &Parameters::default(), opts.clone())
         .expect("page1");
     let cont = p1.next.expect("continuation after page1");
-    assert!(!cont.token.is_empty(), "continuation token must be non-empty");
+    assert!(
+        !cont.token.is_empty(),
+        "continuation token must be non-empty"
+    );
 
     // First resume with valid token.
     let mut opts_r1 = opts.clone();
@@ -749,10 +788,7 @@ fn q33_continuation_token_replay_and_cross_query_misuse() {
     let p2a = col
         .rql("from docs", &Parameters::default(), opts_r1)
         .expect("first resume with valid token");
-    assert!(
-        !p2a.rows.is_empty(),
-        "first resume must return page2 rows"
-    );
+    assert!(!p2a.rows.is_empty(), "first resume must return page2 rows");
     let keys_a = page_keys(&p2a);
 
     // Second resume with the *same* token (replay).
@@ -781,7 +817,10 @@ fn q33_continuation_token_replay_and_cross_query_misuse() {
                         | ErrorCode::Internal
                 ) || err.to_string().to_ascii_lowercase().contains("cursor")
                     || err.to_string().to_ascii_lowercase().contains("token")
-                    || err.to_string().to_ascii_lowercase().contains("continuation"),
+                    || err
+                        .to_string()
+                        .to_ascii_lowercase()
+                        .contains("continuation"),
                 "token replay must fail closed if not idempotent; got {err:?} code={code:?}"
             );
         }
@@ -791,11 +830,7 @@ fn q33_continuation_token_replay_and_cross_query_misuse() {
     let mut opts_x = opts.clone();
     opts_x.after = Some(cont);
     let err = col
-        .rql(
-            r#"from docs where g = "a""#,
-            &Parameters::default(),
-            opts_x,
-        )
+        .rql(r#"from docs where g = "a""#, &Parameters::default(), opts_x)
         .expect_err("cross-query continuation reuse must fail closed");
     let code = err.code();
     let msg = err.to_string().to_ascii_lowercase();
@@ -820,10 +855,7 @@ fn q33_continuation_token_replay_and_cross_query_misuse() {
 fn q33_holey_complete_fails_closed_no_false_absence() {
     let cid = coll_id(6);
     let mut host = AdvHost::from_docs(
-        BTreeMap::from([
-            ("a".into(), json!({"n": 1})),
-            ("c".into(), json!({"n": 3})),
-        ]),
+        BTreeMap::from([("a".into(), json!({"n": 1})), ("c".into(), json!({"n": 3}))]),
         false,
     );
     host.hole_keys.insert("b".into()); // listed but missing body
@@ -850,10 +882,7 @@ fn q33_holey_complete_fails_closed_no_false_absence() {
 fn q33_holey_incomplete_reports_holes_no_false_complete() {
     let cid = coll_id(7);
     let mut host = AdvHost::from_docs(
-        BTreeMap::from([
-            ("a".into(), json!({"n": 1})),
-            ("c".into(), json!({"n": 3})),
-        ]),
+        BTreeMap::from([("a".into(), json!({"n": 1})), ("c".into(), json!({"n": 3}))]),
         false,
     );
     host.hole_keys.insert("b".into());
@@ -1056,7 +1085,8 @@ fn q33_enrich_exactly_one_violation_fails_closed() {
     drop(customers);
 
     // Full RQL enrich — expect fail closed when exactly_one has zero matches.
-    let src = "from orders enrich customer using customers matching customer_id = id expect exactly_one";
+    let src =
+        "from orders enrich customer using customers matching customer_id = id expect exactly_one";
     let res = residiuum_sdk::execute_rql_full(
         &mut client,
         src,

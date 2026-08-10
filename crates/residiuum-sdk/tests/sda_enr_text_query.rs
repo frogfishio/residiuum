@@ -7,7 +7,7 @@
 //! 2. [`Collection::filter_sda`] — per-doc boolean predicate as text
 //! 3. [`Residiuum::sda_query`] / [`Residiuum::sda`] — multi-collection ENR1 attach as text
 
-use residiuum_sdk::{json, Residiuum, Filter, QueryOptions};
+use residiuum_sdk::{json, Filter, QueryOptions, Residiuum};
 use tempfile::tempdir;
 
 #[test]
@@ -36,10 +36,7 @@ fn collection_sda_filters_active_users() {
     let out = users.sda(program).expect("collection.sda");
     let arr = out.as_array().expect("seq of active users");
     assert_eq!(arr.len(), 2);
-    let names: Vec<&str> = arr
-        .iter()
-        .filter_map(|u| u["name"].as_str())
-        .collect();
+    let names: Vec<&str> = arr.iter().filter_map(|u| u["name"].as_str()).collect();
     assert!(names.contains(&"Ada"));
     assert!(names.contains(&"Cy"));
     assert!(!names.contains(&"Bob"));
@@ -51,8 +48,12 @@ fn collection_filter_sda_keeps_keys() {
     let mut db = Residiuum::open(dir.path().join("filter-sda.residiuum")).unwrap();
     {
         let mut users = db.collection("users").unwrap();
-        users.put("a", &json!({"status": "active", "n": 1})).unwrap();
-        users.put("b", &json!({"status": "paused", "n": 2})).unwrap();
+        users
+            .put("a", &json!({"status": "active", "n": 1}))
+            .unwrap();
+        users
+            .put("b", &json!({"status": "paused", "n": 2}))
+            .unwrap();
     }
 
     let mut users = db.collection("users").unwrap();
@@ -186,10 +187,7 @@ fn enr1_missing_match_surfaces_as_fail() {
     {
         let mut orders = db.collection("orders").unwrap();
         orders
-            .put(
-                "o1",
-                &json!({"id": "o1", "customer_id": "missing"}),
-            )
+            .put("o1", &json!({"id": "o1", "customer_id": "missing"}))
             .unwrap();
     }
     {

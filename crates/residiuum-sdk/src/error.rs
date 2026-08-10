@@ -375,7 +375,6 @@ fn remote_code(code: &str) -> ErrorCode {
     }
 }
 
-
 impl From<residiuum_client::Error> for Error {
     fn from(e: residiuum_client::Error) -> Self {
         match e {

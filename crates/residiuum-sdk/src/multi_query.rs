@@ -37,9 +37,9 @@
 //! budgets. Nested SDA over full cartesian products is intentionally avoided —
 //! the host join does the X=Y work; SDA only shapes the result.
 
-use crate::residiuum::Residiuum;
 use crate::error::Error;
 use crate::filter::{resolve_path_value, Filter, QueryBudget, QueryOptions};
+use crate::residiuum::Residiuum;
 use crate::subject::validate_collection_name;
 use serde_json::{json, Map, Value as JsonValue};
 use std::collections::HashMap;
@@ -89,7 +89,9 @@ pub struct JoinBuilder<'a> {
 
 impl<'a> MultiQuery<'a> {
     pub(crate) fn new(residiuum: &'a mut Residiuum) -> Self {
-        Self { residiuum, sources: Vec::new(),
+        Self {
+            residiuum,
+            sources: Vec::new(),
             joins: Vec::new(),
             limit: None,
             include_keys: false,
@@ -300,7 +302,9 @@ impl<'a> MultiQuery<'a> {
         for src in &self.sources {
             validate_collection_name(&src.collection)?;
             if src.alias.is_empty() {
-                return Err(Error::QueryInvalid("join source alias must be non-empty".into()));
+                return Err(Error::QueryInvalid(
+                    "join source alias must be non-empty".into(),
+                ));
             }
         }
         // Unique aliases.
@@ -317,9 +321,12 @@ impl<'a> MultiQuery<'a> {
         }
 
         // Materialise each source: alias → rows of (store_key, doc).
-        let mut loaded: Vec<(String, Vec<(String, JsonValue)>)> = Vec::with_capacity(self.sources.len());
+        let mut loaded: Vec<(String, Vec<(String, JsonValue)>)> =
+            Vec::with_capacity(self.sources.len());
         // We need sequential mutable access to residiuum.collection — load one at a time.
-        let MultiQuery { residiuum, sources,
+        let MultiQuery {
+            residiuum,
+            sources,
             joins,
             limit,
             include_keys,
@@ -337,10 +344,7 @@ impl<'a> MultiQuery<'a> {
             .iter()
             .map(|(key, doc)| {
                 let mut map = Map::new();
-                map.insert(
-                    first_alias.clone(),
-                    namespaced_doc(doc, key, include_keys),
-                );
+                map.insert(first_alias.clone(), namespaced_doc(doc, key, include_keys));
                 map
             })
             .collect();
@@ -466,7 +470,11 @@ impl<'a> JoinBuilder<'a> {
     ///
     /// Left side defaults to the **first** source (the `FROM` table), matching
     /// the usual FK pattern (`orders.customer_id = customers.id`).
-    pub fn on(self, left_field: impl Into<String>, right_field: impl Into<String>) -> MultiQuery<'a> {
+    pub fn on(
+        self,
+        left_field: impl Into<String>,
+        right_field: impl Into<String>,
+    ) -> MultiQuery<'a> {
         let left_alias = self
             .query
             .sources

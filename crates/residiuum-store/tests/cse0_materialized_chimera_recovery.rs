@@ -91,7 +91,9 @@ fn seed_materialized_fixture() -> Fixture {
         .map(|k| {
             (
                 (*k).to_string(),
-                *last.get(*k).unwrap_or_else(|| panic!("missing frame for {k}")),
+                *last
+                    .get(*k)
+                    .unwrap_or_else(|| panic!("missing frame for {k}")),
             )
         })
         .collect();
@@ -150,8 +152,8 @@ fn xor_frame_body(path: &Path, frame_offset: u64, xor: u8) {
     let mut bytes = fs::read(path).unwrap();
     let off = frame_offset as usize;
     assert!(off < bytes.len(), "frame_offset out of range");
-    let ( _h, _e, body, _hash, _flen) =
-        verify_frame_at(&bytes[off..], SafetyLimits::default()).expect("frame must verify before damage");
+    let (_h, _e, body, _hash, _flen) = verify_frame_at(&bytes[off..], SafetyLimits::default())
+        .expect("frame must verify before damage");
     let body_rel = body.as_ptr() as usize - bytes[off..].as_ptr() as usize;
     let start = off + body_rel;
     let end = (start + body.len().min(64)).max(start + 1);
@@ -308,8 +310,15 @@ fn cse0_materialized_recovery_baseline_matrix() {
     assert_eq!(f0.auth, bset(&["t", "m", "l"]));
     assert_eq!(f0.chimera, bset(&["t", "m", "l"]));
 
-    let f1 = rows.iter().find(|r| r.failure == "F1_wipe_chimera").unwrap();
-    assert_eq!(f1.auth, bset(&["t", "m", "l"]), "auth must not depend on Chimera");
+    let f1 = rows
+        .iter()
+        .find(|r| r.failure == "F1_wipe_chimera")
+        .unwrap();
+    assert_eq!(
+        f1.auth,
+        bset(&["t", "m", "l"]),
+        "auth must not depend on Chimera"
+    );
     assert!(f1.chimera.is_empty(), "no Chimera → chimera channel empty");
 
     let f2 = rows

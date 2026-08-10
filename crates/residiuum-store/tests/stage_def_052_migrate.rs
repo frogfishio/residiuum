@@ -45,9 +45,7 @@ fn full_migration_roundtrip_preserves_source() {
     store.delete("users/a", DurabilityMode::Durable).unwrap();
     let sid = store.store_id();
 
-    let report = store
-        .migrate_to(&dst, MigrateOptions::default())
-        .unwrap();
+    let report = store.migrate_to(&dst, MigrateOptions::default()).unwrap();
     assert_eq!(report.phase, MigratePhase::Done);
     assert!(report.files_applied >= 2);
     assert_eq!(report.verified_live_subjects, Some(1));
@@ -105,7 +103,12 @@ fn preflight_and_plan_only() {
         )
         .unwrap();
     assert_eq!(report.phase, MigratePhase::Plan);
-    assert!(!dst.exists() || fs::read_dir(&dst).map(|mut d| d.next().is_none()).unwrap_or(true));
+    assert!(
+        !dst.exists()
+            || fs::read_dir(&dst)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true)
+    );
 }
 
 #[test]
@@ -146,7 +149,10 @@ fn phased_apply_verify_and_rollback() {
     let report = migrate_store(&src, &dst, sid, MigrateOptions::default()).unwrap();
     assert_eq!(report.phase, MigratePhase::Done);
     let opened = Store::open(&dst).unwrap();
-    assert_eq!(opened.get("k").unwrap().as_deref(), Some(b"hello".as_slice()));
+    assert_eq!(
+        opened.get("k").unwrap().as_deref(),
+        Some(b"hello".as_slice())
+    );
 }
 
 #[test]

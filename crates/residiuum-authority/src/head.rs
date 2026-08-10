@@ -1,9 +1,7 @@
 //! Authority head payload (`HEAP_SPEC` §35.1).
 
 use crate::error::AuthorityStoreError;
-use residiuum_format::{
-    decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue,
-};
+use residiuum_format::{decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue};
 use residiuum_heap::{BlacklistEntry, BlacklistKind, HeapAdministrativeState, Rights};
 
 /// Recovery profile wire value.
@@ -168,7 +166,10 @@ impl AuthorityHead {
             (14, grace),
             (15, blacklist),
             (16, CborValue::Uint(self.trusted_time_floor)),
-            (17, CborValue::Bytes(self.authority_chain_head_hash.to_vec())),
+            (
+                17,
+                CborValue::Bytes(self.authority_chain_head_hash.to_vec()),
+            ),
             (18, CborValue::Uint(self.recovery_profile as u64)),
             (19, CborValue::Array(vec![])),
             (20, CborValue::Uint(0)),
@@ -314,8 +315,7 @@ impl AuthorityHead {
 
     fn validate_shape(&self) -> Result<(), AuthorityStoreError> {
         let prev_present = self.previous_generation.is_some();
-        if prev_present
-            != self.previous_public_key.is_some()
+        if prev_present != self.previous_public_key.is_some()
             || prev_present != self.grace_deadline.is_some()
         {
             return Err(AuthorityStoreError::Corrupt("prev grace triple"));

@@ -173,11 +173,7 @@ fn adaptive_mode_select_plan_sizes_cold_batch_to_natural_one() {
     let receipts = handle
         .admit_put_batch(
             &mut guard,
-            &[
-                ("awo/ad/a", b"1"),
-                ("awo/ad/b", b"2"),
-                ("awo/ad/c", b"3"),
-            ],
+            &[("awo/ad/a", b"1"), ("awo/ad/b", b"2"), ("awo/ad/c", b"3")],
             DurabilityMode::Buffered,
         )
         .unwrap();

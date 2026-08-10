@@ -9,9 +9,8 @@ use residiuum_heap::{
     TrustedInstant, VerifiedCertificate,
 };
 use residiuum_sdk::{
-    execute_bytecode, CollectionBindings, CoveragePolicy, ErrorCode, HeapClient,
-    HostCapabilities, OrderDir, Parameters, PlanBuilder, QueryBytecodeV1, QueryRunOptions,
-    ResidiuumDeployment,
+    execute_bytecode, CollectionBindings, CoveragePolicy, ErrorCode, HeapClient, HostCapabilities,
+    OrderDir, Parameters, PlanBuilder, QueryBytecodeV1, QueryRunOptions, ResidiuumDeployment,
 };
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
 use serde_json::Value as JsonValue;
@@ -51,7 +50,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -121,7 +127,11 @@ fn healthy_query_reports_complete_coverage_grade() {
     col.put("b", &serde_json::json!({"n": 2})).unwrap();
 
     let page = col
-        .rql("from orders", &Parameters::default(), QueryRunOptions::default())
+        .rql(
+            "from orders",
+            &Parameters::default(),
+            QueryRunOptions::default(),
+        )
         .expect("rql");
     assert!(page.coverage.complete);
     assert_eq!(page.coverage.mode, CoveragePolicy::Complete);

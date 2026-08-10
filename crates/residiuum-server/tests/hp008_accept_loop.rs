@@ -1,5 +1,7 @@
 //! HP-008 Accept: live TLS accept-loop runs qualified heap session (no token/RBAC).
 
+use ed25519_dalek::{Signer, SigningKey};
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose, SanType};
 use residiuum_client::{
     b64u_decode, b64u_encode, read_frame, write_json_frame, Handshake, HeapAuth, HeapChallenge,
     HeapWelcome, FEATURE_HEAP_KEY_V1,
@@ -15,10 +17,6 @@ use residiuum_server::{
     serve_store_with, HeapAuthAuditLog, ResidentHeap, ResidentHeapRegistry, ServeOptions,
 };
 use residiuum_store::Store;
-use ed25519_dalek::{Signer, SigningKey};
-use rcgen::{
-    BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose, SanType,
-};
 use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -219,7 +217,8 @@ fn live_tls_accept_loop_heap_key_ping_without_token() {
     let bind = format!("127.0.0.1:{port}");
     let shutdown = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&shutdown);
-    let opts = ServeOptions::new().legacy_token_server()
+    let opts = ServeOptions::new()
+        .legacy_token_server()
         .tls(TlsServerOptions::new(&cert_path, &key_path))
         .qualified_heap_key(true)
         .heap_registry(Arc::clone(&registry))
@@ -237,11 +236,8 @@ fn live_tls_accept_loop_heap_key_ping_without_token() {
     let tcp = TcpStream::connect(&bind).unwrap();
     tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
     tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
-    let (mut stream, _) = client_connect(
-        tcp,
-        &TlsClientOptions::new("localhost").ca_path(ca_path),
-    )
-    .expect("tls client");
+    let (mut stream, _) = client_connect(tcp, &TlsClientOptions::new("localhost").ca_path(ca_path))
+        .expect("tls client");
     assert!(stream.is_tls());
     let exporter = stream.export_channel_binding().expect("client exporter");
 
@@ -308,10 +304,10 @@ fn live_tls_accept_loop_heap_key_ping_without_token() {
     thread::sleep(Duration::from_millis(50));
 
     assert!(
-        audit.snapshot().iter().any(|e| matches!(
-            e,
-            residiuum_server::HeapAuthAuditEvent::Welcome { .. }
-        )),
+        audit
+            .snapshot()
+            .iter()
+            .any(|e| matches!(e, residiuum_server::HeapAuthAuditEvent::Welcome { .. })),
         "audit must record welcome"
     );
 }

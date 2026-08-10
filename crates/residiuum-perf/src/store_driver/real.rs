@@ -218,7 +218,11 @@ pub fn run_real_store(cfg: &DriverRunConfig) -> Result<DriverCellReport, DriverE
             "lossless_plan=yes plan_source=store_boundary_probe (complete samples; not receipt reconstruction)"
                 .into(),
         );
-        (Some(plan), true, STORE_SEAM_EMITTER_FROM_RECEIPTS.to_string())
+        (
+            Some(plan),
+            true,
+            STORE_SEAM_EMITTER_FROM_RECEIPTS.to_string(),
+        )
     } else {
         messages.push(format!(
             "lossless_plan=no: {}",
@@ -231,11 +235,7 @@ pub fn run_real_store(cfg: &DriverRunConfig) -> Result<DriverCellReport, DriverE
             "exact aggregates (counters/histograms/digest) remain valid; plan/replay claims withheld"
                 .into(),
         );
-        (
-            None,
-            false,
-            "store_boundary_aggregates_only".to_string(),
-        )
+        (None, false, "store_boundary_aggregates_only".to_string())
     };
     messages.push(format!(
         "boundary_aggregates_digest={}",
@@ -251,9 +251,7 @@ pub fn run_real_store(cfg: &DriverRunConfig) -> Result<DriverCellReport, DriverE
         "invalid_correctness".to_string()
     };
     if run_class.allows_smoke_op_cap() {
-        messages.push(
-            "smoke/diagnostic: not a qualification claim; no product bottleneck".into(),
-        );
+        messages.push("smoke/diagnostic: not a qualification claim; no product bottleneck".into());
     } else if !floors_met {
         valid = false;
         validity = "invalid_floors".into();
@@ -411,8 +409,11 @@ fn run_contract_leg(
     probe_on: bool,
     tag: &str,
 ) -> Result<WorkloadLegStats, DriverError> {
-    let store_path =
-        cell_store_path(work_root, &cfg.cell.cell_id, &format!("{tag}-s{:x}", cfg.seed));
+    let store_path = cell_store_path(
+        work_root,
+        &cfg.cell.cell_id,
+        &format!("{tag}-s{:x}", cfg.seed),
+    );
     if store_path.exists() {
         let _ = fs::remove_dir_all(&store_path);
     }
@@ -654,15 +655,7 @@ fn execute_workload_puts_independent(
             awo,
         )?
     } else {
-        execute_serial_admit_put(
-            store,
-            cfg,
-            store_dur,
-            outstanding,
-            smoke_ops_limit,
-            t0,
-            awo,
-        )?
+        execute_serial_admit_put(store, cfg, store_dur, outstanding, smoke_ops_limit, t0, awo)?
     };
     messages.append(&mut stats.messages);
     stats.messages = messages;
@@ -718,20 +711,14 @@ fn execute_serial_admit_put(
     let min_dur = Duration::from_secs(run_class.min_duration_secs());
     let min_bytes = run_class.min_logical_bytes();
     let safety = RunBudgets::default();
-    let max_dur = Duration::from_secs(
-        safety
-            .max_duration_secs
-            .max(run_class.min_duration_secs()),
-    );
+    let max_dur = Duration::from_secs(safety.max_duration_secs.max(run_class.min_duration_secs()));
     let max_bytes = safety.max_bytes.max(run_class.min_logical_bytes());
 
     let mut ledger = AckLedger::new();
     let mut logical_bytes = 0u64;
     let mut records = Vec::new();
     let mut window_samples = Vec::new();
-    let mut messages = vec![format!(
-        "serial_admit_put outstanding={outstanding}"
-    )];
+    let mut messages = vec![format!("serial_admit_put outstanding={outstanding}")];
     let mut seq: u64 = 0;
     let mut in_flight: Vec<(u64, u64, residiuum_store::adaptive_write::WriteCompletion)> =
         Vec::new();
@@ -854,10 +841,17 @@ fn execute_serial_admit_put(
 /// land in exactly one of these; Reject carries the issued seq (not anonymous).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConcurrentOpOutcome {
-    Ack { seq: u64, plen: u64 },
-    Fail { seq: u64 },
+    Ack {
+        seq: u64,
+        plen: u64,
+    },
+    Fail {
+        seq: u64,
+    },
     /// Admit rejected / lock poison before wait — no durable install.
-    Reject { seq: u64 },
+    Reject {
+        seq: u64,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -962,8 +956,7 @@ fn fold_concurrent_op_outcomes(
     }
 
     let count_ok = ledger.attempted == ledger.acknowledged.saturating_add(ledger.failed);
-    let balanced =
-        count_ok && multi_terminal == 0 && missing_seq == 0 && out_of_range == 0;
+    let balanced = count_ok && multi_terminal == 0 && missing_seq == 0 && out_of_range == 0;
     let mut messages = Vec::new();
     if multi_terminal > 0 {
         messages.push(format!(
@@ -1025,10 +1018,7 @@ impl GlobalOutstanding {
 
     /// Non-blocking: returns false when the global limit is exhausted.
     fn try_acquire(&self) -> bool {
-        let mut g = self
-            .available
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut g = self.available.lock().unwrap_or_else(|p| p.into_inner());
         if *g > 0 {
             *g -= 1;
             true
@@ -1038,10 +1028,7 @@ impl GlobalOutstanding {
     }
 
     fn release(&self) {
-        let mut g = self
-            .available
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut g = self.available.lock().unwrap_or_else(|p| p.into_inner());
         *g = (*g).saturating_add(1).min(self.capacity);
     }
 }
@@ -1085,11 +1072,7 @@ fn execute_concurrent_admit_put(
     let min_dur = Duration::from_secs(run_class.min_duration_secs());
     let min_bytes = run_class.min_logical_bytes();
     let safety = RunBudgets::default();
-    let max_dur = Duration::from_secs(
-        safety
-            .max_duration_secs
-            .max(run_class.min_duration_secs()),
-    );
+    let max_dur = Duration::from_secs(safety.max_duration_secs.max(run_class.min_duration_secs()));
     let max_bytes = safety.max_bytes.max(run_class.min_logical_bytes());
 
     // Concurrent workers: admit under lock, wait outside. Outcomes collected for a
@@ -1206,12 +1189,10 @@ fn execute_concurrent_admit_put(
                 match completion.wait() {
                     Ok(_) => {
                         logical_shared.fetch_add(plen, Ordering::Relaxed);
-                        outcomes_mu.lock().expect("outcomes_mu poisoned").push(
-                            ConcurrentOpOutcome::Ack {
-                                seq: op_seq,
-                                plen,
-                            },
-                        );
+                        outcomes_mu
+                            .lock()
+                            .expect("outcomes_mu poisoned")
+                            .push(ConcurrentOpOutcome::Ack { seq: op_seq, plen });
                     }
                     Err(_) => {
                         outcomes_mu
@@ -1227,12 +1208,10 @@ fn execute_concurrent_admit_put(
                 match completion.wait() {
                     Ok(_) => {
                         logical_shared.fetch_add(plen, Ordering::Relaxed);
-                        outcomes_mu.lock().expect("outcomes_mu poisoned").push(
-                            ConcurrentOpOutcome::Ack {
-                                seq: op_seq,
-                                plen,
-                            },
-                        );
+                        outcomes_mu
+                            .lock()
+                            .expect("outcomes_mu poisoned")
+                            .push(ConcurrentOpOutcome::Ack { seq: op_seq, plen });
                     }
                     Err(_) => {
                         outcomes_mu
@@ -1259,9 +1238,10 @@ fn execute_concurrent_admit_put(
     }
 
     // Poisoned outcomes mutex is a direct run failure (not an empty fold).
-    let outcomes = outcomes_mu.lock().map(|g| g.clone()).map_err(|_| {
-        DriverError::Msg("outcomes mutex poisoned; concurrent run failed".into())
-    })?;
+    let outcomes = outcomes_mu
+        .lock()
+        .map(|g| g.clone())
+        .map_err(|_| DriverError::Msg("outcomes mutex poisoned; concurrent run failed".into()))?;
     let issued_count = next_seq.load(Ordering::Relaxed);
     let logical_bytes = logical_shared.load(Ordering::Relaxed);
     let fold = fold_concurrent_op_outcomes(&outcomes, cfg.digest_mutant, issued_count);
@@ -1386,11 +1366,7 @@ fn execute_serial_batched(
     let min_dur = Duration::from_secs(run_class.min_duration_secs());
     let min_bytes = run_class.min_logical_bytes();
     let safety = RunBudgets::default();
-    let max_dur = Duration::from_secs(
-        safety
-            .max_duration_secs
-            .max(run_class.min_duration_secs()),
-    );
+    let max_dur = Duration::from_secs(safety.max_duration_secs.max(run_class.min_duration_secs()));
     let max_bytes = safety.max_bytes.max(run_class.min_logical_bytes());
 
     let mut ledger = AckLedger::new();
@@ -1530,11 +1506,7 @@ fn execute_concurrent_batched(
     let min_dur = Duration::from_secs(run_class.min_duration_secs());
     let min_bytes = run_class.min_logical_bytes();
     let safety = RunBudgets::default();
-    let max_dur = Duration::from_secs(
-        safety
-            .max_duration_secs
-            .max(run_class.min_duration_secs()),
-    );
+    let max_dur = Duration::from_secs(safety.max_duration_secs.max(run_class.min_duration_secs()));
     let max_bytes = safety.max_bytes.max(run_class.min_logical_bytes());
 
     let seq_counter = Arc::new(AtomicU64::new(0));
@@ -1605,13 +1577,7 @@ fn execute_concurrent_batched(
                     if subjects.is_empty() {
                         break;
                     }
-                    if tx
-                        .send(PreparedBatch {
-                            subjects,
-                            bodies,
-                        })
-                        .is_err()
-                    {
+                    if tx.send(PreparedBatch { subjects, bodies }).is_err() {
                         break;
                     }
                 }
@@ -1708,7 +1674,6 @@ struct PreparedBatch {
     bodies: Vec<Vec<u8>>,
 }
 
-
 /// Flush a prepared batch.
 ///
 /// - **AWO disabled:** `Store::put_many` (multi-shard → `put_many_parallel`).
@@ -1731,12 +1696,7 @@ fn flush_batch(
     }
 }
 
-fn payload_len(
-    cfg: &DriverRunConfig,
-    sampler: &SizeSampler,
-    seq: u64,
-    run_class: RunClass,
-) -> u64 {
+fn payload_len(cfg: &DriverRunConfig, sampler: &SizeSampler, seq: u64, run_class: RunClass) -> u64 {
     let plen = if cfg.cell.distribution.is_some() {
         sampler.size_at(seq)
     } else {
@@ -1753,9 +1713,7 @@ fn fill_body(seed: u64, seq: u64, plen: u64) -> Vec<u8> {
     let mut body = vec![0u8; plen as usize];
     let mut x = seed.wrapping_add(seq);
     for b in &mut body {
-        x = x
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add(1);
+        x = x.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
         *b = (x >> 33) as u8;
     }
     body
@@ -1823,10 +1781,7 @@ mod tests {
         plan.assert_redacted_json().unwrap();
         assert!(plan.planned_bytes > 0);
         assert!(
-            report
-                .notes
-                .iter()
-                .any(|n| n.contains("lossless_plan=yes")),
+            report.notes.iter().any(|n| n.contains("lossless_plan=yes")),
             "expected lossless plan note"
         );
         assert!(report.notes.iter().any(|n| n.contains("run_class=smoke")));
@@ -1903,7 +1858,10 @@ mod tests {
         .expect("observer overhead");
         assert!(report.probe_off_e2e_ns > 0);
         assert!(report.probe_on_e2e_ns > 0);
-        assert_eq!(report.probe_off_logical_bytes, report.probe_on_logical_bytes);
+        assert_eq!(
+            report.probe_off_logical_bytes,
+            report.probe_on_logical_bytes
+        );
         assert_eq!(report.pair_count, OVERHEAD_MIN_PAIRS_SMOKE);
         assert_eq!(report.ops_per_leg, 8);
         assert!((report.overhead_budget - OBSERVER_OVERHEAD_BUDGET).abs() < 1e-12);
@@ -1919,8 +1877,16 @@ mod tests {
             .iter()
             .all(|p| p.cost_basis == OverheadCostBasis::WallTime && p.legs_valid));
         assert_eq!(
-            report.pairs.iter().filter(|p| p.order == "off_first").count(),
-            report.pairs.iter().filter(|p| p.order == "on_first").count()
+            report
+                .pairs
+                .iter()
+                .filter(|p| p.order == "off_first")
+                .count(),
+            report
+                .pairs
+                .iter()
+                .filter(|p| p.order == "on_first")
+                .count()
         );
         assert!(report.notes.iter().any(|n| n.contains("workload_contract")));
     }
@@ -1958,15 +1924,16 @@ mod tests {
         assert_eq!(report.cell.validity, "valid");
         assert!(report.cell.acknowledged > 0);
         assert!(
-            report
-                .notes
-                .iter()
-                .any(|n| n.contains("concurrent_batched") || n.contains("serial_batched") || n.contains("put_many")),
+            report.notes.iter().any(|n| n.contains("concurrent_batched")
+                || n.contains("serial_batched")
+                || n.contains("put_many")),
             "expected batching/concurrency behaviour notes"
         );
         assert!(
-            report.notes.iter().any(|n| n.contains("concurrent_workers=2")
-                || n.contains("workers=2")),
+            report
+                .notes
+                .iter()
+                .any(|n| n.contains("concurrent_workers=2") || n.contains("workers=2")),
             "expected concurrency dimension applied"
         );
         // Multi-shard + probe: observations must come from put_many product path
@@ -2065,7 +2032,8 @@ mod tests {
             .unwrap_or_else(|e| panic!("T3 three-way smoke mode={}: {e}", mode.as_str()));
 
             assert_eq!(
-                report.cell.validity, "valid",
+                report.cell.validity,
+                "valid",
                 "mode={} must be valid (no poison happy path)",
                 mode.as_str()
             );
@@ -2086,8 +2054,7 @@ mod tests {
                 report
                     .notes
                     .iter()
-                    .any(|n| n.contains("sample_get_ok=")
-                        && !n.contains("sample_get_ok=0")),
+                    .any(|n| n.contains("sample_get_ok=") && !n.contains("sample_get_ok=0")),
                 "mode={} sample get must succeed",
                 mode.as_str()
             );
@@ -2095,8 +2062,7 @@ mod tests {
                 report
                     .notes
                     .iter()
-                    .any(|n| n.starts_with("reopen_live_count=")
-                        && n != "reopen_live_count=0"),
+                    .any(|n| n.starts_with("reopen_live_count=") && n != "reopen_live_count=0"),
                 "mode={} reopen must see live subjects: {:?}",
                 mode.as_str(),
                 report.notes
@@ -2226,7 +2192,10 @@ mod tests {
         assert_eq!(fold.ledger.attempted, 3);
         assert_eq!(fold.ledger.acknowledged, 1);
         assert_eq!(fold.ledger.failed, 2);
-        assert!(fold.messages.iter().any(|m| m.contains("ledger_balance=ok")));
+        assert!(fold
+            .messages
+            .iter()
+            .any(|m| m.contains("ledger_balance=ok")));
     }
 
     /// Pure fold: Ack then Fail on same seq is multi-terminal (not only double-ack).
@@ -2344,7 +2313,10 @@ mod tests {
         let credits = GlobalOutstanding::new(2);
         assert!(credits.try_acquire());
         assert!(credits.try_acquire());
-        assert!(!credits.try_acquire(), "third acquire must fail at capacity 2");
+        assert!(
+            !credits.try_acquire(),
+            "third acquire must fail at capacity 2"
+        );
         credits.release();
         assert!(credits.try_acquire());
         credits.release();
@@ -2403,10 +2375,7 @@ mod tests {
             report.notes
         );
         assert!(
-            report
-                .notes
-                .iter()
-                .any(|n| n.contains("issued_count=")),
+            report.notes.iter().any(|n| n.contains("issued_count=")),
             "expected authoritative issued_count in notes: {:?}",
             report.notes
         );
@@ -2419,10 +2388,7 @@ mod tests {
             report.notes
         );
         assert!(
-            report
-                .notes
-                .iter()
-                .any(|n| n.contains("ledger_balance=ok")),
+            report.notes.iter().any(|n| n.contains("ledger_balance=ok")),
             "ledger must balance: {:?}",
             report.notes
         );
@@ -2435,10 +2401,7 @@ mod tests {
             report.notes
         );
         assert!(
-            !report
-                .notes
-                .iter()
-                .any(|n| n.contains("missing_seq_count")),
+            !report.notes.iter().any(|n| n.contains("missing_seq_count")),
             "no missing seq: {:?}",
             report.notes
         );

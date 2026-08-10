@@ -107,29 +107,30 @@ fn multi_page_coverage_and_deterministic_sequence() {
         }
         let tok = page.continuation.expect("has_more implies continuation");
         // Token must authenticate for this cluster with secret keyring (DEF-097).
-        let decoded = QueryContinuation::decode(
-            cluster.cluster_id(),
-            cluster.continuation_keyring(),
-            &tok,
-        )
-        .unwrap();
+        let decoded =
+            QueryContinuation::decode(cluster.cluster_id(), cluster.continuation_keyring(), &tok)
+                .unwrap();
         assert_eq!(&decoded.query_id, query_id.as_ref().unwrap());
         opts = ScanOptions::new().continuation(tok);
         assert!(pages < 20, "page loop must terminate");
     }
 
-    assert_eq!(gathered, expected, "paged scan must equal one-shot sequence");
-    assert!(pages >= 2, "expected multiple pages for page_size=5 over 25 keys");
+    assert_eq!(
+        gathered, expected,
+        "paged scan must equal one-shot sequence"
+    );
+    assert!(
+        pages >= 2,
+        "expected multiple pages for page_size=5 over 25 keys"
+    );
 }
 
 #[test]
 fn coordinator_failover_resume_no_dup_no_omit() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("c");
-    let mut cluster = Cluster::create(
-        ClusterConfig::dependable_local(&root).with_virtual_partitions(8),
-    )
-    .unwrap();
+    let mut cluster =
+        Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(8)).unwrap();
     for i in 0..30 {
         cluster
             .put(
@@ -179,7 +180,11 @@ fn coordinator_failover_resume_no_dup_no_omit() {
 
     // No silent duplicates.
     let set: HashSet<_> = gathered.iter().cloned().collect();
-    assert_eq!(set.len(), gathered.len(), "coordinator resume must not duplicate");
+    assert_eq!(
+        set.len(),
+        gathered.len(),
+        "coordinator resume must not duplicate"
+    );
     // No silent omissions relative to full prefix scan.
     let expected: Vec<String> = full.into_iter().filter(|s| s.starts_with("doc/")).collect();
     assert_eq!(gathered, expected, "coordinator resume must not omit rows");
@@ -262,9 +267,7 @@ fn resource_budget_carried_on_page_coverage() {
 #[test]
 fn continuation_rejects_tampered_token() {
     let (_dir, mut cluster) = seed_cluster(20);
-    let page = cluster
-        .scan_page(ScanOptions::new().page_size(3))
-        .unwrap();
+    let page = cluster.scan_page(ScanOptions::new().page_size(3)).unwrap();
     assert!(page.has_more);
     let mut tok = page.continuation.unwrap();
     let i = tok.len() / 2;
@@ -279,7 +282,11 @@ fn continuation_rejects_tampered_token() {
 fn frontiers_preserved_per_partition() {
     let (_dir, mut cluster) = seed_cluster(15);
     let page = cluster
-        .scan_page(ScanOptions::new().page_size(100).read_mode(ReadMode::Linearizable))
+        .scan_page(
+            ScanOptions::new()
+                .page_size(100)
+                .read_mode(ReadMode::Linearizable),
+        )
         .unwrap();
     assert!(page.coverage.is_complete());
     for p in &page.coverage.requested {
@@ -289,8 +296,5 @@ fn frontiers_preserved_per_partition() {
             p.get()
         );
     }
-    assert_eq!(
-        page.coverage.frontiers.len(),
-        page.coverage.completed.len()
-    );
+    assert_eq!(page.coverage.frontiers.len(), page.coverage.completed.len());
 }

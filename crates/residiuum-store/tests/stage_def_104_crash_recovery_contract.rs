@@ -98,11 +98,7 @@ fn journey_prior_complete_via_history_apis() {
     );
 
     let found = store
-        .find_last_complete_version(
-            "doc",
-            BeforeEvent::Current,
-            RecoveryReadOptions::default(),
-        )
+        .find_last_complete_version("doc", BeforeEvent::Current, RecoveryReadOptions::default())
         .unwrap();
     assert_eq!(
         found
@@ -182,12 +178,10 @@ fn journey_writer_held_inspect_not_empty() {
     assert_ne!(status.class, WriterLockClass::Free);
 
     // Bounded wait still times out while held — never NotAStore.
-    let err = Store::open_with_options(
-        &path,
-        StoreOpenOptions::wait_for(Duration::from_millis(30)),
-    )
-    .err()
-    .expect("must not succeed while held");
+    let err =
+        Store::open_with_options(&path, StoreOpenOptions::wait_for(Duration::from_millis(30)))
+            .err()
+            .expect("must not succeed while held");
     assert!(matches!(err, StoreError::WriterLockHeld(_)));
 }
 
@@ -208,9 +202,7 @@ fn journey_derived_cache_wipe_neutral() {
                 .unwrap();
         }
         store.seal_active().unwrap();
-        store
-            .put("tail", b"T", DurabilityMode::Durable)
-            .unwrap();
+        store.put("tail", b"T", DurabilityMode::Durable).unwrap();
         store.persist_index_cache().unwrap();
         let diag = store.primary_cache_diag().unwrap();
         assert!(!diag.authoritative);
@@ -336,9 +328,7 @@ fn forbidden_lock_held_is_not_empty_store() {
 fn forbidden_payload_too_large_zero_effect() {
     let dir = tempdir().unwrap();
     let mut store = Store::create(dir.path().join("s")).unwrap();
-    store
-        .put("k", b"prior", DurabilityMode::Durable)
-        .unwrap();
+    store.put("k", b"prior", DurabilityMode::Durable).unwrap();
     let huge = vec![0u8; 20 * 1024 * 1024]; // above default 16 MiB profile
     let err = store
         .put("k", &huge, DurabilityMode::Durable)

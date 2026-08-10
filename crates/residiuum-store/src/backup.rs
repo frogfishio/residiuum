@@ -204,7 +204,11 @@ pub fn verify_package_files(
 ) -> Result<(), StoreError> {
     let store_root = backup_store_path(package_root);
     for entry in &manifest.files {
-        let path = store_root.join(entry.relative_path.replace('/', std::path::MAIN_SEPARATOR_STR));
+        let path = store_root.join(
+            entry
+                .relative_path
+                .replace('/', std::path::MAIN_SEPARATOR_STR),
+        );
         if !path.is_file() {
             return Err(StoreError::CorruptControl {
                 path: entry.relative_path.clone(),
@@ -216,11 +220,7 @@ pub fn verify_package_files(
         if meta.len() != entry.size {
             return Err(StoreError::CorruptControl {
                 path: entry.relative_path.clone(),
-                detail: format!(
-                    "size mismatch: expected {} got {}",
-                    entry.size,
-                    meta.len()
-                ),
+                detail: format!("size mismatch: expected {} got {}", entry.size, meta.len()),
                 recovery: "discard package; re-run backup".into(),
             });
         }
@@ -357,7 +357,9 @@ pub fn restore_full_backup(
     let src_store = backup_store_path(package_root);
     // Copy only listed files (manifest is source of truth).
     for entry in &manifest.files {
-        let rel = entry.relative_path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let rel = entry
+            .relative_path
+            .replace('/', std::path::MAIN_SEPARATOR_STR);
         let from = src_store.join(&rel);
         let to = dest_root.join(&rel);
         if let Some(parent) = to.parent() {
@@ -483,7 +485,14 @@ fn walk_and_copy(
     total_bytes: &mut u64,
 ) -> Result<(), StoreError> {
     if current.is_file() {
-        copy_one(source_root, current, dest_store, under_store_info, files, total_bytes)?;
+        copy_one(
+            source_root,
+            current,
+            dest_store,
+            under_store_info,
+            files,
+            total_bytes,
+        )?;
         return Ok(());
     }
     if !current.is_dir() {
@@ -551,10 +560,7 @@ fn copy_one(
         .to_path_buf();
     let rel_str = path_to_posix(&rel);
     if under_store_info {
-        let base = src_file
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let base = src_file.file_name().and_then(|s| s.to_str()).unwrap_or("");
         if SKIP_STORE_INFO_NAMES.contains(&base) {
             return Ok(());
         }
@@ -711,9 +717,7 @@ mod tests {
         let dst = dir.path().join("clone");
 
         let mut store = Store::create(&src).unwrap();
-        store
-            .put("k", b"v", DurabilityMode::Durable)
-            .unwrap();
+        store.put("k", b"v", DurabilityMode::Durable).unwrap();
         let sid = store.store_id();
         store.backup_to(&bak).unwrap();
         drop(store);
@@ -730,7 +734,11 @@ mod tests {
         assert_ne!(restored.restored_store_id, sid);
         assert!(restored.identity_reassigned);
 
-        let opened = Store::open_with_options(&dst, crate::writer_lock::StoreOpenOptions::default().tolerate_unidentified_inventory()).unwrap();
+        let opened = Store::open_with_options(
+            &dst,
+            crate::writer_lock::StoreOpenOptions::default().tolerate_unidentified_inventory(),
+        )
+        .unwrap();
         assert_eq!(opened.store_id(), restored.restored_store_id);
         assert_eq!(opened.get("k").unwrap().as_deref(), Some(b"v".as_slice()));
     }

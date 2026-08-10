@@ -94,7 +94,12 @@ pub fn stream_stats(ops: &[LogicalOp]) -> StreamStats {
 /// Assert a result JSON object does not embed raw keys or payloads (safety).
 pub fn result_must_not_contain_payloads(result_json: &str) -> Result<(), String> {
     // Fail closed on obvious leakage fields.
-    for bad in ["\"payload\":", "\"key_bytes\":", "\"raw_key\":", "\"body\":"] {
+    for bad in [
+        "\"payload\":",
+        "\"key_bytes\":",
+        "\"raw_key\":",
+        "\"body\":",
+    ] {
         if result_json.contains(bad) {
             return Err(format!("result must not contain {bad}"));
         }

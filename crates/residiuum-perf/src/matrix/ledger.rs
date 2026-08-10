@@ -123,10 +123,7 @@ impl AckLedger {
     }
 
     /// Independent reopen check: recompute expected from supplied records.
-    pub fn verify_reopen(
-        &self,
-        records: &[(u64, u64, u64, u32)],
-    ) -> Result<(), LedgerError> {
+    pub fn verify_reopen(&self, records: &[(u64, u64, u64, u32)]) -> Result<(), LedgerError> {
         let mut he = None::<String>;
         for (seq, key_index, payload_len, generation) in records {
             let mut h = Sha256::new();

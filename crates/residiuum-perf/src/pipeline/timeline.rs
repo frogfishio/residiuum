@@ -47,7 +47,9 @@ pub fn check_timeline(events: &[TimelineEvent]) -> TimelineReport {
                 open.push((e.seq, e.stage.clone(), e.t_ns));
             }
             "exit" => {
-                if let Some(pos) = open.iter().rposition(|(s, st, _)| *s == e.seq && st == &e.stage)
+                if let Some(pos) = open
+                    .iter()
+                    .rposition(|(s, st, _)| *s == e.seq && st == &e.stage)
                 {
                     open.remove(pos);
                 } else {

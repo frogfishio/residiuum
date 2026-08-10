@@ -228,16 +228,7 @@ mod tests {
             maximum_batch_bytes: u64::MAX,
             segment_room_entries: 1000,
         };
-        let s = select_plan(
-            &b,
-            1000,
-            100_000,
-            false,
-            false,
-            true,
-            u64::MAX,
-            |_| 10,
-        );
+        let s = select_plan(&b, 1000, 100_000, false, false, true, u64::MAX, |_| 10);
         assert_eq!(s.plan, AwoPlan::Natural);
         assert_eq!(s.reason, "natural_insufficient_evidence");
     }
@@ -255,16 +246,7 @@ mod tests {
         };
         // natural J for q=8 service=1000: mean=4500 tail=8000 J=12500
         // batch upper must be < J * 0.9 = 11250
-        let s = select_plan(
-            &b,
-            1000,
-            100_000,
-            true,
-            false,
-            true,
-            u64::MAX,
-            |_| 5_000,
-        );
+        let s = select_plan(&b, 1000, 100_000, true, false, true, u64::MAX, |_| 5_000);
         assert_eq!(s.plan, AwoPlan::Batch);
         assert!(s.entries >= 2);
     }

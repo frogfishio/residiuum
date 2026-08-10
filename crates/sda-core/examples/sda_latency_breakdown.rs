@@ -77,11 +77,7 @@ fn cases() -> Vec<Case> {
         Case {
             name: "seq_comp_1k",
             source: r#"{ yield x + 1 | x in input }"#,
-            input: serde_json::Value::Array(
-                (0..1000)
-                    .map(|i| serde_json::json!(i))
-                    .collect(),
-            ),
+            input: serde_json::Value::Array((0..1000).map(|i| serde_json::json!(i)).collect()),
             heavy: true,
         },
     ]
@@ -149,9 +145,8 @@ fn main() {
         eprintln!("source: {}", case.source);
 
         // Warm compile + one correctness touch.
-        let program = Program::parse(case.source).unwrap_or_else(|e| {
-            panic!("parse failed for {}: {e}", case.name)
-        });
+        let program = Program::parse(case.source)
+            .unwrap_or_else(|e| panic!("parse failed for {}: {e}", case.name));
         let _probe = program
             .run_json("input", case.input.clone())
             .unwrap_or_else(|e| panic!("eval failed for {}: {e}", case.name));
@@ -180,16 +175,12 @@ fn main() {
         // --- eval only (preconverted Value; clone per iter = multi-doc cost) ---
         let sda_input = from_json(case.input.clone());
         let eval_samples = bench_durations(n, || {
-            let _ = program
-                .eval("input", sda_input.clone())
-                .expect("eval");
+            let _ = program.eval("input", sda_input.clone()).expect("eval");
         });
         summarize(&format!("{}|eval", case.name), eval_samples);
 
         // --- to_json of a stable result ---
-        let eval_once = program
-            .eval("input", sda_input.clone())
-            .expect("eval once");
+        let eval_once = program.eval("input", sda_input.clone()).expect("eval once");
         let to_samples = bench_durations(n, || {
             let _ = to_json(eval_once.clone());
         });
@@ -238,5 +229,7 @@ fn main() {
         eprintln!();
     }
 
-    eprintln!("done. diagnostic only — see doc/reference/operations/PERFORMANCE_STRATEGIES.md (SDA).");
+    eprintln!(
+        "done. diagnostic only — see doc/reference/operations/PERFORMANCE_STRATEGIES.md (SDA)."
+    );
 }

@@ -5,9 +5,9 @@
 //! [`crate::may_advertise_qualified`].
 
 use crate::capability::HeapCap;
+use crate::decide::refresh_capability_or_terminate;
 use crate::error::{HeapError, HeapUnavailableCause};
 use crate::ids::{CollectionId, HeapId, StreamId};
-use crate::decide::refresh_capability_or_terminate;
 
 /// A planner-emitted observation request (may be malicious / unconstrained).
 #[derive(Debug, Clone)]
@@ -189,16 +189,21 @@ mod tests {
             expires_at: 4_000_000_000,
             issuer_master_key_id: [5u8; 32],
         };
-        mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+        mint_capability(
+            slot,
+            &cert,
+            TrustedInstant {
+                unix_s: 1_700_000_000,
+            },
+        )
+        .unwrap()
     }
 
     #[test]
     fn faulty_unconstrained_planner_denied_under_allowlist() {
         let allowed = CollectionId::from_bytes(uuidish(0xb1)).unwrap();
-        let constraints = Constraints::from_sorted(vec![Constraint::CollectionAllowlist(vec![
-            allowed,
-        ])])
-        .unwrap();
+        let constraints =
+            Constraints::from_sorted(vec![Constraint::CollectionAllowlist(vec![allowed])]).unwrap();
         let cap = mint_with(constraints);
         let other_heap = HeapId::from_bytes(uuidish(0xa1)).unwrap();
 

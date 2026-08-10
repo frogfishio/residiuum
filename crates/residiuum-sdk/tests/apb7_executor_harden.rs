@@ -45,7 +45,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -222,5 +229,8 @@ fn equality_filter_field_order_oracle() {
         .expect("run");
     let keys: Vec<_> = page.rows.iter().map(|r| r.key.clone()).collect();
     assert_eq!(keys, oracle_keys);
-    assert_eq!(keys, vec!["k3".to_string(), "k1".to_string(), "k4".to_string()]);
+    assert_eq!(
+        keys,
+        vec!["k3".to_string(), "k1".to_string(), "k4".to_string()]
+    );
 }

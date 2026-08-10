@@ -112,10 +112,7 @@ fn stdlib_enr_first(args: Vec<Value>) -> Result<Value, EvalError> {
             Some(v) => Ok(Value::Some_(Box::new(v))),
             None => Ok(Value::None_),
         },
-        Value::Bag(_) | Value::Set(_) => Ok(enr_fail(
-            "t_enr_unordered_policy",
-            "unordered policy",
-        )),
+        Value::Bag(_) | Value::Set(_) => Ok(enr_fail("t_enr_unordered_policy", "unordered policy")),
         _ => Ok(enr_wrong_shape()),
     }
 }
@@ -128,10 +125,7 @@ fn stdlib_enr_last(args: Vec<Value>) -> Result<Value, EvalError> {
             Some(v) => Ok(Value::Some_(Box::new(v))),
             None => Ok(Value::None_),
         },
-        Value::Bag(_) | Value::Set(_) => Ok(enr_fail(
-            "t_enr_unordered_policy",
-            "unordered policy",
-        )),
+        Value::Bag(_) | Value::Set(_) => Ok(enr_fail("t_enr_unordered_policy", "unordered policy")),
         _ => Ok(enr_wrong_shape()),
     }
 }
@@ -478,12 +472,10 @@ fn stdlib_get_path(args: Vec<Value>) -> Result<Value, EvalError> {
             _ => return Ok(wrong_shape()),
         };
         match cur {
-            Value::Map(entries) => {
-                match entries.into_iter().find(|(k, _)| k == &key) {
-                    Some((_, v)) => cur = v,
-                    None => return Ok(Value::None_),
-                }
-            }
+            Value::Map(entries) => match entries.into_iter().find(|(k, _)| k == &key) {
+                Some((_, v)) => cur = v,
+                None => return Ok(Value::None_),
+            },
             // Intermediate non-object: treat as absence (native filter Missing).
             _ => return Ok(Value::None_),
         }

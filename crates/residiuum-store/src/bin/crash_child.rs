@@ -87,10 +87,7 @@ fn main() -> ExitCode {
             }
             let k2 = format!("{key}-b");
             match s.put_many(
-                &[
-                    (key.as_str(), val.as_bytes()),
-                    (k2.as_str(), b"v-b"),
-                ],
+                &[(key.as_str(), val.as_bytes()), (k2.as_str(), b"v-b")],
                 DurabilityMode::Durable,
             ) {
                 Ok(_) => ExitCode::SUCCESS,

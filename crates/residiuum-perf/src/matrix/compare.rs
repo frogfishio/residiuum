@@ -79,7 +79,10 @@ pub fn select_matched_pairs(results: &[CellResult]) -> Vec<MatchedPair> {
 }
 
 /// Convenience: build + run smoke matrix.
-pub fn smoke_matrix(seed: u64, max_cells: usize) -> Result<(MatrixManifest, Vec<CellResult>), MatrixError> {
+pub fn smoke_matrix(
+    seed: u64,
+    max_cells: usize,
+) -> Result<(MatrixManifest, Vec<CellResult>), MatrixError> {
     let manifest = build_matrix_cells(ScheduleSeed { seed });
     let results = run_matrix(&manifest, max_cells)?;
     Ok((manifest, results))

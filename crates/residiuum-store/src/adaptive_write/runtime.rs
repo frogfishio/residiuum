@@ -15,8 +15,8 @@ use super::collection::IndependentCollector;
 use super::controller::{
     AwoClock, ControllerPolicy, ControllerSignals, InstantClock, ManualClock, ScaleController,
 };
-use super::coordinator::{PipelineCoordinator, PipelineError, PipelineStatus};
 use super::cooker::PersistentCookerPool;
+use super::coordinator::{PipelineCoordinator, PipelineError, PipelineStatus};
 use super::credits::{mutation_credit, CreditLedger};
 use super::estimator::ServiceEstimator;
 use super::policy::{AdaptiveWriteMode, AdaptiveWritePolicy, PolicyError};
@@ -296,7 +296,10 @@ impl AdaptiveWriteHandle {
         let adaptive = policy.mode == AdaptiveWriteMode::Adaptive;
         let mut estimator = ServiceEstimator::with_policy_defaults();
         estimator.min_samples = policy.estimator_min_samples;
-        estimator.stale_after_ns = policy.estimator_stale_after.as_nanos().min(u64::MAX as u128) as u64;
+        estimator.stale_after_ns = policy
+            .estimator_stale_after
+            .as_nanos()
+            .min(u64::MAX as u128) as u64;
         let scale = ScaleController::new(
             ControllerPolicy::machine_defaults(
                 policy.minimum_active_cookers,
@@ -399,11 +402,7 @@ impl AdaptiveWriteHandle {
 
     /// Whether direct store mutation is fenced.
     pub fn lease_active(&self) -> bool {
-        self.runtime
-            .inner
-            .lock()
-            .expect("awo runtime")
-            .lease_active
+        self.runtime.inner.lock().expect("awo runtime").lease_active
     }
 
     /// Admit a put under the adaptive lease (natural execution on AWO-3 floor).
@@ -437,10 +436,7 @@ impl AdaptiveWriteHandle {
     ) -> Option<AdmissionResult> {
         let (collector, credit) = {
             let g = self.runtime.inner.lock().expect("awo runtime");
-            if g.policy.mode == AdaptiveWriteMode::Disabled
-                || !g.lease_active
-                || g.draining
-            {
+            if g.policy.mode == AdaptiveWriteMode::Disabled || !g.lease_active || g.draining {
                 return None;
             }
             if store.is_awo_writer_poisoned() {
@@ -553,15 +549,16 @@ impl AdaptiveWriteHandle {
 
         let mut total_credit: usize = 0;
         for (subject, value) in items {
-            let c = mutation_credit(subject.len(), value.len())
-                .map_err(|_| AdaptiveWriteError::QueueFull {
-                    retry_after: Duration::from_millis(1),
-                })?;
-            total_credit = total_credit.checked_add(c).ok_or(
+            let c = mutation_credit(subject.len(), value.len()).map_err(|_| {
                 AdaptiveWriteError::QueueFull {
                     retry_after: Duration::from_millis(1),
-                },
-            )?;
+                }
+            })?;
+            total_credit = total_credit
+                .checked_add(c)
+                .ok_or(AdaptiveWriteError::QueueFull {
+                    retry_after: Duration::from_millis(1),
+                })?;
         }
 
         let retry_after;
@@ -583,10 +580,7 @@ impl AdaptiveWriteHandle {
                 });
             }
             if let Some(credits) = g.credits.as_ref() {
-                if credits
-                    .try_reserve(items.len(), total_credit)
-                    .is_err()
-                {
+                if credits.try_reserve(items.len(), total_credit).is_err() {
                     return Err(AdaptiveWriteError::QueueFull { retry_after });
                 }
             }
@@ -711,10 +705,7 @@ impl AdaptiveWriteHandle {
         let avg_bytes = if items.is_empty() {
             0u64
         } else {
-            let sum: u64 = items
-                .iter()
-                .map(|(s, v)| (s.len() + v.len()) as u64)
-                .sum();
+            let sum: u64 = items.iter().map(|(s, v)| (s.len() + v.len()) as u64).sum();
             sum / items.len() as u64
         };
         let (warm, stale) = g
@@ -807,9 +798,9 @@ impl AdaptiveWriteHandle {
 
         match receipt {
             Ok(r) => AdmissionResult::Admitted(WriteCompletion::ready(Ok(r))),
-            Err(e) => AdmissionResult::Admitted(WriteCompletion::ready(Err(
-                AdaptiveWriteError::from(e),
-            ))),
+            Err(e) => {
+                AdmissionResult::Admitted(WriteCompletion::ready(Err(AdaptiveWriteError::from(e))))
+            }
         }
     }
 
@@ -845,9 +836,9 @@ impl AdaptiveWriteHandle {
                     "awo pipeline depth exceeded",
                 ))
             }
-            AdaptiveWriteError::Pipeline(e) => StoreError::Io(std::io::Error::other(format!(
-                "awo pipeline: {e:?}"
-            ))),
+            AdaptiveWriteError::Pipeline(e) => {
+                StoreError::Io(std::io::Error::other(format!("awo pipeline: {e:?}")))
+            }
         }
     }
 

@@ -121,12 +121,8 @@ impl Eq for CancelToken {}
 /// Maximum nesting depth of a JSON value (root depth = 1).
 pub fn json_depth(value: &JsonValue) -> usize {
     match value {
-        JsonValue::Array(items) => {
-            1 + items.iter().map(json_depth).max().unwrap_or(0)
-        }
-        JsonValue::Object(map) => {
-            1 + map.values().map(json_depth).max().unwrap_or(0)
-        }
+        JsonValue::Array(items) => 1 + items.iter().map(json_depth).max().unwrap_or(0),
+        JsonValue::Object(map) => 1 + map.values().map(json_depth).max().unwrap_or(0),
         _ => 1,
     }
 }
@@ -183,9 +179,7 @@ pub fn estimate_json_bytes(value: &JsonValue) -> u64 {
         JsonValue::Object(map) => {
             24 + map
                 .iter()
-                .map(|(k, v)| {
-                    (16 + k.len() as u64).saturating_add(estimate_json_bytes(v))
-                })
+                .map(|(k, v)| (16 + k.len() as u64).saturating_add(estimate_json_bytes(v)))
                 .sum::<u64>()
         }
     }

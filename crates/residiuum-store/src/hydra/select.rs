@@ -211,9 +211,7 @@ mod tests {
     #[test]
     fn dense_vs_sparse_numeric() {
         // Dense u64 sequence 0..200
-        let dense: Vec<_> = (0..200u64)
-            .map(|i| (i.to_be_bytes().to_vec(), i))
-            .collect();
+        let dense: Vec<_> = (0..200u64).map(|i| (i.to_be_bytes().to_vec(), i)).collect();
         assert_eq!(
             select_index_kind(&dense, &HydraBuildOptions::default()),
             IndexKind::RadixSpline

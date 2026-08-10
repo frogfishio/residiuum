@@ -6,8 +6,8 @@
 
 use residiuum_sdk::{
     flat_collection_claim_language, heap_only_embedded_profile, legacy_flat_sdk_enabled,
-    product_may_advertise_qualified_heap, Residiuum, ResidiuumDeployment, FLAT_COLLECTION_SURFACE_LABEL,
-    LEGACY_FLAT_SDK_FEATURE, SDK_API_VERSION,
+    product_may_advertise_qualified_heap, Residiuum, ResidiuumDeployment,
+    FLAT_COLLECTION_SURFACE_LABEL, LEGACY_FLAT_SDK_FEATURE, SDK_API_VERSION,
 };
 use tempfile::tempdir;
 

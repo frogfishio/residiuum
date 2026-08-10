@@ -131,9 +131,7 @@ impl AdaptiveWritePolicy {
         if self.default_completion_deadline < self.maximum_collection_delay {
             return Err(PolicyError::DeadlineBeforeCollection);
         }
-        if self.minimum_active_cookers == 0
-            || self.minimum_active_cookers > self.maximum_cookers
-        {
+        if self.minimum_active_cookers == 0 || self.minimum_active_cookers > self.maximum_cookers {
             return Err(PolicyError::ActiveCookersOutOfRange);
         }
         Ok(())

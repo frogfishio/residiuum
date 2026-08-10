@@ -119,10 +119,7 @@ impl ClusterMeta {
     /// Persist a registration secret requirement (DEF-038 endpoint auth).
     ///
     /// Subsequent authenticated endpoint upserts must present the same secret.
-    pub fn set_registration_secret(
-        root: &Path,
-        secret: &str,
-    ) -> Result<(), ClusterError> {
+    pub fn set_registration_secret(root: &Path, secret: &str) -> Result<(), ClusterError> {
         let mut meta = Self::load(root)?;
         meta.registration_token_hash = Some(Self::hash_registration_secret(secret));
         meta.write(root)

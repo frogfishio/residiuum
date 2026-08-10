@@ -93,10 +93,7 @@ pub fn build_campaign_reports(result: &CampaignResult) -> CampaignReports {
             .or_default()
             .push((id, t));
         // concurrency proxy: interference string or features — use process_id aggregate later
-        concurrency
-            .entry(rep.process_id)
-            .or_default()
-            .push((id, t));
+        concurrency.entry(rep.process_id).or_default().push((id, t));
         distribution
             .entry(rep.report.layer.clone())
             .or_default()
@@ -110,10 +107,10 @@ pub fn build_campaign_reports(result: &CampaignResult) -> CampaignReports {
         }
         if let Some(sz) = extract_size_token(&rep.cell_id) {
             if sz == 4096 || sz == 8192 {
-                multiproc
-                    .entry(sz)
-                    .or_default()
-                    .push((rep.run_id.as_str(), rep.report.throughput_bytes_per_sec_proxy));
+                multiproc.entry(sz).or_default().push((
+                    rep.run_id.as_str(),
+                    rep.report.throughput_bytes_per_sec_proxy,
+                ));
             }
         }
     }
@@ -150,9 +147,10 @@ pub fn build_campaign_reports(result: &CampaignResult) -> CampaignReports {
     let follow_up_cards = follow_ups(&ranked_bottlenecks);
 
     // Variability: CV within 5% on any fixed-size row with n>=5 → ok flag for campaign
-    let variability_cv_ok = fixed_size.iter().any(|r| {
-        r.n_runs >= 5 && r.mean_throughput > 0.0 && (r.mad / r.mean_throughput) <= 0.05
-    }) || fixed_size.is_empty();
+    let variability_cv_ok = fixed_size
+        .iter()
+        .any(|r| r.n_runs >= 5 && r.mean_throughput > 0.0 && (r.mad / r.mean_throughput) <= 0.05)
+        || fixed_size.is_empty();
 
     let mut notes = vec![
         "No optimization applied in PQH-9; follow-up cards are stubs only".into(),
@@ -253,9 +251,7 @@ fn rank_bottlenecks(result: &CampaignResult) -> Vec<RankedBottleneck> {
             supporting_evidence: {
                 let mut s = attr.supporting_evidence;
                 s.push(format!("cell_id={cell_id}"));
-                s.push(
-                    "no synthesized L1/L2/L3/stage/queue/CPU/OS attribution inputs".into(),
-                );
+                s.push("no synthesized L1/L2/L3/stage/queue/CPU/OS attribution inputs".into());
                 s
             },
             falsification_ids: fals.into_iter().map(|f| f.id).collect(),
@@ -267,8 +263,7 @@ fn rank_bottlenecks(result: &CampaignResult) -> Vec<RankedBottleneck> {
     ranked.sort_by(|a, b| {
         let am = a.verdict == "mixed_or_unknown";
         let bm = b.verdict == "mixed_or_unknown";
-        am.cmp(&bm)
-            .then_with(|| a.verdict.cmp(&b.verdict))
+        am.cmp(&bm).then_with(|| a.verdict.cmp(&b.verdict))
     });
     for (i, r) in ranked.iter_mut().enumerate() {
         r.rank = (i + 1) as u32;
@@ -360,21 +355,15 @@ fn extract_size_token(cell_id: &str) -> Option<u64> {
 }
 
 fn map_to_rows_u64(m: &BTreeMap<u64, Vec<(&str, f64)>>) -> Vec<SliceRow> {
-    m.iter()
-        .map(|(k, v)| slice_row(k.to_string(), v))
-        .collect()
+    m.iter().map(|(k, v)| slice_row(k.to_string(), v)).collect()
 }
 
 fn map_to_rows_u32(m: &BTreeMap<u32, Vec<(&str, f64)>>) -> Vec<SliceRow> {
-    m.iter()
-        .map(|(k, v)| slice_row(k.to_string(), v))
-        .collect()
+    m.iter().map(|(k, v)| slice_row(k.to_string(), v)).collect()
 }
 
 fn map_to_rows_str(m: &BTreeMap<String, Vec<(&str, f64)>>) -> Vec<SliceRow> {
-    m.iter()
-        .map(|(k, v)| slice_row(k.clone(), v))
-        .collect()
+    m.iter().map(|(k, v)| slice_row(k.clone(), v)).collect()
 }
 
 fn slice_row(key: String, pairs: &[(&str, f64)]) -> SliceRow {

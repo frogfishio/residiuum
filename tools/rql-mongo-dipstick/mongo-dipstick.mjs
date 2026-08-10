@@ -13,11 +13,16 @@ const sourceDocs = Object.entries(fixture.collections.docs).map(([key, value]) =
   delete copy._key;
   return { _id: key, ...copy };
 });
+const sourceCustomers = Object.entries(fixture.collections.customers).map(([key, value]) => {
+  const copy = structuredClone(value);
+  delete copy._key;
+  return { _id: key, ...copy };
+});
 
 function normalize(value) {
   if (Array.isArray(value)) return value.map(normalize);
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.keys(value).filter(k => k !== "$key").sort()
+    return Object.fromEntries(Object.keys(value).filter(k => k !== "$key" && k !== "_id").sort()
       .map(k => [k, normalize(value[k])]));
   }
   return value;
@@ -29,6 +34,7 @@ function canonical(rows, orderSensitive, groupKey) {
     const mongoKey = copy._id;
     delete copy._id;
     const keyValue = groupKey ? copy[groupKey] : mongoKey;
+    if (groupKey === "_key") delete copy._key;
     const key = groupKey ? JSON.stringify(keyValue) : String(keyValue);
     return [key, JSON.stringify(normalize(copy))];
   });
@@ -51,11 +57,18 @@ await client.connect();
 const db = client.db("residiuum_rql_game_dipstick");
 await db.dropDatabase();
 const docs = db.collection("docs");
+const customers = db.collection("customers");
 for (let at = 0; at < sourceDocs.length; at += 1000) {
   await docs.insertMany(sourceDocs.slice(at, at + 1000), { ordered: true });
 }
+for (let at = 0; at < sourceCustomers.length; at += 1000) {
+  await customers.insertMany(sourceCustomers.slice(at, at + 1000), { ordered: true });
+}
 await docs.createIndex({ sel_bucket: 1 }, { name: "by_sel_bucket" });
 await docs.createIndex({ region: 1, amount: 1 }, { name: "by_region_amount" });
+await docs.createIndex({ region: 1 }, { name: "by_region" });
+await docs.createIndex({ score: 1 }, { name: "by_score" });
+await customers.createIndex({ id: 1 }, { name: "by_customer_id" });
 
 const cases = [
   {
@@ -86,6 +99,32 @@ const cases = [
     run: () => docs.aggregate([
       { $group: { _id: "$region", count: { $sum: 1 }, sum: { $sum: "$amount" }, min: { $min: "$amount" }, max: { $max: "$amount" }, avg: { $avg: "$amount" } } },
       { $project: { _id: 0, region: "$_id", count: 1, sum: 1, min: 1, max: 1, avg: 1 } },
+    ]).toArray(),
+  },
+  {
+    name: "full_scan_materialize", orderSensitive: false, groupKey: null,
+    run: () => docs.find({}).sort({ _id: 1 }).toArray(),
+  },
+  {
+    name: "filtered_group_count", orderSensitive: false, groupKey: "status",
+    run: () => docs.aggregate([
+      { $match: { region: "r0" } },
+      { $group: { _id: "$status", count: { $sum: 1 } } },
+      { $project: { _id: 0, status: "$_id", count: 1 } },
+    ]).toArray(),
+  },
+  {
+    name: "high_cardinality_group", orderSensitive: false, groupKey: "_key",
+    run: () => docs.aggregate([
+      { $group: { _id: "$_id", count: { $sum: 1 } } },
+      { $project: { _id: 0, _key: "$_id", count: 1 } },
+    ]).toArray(),
+  },
+  {
+    name: "indexed_enrich_many", orderSensitive: false, groupKey: null,
+    run: () => docs.aggregate([
+      { $lookup: { from: "customers", localField: "customer_id", foreignField: "id", as: "customer" } },
+      { $sort: { _id: 1 } },
     ]).toArray(),
   },
 ];

@@ -1,18 +1,16 @@
 //! Stage 8d: SDK cluster routing + client directory cache (CLUSTER_SPEC §13, §22.5).
 
-
 use residiuum_cluster::ClusterConfig;
 use residiuum_sdk::{
-    json, parse_residiuum_url, ClientDirectoryCache, ClusterConfig as SdkClusterConfig, Residiuum,
-    DirectorySnapshot, ErrorCode, Filter, NodeId,
+    json, parse_residiuum_url, ClientDirectoryCache, ClusterConfig as SdkClusterConfig,
+    DirectorySnapshot, ErrorCode, Filter, NodeId, Residiuum,
 };
 
-
+use residiuum_server::{serve_cluster_node, serve_store_with, ServeOptions};
 use std::net::TcpListener;
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
-use residiuum_server::{serve_cluster_node, serve_store_with, ServeOptions};
 
 #[test]
 fn create_cluster_same_collection_api() {
@@ -153,11 +151,7 @@ fn remote_directory_op_and_cache() {
     let path_c = path.clone();
     let bind_c = bind.clone();
     thread::spawn(move || {
-        let _ = serve_store_with(
-            path_c,
-            &bind_c,
-            ServeOptions::new().legacy_token_server(),
-        );
+        let _ = serve_store_with(path_c, &bind_c, ServeOptions::new().legacy_token_server());
     });
     wait_for(&bind);
 
@@ -204,8 +198,6 @@ fn partition_unavailable_code_is_stable() {
 fn multi_hop_and_kill_node_survivor() {
     use residiuum_sdk::{PutOptions, RemoteClient};
 
-
-
     let dir = tempdir().unwrap();
     let root = dir.path().join("c");
     {
@@ -230,7 +222,9 @@ fn multi_hop_and_kill_node_survivor() {
                 &root_t,
                 idx,
                 &bind_t,
-                ServeOptions::new().legacy_token_server().experimental_network_cluster(true),
+                ServeOptions::new()
+                    .legacy_token_server()
+                    .experimental_network_cluster(true),
             );
         });
         wait_for(bind);
@@ -274,8 +268,8 @@ fn multi_hop_and_kill_node_survivor() {
     // Kill-node story: connect only to survivors 0 and 1 (node 2 "down" from client
     // perspective). Directory still lists node 2, but ops whose leader is 0 or 1 work.
     drop(client);
-    let mut survivor =
-        RemoteClient::connect(&binds[1], format!("residiuum://{}/c", binds[1])).expect("survivor seed");
+    let mut survivor = RemoteClient::connect(&binds[1], format!("residiuum://{}/c", binds[1]))
+        .expect("survivor seed");
     assert!(survivor.ping().is_ok());
     assert!(survivor.directory_cache().is_some());
     // Seed written in-process should still be readable on some node store.

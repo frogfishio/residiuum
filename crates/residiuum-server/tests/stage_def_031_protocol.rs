@@ -4,10 +4,14 @@
 //! frame refusal before allocation, diagnostic line profile, and golden
 //! fixtures under `tests/fixtures/protocol/`.
 
+use residiuum_sdk::{
+    client_handshake, encode_frame, json, read_frame, write_frame, write_json_frame,
+    write_reject_frame, ConnectOptions, ErrorCode, Handshake, HandshakeMsg, Residiuum,
+    DEFAULT_MAX_FRAME_BYTES, FEATURE_JSON_RPC_V1, HANDSHAKE_MAX_FRAME_BYTES, PROTOCOL_MAJOR,
+    PROTOCOL_PROFILE, REQUIRED_FEATURES, REQUIRED_WRITE_RECEIPT_FIELDS, RPC_WIRE_LABEL,
+};
 
-use residiuum_sdk::{client_handshake, encode_frame, json, read_frame, write_frame, write_json_frame, write_reject_frame, ConnectOptions, Residiuum, ErrorCode, Handshake, HandshakeMsg, DEFAULT_MAX_FRAME_BYTES, FEATURE_JSON_RPC_V1, HANDSHAKE_MAX_FRAME_BYTES, PROTOCOL_MAJOR, PROTOCOL_PROFILE, REQUIRED_FEATURES, REQUIRED_WRITE_RECEIPT_FIELDS, RPC_WIRE_LABEL};
-
-
+use residiuum_server::{serve_store_with, ServeOptions, SERVER_PROFILE};
 use std::io::{BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -16,7 +20,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
-use residiuum_server::{SERVER_PROFILE, ServeOptions, serve_store_with};
 
 fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/protocol")
@@ -168,9 +171,7 @@ fn legacy_line_client_fails_clearly() {
         .set_read_timeout(Some(Duration::from_secs(3)))
         .unwrap();
     // Old client: raw line JSON without handshake.
-    stream
-        .write_all(br#"{"id":1,"op":"ping"}"#)
-        .unwrap();
+    stream.write_all(br#"{"id":1,"op":"ping"}"#).unwrap();
     stream.write_all(b"\n").unwrap();
     stream.flush().unwrap();
 
@@ -194,7 +195,10 @@ fn legacy_line_client_fails_clearly() {
             // Peer reset after reject is also fine.
             let s = e.to_string();
             assert!(
-                s.contains("protocol") || s.contains("closed") || s.contains("reset") || s.contains("Connection"),
+                s.contains("protocol")
+                    || s.contains("closed")
+                    || s.contains("reset")
+                    || s.contains("Connection"),
                 "unexpected error: {s}"
             );
         }
@@ -228,10 +232,7 @@ fn unsupported_protocol_major_rejected() {
         .unwrap();
     let hs: Handshake = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(hs.msg, HandshakeMsg::Reject);
-    assert_eq!(
-        hs.code.as_deref(),
-        Some("protocol_version_unsupported")
-    );
+    assert_eq!(hs.code.as_deref(), Some("protocol_version_unsupported"));
 
     shutdown.store(true, Ordering::SeqCst);
     thread::sleep(Duration::from_millis(100));
@@ -294,7 +295,9 @@ fn diagnostic_line_protocol_opt_in() {
     let shutdown = spawn_server(
         path,
         &bind,
-        ServeOptions::new().legacy_token_server().diagnostic_line_protocol(true),
+        ServeOptions::new()
+            .legacy_token_server()
+            .diagnostic_line_protocol(true),
     );
 
     // Raw line client works only against diagnostic servers.
@@ -302,9 +305,7 @@ fn diagnostic_line_protocol_opt_in() {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    stream
-        .write_all(br#"{"id":9,"op":"ping"}"#)
-        .unwrap();
+    stream.write_all(br#"{"id":9,"op":"ping"}"#).unwrap();
     stream.write_all(b"\n").unwrap();
     stream.flush().unwrap();
     let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -317,11 +318,9 @@ fn diagnostic_line_protocol_opt_in() {
 
     // Matching diagnostic client options.
     let url = format!("residiuum://{bind}/app");
-    let mut db = Residiuum::connect_with(
-        &url,
-        ConnectOptions::new().diagnostic_line_protocol(true),
-    )
-    .unwrap();
+    let mut db =
+        Residiuum::connect_with(&url, ConnectOptions::new().diagnostic_line_protocol(true))
+            .unwrap();
     db.collection("c")
         .unwrap()
         .put("x", &json!({"ok": true}))
@@ -335,8 +334,12 @@ fn diagnostic_line_protocol_opt_in() {
 fn unsolicited_reject_frame_is_parseable() {
     // Overload path writes a framed reject without a prior hello.
     let mut buf = Vec::new();
-    write_reject_frame(&mut buf, "resource_limit", "connection limit exceeded (max 2)")
-        .unwrap();
+    write_reject_frame(
+        &mut buf,
+        "resource_limit",
+        "connection limit exceeded (max 2)",
+    )
+    .unwrap();
     let mut cur = std::io::Cursor::new(buf);
     let bytes = read_frame(&mut cur, HANDSHAKE_MAX_FRAME_BYTES)
         .unwrap()

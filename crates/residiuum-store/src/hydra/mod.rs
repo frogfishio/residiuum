@@ -27,7 +27,8 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::thread;
 
 pub use select::{
-    classify_keys, select_index_kind, HydraBuildOptions, IndexKind, KeyShape, DEFAULT_TINY_THRESHOLD,
+    classify_keys, select_index_kind, HydraBuildOptions, IndexKind, KeyShape,
+    DEFAULT_TINY_THRESHOLD,
 };
 
 /// One subject key mapped to a byte offset inside its segment file.
@@ -135,10 +136,7 @@ pub fn build_sorted(sorted: &[(Vec<u8>, u64)], opts: &HydraBuildOptions) -> Hydr
 ///
 /// Each batch is built on a worker; order of results matches input order.
 /// Uses at most `opts.threads` workers (clamped to `1..=num_cpus_estimate`).
-pub fn build_many(
-    batches: &[Vec<SegmentRecord>],
-    opts: &HydraBuildOptions,
-) -> Vec<HydraIndex> {
+pub fn build_many(batches: &[Vec<SegmentRecord>], opts: &HydraBuildOptions) -> Vec<HydraIndex> {
     if batches.is_empty() {
         return Vec::new();
     }
@@ -398,7 +396,12 @@ mod tests {
         let page = idx.scan_after(Some(b"05"), 4);
         assert_eq!(
             page.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
-            vec![b"06".to_vec(), b"07".to_vec(), b"08".to_vec(), b"09".to_vec()]
+            vec![
+                b"06".to_vec(),
+                b"07".to_vec(),
+                b"08".to_vec(),
+                b"09".to_vec()
+            ]
         );
     }
 
@@ -437,9 +440,7 @@ mod tests {
             ),
             (
                 HydraBuildOptions::default(),
-                (0..400u64)
-                    .map(|i| rec(&i.to_be_bytes(), i * 8))
-                    .collect(),
+                (0..400u64).map(|i| rec(&i.to_be_bytes(), i * 8)).collect(),
             ),
             (
                 HydraBuildOptions::default(),
@@ -495,12 +496,7 @@ mod tests {
 
     #[test]
     fn last_duplicate_wins() {
-        let records = vec![
-            rec(b"a", 1),
-            rec(b"b", 2),
-            rec(b"a", 99),
-            rec(b"b", 3),
-        ];
+        let records = vec![rec(b"a", 1), rec(b"b", 2), rec(b"a", 99), rec(b"b", 3)];
         let idx = build(&records, &HydraBuildOptions::default());
         assert_eq!(idx.get(b"a"), Some(99));
         assert_eq!(idx.get(b"b"), Some(3));

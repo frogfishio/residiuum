@@ -25,22 +25,12 @@ fn fp_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn seed_history(store: &mut Store) {
-    store
-        .put("keep", b"v1", DurabilityMode::Durable)
-        .unwrap();
-    store
-        .put("drop", b"gone", DurabilityMode::Durable)
-        .unwrap();
-    store
-        .put("keep", b"v2", DurabilityMode::Durable)
-        .unwrap();
-    store
-        .delete("drop", DurabilityMode::Durable)
-        .unwrap();
+    store.put("keep", b"v1", DurabilityMode::Durable).unwrap();
+    store.put("drop", b"gone", DurabilityMode::Durable).unwrap();
+    store.put("keep", b"v2", DurabilityMode::Durable).unwrap();
+    store.delete("drop", DurabilityMode::Durable).unwrap();
     store.seal_active().unwrap();
-    store
-        .put("extra", b"e1", DurabilityMode::Durable)
-        .unwrap();
+    store.put("extra", b"e1", DurabilityMode::Durable).unwrap();
     store.seal_active().unwrap();
 }
 
@@ -135,7 +125,10 @@ fn reclaim_after_activate_measures_bytes_and_keeps_live() {
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("residiuum"))
         .count();
-    assert_eq!(remaining, 1, "only the compacted output segment should remain");
+    assert_eq!(
+        remaining, 1,
+        "only the compacted output segment should remain"
+    );
     assert_eq!(
         store.get("keep").unwrap().as_deref(),
         Some(b"v2".as_slice())
@@ -253,7 +246,10 @@ fn cancel_before_activate_removes_output() {
     if job.phase == CompactPhase::Created {
         let out_name = format!("{}.residiuum", job.output_segment_id);
         let out_path = root.join("segments").join(&out_name);
-        assert!(out_path.is_file(), "output segment should exist before cancel");
+        assert!(
+            out_path.is_file(),
+            "output segment should exist before cancel"
+        );
         let cancelled = store.cancel_compact_job(&job_id).unwrap();
         assert_eq!(cancelled.phase, CompactPhase::Cancelled);
         assert!(

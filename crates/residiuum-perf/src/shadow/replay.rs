@@ -8,7 +8,11 @@ pub enum ReplayError {
     #[error("empty plan")]
     Empty,
     #[error("seq gap at index {index}: expected {expected}, got {got}")]
-    SeqGap { index: usize, expected: u32, got: u32 },
+    SeqGap {
+        index: usize,
+        expected: u32,
+        got: u32,
+    },
     #[error("planned_bytes mismatch: header {header}, sum {sum}")]
     BytesMismatch { header: u64, sum: u64 },
     #[error("shape_hash mismatch")]

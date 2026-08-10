@@ -457,7 +457,12 @@ fn decode_secondary(bytes: &[u8], store_id: [u8; 16]) -> Option<SecondaryIndex> 
         cursor += 32;
         let resume_after_subject = read_bytes(bytes, &mut cursor)?;
         let failure_reason = read_str(bytes, &mut cursor)?;
-        (build_id, source_frontier, resume_after_subject, failure_reason)
+        (
+            build_id,
+            source_frontier,
+            resume_after_subject,
+            failure_reason,
+        )
     } else {
         ([0u8; 16], [0u8; 32], Vec::new(), String::new())
     };

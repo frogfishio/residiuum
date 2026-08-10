@@ -153,7 +153,10 @@ fn h0(key: &[u8], salt: u64) -> u64 {
 }
 
 fn h1(key: &[u8], salt: u64, d: u32) -> u64 {
-    mix(hash_bytes(key, salt ^ (d as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)))
+    mix(hash_bytes(
+        key,
+        salt ^ (d as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+    ))
 }
 
 fn fingerprint(key: &[u8], salt: u64) -> u64 {

@@ -71,7 +71,10 @@ fn license_prints_notice() {
 
 #[test]
 fn help_mentions_core_workflows() {
-    let output = sda_bin().arg("--help").output().expect("run residiuum-sda --help");
+    let output = sda_bin()
+        .arg("--help")
+        .output()
+        .expect("run residiuum-sda --help");
 
     assert!(
         output.status.success(),

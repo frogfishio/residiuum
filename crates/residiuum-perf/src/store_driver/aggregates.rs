@@ -142,7 +142,11 @@ impl WorkloadContract {
             "duration_and_byte_floors"
         };
         let smoke_ops_limit = if smoke {
-            Some(cell.op_count.min(crate::campaign::RunClass::SMOKE_MAX_OPS).max(1))
+            Some(
+                cell.op_count
+                    .min(crate::campaign::RunClass::SMOKE_MAX_OPS)
+                    .max(1),
+            )
         } else {
             None
         };
@@ -362,7 +366,14 @@ impl ObserverOverheadReport {
         off_bytes: u64,
         on_bytes: u64,
     ) -> Self {
-        let pair = OverheadPairSample::from_times(0, "off_first", off_e2e_ns, on_e2e_ns, off_bytes, on_bytes);
+        let pair = OverheadPairSample::from_times(
+            0,
+            "off_first",
+            off_e2e_ns,
+            on_e2e_ns,
+            off_bytes,
+            on_bytes,
+        );
         Self::from_pairs(
             cell_id,
             seed,
@@ -447,10 +458,10 @@ impl ObserverOverheadReport {
         let sum_on: u128 = pairs.iter().map(|p| p.probe_on_e2e_ns as u128).sum();
         let mean_off = (sum_off / pairs.len() as u128) as u64;
         let mean_on = (sum_on / pairs.len() as u128) as u64;
-        let mean_off_bytes = pairs.iter().map(|p| p.probe_off_logical_bytes).sum::<u64>()
-            / pairs.len() as u64;
-        let mean_on_bytes = pairs.iter().map(|p| p.probe_on_logical_bytes).sum::<u64>()
-            / pairs.len() as u64;
+        let mean_off_bytes =
+            pairs.iter().map(|p| p.probe_off_logical_bytes).sum::<u64>() / pairs.len() as u64;
+        let mean_on_bytes =
+            pairs.iter().map(|p| p.probe_on_logical_bytes).sum::<u64>() / pairs.len() as u64;
         let mean_ops = pairs
             .iter()
             .map(|p| p.probe_off_ops.saturating_add(p.probe_on_ops) / 2)
@@ -508,7 +519,8 @@ impl ObserverOverheadReport {
         }
         if mean_frac < 0.0 || median < 0.0 {
             notes.push(
-                "probe-on faster than probe-off on average (noise); negative overhead reported".into(),
+                "probe-on faster than probe-off on average (noise); negative overhead reported"
+                    .into(),
             );
         }
         if !within_budget {
@@ -600,10 +612,7 @@ mod tests {
         assert_eq!(r.pair_count, 4);
         assert!(r.median_overhead_fraction < 0.02);
         assert!(r.within_budget);
-        assert_eq!(
-            r.pairs.iter().filter(|p| p.order == "off_first").count(),
-            2
-        );
+        assert_eq!(r.pairs.iter().filter(|p| p.order == "off_first").count(), 2);
         assert_eq!(r.pairs.iter().filter(|p| p.order == "on_first").count(), 2);
     }
 
@@ -624,6 +633,9 @@ mod tests {
             pairs,
         );
         assert!(!r.within_budget);
-        assert!(r.notes.iter().any(|n| n.contains("OVERHEAD_BUDGET_EXCEEDED")));
+        assert!(r
+            .notes
+            .iter()
+            .any(|n| n.contains("OVERHEAD_BUDGET_EXCEEDED")));
     }
 }

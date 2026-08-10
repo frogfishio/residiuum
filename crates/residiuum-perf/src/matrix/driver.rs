@@ -157,7 +157,11 @@ pub fn run_cell(cfg: &RunCellConfig) -> Result<CellRunReport, MatrixError> {
         stages,
         delays: InjectedDelays {
             queue_ns: 1,
-            lock_ns: if cell.features.features.len() > 2 { 2 } else { 0 },
+            lock_ns: if cell.features.features.len() > 2 {
+                2
+            } else {
+                0
+            },
             cpu_burn_ns: 0,
             stage_extra: vec![],
         },
@@ -165,7 +169,10 @@ pub fn run_cell(cfg: &RunCellConfig) -> Result<CellRunReport, MatrixError> {
     })
     .map_err(|e: PipelineError| MatrixError::Msg(e.to_string()))?;
     e2e = e2e.saturating_add(l3.e2e_ns);
-    messages.push(format!("L3 digest {}", &l3.output_digest_hex[..16.min(l3.output_digest_hex.len())]));
+    messages.push(format!(
+        "L3 digest {}",
+        &l3.output_digest_hex[..16.min(l3.output_digest_hex.len())]
+    ));
 
     // Operation stream with ledger.
     let ops = cell.op_count.min(64);
@@ -209,7 +216,9 @@ pub fn run_cell(cfg: &RunCellConfig) -> Result<CellRunReport, MatrixError> {
     }
     let reopen_ok = ledger.verify_reopen(&records).is_ok();
     if !reopen_ok {
-        return Err(MatrixError::InvalidCorrectness("reopen digest mismatch".into()));
+        return Err(MatrixError::InvalidCorrectness(
+            "reopen digest mismatch".into(),
+        ));
     }
 
     // L2 shadow for physical shape matching.

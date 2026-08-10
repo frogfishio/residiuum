@@ -8,8 +8,9 @@ use residiuum_store::{
     action_for_failure_class, all_cells, arm_failpoint_once, ci_subset_cells, clear_failpoints,
     composed_schedule, enable_failpoint_hit_proof, load_crash_matrix, load_failure_combinations,
     matrix_totals, probe_linux_loopback_lane, require_failpoint_visited, validate_crash_matrix,
-    validate_reopen_expectation, CampaignReport, CrashController, CrashOutcomeClass, DurabilityMode,
-    FailpointAction, FilesystemImageHarness, PortableFsImage, ScheduleDecision, Store, StoreError,
+    validate_reopen_expectation, CampaignReport, CrashController, CrashOutcomeClass,
+    DurabilityMode, FailpointAction, FilesystemImageHarness, PortableFsImage, ScheduleDecision,
+    Store, StoreError,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -74,11 +75,7 @@ fn arm_fault(name: &str, fault: Option<&str>) {
 }
 
 /// Drive put_durable-style cells used by most matrix ops; returns (acked, visible, prior_ok).
-fn drive_put_cell(
-    path: &Path,
-    failpoint: &str,
-    fault: Option<&str>,
-) -> (bool, bool, bool) {
+fn drive_put_cell(path: &Path, failpoint: &str, fault: Option<&str>) -> (bool, bool, bool) {
     seed_prior(path);
     if fault == Some("process_abort") {
         let ctrl = CrashController::resolve().expect("crash child");
@@ -140,25 +137,23 @@ fn csq5_ci_subset_and_full_matrix_cells_run() {
         }
         let dir = tempdir().unwrap();
         let path = dir.path().join("s");
-        let (acked, visible, prior) =
-            drive_put_cell(&path, &fp.name, fp.fault.as_deref());
+        let (acked, visible, prior) = drive_put_cell(&path, &fp.name, fp.fault.as_deref());
         if fp.fault.as_deref() != Some("process_abort") {
             // Hit proof when in-process
             let _ = require_failpoint_visited(&fp.name);
         }
-        let class = validate_reopen_expectation(
-            &fp.expected_on_reopen,
-            acked,
-            visible,
-            prior,
-        )
-        .unwrap_or_else(|e| panic!("cell {}/{}: {e}", op.id, fp.name));
+        let class = validate_reopen_expectation(&fp.expected_on_reopen, acked, visible, prior)
+            .unwrap_or_else(|e| panic!("cell {}/{}: {e}", op.id, fp.name));
         report.record_outcome(class);
         report.ci_subset_ran += 1;
         report.matrix_cells_ran += 1;
         clear_failpoints();
     }
-    assert!(report.ci_subset_ran >= 3, "ran {} ci cells", report.ci_subset_ran);
+    assert!(
+        report.ci_subset_ran >= 3,
+        "ran {} ci cells",
+        report.ci_subset_ran
+    );
 
     // Full matrix: every put_* cell (not only ci_subset)
     report.lane_ran("crash_matrix_full_put_family");
@@ -177,15 +172,9 @@ fn csq5_ci_subset_and_full_matrix_cells_run() {
         }
         let dir = tempdir().unwrap();
         let path = dir.path().join("s");
-        let (acked, visible, prior) =
-            drive_put_cell(&path, &fp.name, fp.fault.as_deref());
-        let class = validate_reopen_expectation(
-            &fp.expected_on_reopen,
-            acked,
-            visible,
-            prior,
-        )
-        .unwrap_or_else(|e| panic!("full cell {}/{}: {e}", op.id, fp.name));
+        let (acked, visible, prior) = drive_put_cell(&path, &fp.name, fp.fault.as_deref());
+        let class = validate_reopen_expectation(&fp.expected_on_reopen, acked, visible, prior)
+            .unwrap_or_else(|e| panic!("full cell {}/{}: {e}", op.id, fp.name));
         report.record_outcome(class);
         report.matrix_cells_ran += 1;
         clear_failpoints();
@@ -263,10 +252,7 @@ fn csq5_composed_failure_pairs_execute() {
                             "store.active.write_tail.short_write",
                             FailpointAction::ShortWrite,
                         ),
-                        "enospc" => (
-                            "store.active.write_tail.before",
-                            FailpointAction::IoEnospc,
-                        ),
+                        "enospc" => ("store.active.write_tail.before", FailpointAction::IoEnospc),
                         "permission" => (
                             "store.active.write_tail.before",
                             FailpointAction::IoPermission,
@@ -323,10 +309,7 @@ fn csq5_repeated_reopen_idempotent_after_fault() {
     seed_prior(&path);
     {
         let mut s = Store::open(&path).unwrap();
-        arm_failpoint_once(
-            "store.active.write_tail.before",
-            FailpointAction::Error,
-        );
+        arm_failpoint_once("store.active.write_tail.before", FailpointAction::Error);
         let _ = s.put("k", b"v", DurabilityMode::Durable).unwrap_err();
         drop(s);
         clear_failpoints();

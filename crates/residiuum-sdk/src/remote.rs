@@ -21,13 +21,13 @@ use crate::error::Error;
 use crate::filter::{Filter, QueryOptions, SortOrder};
 use crate::history::{KeyHistory, Version};
 use crate::indexes::IndexInfo;
+use crate::receipt::{DeleteReceipt, PutOptions, WriteReceipt};
+use crate::subject::{encode_subject, validate_collection_name, validate_key};
+use crate::tls::{client_connect, IoStream, TlsClientOptions};
 use crate::{
     negotiate_features, negotiate_max_frame, parse_handshake, read_frame, write_json_frame,
     Handshake, HandshakeMsg, NegotiatedSession, HANDSHAKE_MAX_FRAME_BYTES,
 };
-use crate::receipt::{DeleteReceipt, PutOptions, WriteReceipt};
-use crate::subject::{encode_subject, validate_collection_name, validate_key};
-use crate::tls::{client_connect, IoStream, TlsClientOptions};
 use residiuum_store::{
     random_id, ByteRange, DurabilityMode, IndexState, LogicalExtent, PayloadResult,
 };
@@ -1257,9 +1257,8 @@ fn parse_hex16_strict(s: &str, field: &str) -> Result<[u8; 16], Error> {
     }
     let mut out = [0u8; 16];
     for i in 0..16 {
-        let byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|e| {
-            Error::ProtocolViolation(format!("invalid hex id for `{field}`: {e}"))
-        })?;
+        let byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+            .map_err(|e| Error::ProtocolViolation(format!("invalid hex id for `{field}`: {e}")))?;
         out[i] = byte;
     }
     Ok(out)
@@ -1296,9 +1295,7 @@ fn open_client_stream(addr: &str, options: &ConnectOptions) -> Result<IoStream, 
 }
 
 /// Client handshake over a buffered duplex stream (single ownership).
-fn client_handshake_buffered(
-    reader: &mut BufReader<IoStream>,
-) -> Result<NegotiatedSession, Error> {
+fn client_handshake_buffered(reader: &mut BufReader<IoStream>) -> Result<NegotiatedSession, Error> {
     write_json_frame(reader.get_mut(), &Handshake::hello())?;
     let payload = match read_frame(reader, HANDSHAKE_MAX_FRAME_BYTES)? {
         Some(p) => p,

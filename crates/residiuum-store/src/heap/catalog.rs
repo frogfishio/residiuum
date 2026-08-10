@@ -210,7 +210,12 @@ impl HeapMetaLayout {
     }
 
     /// Object descriptor root (collections or streams).
-    pub fn object_dir(&self, heap_id: &[u8; 16], kind: ObjectKind, object_id: &[u8; 16]) -> PathBuf {
+    pub fn object_dir(
+        &self,
+        heap_id: &[u8; 16],
+        kind: ObjectKind,
+        object_id: &[u8; 16],
+    ) -> PathBuf {
         let sub = match kind {
             ObjectKind::Collection => "collections",
             ObjectKind::Stream => "streams",
@@ -382,7 +387,12 @@ fn encode_object_frame(
     Ok((frame, hash))
 }
 
-fn write_chain_frame(dir: &Path, sequence: u64, hash: &[u8; 32], frame: &[u8]) -> Result<(), StoreError> {
+fn write_chain_frame(
+    dir: &Path,
+    sequence: u64,
+    hash: &[u8; 32],
+    frame: &[u8],
+) -> Result<(), StoreError> {
     fs::create_dir_all(dir)?;
     let path = dir.join(chain_frame_name(sequence, hash));
     if path.exists() {
@@ -503,7 +513,9 @@ pub fn rebuild_object_entry_from_chain(
         }
         let decoded = load_verified_frame(&path)?;
         if decoded.header.known_kind() != Some(kind.as_frame_kind()) {
-            return Err(StoreError::HeapAdmit("object kind mismatch in chain".into()));
+            return Err(StoreError::HeapAdmit(
+                "object kind mismatch in chain".into(),
+            ));
         }
         let body_hash = descriptor_hash(&decoded.body);
         if body_hash != file_hash {
@@ -533,7 +545,11 @@ pub fn rebuild_object_entry_from_chain(
     Ok(tip)
 }
 
-fn list_object_ids(layout: &HeapMetaLayout, heap_id: &[u8; 16], kind: ObjectKind) -> Result<Vec<[u8; 16]>, StoreError> {
+fn list_object_ids(
+    layout: &HeapMetaLayout,
+    heap_id: &[u8; 16],
+    kind: ObjectKind,
+) -> Result<Vec<[u8; 16]>, StoreError> {
     let sub = match kind {
         ObjectKind::Collection => "collections",
         ObjectKind::Stream => "streams",
@@ -598,11 +614,8 @@ fn encode_heap_catalog(entries: &[HeapCatalogEntry]) -> Result<Vec<u8>, StoreErr
             (7, CborValue::Bytes(e.origin_deployment_id.to_vec())),
         ]));
     }
-    encode_deterministic_uint_map(&[
-        (1u64, CborValue::Uint(1)),
-        (2, CborValue::Array(arr)),
-    ])
-    .map_err(|e| StoreError::HeapAdmit(e.to_string()))
+    encode_deterministic_uint_map(&[(1u64, CborValue::Uint(1)), (2, CborValue::Array(arr))])
+        .map_err(|e| StoreError::HeapAdmit(e.to_string()))
 }
 
 fn decode_heap_catalog(bytes: &[u8]) -> Result<Vec<HeapCatalogEntry>, StoreError> {
@@ -635,9 +648,8 @@ fn decode_heap_catalog(bytes: &[u8]) -> Result<Vec<HeapCatalogEntry>, StoreError
                                 4 => hash = Some(expect_b32(&fv)?),
                                 5 => {
                                     state = Some(
-                                        HeapDescriptorState::from_u64(expect_uint(&fv)?).map_err(
-                                            |e| StoreError::HeapAdmit(e.to_string()),
-                                        )?,
+                                        HeapDescriptorState::from_u64(expect_uint(&fv)?)
+                                            .map_err(|e| StoreError::HeapAdmit(e.to_string()))?,
                                     )
                                 }
                                 6 => sequence = Some(expect_uint(&fv)?),
@@ -646,8 +658,9 @@ fn decode_heap_catalog(bytes: &[u8]) -> Result<Vec<HeapCatalogEntry>, StoreError
                             }
                         }
                         out.push(HeapCatalogEntry {
-                            heap_id: heap_id
-                                .ok_or_else(|| StoreError::HeapAdmit("heap catalog heap_id".into()))?,
+                            heap_id: heap_id.ok_or_else(|| {
+                                StoreError::HeapAdmit("heap catalog heap_id".into())
+                            })?,
                             name: name
                                 .ok_or_else(|| StoreError::HeapAdmit("heap catalog name".into()))?,
                             aliases: aliases.unwrap_or_default(),
@@ -698,7 +711,7 @@ fn encode_object_catalog(
     .map_err(|e| StoreError::HeapAdmit(e.to_string()))
 }
 
-fn decode_object_catalog(bytes: &[u8]) -> Result<( [u8; 16], Vec<ObjectCatalogEntry>), StoreError> {
+fn decode_object_catalog(bytes: &[u8]) -> Result<([u8; 16], Vec<ObjectCatalogEntry>), StoreError> {
     let map = residiuum_format::decode_deterministic_uint_map(bytes)
         .map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
     let mut version = None;
@@ -710,8 +723,9 @@ fn decode_object_catalog(bytes: &[u8]) -> Result<( [u8; 16], Vec<ObjectCatalogEn
             2 => heap_id = Some(expect_b16(&v)?),
             3 => match v {
                 CborValue::Array(items) => {
-                    let hid = heap_id
-                        .ok_or_else(|| StoreError::HeapAdmit("object catalog heap before entries".into()))?;
+                    let hid = heap_id.ok_or_else(|| {
+                        StoreError::HeapAdmit("object catalog heap before entries".into())
+                    })?;
                     let mut out = Vec::with_capacity(items.len());
                     for item in items {
                         let CborValue::Map(fields) = item else {
@@ -732,9 +746,8 @@ fn decode_object_catalog(bytes: &[u8]) -> Result<( [u8; 16], Vec<ObjectCatalogEn
                                 4 => hash = Some(expect_b32(&fv)?),
                                 5 => {
                                     state = Some(
-                                        ObjectDescriptorState::from_u64(expect_uint(&fv)?).map_err(
-                                            |e| StoreError::HeapAdmit(e.to_string()),
-                                        )?,
+                                        ObjectDescriptorState::from_u64(expect_uint(&fv)?)
+                                            .map_err(|e| StoreError::HeapAdmit(e.to_string()))?,
                                     )
                                 }
                                 6 => sequence = Some(expect_uint(&fv)?),
@@ -747,7 +760,8 @@ fn decode_object_catalog(bytes: &[u8]) -> Result<( [u8; 16], Vec<ObjectCatalogEn
                             object_id: object_id
                                 .ok_or_else(|| StoreError::HeapAdmit("object id".into()))?,
                             kind: kind.unwrap_or(ObjectKind::Collection),
-                            name: name.ok_or_else(|| StoreError::HeapAdmit("object name".into()))?,
+                            name: name
+                                .ok_or_else(|| StoreError::HeapAdmit("object name".into()))?,
                             aliases: aliases.unwrap_or_default(),
                             descriptor_hash: hash
                                 .ok_or_else(|| StoreError::HeapAdmit("object hash".into()))?,
@@ -771,10 +785,7 @@ fn decode_object_catalog(bytes: &[u8]) -> Result<( [u8; 16], Vec<ObjectCatalogEn
     ))
 }
 
-fn write_admin_receipt(
-    layout: &HeapMetaLayout,
-    receipt: &AdminReceipt,
-) -> Result<(), StoreError> {
+fn write_admin_receipt(layout: &HeapMetaLayout, receipt: &AdminReceipt) -> Result<(), StoreError> {
     let dir = layout.receipts_dir(&receipt.heap_id);
     fs::create_dir_all(&dir)?;
     let obj = match receipt.object_id {
@@ -840,7 +851,10 @@ pub fn stage_heap_genesis(
     let (frame, hash) = encode_heap_frame(&desc)?;
     let dir = layout.staging_dir(&staging_id);
     fs::create_dir_all(&dir)?;
-    write_atomic(&dir.join(format!("00000000000000000001-{}.frame", hex32(&hash))), &frame)?;
+    write_atomic(
+        &dir.join(format!("00000000000000000001-{}.frame", hex32(&hash))),
+        &frame,
+    )?;
     let manifest = encode_deterministic_uint_map(&[
         (1u64, CborValue::Uint(1)),
         (2, CborValue::Bytes(staging_id.to_vec())),
@@ -919,8 +933,8 @@ pub fn publish_staged_genesis(
     if body_hash != staged.descriptor_hash {
         return Err(StoreError::HeapAdmit("staged body hash conflict".into()));
     }
-    let desc = decode_heap_descriptor(&decoded.body)
-        .map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
+    let desc =
+        decode_heap_descriptor(&decoded.body).map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
     if desc.heap_id != staged.heap_id || desc.sequence != 1 {
         return Err(StoreError::HeapAdmit("staged descriptor invalid".into()));
     }
@@ -934,12 +948,7 @@ pub fn publish_staged_genesis(
     // Remove staging (published bytes live only under heaps/).
     let _ = fs::remove_dir_all(&dir);
     rebuild_and_persist_all_catalogs(layout)?;
-    let receipt = mint_receipt(
-        "publish_staged_genesis",
-        staged.heap_id,
-        None,
-        body_hash,
-    )?;
+    let receipt = mint_receipt("publish_staged_genesis", staged.heap_id, None, body_hash)?;
     write_admin_receipt(layout, &receipt)?;
     Ok(receipt)
 }
@@ -956,8 +965,8 @@ fn tip_heap_descriptor(
         .find(|(s, h, _)| *s == entry.sequence && h == &entry.descriptor_hash)
         .ok_or_else(|| StoreError::HeapAdmit("tip frame missing".into()))?;
     let decoded = load_verified_frame(&path)?;
-    let desc = decode_heap_descriptor(&decoded.body)
-        .map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
+    let desc =
+        decode_heap_descriptor(&decoded.body).map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
     Ok((desc, entry.descriptor_hash))
 }
 
@@ -1100,10 +1109,7 @@ pub fn create_object(
         &hash,
         &frame,
     )?;
-    write_head_hint(
-        &layout.object_head_path(heap_id, kind, &object_id),
-        &hash,
-    )?;
+    write_head_hint(&layout.object_head_path(heap_id, kind, &object_id), &hash)?;
     rebuild_and_persist_all_catalogs(layout)?;
     let receipt = mint_receipt(
         match kind {
@@ -1147,10 +1153,7 @@ pub fn rename_object(
         &hash,
         &frame,
     )?;
-    write_head_hint(
-        &layout.object_head_path(heap_id, kind, object_id),
-        &hash,
-    )?;
+    write_head_hint(&layout.object_head_path(heap_id, kind, object_id), &hash)?;
     rebuild_and_persist_all_catalogs(layout)?;
     let receipt = mint_receipt("rename_object", *heap_id, Some(*object_id), hash)?;
     write_admin_receipt(layout, &receipt)?;
@@ -1178,10 +1181,7 @@ pub fn retire_object(
         &hash,
         &frame,
     )?;
-    write_head_hint(
-        &layout.object_head_path(heap_id, kind, object_id),
-        &hash,
-    )?;
+    write_head_hint(&layout.object_head_path(heap_id, kind, object_id), &hash)?;
     rebuild_and_persist_all_catalogs(layout)?;
     let receipt = mint_receipt("retire_object", *heap_id, Some(*object_id), hash)?;
     write_admin_receipt(layout, &receipt)?;
@@ -1223,7 +1223,10 @@ pub fn delete_rebuildable_catalogs(layout: &HeapMetaLayout) -> Result<(), StoreE
 }
 
 /// Result of rebuilding published catalogs from descriptor chains.
-pub type RebuiltCatalogs = (Vec<HeapCatalogEntry>, BTreeMap<[u8; 16], Vec<ObjectCatalogEntry>>);
+pub type RebuiltCatalogs = (
+    Vec<HeapCatalogEntry>,
+    BTreeMap<[u8; 16], Vec<ObjectCatalogEntry>>,
+);
 
 /// Rebuild all rebuildable catalogs from surviving descriptor chains.
 pub fn rebuild_and_persist_all_catalogs(
@@ -1281,7 +1284,9 @@ pub fn rebuild_and_persist_all_catalogs(
 }
 
 /// Load the deployment-wide rebuildable heap catalog (accelerator only).
-pub fn try_load_heap_catalog(layout: &HeapMetaLayout) -> Result<Option<Vec<HeapCatalogEntry>>, StoreError> {
+pub fn try_load_heap_catalog(
+    layout: &HeapMetaLayout,
+) -> Result<Option<Vec<HeapCatalogEntry>>, StoreError> {
     let path = layout.heap_catalog_path();
     if !path.is_file() {
         return Ok(None);
@@ -1300,7 +1305,9 @@ pub fn try_load_collections_catalog(
     }
     let (hid, entries) = decode_object_catalog(&fs::read(path)?)?;
     if &hid != heap_id {
-        return Err(StoreError::HeapAdmit("collections catalog heap mismatch".into()));
+        return Err(StoreError::HeapAdmit(
+            "collections catalog heap mismatch".into(),
+        ));
     }
     Ok(Some(entries))
 }
@@ -1316,7 +1323,9 @@ pub fn try_load_streams_catalog(
     }
     let (hid, entries) = decode_object_catalog(&fs::read(path)?)?;
     if &hid != heap_id {
-        return Err(StoreError::HeapAdmit("streams catalog heap mismatch".into()));
+        return Err(StoreError::HeapAdmit(
+            "streams catalog heap mismatch".into(),
+        ));
     }
     Ok(Some(entries))
 }
@@ -1363,14 +1372,8 @@ mod tests {
         let dir = tempdir().unwrap();
         let layout = HeapMetaLayout::new(dir.path());
         let heap = [0x11u8; 16];
-        let staged = stage_heap_genesis(
-            &layout,
-            [0x22u8; 16],
-            heap,
-            [0x33u8; 16],
-            "alpha",
-        )
-        .unwrap();
+        let staged =
+            stage_heap_genesis(&layout, [0x22u8; 16], heap, [0x33u8; 16], "alpha").unwrap();
         assert!(list_published_heap_ids(&layout).unwrap().is_empty());
         assert!(try_load_heap_catalog(&layout).unwrap().is_none());
         assert!(staging_is_non_discoverable(&layout).unwrap());

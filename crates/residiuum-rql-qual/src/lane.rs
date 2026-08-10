@@ -68,9 +68,9 @@ impl EngineId {
     /// Logical harness scaffolds on Lane E only (not a competitive pairing).
     pub fn primary_lane(self) -> LaneId {
         match self {
-            Self::ResidiuumEmbedded
-            | Self::CouchbaseLiteEmbedded
-            | Self::LogicalHarness => LaneId::Embedded,
+            Self::ResidiuumEmbedded | Self::CouchbaseLiteEmbedded | Self::LogicalHarness => {
+                LaneId::Embedded
+            }
             Self::ResidiuumServer | Self::MongoLocal => LaneId::LocalClientServer,
         }
     }

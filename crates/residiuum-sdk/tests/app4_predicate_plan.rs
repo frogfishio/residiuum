@@ -2,13 +2,13 @@
 //!
 //! Normative: CORE plan §14 APP-4; `spec/app/v1/plan_vectors_v1.json`.
 
+use residiuum_heap::CollectionId;
 use residiuum_sdk::plan_v1::{
     CollectionBindings, OrderDir, PlanBuilder, RqlPlanV1, PLAN_ENCODING_PROFILE, PLAN_HASH_DOMAIN,
     PLAN_PROFILE,
 };
 use residiuum_sdk::predicate::{field, param, Predicate};
 use residiuum_sdk::{CoveragePolicy, PREDICATE_PROFILE};
-use residiuum_heap::CollectionId;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::fs;
@@ -134,5 +134,8 @@ fn app4_name_binding_required() {
     let err = PlanBuilder::from_source("missing")
         .compile(&CollectionBindings::default())
         .unwrap_err();
-    assert!(err.to_string().contains("unknown collection") || matches!(err, residiuum_sdk::Error::QueryInvalid(_)));
+    assert!(
+        err.to_string().contains("unknown collection")
+            || matches!(err, residiuum_sdk::Error::QueryInvalid(_))
+    );
 }

@@ -8,8 +8,8 @@ use crate::wire::{
     AUDIENCE_DATA_V1, CERT_MAX_BYTES, CERT_MAX_LIFETIME_S, CONTENT_TYPE_CERTIFICATE,
     COSE_ALG_EDDSA, EXTERNAL_AAD_CERTIFICATE, PROFILE_VERSION,
 };
-use residiuum_format::{decode_deterministic_uint_map, CborValue};
 use ed25519_dalek::{Signature, VerifyingKey};
+use residiuum_format::{decode_deterministic_uint_map, CborValue};
 use sha2::{Digest, Sha256};
 
 /// Verified certificate claims (no private key material).

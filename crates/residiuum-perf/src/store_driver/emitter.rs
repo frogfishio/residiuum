@@ -3,9 +3,7 @@
 //! Emits plans at the store **boundary** from sizes, durability, and segment
 //! rotation signals — never from document payloads or keys.
 
-use crate::shadow::{
-    DestinationClass, PhysicalOp, PhysicalWritePlan, SyncBoundary, PLAN_SCHEMA,
-};
+use crate::shadow::{DestinationClass, PhysicalOp, PhysicalWritePlan, SyncBoundary, PLAN_SCHEMA};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -119,7 +117,13 @@ pub fn emit_plan_from_store_boundary_events(
     batch_size: u32,
 ) -> PhysicalWritePlan {
     let facts = facts_from_store_boundary_events(events);
-    emit_plan_from_receipts(plan_id, &facts, segment_threshold, chunk_threshold, batch_size)
+    emit_plan_from_receipts(
+        plan_id,
+        &facts,
+        segment_threshold,
+        chunk_threshold,
+        batch_size,
+    )
 }
 
 /// Emit a closed PhysicalWritePlan from a stream of redacted write facts.
@@ -243,7 +247,13 @@ pub fn emit_plan_from_boundary_events(
     batch_size: u32,
 ) -> PhysicalWritePlan {
     let facts = facts_from_boundary_events(events);
-    emit_plan_from_receipts(plan_id, &facts, segment_threshold, chunk_threshold, batch_size)
+    emit_plan_from_receipts(
+        plan_id,
+        &facts,
+        segment_threshold,
+        chunk_threshold,
+        batch_size,
+    )
 }
 
 #[cfg(test)]

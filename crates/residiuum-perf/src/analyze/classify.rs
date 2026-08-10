@@ -273,10 +273,7 @@ pub fn classify_bottleneck(input: &AttributionInput) -> AttributionResult {
         candidates.push((
             "io_queue_underdriven".into(),
             0.8,
-            vec![
-                "device not busy".into(),
-                "low outstanding I/O depth".into(),
-            ],
+            vec!["device not busy".into(), "low outstanding I/O depth".into()],
             vec!["queue_starvation_called_disk_saturation".into()],
         ));
     } else if device_busy && s.outstanding_depth >= 4 {
@@ -322,16 +319,13 @@ pub fn classify_bottleneck(input: &AttributionInput) -> AttributionResult {
 
     // cpu_transform_bound (L3)
     if s.layer == "L3" || input.t_l3.is_some() {
-        let cpu_busy = s.cpu_cores_busy.unwrap_or(0.0) >= 0.85
-            || input.single_core_saturated;
+        let cpu_busy = s.cpu_cores_busy.unwrap_or(0.0) >= 0.85 || input.single_core_saturated;
         if cpu_busy {
             candidates.push((
                 "cpu_transform_bound".into(),
                 0.8,
                 vec!["L3 saturates available CPU".into()],
-                if input.single_core_saturated
-                    && s.aggregate_cpu_idle.unwrap_or(0.0) > 0.3
-                {
+                if input.single_core_saturated && s.aggregate_cpu_idle.unwrap_or(0.0) > 0.3 {
                     vec!["idle_aggregate_hides_saturated_core".into()]
                 } else {
                     vec![]
@@ -432,10 +426,7 @@ pub fn classify_bottleneck(input: &AttributionInput) -> AttributionResult {
         residual_fraction,
         throughput_stats,
         throughput_ci,
-        candidates
-            .into_iter()
-            .flat_map(|c| c.3)
-            .collect::<Vec<_>>(),
+        candidates.into_iter().flat_map(|c| c.3).collect::<Vec<_>>(),
         vec!["evidence cannot isolate one registered cause".into()],
         notes,
     )

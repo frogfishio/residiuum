@@ -17,7 +17,7 @@ use crate::ids::segment_seq_from_id;
 use crate::layout::{hex16, list_residiuum_files, segment_id_from_filename, StorePaths};
 use crate::recovery_shadow::crypto::{envelope_open, ENVELOPE_MAGIC};
 use crate::recovery_shadow::frontier::{
-    load_protected_coverage, publish_protected_coverage, protection_lag_from_coverage,
+    load_protected_coverage, protection_lag_from_coverage, publish_protected_coverage,
 };
 use crate::recovery_shadow::mirror::publish_mirror_shadow_timed;
 use crate::recovery_shadow::wire::{
@@ -243,9 +243,9 @@ pub fn publish_shadow_timed(
             "refusing to publish corrupt recovery shadow",
         ));
     }
-    let sid: [u8; 16] = bytes[24..40].try_into().map_err(|_| {
-        StoreError::CorruptMeta("recovery shadow segment_id truncated")
-    })?;
+    let sid: [u8; 16] = bytes[24..40]
+        .try_into()
+        .map_err(|_| StoreError::CorruptMeta("recovery shadow segment_id truncated"))?;
     if &sid != segment_id {
         return Err(StoreError::CorruptMeta(
             "recovery shadow segment_id does not match publish path",
@@ -335,8 +335,7 @@ pub fn enrich_segment_candidate(
     let mut live_payload = 0u64;
     if opts.write_compact {
         let t_decode = Instant::now();
-        let (_live, frames, lp) =
-            decode_segment_for_candidate(segment_id, segment_bytes, limits);
+        let (_live, frames, lp) = decode_segment_for_candidate(segment_id, segment_bytes, limits);
         live_payload = lp;
         source_read_decode_ns = t_decode.elapsed().as_nanos() as u64;
         if !frames.is_empty() {

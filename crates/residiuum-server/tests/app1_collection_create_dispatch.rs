@@ -1,9 +1,9 @@
 //! APP-1: qualified op 106 collection_create dispatch + admin_op_dedup.
 
 use residiuum_heap::{
-    mint_capability, AuthorityEpoch, AuthorityGeneration, CertificateId, Constraints,
-    DeploymentId, HeapAdministrativeState, HeapId, HeapSecuritySnapshot, HeapSlot, Rights,
-    SecurityRevision, TrustedInstant, VerifiedCertificate,
+    mint_capability, AuthorityEpoch, AuthorityGeneration, CertificateId, Constraints, DeploymentId,
+    HeapAdministrativeState, HeapId, HeapSecuritySnapshot, HeapSlot, Rights, SecurityRevision,
+    TrustedInstant, VerifiedCertificate,
 };
 use residiuum_server::{
     dispatch_heap_request_with, layout_for_root, HeapDataCtx, HeapDispatchResult,
@@ -46,7 +46,14 @@ fn mint_admin_cap(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::Hea
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -127,10 +134,10 @@ fn op_106_create_replay_and_conflict() {
         store: &store,
         layout: &layout,
     };
-    let conflict = match dispatch_heap_request_with(&cap, &serde_json::to_vec(&bad).unwrap(), Some(ctx))
-    {
-        HeapDispatchResult::Response(r) => r,
-    };
+    let conflict =
+        match dispatch_heap_request_with(&cap, &serde_json::to_vec(&bad).unwrap(), Some(ctx)) {
+            HeapDispatchResult::Response(r) => r,
+        };
     assert!(!conflict.ok);
     assert_eq!(
         conflict.error.as_ref().unwrap().code,
@@ -169,8 +176,14 @@ fn op_106_create_replay_and_conflict() {
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    let read_cap =
-        mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap();
+    let read_cap = mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap();
     let read_store = host.open_heap(read_cap.clone());
     let ctx = HeapDataCtx {
         store: &read_store,

@@ -72,11 +72,7 @@ impl IndependentCollector {
     }
 
     pub fn is_bound(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("collect lock")
-            .physical
-            .is_some()
+        self.inner.lock().expect("collect lock").physical.is_some()
     }
 
     pub fn pending_len(&self) -> usize {
@@ -176,7 +172,11 @@ impl IndependentCollector {
         }
         if !force {
             let n = g.queue.len();
-            let oldest = g.queue.front().map(|p| p.enqueued_at).unwrap_or_else(Instant::now);
+            let oldest = g
+                .queue
+                .front()
+                .map(|p| p.enqueued_at)
+                .unwrap_or_else(Instant::now);
             let aged = oldest.elapsed() >= g.collection_delay;
             // Coalesce when concurrent pile-up or collection window elapsed.
             if n < 2 && !aged {
@@ -243,10 +243,7 @@ impl IndependentCollector {
                     break;
                 }
                 if g.queue.is_empty() {
-                    g = self
-                        .wake
-                        .wait(g)
-                        .expect("collect wait");
+                    g = self.wake.wait(g).expect("collect wait");
                     if g.shutdown && g.queue.is_empty() {
                         break;
                     }

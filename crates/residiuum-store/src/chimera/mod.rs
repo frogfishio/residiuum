@@ -52,9 +52,10 @@ pub use container::{
 };
 pub use io_path::{select_io_path, IoHints, IoPath, IoSelectOptions};
 pub use layout::{
-    build_compact_layout, build_layout, build_materialized_layout, chimera_dir, chimera_layout_path,
-    delete_chimera_layout, try_load_chimera_layout, write_chimera_layout, ChimeraKindCounts,
-    ChimeraLayout, CompactFrameRef, CHIMERA_LAYOUT_VERSION, CHIMERA_LAYOUT_VERSION_LEGACY,
+    build_compact_layout, build_layout, build_materialized_layout, chimera_dir,
+    chimera_layout_path, delete_chimera_layout, try_load_chimera_layout, write_chimera_layout,
+    ChimeraKindCounts, ChimeraLayout, CompactFrameRef, CHIMERA_LAYOUT_VERSION,
+    CHIMERA_LAYOUT_VERSION_LEGACY,
 };
 pub use value_log::{
     decode_record, ValueLog, ValueLogRecord, VALUE_LOG_HEADER_LEN, VALUE_LOG_MAGIC,
@@ -267,12 +268,7 @@ pub fn resolve(
                     "chimera segment frame body_len mismatch",
                 )));
             }
-            (
-                v.to_vec(),
-                LocatorKind::SegmentFrame,
-                v.len() as u64,
-                false,
-            )
+            (v.to_vec(), LocatorKind::SegmentFrame, v.len() as u64, false)
         }
     };
 
@@ -403,7 +399,12 @@ mod tests {
         let loc = ValueLocator::Inline {
             bytes: b"hi".to_vec(),
         };
-        let got = resolve(&loc, &ResolveContext::default(), &IoSelectOptions::default()).unwrap();
+        let got = resolve(
+            &loc,
+            &ResolveContext::default(),
+            &IoSelectOptions::default(),
+        )
+        .unwrap();
         assert_eq!(got.bytes, b"hi");
         assert_eq!(got.source, LocatorKind::Inline);
         assert_eq!(got.io_path, IoPath::Buffered);
@@ -469,7 +470,12 @@ mod tests {
             body_len: 4,
             generation: 1,
         };
-        assert!(resolve(&loc, &ResolveContext::default(), &IoSelectOptions::default()).is_err());
+        assert!(resolve(
+            &loc,
+            &ResolveContext::default(),
+            &IoSelectOptions::default()
+        )
+        .is_err());
         let wrong = b"toolong";
         let ctx = ResolveContext {
             segment_frame_bytes: Some(wrong.as_slice()),

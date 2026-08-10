@@ -130,7 +130,10 @@ pub fn validate_combinations(doc: &FailureCombinationDoc) -> Result<(), String> 
 }
 
 /// Materialize schedule decisions for every combination (or CI subset).
-pub fn schedule(doc: &FailureCombinationDoc, ci_only: bool) -> Result<Vec<ScheduleDecision>, String> {
+pub fn schedule(
+    doc: &FailureCombinationDoc,
+    ci_only: bool,
+) -> Result<Vec<ScheduleDecision>, String> {
     validate_combinations(doc)?;
     let mut out = Vec::new();
     for c in &doc.items {

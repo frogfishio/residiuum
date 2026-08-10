@@ -14,9 +14,7 @@ use super::ordered_ready::OrderedReadyRing;
 use super::persist::LaneTicket;
 use super::queue::BoundedQueue;
 use crate::envelope::{encode_item_envelope, EventKind, ItemEnvelope, MAX_SUBJECT_LEN};
-use residiuum_format::{
-    encode_frame_into, FrameHeader, FrameKind, WIRE_MAJOR, WIRE_MINOR,
-};
+use residiuum_format::{encode_frame_into, FrameHeader, FrameKind, WIRE_MAJOR, WIRE_MINOR};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -126,8 +124,7 @@ pub fn cook_item_frame(task: &CookTask) -> Result<Vec<u8>, String> {
         writer_sequence: task.writer_sequence,
         event_id: task.event_id,
     };
-    let mut frame =
-        Vec::with_capacity((task.body.len() + envelope.len() + 128).max(256));
+    let mut frame = Vec::with_capacity((task.body.len() + envelope.len() + 128).max(256));
     encode_frame_into(&mut frame, &header, &envelope, task.body.as_ref())
         .map_err(|e| e.to_string())?;
     let _ = crate::failpoint::hit("awo.cook.after").map_err(|e| e.to_string())?;
@@ -364,8 +361,7 @@ fn worker_loop(
             match ready.push(ticket, out, bytes) {
                 Ok(()) => break,
                 Err((super::ordered_ready::ReadyError::BytesExhausted, out)) => {
-                    if shutdown.load(Ordering::SeqCst)
-                        || std::time::Instant::now() >= spin_deadline
+                    if shutdown.load(Ordering::SeqCst) || std::time::Instant::now() >= spin_deadline
                     {
                         // Drop outcome rather than hang the worker forever.
                         break;
@@ -416,17 +412,12 @@ mod tests {
         task.operation_id = Some([0x31; 16]);
         task.operation_content_hash = Some([0x42; 32]);
         let frame = cook_item_frame(&task).unwrap();
-        let (_, envelope, _, _, _) = residiuum_format::verify_frame_at(
-            &frame,
-            residiuum_format::SafetyLimits::default(),
-        )
-        .unwrap();
+        let (_, envelope, _, _, _) =
+            residiuum_format::verify_frame_at(&frame, residiuum_format::SafetyLimits::default())
+                .unwrap();
         let decoded = crate::envelope::decode_item_envelope(envelope).unwrap();
         assert_eq!(decoded.operation_id, task.operation_id);
-        assert_eq!(
-            decoded.operation_content_hash,
-            task.operation_content_hash
-        );
+        assert_eq!(decoded.operation_content_hash, task.operation_content_hash);
 
         task.operation_content_hash = None;
         assert!(cook_item_frame(&task)

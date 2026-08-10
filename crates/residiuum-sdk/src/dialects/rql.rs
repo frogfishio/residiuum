@@ -6,8 +6,8 @@
 //! (`Match` / `one!` / `one?` / bare bag / `enrich` pipe). Execution is shared
 //! (`residiuum-sda`); there is no second evaluator.
 
-use crate::error::Error;
 use crate::dialects::CompiledSda;
+use crate::error::Error;
 
 /// Compile RQL source into pure ENR1 + SDA program text.
 pub fn compile_rql(source: &str) -> Result<CompiledSda, Error> {
@@ -127,9 +127,7 @@ fn tokenize(src: &str) -> Result<Vec<Tok>, Error> {
             c if c.is_ascii_alphabetic() || c == '_' => {
                 let start = i;
                 i += 1;
-                while i < chars.len()
-                    && (chars[i].is_ascii_alphanumeric() || chars[i] == '_')
-                {
+                while i < chars.len() && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
                     i += 1;
                 }
                 let s: String = chars[start..i].iter().collect();
@@ -210,8 +208,7 @@ impl Parser {
 
         if from.is_none() && enriches.is_empty() {
             return Err(Error::QueryInvalid(
-                "dialect 'rql': program needs `from <collection>` or at least one enrich"
-                    .into(),
+                "dialect 'rql': program needs `from <collection>` or at least one enrich".into(),
             ));
         }
 
@@ -315,12 +312,11 @@ impl Parser {
 }
 
 fn lower_to_sda(program: &RqlProgram) -> Result<String, Error> {
-    let root = program
-        .from
-        .clone()
-        .ok_or_else(|| Error::QueryInvalid(
+    let root = program.from.clone().ok_or_else(|| {
+        Error::QueryInvalid(
             "dialect 'rql': `from <collection>` is required for v0.1 lowering".into(),
-        ))?;
+        )
+    })?;
 
     let mut pipeline = root;
     for step in &program.enriches {
@@ -343,9 +339,7 @@ fn lower_to_sda(program: &RqlProgram) -> Result<String, Error> {
 
     if let Some(fields) = &program.project {
         let body = lower_project_fields(fields, "o", 0)?;
-        pipeline = format!(
-            "{pipeline}\n|> refine {{\n    yield {body}\n    | o in _\n  }}"
-        );
+        pipeline = format!("{pipeline}\n|> refine {{\n    yield {body}\n    | o in _\n  }}");
     }
 
     Ok(pipeline)
@@ -360,11 +354,7 @@ fn path_get(var: &str, path: &[String]) -> String {
     format!("getPath({var}, Seq[{segs}])")
 }
 
-fn lower_project_fields(
-    fields: &[ProjectField],
-    row: &str,
-    depth: usize,
-) -> Result<String, Error> {
+fn lower_project_fields(fields: &[ProjectField], row: &str, depth: usize) -> Result<String, Error> {
     if depth > 8 {
         return Err(Error::QueryInvalid(
             "dialect 'rql': project nesting too deep".into(),
@@ -434,9 +424,7 @@ fn lower_project_fields(
                     let bind = format!("i{depth}");
                     let inner = lower_project_fields(fields, &bind, depth + 1)?;
                     let bag_path = path_get(row, &path);
-                    format!(
-                        "bindOpt({bag_path}, bag => Some({{ yield {inner} | {bind} in bag }}))"
-                    )
+                    format!("bindOpt({bag_path}, bag => Some({{ yield {inner} | {bind} in bag }}))")
                 }
             };
             entries.push(format!("\"{key}\" -> {val}"));

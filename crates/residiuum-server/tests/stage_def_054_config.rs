@@ -11,8 +11,8 @@
 
 use residiuum_server::{
     load_and_validate, redact_json_value, resolve_secret_ref, setting_class, validate_document,
-    ClusterConfigSection, ConfigError, ConfigLayer, ConfigMode, ConfigOverrides, ResidiuumConfigFile,
-    ServeConfigSection, SettingClass, StoreConfigSection, CONFIG_PROFILE,
+    ClusterConfigSection, ConfigError, ConfigLayer, ConfigMode, ConfigOverrides,
+    ResidiuumConfigFile, ServeConfigSection, SettingClass, StoreConfigSection, CONFIG_PROFILE,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -69,7 +69,8 @@ fn load_validate_apply_roundtrip() {
     assert_eq!(v.sources.bind, ConfigLayer::File);
     assert!(v.auth_token.is_none());
 
-    let opts = v.apply_to_serve_options(residiuum_server::ServeOptions::new().legacy_token_server());
+    let opts =
+        v.apply_to_serve_options(residiuum_server::ServeOptions::new().legacy_token_server());
     assert_eq!(opts.server_limits.max_connections, 12);
     assert_eq!(opts.admission_limits.global_max_rps, 77);
 
@@ -174,12 +175,15 @@ fn har4_t3_cohost_legacy_and_qualified_refused() {
         }),
         cluster: None,
     };
-    let err = validate_document(doc, None, ConfigMode::Serve, ConfigOverrides::default())
-        .unwrap_err();
+    let err =
+        validate_document(doc, None, ConfigMode::Serve, ConfigOverrides::default()).unwrap_err();
     match err {
         ConfigError::Unsafe { code, detail } => {
             assert_eq!(code, "auth_path_cohost");
-            assert!(detail.contains("HAR-4") || detail.contains("co-host"), "{detail}");
+            assert!(
+                detail.contains("HAR-4") || detail.contains("co-host"),
+                "{detail}"
+            );
         }
         other => panic!("expected co-host Unsafe, got {other:?}"),
     }
@@ -203,8 +207,8 @@ fn har4_t3_qualified_requires_tls_and_deployment_id() {
         }),
         cluster: None,
     };
-    let err = validate_document(doc, None, ConfigMode::Serve, ConfigOverrides::default())
-        .unwrap_err();
+    let err =
+        validate_document(doc, None, ConfigMode::Serve, ConfigOverrides::default()).unwrap_err();
     match err {
         ConfigError::Unsafe { code, .. } => {
             assert!(
@@ -269,8 +273,8 @@ fn refuse_public_plaintext_without_opt_in() {
         }),
         cluster: None,
     };
-    let err = validate_document(doc, None, ConfigMode::Serve, ConfigOverrides::default())
-        .unwrap_err();
+    let err =
+        validate_document(doc, None, ConfigMode::Serve, ConfigOverrides::default()).unwrap_err();
     assert!(matches!(
         err,
         ConfigError::Unsafe {

@@ -22,23 +22,25 @@ pub use admin_op_dedup::{
 };
 pub use catalog::{
     create_object, delete_rebuildable_catalogs, load_staged_genesis, publish_staged_genesis,
-    rebuild_and_persist_all_catalogs, rebuild_heap_entry_from_chain, rebuild_object_entry_from_chain,
-    rename_heap, rename_object, retire_heap, retire_object, stage_heap_genesis,
-    staging_is_non_discoverable, try_load_collections_catalog, try_load_heap_catalog,
-    try_load_streams_catalog, AdminReceipt, HeapCatalogEntry, HeapMetaLayout, ObjectCatalogEntry,
-    ObjectKind, StagedGenesis, COLLECTIONS_CATALOG_FILE, HEAP_CATALOG_FILE, STREAMS_CATALOG_FILE,
+    rebuild_and_persist_all_catalogs, rebuild_heap_entry_from_chain,
+    rebuild_object_entry_from_chain, rename_heap, rename_object, retire_heap, retire_object,
+    stage_heap_genesis, staging_is_non_discoverable, try_load_collections_catalog,
+    try_load_heap_catalog, try_load_streams_catalog, AdminReceipt, HeapCatalogEntry,
+    HeapMetaLayout, ObjectCatalogEntry, ObjectKind, StagedGenesis, COLLECTIONS_CATALOG_FILE,
+    HEAP_CATALOG_FILE, STREAMS_CATALOG_FILE,
 };
 pub use commit_coordinator::OperationCommitStats;
 pub use heap_store::{
-    CollectionScanHole, CollectionScanHoleReason, CollectionScanPage, HeapStore,
-    VersionedCollectionScanPage, VersionedCollectionValue,
+    CollectionScanHole, CollectionScanHoleReason, CollectionScanPage, CollectionVersionPage,
+    HeapStore, VersionedCollectionScanPage, VersionedCollectionValue,
 };
 pub use host::StoreHost;
-pub use maintenance_store::MaintenanceStore;
+#[cfg(feature = "aws-kms")]
+pub use kms_aws::{AwsKmsDataKeyProvider, SharedAwsKmsDataKeyProvider};
 pub use lifecycle::{
-    active_snapshot, build_backup_manifest, decode_purge_receipt,
-    destroy_data_key, disaster_recovery_restore_retaining_id, encode_purge_receipt,
-    heap_label_envelope, heap_object_media_dir, labelled_unit_readable, load_identity_tombstone,
+    active_snapshot, build_backup_manifest, decode_purge_receipt, destroy_data_key,
+    disaster_recovery_restore_retaining_id, encode_purge_receipt, heap_label_envelope,
+    heap_object_media_dir, labelled_unit_readable, load_identity_tombstone,
     old_deployment_credential_invalid, refuse_access_from_payload_restore,
     refuse_clear_tombstone_via_payload_restore, refuse_retain_id_without_ceremony,
     restore_payload_to_new_heap, verify_purge_receipt, wipe_heap_object_media,
@@ -47,13 +49,11 @@ pub use lifecycle::{
     HeapBackupManifest, HeapLifecycle, HeapRetentionPolicy, HsmBackendKind, HsmCapabilities,
     HsmDataKeyConfig, HsmDataKeyProvider, IdentityTombstone, InProcessDataKeyProvider,
     IncompletePurgeResult, MediaDomain, PayloadOnlyRestore, PurgeCoverageUnit, PurgePlan,
-    PurgeReceipt, RetentionScheduler, TombstoneKind,
-    BACKUP_MANIFEST_DOMAIN, DATA_KEY_DESTROY_DOMAIN, HEAP_LIFECYCLE_PROFILE,
-    INCOMPLETE_PURGE_DOMAIN, LIFECYCLE_DIR, PURGE_COVERAGE_DOMAIN, RETENTION_POLICY_DOMAIN,
-    TOMBSTONE_DOMAIN,
+    PurgeReceipt, RetentionScheduler, TombstoneKind, BACKUP_MANIFEST_DOMAIN,
+    DATA_KEY_DESTROY_DOMAIN, HEAP_LIFECYCLE_PROFILE, INCOMPLETE_PURGE_DOMAIN, LIFECYCLE_DIR,
+    PURGE_COVERAGE_DOMAIN, RETENTION_POLICY_DOMAIN, TOMBSTONE_DOMAIN,
 };
-#[cfg(feature = "aws-kms")]
-pub use kms_aws::{AwsKmsDataKeyProvider, SharedAwsKmsDataKeyProvider};
+pub use maintenance_store::MaintenanceStore;
 pub use migration::{
     CutoverGate, HeapMigrationJob, InventoryFrame, InventorySegment, MigrationPhase,
     MigrationStateV1, SourceInventory, ADMITTED_FILE, ASSIGNMENTS_FILE, ASSIGNMENTS_HASH_DOMAIN,

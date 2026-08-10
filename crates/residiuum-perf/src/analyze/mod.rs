@@ -249,9 +249,9 @@ mod suite_tests {
                 observer_budget: Some(0.02),
                 ..Default::default()
             });
-            assert!(f
-                .iter()
-                .any(|x| { x.narrative == FalseNarrative::ObserverOverheadAsDbCost && x.detected }));
+            assert!(f.iter().any(|x| {
+                x.narrative == FalseNarrative::ObserverOverheadAsDbCost && x.detected
+            }));
         }
 
         // 10. two changed variables as causal

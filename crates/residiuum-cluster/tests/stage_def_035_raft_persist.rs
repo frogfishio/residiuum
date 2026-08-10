@@ -22,10 +22,9 @@ fn cluster_survives_process_restart_with_committed_write() {
     let root = dir.path().join("restart");
 
     let ack = {
-        let mut cluster = Cluster::create(
-            ClusterConfig::dependable_local(&root).with_virtual_partitions(4),
-        )
-        .unwrap();
+        let mut cluster =
+            Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(4))
+                .unwrap();
         let ack = cluster
             .put("orders/1", b"v1", DurabilityMode::Durable)
             .unwrap();
@@ -59,7 +58,10 @@ fn cluster_survives_process_restart_with_committed_write() {
                 "leadership must not survive restart as Leader"
             );
         }
-        assert!(saw_log, "committed entry must appear in at least one durable log");
+        assert!(
+            saw_log,
+            "committed entry must appear in at least one durable log"
+        );
     }
 
     let got = cluster.get("orders/1", ReadMode::Linearizable).unwrap();

@@ -15,7 +15,12 @@ pub struct RetentionReport {
 }
 
 /// Throughput retention between matched layers.
-pub fn throughput_retention(t_i: f64, t_im1: f64, layer_i: &str, layer_im1: &str) -> RetentionReport {
+pub fn throughput_retention(
+    t_i: f64,
+    t_im1: f64,
+    layer_i: &str,
+    layer_im1: &str,
+) -> RetentionReport {
     let (retention, loss) = if t_im1 > 0.0 && t_i.is_finite() && t_im1.is_finite() {
         let r = t_i / t_im1;
         (Some(r), Some(1.0 - r))

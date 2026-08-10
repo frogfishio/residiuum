@@ -102,10 +102,7 @@ impl RunBudgets {
             if inodes < self.free_inode_floor {
                 return Ok(BudgetCheck::Exceeded {
                     kind: BudgetKind::FreeInodeFloor,
-                    detail: format!(
-                        "free inodes {inodes} below floor {}",
-                        self.free_inode_floor
-                    ),
+                    detail: format!("free inodes {inodes} below floor {}", self.free_inode_floor),
                 });
             }
         }

@@ -11,8 +11,8 @@ use residiuum_heap::{
 use residiuum_sdk::plan_v1::CollectionBindings;
 use residiuum_sdk::rql_app_core::{compile_app_core, DIAG_RQL_FEATURE_UNAVAILABLE};
 use residiuum_sdk::{
-    compile_rql_full, execute_rql_full, FullPipelineStepV1, HeapClient, Parameters,
-    ProjectItemV1, QueryRunOptions, ResidiuumDeployment, RQL_FULL_PROFILE,
+    compile_rql_full, execute_rql_full, FullPipelineStepV1, HeapClient, Parameters, ProjectItemV1,
+    QueryRunOptions, ResidiuumDeployment, RQL_FULL_PROFILE,
 };
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
 use serde_json::Value;
@@ -87,7 +87,11 @@ fn rql_full_corpus_compile_accept_and_refuse() {
     let bindings = bindings_from(&doc["default_bindings"]);
 
     let accept = doc["accept"].as_array().expect("accept");
-    assert!(accept.len() >= 6, "accept corpus too small: {}", accept.len());
+    assert!(
+        accept.len() >= 6,
+        "accept corpus too small: {}",
+        accept.len()
+    );
     for v in accept {
         let id = v["id"].as_str().unwrap_or("?");
         let src = v["source_rql"].as_str().expect("source_rql");
@@ -120,7 +124,11 @@ fn rql_full_corpus_compile_accept_and_refuse() {
                 assert_eq!(got, want, "{id}: project_outputs");
             }
             if let Some(ps) = exp.get("page_size").and_then(|x| x.as_u64()) {
-                assert_eq!(u64::from(compiled.base.plan.page_size), ps, "{id}: page_size");
+                assert_eq!(
+                    u64::from(compiled.base.plan.page_size),
+                    ps,
+                    "{id}: page_size"
+                );
             }
             if let Some(s) = exp.get("base_contains").and_then(|x| x.as_str()) {
                 assert!(
@@ -158,7 +166,11 @@ fn rql_full_corpus_compile_accept_and_refuse() {
     }
 
     let refuse = doc["refuse"].as_array().expect("refuse");
-    assert!(refuse.len() >= 4, "refuse corpus too small: {}", refuse.len());
+    assert!(
+        refuse.len() >= 4,
+        "refuse corpus too small: {}",
+        refuse.len()
+    );
     for v in refuse {
         let id = v["id"].as_str().unwrap_or("?");
         let src = v["source_rql"].as_str().expect("source_rql");
@@ -168,10 +180,7 @@ fn rql_full_corpus_compile_accept_and_refuse() {
             _ => compile_rql_full(src, &bindings).unwrap_err(),
         };
         let msg = err.to_string();
-        assert!(
-            msg.contains(needle),
-            "{id}: expected `{needle}` in `{msg}`"
-        );
+        assert!(msg.contains(needle), "{id}: expected `{needle}` in `{msg}`");
         if needle == DIAG_RQL_FEATURE_UNAVAILABLE {
             assert!(msg.contains(DIAG_RQL_FEATURE_UNAVAILABLE), "{id}");
         }
@@ -210,7 +219,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {

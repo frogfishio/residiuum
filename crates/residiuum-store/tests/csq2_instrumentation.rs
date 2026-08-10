@@ -6,10 +6,9 @@
 use residiuum_store::{
     arm_failpoint_once, clear_failpoints, clear_failpoints_all, enable_failpoint_hit_proof,
     failpoint_is_armed, failpoint_visit_count, failure_class_action, harness_is_approved,
-    hit_failpoint, require_failpoint_visited, schedule_failure_combinations,
-    validate_crash_matrix, validate_failure_combinations, CrashController, DurabilityMode,
-    FailpointAction, FailureCombinationDoc, FilesystemImageHarness, ScheduleDecision, Store,
-    HARNESS_CAPABILITIES,
+    hit_failpoint, require_failpoint_visited, schedule_failure_combinations, validate_crash_matrix,
+    validate_failure_combinations, CrashController, DurabilityMode, FailpointAction,
+    FailureCombinationDoc, FilesystemImageHarness, ScheduleDecision, Store, HARNESS_CAPABILITIES,
 };
 use serde_json::Value;
 use std::path::PathBuf;
@@ -32,17 +31,16 @@ fn workspace_root() -> PathBuf {
 
 fn load_json(rel: &str) -> Value {
     let path = workspace_root().join(rel);
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
 }
 
 #[test]
 fn csq2_harness_inventory_ready_flags() {
-    assert!(
-        HARNESS_CAPABILITIES
-            .iter()
-            .any(|c| c.ready && c.owner_package == "CSQ-2")
-    );
+    assert!(HARNESS_CAPABILITIES
+        .iter()
+        .any(|c| c.ready && c.owner_package == "CSQ-2"));
     let fs = FilesystemImageHarness::inventory();
     // CSQ-5 marks portable FS image ready; privileged loopback remains skip-with-reason.
     assert!(fs.ready);
@@ -170,10 +168,7 @@ fn csq2_hit_proof_on_put_boundary() {
         s.put("prior", b"v1", DurabilityMode::Durable).unwrap();
     }
     let mut store = Store::open(&path).unwrap();
-    arm_failpoint_once(
-        "store.active.write_tail.before",
-        FailpointAction::Error,
-    );
+    arm_failpoint_once("store.active.write_tail.before", FailpointAction::Error);
     let err = store
         .put("k", b"v-new", DurabilityMode::Durable)
         .unwrap_err();
@@ -230,19 +225,14 @@ fn csq2_ordered_pair_executor_ci_smoke() {
     let path = dir.path().join("s");
     {
         let mut s = Store::create(&path).unwrap();
-        s.put("prior", b"prior-v1", DurabilityMode::Durable).unwrap();
+        s.put("prior", b"prior-v1", DurabilityMode::Durable)
+            .unwrap();
     }
 
     // Pair: io_error then enospc (sequential cells, same boundary family).
     for (fp, action) in [
-        (
-            "store.active.write_tail.before",
-            FailpointAction::Error,
-        ),
-        (
-            "store.active.write_tail.before",
-            FailpointAction::IoEnospc,
-        ),
+        ("store.active.write_tail.before", FailpointAction::Error),
+        ("store.active.write_tail.before", FailpointAction::IoEnospc),
     ] {
         let mut store = Store::open(&path).unwrap();
         arm_failpoint_once(fp, action);

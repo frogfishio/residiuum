@@ -15,7 +15,10 @@ fn publish_failpoint_aborts_before_index_update() {
     arm_failpoint_once("awo.publish.before", FailpointAction::Error);
 
     let err = store
-        .put_many(&[("awo/pub/a", b"1"), ("awo/pub/b", b"2")], DurabilityMode::Buffered)
+        .put_many(
+            &[("awo/pub/a", b"1"), ("awo/pub/b", b"2")],
+            DurabilityMode::Buffered,
+        )
         .expect_err("publish failpoint");
     let _ = err;
     require_failpoint_visited("awo.publish.before");

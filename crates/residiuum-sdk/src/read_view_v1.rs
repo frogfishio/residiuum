@@ -264,10 +264,7 @@ impl ReadView {
                 retention_documents_examined: 0,
             },
             retention_budget: options.retention_budget,
-            pin: Some(SegmentPin {
-                store,
-                fingerprint,
-            }),
+            pin: Some(SegmentPin { store, fingerprint }),
         })
     }
 
@@ -302,9 +299,7 @@ impl ReadView {
     /// Fail closed if closed, expired, or retention hold exceeded.
     pub fn ensure_usable(&self) -> Result<(), Error> {
         if self.info.closed {
-            return Err(Error::ConsistencyViolation(
-                "read view is closed".into(),
-            ));
+            return Err(Error::ConsistencyViolation("read view is closed".into()));
         }
         let now = unix_now()?;
         if self.is_expired_at(now) {
@@ -412,8 +407,7 @@ impl ReadView {
                     .into(),
             )),
             FrontierDrift::Unpinned => Err(Error::ConsistencyViolation(
-                "read view has no re-checkable pin; view-bound query fail-closed (APB-7 T5)"
-                    .into(),
+                "read view has no re-checkable pin; view-bound query fail-closed (APB-7 T5)".into(),
             )),
         }
     }

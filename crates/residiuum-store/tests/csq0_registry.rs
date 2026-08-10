@@ -19,8 +19,10 @@ fn load_items(name: &str) -> Vec<Value> {
     let path = workspace_root()
         .join("spec/verification/core-storage")
         .join(name);
-    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let v: Value = serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let v: Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
     v.get("items")
         .and_then(|i| i.as_array())
         .cloned()
@@ -52,7 +54,8 @@ fn csq0_registry_profile_and_identity() {
     }
 
     let schema_path = workspace_root().join("spec/verification/core-storage/report-v1.schema.json");
-    let schema: Value = serde_json::from_str(&std::fs::read_to_string(schema_path).unwrap()).unwrap();
+    let schema: Value =
+        serde_json::from_str(&std::fs::read_to_string(schema_path).unwrap()).unwrap();
     assert_eq!(
         schema["properties"]["profile"]["const"],
         "residiuum-core-storage-v1"
@@ -73,7 +76,10 @@ fn csq0_registry_graph_closed() {
     let proofs = load_items("proofs-v1.json");
     let mutations = load_items("mutations-v1.json");
 
-    assert!(invariants.len() >= 80, "expected full CSQ invariant registry");
+    assert!(
+        invariants.len() >= 80,
+        "expected full CSQ invariant registry"
+    );
     assert!(operations.len() >= 10);
     assert!(boundaries.len() >= 20);
     assert!(errors.len() >= 10);
@@ -140,7 +146,10 @@ fn csq0_registry_graph_closed() {
             assert!(suite_ids.contains(s.as_str().unwrap()));
         }
         for f in op["failure_classes"].as_array().unwrap_or(&vec![]) {
-            assert!(fail_ids.contains(f.as_str().unwrap()), "op {id} unknown failure");
+            assert!(
+                fail_ids.contains(f.as_str().unwrap()),
+                "op {id} unknown failure"
+            );
         }
     }
 
@@ -222,7 +231,11 @@ fn csq0_store_errors_registered() {
     let errors = load_items("errors-v1.json");
     let rust_names: HashSet<String> = errors
         .iter()
-        .filter_map(|e| e.get("rust_variant").and_then(|x| x.as_str()).map(str::to_string))
+        .filter_map(|e| {
+            e.get("rust_variant")
+                .and_then(|x| x.as_str())
+                .map(str::to_string)
+        })
         .collect();
     for required in [
         "StoreError::Io",

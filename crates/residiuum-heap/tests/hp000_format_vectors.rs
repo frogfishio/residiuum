@@ -44,7 +44,10 @@ fn format_vectors_decode_without_encoder_oracle() {
                 let bytes = hex(v["bytes"].as_str().unwrap());
                 let s = decode_subject_v2(&bytes).expect(v["id"].as_str().unwrap());
                 assert_eq!(*s.heap_id, heap);
-                assert_eq!(s.object_kind as u8, v["object_kind"].as_u64().unwrap() as u8);
+                assert_eq!(
+                    s.object_kind as u8,
+                    v["object_kind"].as_u64().unwrap() as u8
+                );
                 match s.object_kind {
                     SubjectObjectKind::HeapMetadata => assert_eq!(*s.object_id, [0u8; 16]),
                     SubjectObjectKind::Collection => assert_eq!(*s.object_id, collection),

@@ -144,9 +144,7 @@ pub fn free_space_bytes(path: &Path) -> io::Result<u64> {
 ///
 /// Prevents silent near-full-disk contamination (first seal-threshold survey).
 pub fn default_min_free_for_target(target_bytes: u64) -> u64 {
-    let footprint = target_bytes
-        .saturating_mul(25)
-        .saturating_div(10); // 2.5×
+    let footprint = target_bytes.saturating_mul(25).saturating_div(10); // 2.5×
     let headroom = 512 * 1024 * 1024;
     footprint.saturating_add(headroom)
 }

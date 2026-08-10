@@ -5,9 +5,7 @@
 
 use crate::error::AuthorityError;
 use crate::store::{AuthorityPaths, MasterAuthorityStore};
-use residiuum_format::{
-    decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue,
-};
+use residiuum_format::{decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue};
 use residiuum_heap::{
     AuthorityEpoch, AuthorityGeneration, DeploymentId, HeapAdministrativeState, HeapId,
     HeapSecuritySnapshot, SecurityRevision,
@@ -92,7 +90,8 @@ pub fn peek_reload_request(data_root: &Path) -> Result<Option<ReloadRequest>, Au
         }
     }
     Ok(Some(ReloadRequest {
-        deployment_id: deployment.ok_or_else(|| AuthorityError::Crypto("reload deployment".into()))?,
+        deployment_id: deployment
+            .ok_or_else(|| AuthorityError::Crypto("reload deployment".into()))?,
         heap_id: heap.ok_or_else(|| AuthorityError::Crypto("reload heap".into()))?,
         authority_root: root.ok_or_else(|| AuthorityError::Crypto("reload root".into()))?,
         chain_head_hash: hash.ok_or_else(|| AuthorityError::Crypto("reload hash".into()))?,
@@ -119,7 +118,9 @@ pub fn apply_reload_request(
         .load_head()?
         .ok_or_else(|| AuthorityError::Refused("reload: no head".into()))?;
     if head.authority_chain_head_hash != req.chain_head_hash {
-        return Err(AuthorityError::Refused("reload: chain head mismatch".into()));
+        return Err(AuthorityError::Refused(
+            "reload: chain head mismatch".into(),
+        ));
     }
     let snap = HeapSecuritySnapshot {
         deployment_id: DeploymentId::from_bytes_unchecked_nonzero(head.deployment_id)
@@ -132,9 +133,9 @@ pub fn apply_reload_request(
             .map_err(|e| AuthorityError::Heap(e.to_string()))?,
         previous_generation: match head.previous_generation {
             None => None,
-            Some(g) => Some(
-                AuthorityGeneration::new(g).map_err(|e| AuthorityError::Heap(e.to_string()))?,
-            ),
+            Some(g) => {
+                Some(AuthorityGeneration::new(g).map_err(|e| AuthorityError::Heap(e.to_string()))?)
+            }
         },
         grace_deadline_unix_s: head.grace_deadline,
         master_public_key: head.master_public_key,

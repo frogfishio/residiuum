@@ -6,12 +6,11 @@
 //! - Dropping indexes never changes correctness
 //! - Indexed vs force-scan results match
 
-use residiuum_sdk::{json, Residiuum, Filter, IndexState, QueryOptions};
-
+use residiuum_sdk::{json, Filter, IndexState, QueryOptions, Residiuum};
 
 use residiuum_store::{
-    arm_failpoint, clear_failpoints, disarm_failpoint, FailpointAction, IndexState as StoreIndexState,
-    Store,
+    arm_failpoint, clear_failpoints, disarm_failpoint, FailpointAction,
+    IndexState as StoreIndexState, Store,
 };
 use std::collections::BTreeSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -231,10 +230,7 @@ fn partial_index_never_proves_absence() {
         let mut db = Residiuum::open(&path).unwrap();
         let mut c = db.collection("users").unwrap();
         c.put("u1", &json!({"email": "a@x.com"})).unwrap();
-        c.indexes()
-            .unwrap()
-            .create("by-email", &["email"])
-            .unwrap();
+        c.indexes().unwrap().create("by-email", &["email"]).unwrap();
         // Add a second doc via SDK while index is ready → becomes Stale.
         c.put("u2", &json!({"email": "b@x.com"})).unwrap();
         assert_eq!(c.list_indexes().unwrap()[0].state, IndexState::Stale);
@@ -329,10 +325,7 @@ fn rebuild_uses_rebuilding_then_ready() {
     let mut db = Residiuum::open(dir.path().join("app.residiuum")).unwrap();
     let mut c = db.collection("users").unwrap();
     c.put("u1", &json!({"email": "a@x.com"})).unwrap();
-    c.indexes()
-        .unwrap()
-        .create("by-email", &["email"])
-        .unwrap();
+    c.indexes().unwrap().create("by-email", &["email"]).unwrap();
     c.put("u2", &json!({"email": "b@x.com"})).unwrap();
     assert_eq!(c.list_indexes().unwrap()[0].state, IndexState::Stale);
     let rebuilt = c.indexes().unwrap().rebuild("by-email").unwrap();

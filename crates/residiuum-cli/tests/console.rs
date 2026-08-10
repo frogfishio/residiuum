@@ -38,11 +38,14 @@ fn console_executes_put_get_via_stdin() {
         .write_all(script.as_bytes())
         .expect("write script");
 
-    let out = child
-        .wait_with_output()
-        .expect("wait_with_output");
+    let out = child.wait_with_output().expect("wait_with_output");
 
-    assert!(out.status.success(), "stdout={} stderr={}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Expect JSON-ish output containing the inserted value.
     let stdout = String::from_utf8_lossy(&out.stdout);

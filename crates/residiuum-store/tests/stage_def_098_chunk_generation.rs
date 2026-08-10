@@ -9,7 +9,9 @@ use residiuum_store::{DurabilityMode, PayloadResult, Store};
 use tempfile::tempdir;
 
 fn large(seed: u8, len: usize) -> Vec<u8> {
-    (0..len).map(|i| seed.wrapping_add((i % 251) as u8)).collect()
+    (0..len)
+        .map(|i| seed.wrapping_add((i % 251) as u8))
+        .collect()
 }
 
 #[test]
@@ -125,7 +127,9 @@ fn different_key_chunked_values_isolated() {
     let b = large(2, 50);
     store.put("a", &a, DurabilityMode::Durable).unwrap();
     store.put("b", &b, DurabilityMode::Durable).unwrap();
-    store.put("a", &large(3, 55), DurabilityMode::Durable).unwrap();
+    store
+        .put("a", &large(3, 55), DurabilityMode::Durable)
+        .unwrap();
 
     let a2 = large(3, 55);
     assert_eq!(store.get("a").unwrap().as_deref(), Some(a2.as_slice()));

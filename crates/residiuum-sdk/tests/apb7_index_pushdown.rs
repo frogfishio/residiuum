@@ -198,6 +198,23 @@ fn without_index_still_scans() {
 }
 
 #[test]
+fn cached_index_absence_is_invalidated_by_index_creation() {
+    let (_dir, mut client) = open_bound_client();
+    let mut col = client.create_collection("orders").unwrap().collection;
+    col.put("a", &serde_json::json!({"status": "open"}))
+        .unwrap();
+
+    let constraint = [("status".to_string(), serde_json::json!("open"))];
+    assert!(col.lookup_index_keys(&constraint).unwrap().is_none());
+
+    col.indexes().create("by_status", &["status"]).unwrap();
+    assert_eq!(
+        col.lookup_index_keys(&constraint).unwrap(),
+        Some(vec!["a".to_string()])
+    );
+}
+
+#[test]
 fn compound_equality_prefix_is_used_only_when_trailing_fields_are_constrained() {
     let (_dir, mut client) = open_bound_client();
     let mut col = client.create_collection("orders").unwrap().collection;

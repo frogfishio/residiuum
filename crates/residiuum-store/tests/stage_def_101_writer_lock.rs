@@ -23,7 +23,9 @@ fn two_handles_same_process_in_process_class() {
             assert!(!obs.retryable);
             assert!(obs.os_lock_authoritative);
             assert!(!obs.detail.to_lowercase().contains("empty"));
-            assert!(obs.detail.contains("do not delete writer.lock") || obs.detail.contains("drop"));
+            assert!(
+                obs.detail.contains("do not delete writer.lock") || obs.detail.contains("drop")
+            );
         }
         StoreError::NotAStore(_) => panic!("WriterLockHeld must not become NotAStore / empty"),
         other => panic!("expected WriterLockHeld, got {other:?}"),
@@ -35,9 +37,7 @@ fn open_inspect_while_writer_live() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("s");
     let mut writer = Store::create(&path).unwrap();
-    writer
-        .put("k", b"v", DurabilityMode::Durable)
-        .unwrap();
+    writer.put("k", b"v", DurabilityMode::Durable).unwrap();
     let inspect = Store::open_inspect(&path).unwrap();
     assert!(!inspect.holds_writer_lock());
     assert_eq!(inspect.get("k").unwrap().as_deref(), Some(b"v".as_slice()));

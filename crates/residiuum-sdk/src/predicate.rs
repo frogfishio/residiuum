@@ -291,46 +291,63 @@ impl Predicate {
                     });
                 }
                 // Full form: left/right operands
-                let left = operand_from_json(obj.get("left").ok_or_else(|| {
-                    Error::QueryInvalid("cmp requires path or left".into())
-                })?)?;
-                let right = operand_from_json(obj.get("right").ok_or_else(|| {
-                    Error::QueryInvalid("cmp requires right".into())
-                })?)?;
+                let left = operand_from_json(
+                    obj.get("left")
+                        .ok_or_else(|| Error::QueryInvalid("cmp requires path or left".into()))?,
+                )?;
+                let right = operand_from_json(
+                    obj.get("right")
+                        .ok_or_else(|| Error::QueryInvalid("cmp requires right".into()))?,
+                )?;
                 Ok(Self::Cmp { cmp, left, right })
             }
             "present" => Ok(Self::Present {
-                path: path_from_json(obj.get("path").ok_or_else(|| {
-                    Error::QueryInvalid("present requires path".into())
-                })?)?,
+                path: path_from_json(
+                    obj.get("path")
+                        .ok_or_else(|| Error::QueryInvalid("present requires path".into()))?,
+                )?,
             }),
             "missing" => Ok(Self::Missing {
-                path: path_from_json(obj.get("path").ok_or_else(|| {
-                    Error::QueryInvalid("missing requires path".into())
-                })?)?,
+                path: path_from_json(
+                    obj.get("path")
+                        .ok_or_else(|| Error::QueryInvalid("missing requires path".into()))?,
+                )?,
             }),
             "is_null" => Ok(Self::IsNull {
-                path: path_from_json(obj.get("path").ok_or_else(|| {
-                    Error::QueryInvalid("is_null requires path".into())
-                })?)?,
-                negated: obj.get("negated").and_then(|b| b.as_bool()).unwrap_or(false),
+                path: path_from_json(
+                    obj.get("path")
+                        .ok_or_else(|| Error::QueryInvalid("is_null requires path".into()))?,
+                )?,
+                negated: obj
+                    .get("negated")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false),
             }),
             "in" => {
-                let left = operand_from_json(obj.get("left").ok_or_else(|| {
-                    Error::QueryInvalid("in requires left".into())
-                })?)?;
+                let left = operand_from_json(
+                    obj.get("left")
+                        .ok_or_else(|| Error::QueryInvalid("in requires left".into()))?,
+                )?;
                 let list = obj
                     .get("list")
                     .and_then(|l| l.as_array())
                     .ok_or_else(|| Error::QueryInvalid("in requires list".into()))?
                     .clone();
-                let negated = obj.get("negated").and_then(|b| b.as_bool()).unwrap_or(false);
-                Ok(Self::In { left, list, negated })
+                let negated = obj
+                    .get("negated")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false);
+                Ok(Self::In {
+                    left,
+                    list,
+                    negated,
+                })
             }
             "starts_with" => Ok(Self::StartsWith {
-                path: path_from_json(obj.get("path").ok_or_else(|| {
-                    Error::QueryInvalid("starts_with requires path".into())
-                })?)?,
+                path: path_from_json(
+                    obj.get("path")
+                        .ok_or_else(|| Error::QueryInvalid("starts_with requires path".into()))?,
+                )?,
                 prefix: obj
                     .get("prefix")
                     .and_then(|p| p.as_str())
@@ -338,9 +355,10 @@ impl Predicate {
                     .to_string(),
             }),
             "contains" => Ok(Self::Contains {
-                path: path_from_json(obj.get("path").ok_or_else(|| {
-                    Error::QueryInvalid("contains requires path".into())
-                })?)?,
+                path: path_from_json(
+                    obj.get("path")
+                        .ok_or_else(|| Error::QueryInvalid("contains requires path".into()))?,
+                )?,
                 needle: obj
                     .get("needle")
                     .cloned()
@@ -548,11 +566,11 @@ fn operand_from_json(v: &JsonValue) -> Result<Operand, Error> {
             obj.get("path")
                 .ok_or_else(|| Error::QueryInvalid("path operand needs path".into()))?,
         )?)),
-        Some("literal") => Ok(Operand::literal(
-            obj.get("value")
-                .cloned()
-                .ok_or_else(|| Error::QueryInvalid("literal operand needs value".into()))?,
-        )),
+        Some("literal") => {
+            Ok(Operand::literal(obj.get("value").cloned().ok_or_else(
+                || Error::QueryInvalid("literal operand needs value".into()),
+            )?))
+        }
         Some("param") => Ok(Operand::param(
             obj.get("name")
                 .and_then(|n| n.as_str())
@@ -911,9 +929,8 @@ mod tests {
         ];
         for p in cases {
             let j = p.to_canonical_json();
-            let back = Predicate::from_plan_json(&j).unwrap_or_else(|e| {
-                panic!("round-trip decode failed for {p:?}: {e}")
-            });
+            let back = Predicate::from_plan_json(&j)
+                .unwrap_or_else(|e| panic!("round-trip decode failed for {p:?}: {e}"));
             assert_eq!(back, p, "round-trip mismatch for {p:?}");
         }
     }

@@ -4,8 +4,8 @@
 
 use residiuum_store::adaptive_write::{
     cook_item_frame, mutation_credit, AdaptiveWriteMode, AdaptiveWritePolicy, BoundedQueue,
-    CookOutcome, CookTask, CreditError, CreditLedger, OrderedReadyRing, PersistentCookerPool,
-    QueueError, LaneTicket, FRAME_FRAMING_OVERHEAD,
+    CookOutcome, CookTask, CreditError, CreditLedger, LaneTicket, OrderedReadyRing,
+    PersistentCookerPool, QueueError, FRAME_FRAMING_OVERHEAD,
 };
 use residiuum_store::EventKind;
 use std::sync::Arc;

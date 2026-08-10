@@ -273,7 +273,10 @@ mod tests {
         assert_ne!(a, b);
         assert!(matches!(
             p.try_begin_reservation(),
-            Err(PipelineError::DepthExceeded { limit: 2, in_flight: 2 })
+            Err(PipelineError::DepthExceeded {
+                limit: 2,
+                in_flight: 2
+            })
         ));
         p.note_cook_complete(a).unwrap();
         p.note_install_complete(a).unwrap();

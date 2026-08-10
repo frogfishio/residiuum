@@ -13,9 +13,7 @@
 use crate::atomic_file;
 use crate::error::StoreError;
 use crate::layout::{hex16, segment_id_from_filename, StorePaths};
-use crate::recovery_shadow::frontier::{
-    load_protected_coverage, publish_protected_coverage,
-};
+use crate::recovery_shadow::frontier::{load_protected_coverage, publish_protected_coverage};
 use crate::recovery_shadow::mirror::publish_mirror_shadow;
 use crate::recovery_shadow::policy::{set_shadow_reclaim_policy, ShadowReclaimPolicy};
 use crate::recovery_shadow::qualify::{

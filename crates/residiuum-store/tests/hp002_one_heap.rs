@@ -16,17 +16,18 @@ fn bound_segment_never_admits_foreign_frame() {
         store_id: [1u8; 16],
         segment_id: [2u8; 16],
     };
-    let seg = ActiveSegment::create_with_descriptor_envelope(
-        ids,
-        SafetyLimits::default(),
-        0,
-        &env_a,
-    )
-    .unwrap();
+    let seg =
+        ActiveSegment::create_with_descriptor_envelope(ids, SafetyLimits::default(), 0, &env_a)
+            .unwrap();
     assert_eq!(seg.frame_count(), 1);
 
-    let subj = encode_subject_v2(&heap_a, SubjectObjectKind::HeapMetadata, &[0u8; 16], b"\x01")
-        .unwrap();
+    let subj = encode_subject_v2(
+        &heap_a,
+        SubjectObjectKind::HeapMetadata,
+        &[0u8; 16],
+        b"\x01",
+    )
+    .unwrap();
     require_admit(&heap_a, &env_a, &env_a, Some(&subj)).unwrap();
     assert!(require_admit(&heap_a, &env_a, &env_b, Some(&subj)).is_err());
     assert!(require_admit(&heap_b, &env_a, &env_a, None).is_err());

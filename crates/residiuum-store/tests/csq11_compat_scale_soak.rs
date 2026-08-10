@@ -17,8 +17,8 @@ use residiuum_format::{
 };
 use residiuum_store::{
     load_and_verify_manifest, restore_full_backup, verify_package_files, BackupConsistency,
-    DurabilityMode, MigrateOptions, MigratePhase, RestoreOptions, ScrubOptions, Store,
-    StoreError, PRIMARY_CACHE_FILE,
+    DurabilityMode, MigrateOptions, MigratePhase, RestoreOptions, ScrubOptions, Store, StoreError,
+    PRIMARY_CACHE_FILE,
 };
 use serde_json::Value;
 use std::fs;
@@ -46,11 +46,7 @@ fn seed_body(seed: u8, len: usize) -> Vec<u8> {
 
 fn assert_projection(store: &Store, expected: &[(String, Option<Vec<u8>>)]) {
     for (k, v) in expected {
-        assert_eq!(
-            store.get(k).unwrap(),
-            *v,
-            "projection mismatch for key {k}"
-        );
+        assert_eq!(store.get(k).unwrap(), *v, "projection mismatch for key {k}");
     }
 }
 
@@ -203,9 +199,7 @@ fn csq_compat_unsupported_backup_profile_source_intact() {
     let bak = dir.path().join("bak");
     {
         let mut store = Store::create(&src).unwrap();
-        store
-            .put("keep", b"v1", DurabilityMode::Durable)
-            .unwrap();
+        store.put("keep", b"v1", DurabilityMode::Durable).unwrap();
         store.backup_to(&bak).unwrap();
     }
 
@@ -242,7 +236,10 @@ fn csq_compat_unsupported_backup_profile_source_intact() {
     assert_eq!(after_meta, before_meta);
 
     let still = Store::open(&src).unwrap();
-    assert_eq!(still.get("keep").unwrap().as_deref(), Some(b"v1".as_slice()));
+    assert_eq!(
+        still.get("keep").unwrap().as_deref(),
+        Some(b"v1".as_slice())
+    );
 }
 
 /// CSQ-COMPAT-002 / identity policy — pre-reset product meta is not a supported
@@ -362,9 +359,7 @@ fn csq_journey_packaged_torture_reconcile() {
         drop(opened);
 
         // Scrub + rebuild on source must not change live authority.
-        let scrub = store
-            .scrub_to_completion(ScrubOptions::default())
-            .unwrap();
+        let scrub = store.scrub_to_completion(ScrubOptions::default()).unwrap();
         assert!(scrub.cycle_completed);
         store.rebuild_index().unwrap();
         assert_projection(&store, &snap);
@@ -405,9 +400,7 @@ fn csq_scale_pr_safe_seed_campaign_reconcile() {
         for i in 0..N {
             let key = format!("k/{i:04}");
             let body = seed_body((i % 200) as u8, 8 + (i % 60));
-            store
-                .put(&key, &body, DurabilityMode::Durable)
-                .unwrap();
+            store.put(&key, &body, DurabilityMode::Durable).unwrap();
             expected.push((key, Some(body)));
             if i > 0 && i % 25 == 0 {
                 store.seal_active().unwrap();
@@ -417,9 +410,7 @@ fn csq_scale_pr_safe_seed_campaign_reconcile() {
                 let key = format!("k/{i:04}");
                 store.delete(&key, DurabilityMode::Durable).unwrap();
                 let body2 = seed_body(99, 16 + (i % 20));
-                store
-                    .put(&key, &body2, DurabilityMode::Durable)
-                    .unwrap();
+                store.put(&key, &body2, DurabilityMode::Durable).unwrap();
                 if let Some((_, slot)) = expected.iter_mut().find(|(k, _)| k == &key) {
                     *slot = Some(body2);
                 }
@@ -445,9 +436,7 @@ fn csq_scale_pr_safe_seed_campaign_reconcile() {
             assert_eq!(store.get(k).unwrap(), *v, "after rebuild {k}");
         }
 
-        let scrub = store
-            .scrub_to_completion(ScrubOptions::default())
-            .unwrap();
+        let scrub = store.scrub_to_completion(ScrubOptions::default()).unwrap();
         assert!(scrub.cycle_completed);
         for (k, v) in &expected {
             assert_eq!(store.get(k).unwrap(), *v, "after scrub {k}");
@@ -494,9 +483,7 @@ fn csq_platform_host_cell_registered() {
 
     let matches: Vec<_> = items
         .iter()
-        .filter(|i| {
-            i["os"].as_str() == Some(os_reg) && i["arch"].as_str() == Some(arch_reg)
-        })
+        .filter(|i| i["os"].as_str() == Some(os_reg) && i["arch"].as_str() == Some(arch_reg))
         .collect();
 
     // Not every host is a required cell (e.g. windows) — only assert when the
@@ -507,9 +494,9 @@ fn csq_platform_host_cell_registered() {
         return;
     }
     assert!(
-        matches.iter().any(|i| {
-            matches!(i["status"].as_str(), Some("required") | Some("nightly"))
-        }),
+        matches
+            .iter()
+            .any(|i| { matches!(i["status"].as_str(), Some("required") | Some("nightly")) }),
         "registered host cell must be required or nightly"
     );
 }

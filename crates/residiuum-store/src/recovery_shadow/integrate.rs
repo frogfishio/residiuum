@@ -7,7 +7,7 @@
 //! rename → parent-directory sync).
 
 use super::frontier::{
-    load_protected_coverage, publish_protected_coverage, protection_lag_from_coverage,
+    load_protected_coverage, protection_lag_from_coverage, publish_protected_coverage,
     ProtectedCoverage, ProtectionLag,
 };
 use super::policy::{shadow_reclaim_policy, ShadowReclaimPolicy};
@@ -181,12 +181,8 @@ pub fn build_and_publish_mirror_shadow(
     segment_image: &[u8],
 ) -> Result<ShadowTelemetry, StoreError> {
     let t0 = Instant::now();
-    let timing = super::mirror::publish_mirror_shadow_timed(
-        paths,
-        store_id,
-        &segment_id,
-        segment_image,
-    )?;
+    let timing =
+        super::mirror::publish_mirror_shadow_timed(paths, store_id, &segment_id, segment_image)?;
     let construct_ns = t0.elapsed().as_nanos() as u64;
     // Protection only after atomic mirror publish returns.
     let seq = segment_seq_from_id(&segment_id);
@@ -198,7 +194,8 @@ pub fn build_and_publish_mirror_shadow(
     Ok(ShadowTelemetry {
         shadows_built: 1,
         bytes_written: timing.bytes_written,
-        construct_ns: construct_ns.saturating_sub(timing.file_sync_ns + timing.rename_ns + timing.dir_sync_ns),
+        construct_ns: construct_ns
+            .saturating_sub(timing.file_sync_ns + timing.rename_ns + timing.dir_sync_ns),
         persist_ns: timing.file_sync_ns + timing.rename_ns + timing.dir_sync_ns,
         backlog_segments: lag.lag,
         protection_lag: lag.lag,
@@ -293,10 +290,7 @@ pub fn retire_shadows_after_replacement_with_policy(
     policy: ShadowReclaimPolicy,
 ) -> Result<(), StoreError> {
     let repl = shadow_path(paths, replacement_segment_id);
-    let replacement_ok = matches!(
-        try_load_shadow(&repl, Some(store_id))?,
-        ShadowLoad::Ok(_)
-    );
+    let replacement_ok = matches!(try_load_shadow(&repl, Some(store_id))?, ShadowLoad::Ok(_));
     match policy {
         ShadowReclaimPolicy::RequireReplacementShadow => {
             if !replacement_ok {

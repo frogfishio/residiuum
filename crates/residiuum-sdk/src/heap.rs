@@ -18,14 +18,173 @@ use residiuum_store::{
 };
 use serde::Serialize;
 use std::collections::VecDeque;
+use std::hash::{BuildHasher, Hash, Hasher as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const DEFAULT_DECODED_JSON_CACHE_CHARGE: usize = 64 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DecodedJsonKey {
+    heap_id: [u8; 16],
+    collection_id: [u8; 16],
+    key: String,
+}
+
+#[derive(Debug)]
+struct CachedDecodedJson {
+    version: [u8; 16],
+    value: Arc<serde_json::Value>,
+    logical_bytes: u64,
+    charge: usize,
+}
+
+#[derive(Debug)]
+struct DecodedJsonCache {
+    entries: hashbrown::HashMap<DecodedJsonKey, CachedDecodedJson>,
+    admission_order: VecDeque<(DecodedJsonKey, [u8; 16])>,
+    resident_charge: usize,
+    max_charge: usize,
+}
+
+impl DecodedJsonCache {
+    fn new(max_charge: usize) -> Self {
+        Self {
+            entries: hashbrown::HashMap::new(),
+            admission_order: VecDeque::new(),
+            resident_charge: 0,
+            max_charge,
+        }
+    }
+
+    fn get(&self, key: &DecodedJsonKey, version: &[u8; 16]) -> Option<Arc<serde_json::Value>> {
+        let entry = self.entries.get(key)?;
+        (entry.version == *version).then(|| Arc::clone(&entry.value))
+    }
+
+    fn get_with_len(
+        &self,
+        key: &DecodedJsonKey,
+        version: &[u8; 16],
+    ) -> Option<(Arc<serde_json::Value>, u64)> {
+        let entry = self.entries.get(key)?;
+        (entry.version == *version).then(|| (Arc::clone(&entry.value), entry.logical_bytes))
+    }
+
+    fn get_raw_ref_with_len(
+        &self,
+        heap_id: &[u8; 16],
+        collection_id: &[u8; 16],
+        key: &str,
+        version: &[u8; 16],
+    ) -> Option<(&serde_json::Value, u64)> {
+        let mut hasher = self.entries.hasher().build_hasher();
+        heap_id.hash(&mut hasher);
+        collection_id.hash(&mut hasher);
+        key.hash(&mut hasher);
+        let hash = hasher.finish();
+        let (_, entry) = self.entries.raw_entry().from_hash(hash, |candidate| {
+            &candidate.heap_id == heap_id
+                && &candidate.collection_id == collection_id
+                && candidate.key == key
+        })?;
+        (entry.version == *version).then(|| (entry.value.as_ref(), entry.logical_bytes))
+    }
+
+    fn get_projected(
+        &self,
+        key: &DecodedJsonKey,
+        version: &[u8; 16],
+        fields: &[String],
+    ) -> Option<Vec<serde_json::Value>> {
+        let entry = self.entries.get(key)?;
+        (entry.version == *version).then(|| project_json_fields(&entry.value, fields))
+    }
+
+    fn insert(
+        &mut self,
+        key: DecodedJsonKey,
+        version: [u8; 16],
+        value: Arc<serde_json::Value>,
+        encoded_len: usize,
+    ) {
+        if self
+            .entries
+            .get(&key)
+            .is_some_and(|entry| entry.version == version)
+        {
+            return;
+        }
+        if let Some(previous) = self.entries.remove(&key) {
+            self.resident_charge = self.resident_charge.saturating_sub(previous.charge);
+        }
+        // serde_json's tree has allocator overhead beyond encoded bytes. A
+        // conservative 3x logical charge plus key/entry overhead keeps this
+        // cache bounded without coupling the SDK to serde_json internals.
+        let charge = encoded_len
+            .saturating_mul(3)
+            .saturating_add(key.key.len())
+            .saturating_add(128);
+        if charge > self.max_charge {
+            return;
+        }
+        self.resident_charge = self.resident_charge.saturating_add(charge);
+        self.entries.insert(
+            key.clone(),
+            CachedDecodedJson {
+                version,
+                value,
+                logical_bytes: encoded_len.saturating_sub(1) as u64,
+                charge,
+            },
+        );
+        self.admission_order.push_back((key, version));
+        if self.admission_order.len() > self.entries.len().saturating_mul(2).saturating_add(1_024) {
+            self.admission_order.retain(|(key, version)| {
+                self.entries
+                    .get(key)
+                    .is_some_and(|entry| entry.version == *version)
+            });
+        }
+        while self.resident_charge > self.max_charge {
+            let Some((key, version)) = self.admission_order.pop_front() else {
+                break;
+            };
+            if self
+                .entries
+                .get(&key)
+                .is_some_and(|entry| entry.version == version)
+            {
+                if let Some(removed) = self.entries.remove(&key) {
+                    self.resident_charge = self.resident_charge.saturating_sub(removed.charge);
+                }
+            }
+        }
+    }
+}
+
+fn project_json_fields(value: &serde_json::Value, fields: &[String]) -> Vec<serde_json::Value> {
+    fields
+        .iter()
+        .map(|field| {
+            let mut current = value;
+            for segment in field.split('.') {
+                let Some(next) = current.as_object().and_then(|map| map.get(segment)) else {
+                    return serde_json::Value::Null;
+                };
+                current = next;
+            }
+            current.clone()
+        })
+        .collect()
+}
 
 /// Deployment-level host wrapping a capability-gated [`StoreHost`].
 pub struct ResidiuumDeployment {
     host: StoreHost,
     data_root: PathBuf,
+    decoded_json_cache: Arc<Mutex<DecodedJsonCache>>,
 }
 
 impl ResidiuumDeployment {
@@ -35,6 +194,9 @@ impl ResidiuumDeployment {
         Ok(Self {
             host: StoreHost::open(path)?,
             data_root: path.to_path_buf(),
+            decoded_json_cache: Arc::new(Mutex::new(DecodedJsonCache::new(
+                DEFAULT_DECODED_JSON_CACHE_CHARGE,
+            ))),
         })
     }
 
@@ -44,6 +206,9 @@ impl ResidiuumDeployment {
         Ok(Self {
             host: StoreHost::create(path)?,
             data_root: path.to_path_buf(),
+            decoded_json_cache: Arc::new(Mutex::new(DecodedJsonCache::new(
+                DEFAULT_DECODED_JSON_CACHE_CHARGE,
+            ))),
         })
     }
 
@@ -55,6 +220,7 @@ impl ResidiuumDeployment {
             store: Arc::new(store),
             layout: HeapMetaLayout::new(&self.data_root),
             pool: Arc::new(Mutex::new(HeapPoolInner::default())),
+            decoded_json_cache: Arc::clone(&self.decoded_json_cache),
         }
     }
 
@@ -117,6 +283,7 @@ pub struct Heap {
     store: Arc<HeapStore>,
     layout: HeapMetaLayout,
     pool: Arc<Mutex<HeapPoolInner>>,
+    decoded_json_cache: Arc<Mutex<DecodedJsonCache>>,
 }
 
 impl Heap {
@@ -170,6 +337,7 @@ impl Heap {
             store: Arc::clone(&self.store),
             id,
             name_at_open: tip_name,
+            decoded_json_cache: Arc::clone(&self.decoded_json_cache),
         })
     }
 
@@ -188,6 +356,7 @@ impl Heap {
             store: Arc::clone(&self.store),
             id,
             name_at_open: entry.name,
+            decoded_json_cache: Arc::clone(&self.decoded_json_cache),
         })
     }
 
@@ -282,6 +451,7 @@ impl Heap {
             store: Arc::clone(&self.store),
             id: collection_id,
             name_at_open: admin.name,
+            decoded_json_cache: Arc::clone(&self.decoded_json_cache),
         };
         Ok(CreatedCollection {
             collection,
@@ -374,6 +544,7 @@ pub struct HeapCollection {
     store: Arc<HeapStore>,
     id: CollectionId,
     name_at_open: String,
+    decoded_json_cache: Arc<Mutex<DecodedJsonCache>>,
 }
 
 impl HeapCollection {
@@ -560,10 +731,48 @@ impl HeapCollection {
 
     /// Get JSON for `key`.
     pub fn get(&self, key: &str) -> Result<Option<serde_json::Value>, Error> {
-        match self.get_raw_body(key)? {
+        match self.get_versioned_raw_body(key)? {
             None => Ok(None),
-            Some(raw) => Ok(Some(crate::value::decode_json(&raw)?)),
+            Some((raw, version)) => Ok(Some(self.decode_json_versioned(key, &raw, version)?)),
         }
+    }
+
+    pub(crate) fn decode_json_versioned(
+        &self,
+        key: &str,
+        body: &[u8],
+        version: [u8; 16],
+    ) -> Result<serde_json::Value, Error> {
+        Ok(self
+            .decode_json_versioned_shared(key, body, version)?
+            .as_ref()
+            .clone())
+    }
+
+    pub(crate) fn decode_json_versioned_shared(
+        &self,
+        key: &str,
+        body: &[u8],
+        version: [u8; 16],
+    ) -> Result<Arc<serde_json::Value>, Error> {
+        let cache_key = DecodedJsonKey {
+            heap_id: *self.cap.heap_id().as_bytes(),
+            collection_id: *self.id.as_bytes(),
+            key: key.to_string(),
+        };
+        if let Some(value) = self
+            .decoded_json_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&cache_key, &version))
+        {
+            return Ok(value);
+        }
+        let value = Arc::new(crate::value::decode_json(body)?);
+        if let Ok(mut cache) = self.decoded_json_cache.lock() {
+            cache.insert(cache_key, version, Arc::clone(&value), body.len());
+        }
+        Ok(value)
     }
 
     /// Get opaque application bytes for `key` (strips type tag).
@@ -591,26 +800,158 @@ impl HeapCollection {
             validate_key(key)?;
         }
         let raw_keys: Vec<Vec<u8>> = keys.iter().map(|key| key.as_bytes().to_vec()).collect();
-        self.store
-            .get_collection_many(self.id.as_bytes(), &raw_keys)?
-            .into_iter()
-            .map(|(key, body, hole)| {
-                let key = String::from_utf8(key)
-                    .map_err(|_| Error::Internal("get-many: non-UTF-8 key".into()))?;
-                let document = match (body, hole) {
-                    (Some(body), None) => match crate::value::decode_json(&body) {
-                        Ok(value) => HostDocument::Present(value),
+        let identities = self
+            .store
+            .get_collection_versions(self.id.as_bytes(), &raw_keys)?;
+        if identities.len() != keys.len() {
+            return self.get_json_many_covered_raw(keys);
+        }
+        let mut documents = vec![None; keys.len()];
+        let mut misses = Vec::new();
+        if let Ok(cache) = self.decoded_json_cache.lock() {
+            for (slot, ((expected_key, supplied_key), (raw_key, version))) in keys
+                .iter()
+                .zip(raw_keys.iter())
+                .zip(identities.iter())
+                .enumerate()
+            {
+                if raw_key != supplied_key {
+                    return self.get_json_many_covered_raw(keys);
+                }
+                let Some(version) = version else {
+                    documents[slot] = Some((expected_key.clone(), HostDocument::Absent));
+                    continue;
+                };
+                let cache_key = DecodedJsonKey {
+                    heap_id: *self.cap.heap_id().as_bytes(),
+                    collection_id: *self.id.as_bytes(),
+                    key: expected_key.clone(),
+                };
+                match cache.get_with_len(&cache_key, version) {
+                    Some((value, logical_bytes)) => {
+                        documents[slot] = Some((
+                            expected_key.clone(),
+                            HostDocument::Present {
+                                value: value.into(),
+                                logical_bytes: Some(logical_bytes),
+                            },
+                        ));
+                    }
+                    None => {
+                        misses.push((slot, supplied_key.clone(), expected_key.clone(), *version))
+                    }
+                }
+            }
+        } else {
+            for (slot, ((expected_key, supplied_key), (raw_key, version))) in keys
+                .iter()
+                .zip(raw_keys.iter())
+                .zip(identities.iter())
+                .enumerate()
+            {
+                if raw_key != supplied_key {
+                    return self.get_json_many_covered_raw(keys);
+                }
+                match version {
+                    Some(version) => {
+                        misses.push((slot, supplied_key.clone(), expected_key.clone(), *version))
+                    }
+                    None => {
+                        documents[slot] = Some((expected_key.clone(), HostDocument::Absent));
+                    }
+                }
+            }
+        }
+
+        if !misses.is_empty() {
+            let miss_keys = misses
+                .iter()
+                .map(|(_, key, _, _)| key.clone())
+                .collect::<Vec<_>>();
+            let resolved = self
+                .store
+                .get_collection_many_versioned(self.id.as_bytes(), &miss_keys)?;
+            if resolved.len() != misses.len() {
+                return self.get_json_many_covered_raw(keys);
+            }
+            for (
+                (slot, expected_key, key, expected_version),
+                (resolved_key, body, version, hole),
+            ) in misses.into_iter().zip(resolved)
+            {
+                if resolved_key != expected_key {
+                    return self.get_json_many_covered_raw(keys);
+                }
+                if let Some(reason) = hole {
+                    documents[slot] = Some((
+                        key,
+                        HostDocument::Hole {
+                            code: reason.as_str().to_string(),
+                        },
+                    ));
+                    continue;
+                }
+                if version != Some(expected_version) {
+                    return self.get_json_many_covered_raw(keys);
+                }
+                let Some(body) = body else {
+                    return self.get_json_many_covered_raw(keys);
+                };
+                let document =
+                    match self.decode_json_versioned_shared(&key, &body, expected_version) {
+                        Ok(value) => HostDocument::Present {
+                            value: value.into(),
+                            logical_bytes: crate::value::encoded_json_payload_len(&body),
+                        },
                         Err(error) => HostDocument::Hole {
                             code: error.code().as_str().to_string(),
                         },
-                    },
-                    (None, Some(reason)) => HostDocument::Hole {
+                    };
+                documents[slot] = Some((key, document));
+            }
+        }
+
+        documents
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| Error::Internal("cached get-many left an unresolved row".into()))
+    }
+
+    fn get_json_many_covered_raw(
+        &self,
+        keys: &[String],
+    ) -> Result<Vec<(String, crate::query_bytecode_v1::HostDocument)>, Error> {
+        use crate::query_bytecode_v1::HostDocument;
+
+        for key in keys {
+            validate_key(key)?;
+        }
+        let raw_keys: Vec<Vec<u8>> = keys.iter().map(|key| key.as_bytes().to_vec()).collect();
+        self.store
+            .get_collection_many_versioned(self.id.as_bytes(), &raw_keys)?
+            .into_iter()
+            .map(|(key, body, version, hole)| {
+                let key = String::from_utf8(key)
+                    .map_err(|_| Error::Internal("get-many: non-UTF-8 key".into()))?;
+                let document = match (body, version, hole) {
+                    (Some(body), Some(version), None) => {
+                        match self.decode_json_versioned_shared(&key, &body, version) {
+                            Ok(value) => HostDocument::Present {
+                                value: value.into(),
+                                logical_bytes: crate::value::encoded_json_payload_len(&body),
+                            },
+                            Err(error) => HostDocument::Hole {
+                                code: error.code().as_str().to_string(),
+                            },
+                        }
+                    }
+                    (None, _, Some(reason)) => HostDocument::Hole {
                         code: reason.as_str().to_string(),
                     },
-                    (None, None) => HostDocument::Absent,
-                    (Some(_), Some(_)) => {
+                    (None, None, None) => HostDocument::Absent,
+                    _ => {
                         return Err(Error::Internal(
-                            "get-many returned body and hole for one key".into(),
+                            "get-many returned incoherent body/version/hole".into(),
                         ))
                     }
                 };
@@ -638,6 +979,135 @@ impl HeapCollection {
         Ok(self
             .store
             .scan_collection_page_versioned(self.id.as_bytes(), limit, after_key)?)
+    }
+
+    /// Resolve a bounded document page by immutable key/version identity first.
+    /// Exact decoded-cache hits avoid body materialisation; misses are fetched
+    /// and verified as one batch. Concurrent identity drift refuses this fast
+    /// path so the caller can fall back to the ordinary authoritative scan.
+    pub(crate) fn scan_json_covered_page_cached(
+        &self,
+        limit: usize,
+        after_key: Option<&[u8]>,
+    ) -> Result<Option<Vec<(String, crate::query_bytecode_v1::HostDocument)>>, Error> {
+        use crate::query_bytecode_v1::HostDocument;
+
+        let page =
+            self.store
+                .scan_collection_versions_page(self.id.as_bytes(), limit, after_key)?;
+        let mut documents = vec![None; page.entries.len()];
+        let mut misses = Vec::new();
+
+        if let Ok(cache) = self.decoded_json_cache.lock() {
+            for (slot, (raw_key, version)) in page.entries.iter().enumerate() {
+                let key = String::from_utf8(raw_key.clone())
+                    .map_err(|_| Error::Internal("cached scan: non-UTF-8 key".into()))?;
+                let cache_key = DecodedJsonKey {
+                    heap_id: *self.cap.heap_id().as_bytes(),
+                    collection_id: *self.id.as_bytes(),
+                    key: key.clone(),
+                };
+                match cache.get_with_len(&cache_key, version) {
+                    Some((value, logical_bytes)) => {
+                        documents[slot] = Some((
+                            key,
+                            HostDocument::Present {
+                                value: value.into(),
+                                logical_bytes: Some(logical_bytes),
+                            },
+                        ));
+                    }
+                    None => misses.push((slot, raw_key.clone(), key, *version, cache_key)),
+                }
+            }
+        } else {
+            for (slot, (raw_key, version)) in page.entries.iter().enumerate() {
+                let key = String::from_utf8(raw_key.clone())
+                    .map_err(|_| Error::Internal("cached scan: non-UTF-8 key".into()))?;
+                misses.push((
+                    slot,
+                    raw_key.clone(),
+                    key.clone(),
+                    *version,
+                    DecodedJsonKey {
+                        heap_id: *self.cap.heap_id().as_bytes(),
+                        collection_id: *self.id.as_bytes(),
+                        key,
+                    },
+                ));
+            }
+        }
+
+        if !misses.is_empty() {
+            let miss_keys = misses
+                .iter()
+                .map(|(_, raw_key, _, _, _)| raw_key.clone())
+                .collect::<Vec<_>>();
+            let resolved = self
+                .store
+                .get_collection_many_versioned(self.id.as_bytes(), &miss_keys)?;
+            if resolved.len() != misses.len() {
+                return Ok(None);
+            }
+            let mut decoded = Vec::with_capacity(misses.len());
+            for (
+                (slot, expected_key, key, expected_version, cache_key),
+                (resolved_key, body, version, hole),
+            ) in misses.into_iter().zip(resolved)
+            {
+                if resolved_key != expected_key {
+                    return Ok(None);
+                }
+                if let Some(reason) = hole {
+                    documents[slot] = Some((
+                        key,
+                        HostDocument::Hole {
+                            code: reason.as_str().to_string(),
+                        },
+                    ));
+                    continue;
+                }
+                if version != Some(expected_version) {
+                    return Ok(None);
+                }
+                let Some(body) = body else {
+                    return Ok(None);
+                };
+                match crate::value::decode_json(&body) {
+                    Ok(value) => {
+                        let value = Arc::new(value);
+                        let logical_bytes = crate::value::encoded_json_payload_len(&body);
+                        documents[slot] = Some((
+                            key,
+                            HostDocument::Present {
+                                value: Arc::clone(&value).into(),
+                                logical_bytes,
+                            },
+                        ));
+                        decoded.push((cache_key, expected_version, value, body.len()));
+                    }
+                    Err(error) => {
+                        documents[slot] = Some((
+                            key,
+                            HostDocument::Hole {
+                                code: error.code().as_str().to_string(),
+                            },
+                        ));
+                    }
+                }
+            }
+            if let Ok(mut cache) = self.decoded_json_cache.lock() {
+                for (key, version, value, encoded_len) in decoded {
+                    cache.insert(key, version, value, encoded_len);
+                }
+            }
+        }
+
+        documents
+            .into_iter()
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| Error::Internal("cached scan left an unresolved row".into()))
+            .map(Some)
     }
 
     /// Delete `key` (SubjectV2, durable).
@@ -728,6 +1198,31 @@ impl HeapCollection {
         Ok(Some(out))
     }
 
+    pub(crate) fn lookup_index_keys_many(
+        &self,
+        field: &str,
+        values: &[serde_json::Value],
+    ) -> Result<Option<Vec<String>>, Error> {
+        let raw = self
+            .store
+            .lookup_index_keys_many(self.id.as_bytes(), field, values)?;
+        let Some(keys) = raw else {
+            return Ok(None);
+        };
+        keys.into_iter()
+            .map(|key| {
+                String::from_utf8(key).map_err(|_| {
+                    Error::Internal("index lookup-many: non-UTF-8 application key".into())
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+    }
+
+    pub(crate) fn source_frontier(&self) -> Result<[u8; 32], Error> {
+        Ok(self.store.segment_fingerprint()?)
+    }
+
     pub(crate) fn lookup_index_keys_with_constraints(
         &self,
         equalities: &[(String, serde_json::Value)],
@@ -773,6 +1268,217 @@ impl HeapCollection {
             })
             .collect::<Result<Vec<_>, _>>()
             .map(Some)
+    }
+
+    pub(crate) fn lookup_covering_index_values(
+        &self,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<serde_json::Value>>>, Error> {
+        Ok(self
+            .store
+            .lookup_covering_index_values(self.id.as_bytes(), fields)?)
+    }
+
+    /// Scan authoritative live documents while materializing only requested
+    /// JSON paths. A page hole refuses the optimization so normal query
+    /// coverage handling remains authoritative.
+    pub(crate) fn scan_projected_values(
+        &self,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<serde_json::Value>>>, Error> {
+        if fields.is_empty() {
+            return Ok(None);
+        }
+        let mut rows = Vec::new();
+        let mut after_key: Option<Vec<u8>> = None;
+        loop {
+            let page = self.store.scan_collection_versions_page(
+                self.id.as_bytes(),
+                4_096,
+                after_key.as_deref(),
+            )?;
+            let mut projected = vec![None; page.entries.len()];
+            let mut misses = Vec::new();
+            if let Ok(cache) = self.decoded_json_cache.lock() {
+                for (slot, (raw_key, version)) in page.entries.iter().enumerate() {
+                    let key = String::from_utf8(raw_key.clone())
+                        .map_err(|_| Error::Internal("projected scan: non-UTF-8 key".into()))?;
+                    let cache_key = DecodedJsonKey {
+                        heap_id: *self.cap.heap_id().as_bytes(),
+                        collection_id: *self.id.as_bytes(),
+                        key,
+                    };
+                    match cache.get_projected(&cache_key, version, fields) {
+                        Some(row) => projected[slot] = Some(row),
+                        None => misses.push((slot, raw_key.clone(), *version, cache_key)),
+                    }
+                }
+            } else {
+                for (slot, (raw_key, version)) in page.entries.iter().enumerate() {
+                    let key = String::from_utf8(raw_key.clone())
+                        .map_err(|_| Error::Internal("projected scan: non-UTF-8 key".into()))?;
+                    misses.push((
+                        slot,
+                        raw_key.clone(),
+                        *version,
+                        DecodedJsonKey {
+                            heap_id: *self.cap.heap_id().as_bytes(),
+                            collection_id: *self.id.as_bytes(),
+                            key,
+                        },
+                    ));
+                }
+            }
+            if !misses.is_empty() {
+                let miss_keys = misses
+                    .iter()
+                    .map(|(_, key, _, _)| key.clone())
+                    .collect::<Vec<_>>();
+                let resolved = self
+                    .store
+                    .get_collection_many_versioned(self.id.as_bytes(), &miss_keys)?;
+                let mut decoded = Vec::with_capacity(misses.len());
+                for (
+                    (slot, expected_key, expected_version, cache_key),
+                    (key, body, version, hole),
+                ) in misses.into_iter().zip(resolved)
+                {
+                    if key != expected_key || hole.is_some() || version != Some(expected_version) {
+                        return Ok(None);
+                    }
+                    let Some(body) = body else {
+                        return Ok(None);
+                    };
+                    let value = crate::value::decode_json(&body)?;
+                    projected[slot] = Some(project_json_fields(&value, fields));
+                    decoded.push((cache_key, expected_version, value, body.len()));
+                }
+                if let Ok(mut cache) = self.decoded_json_cache.lock() {
+                    for (key, version, value, encoded_len) in decoded {
+                        cache.insert(key, version, Arc::new(value), encoded_len);
+                    }
+                }
+            }
+            rows.extend(
+                projected
+                    .into_iter()
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or_else(|| {
+                        Error::Internal("projected scan left an unresolved row".into())
+                    })?,
+            );
+            if !page.has_more {
+                return Ok(Some(rows));
+            }
+            let Some(last_key) = page.last_key else {
+                return Err(Error::Internal(
+                    "projected scan has_more without continuation key".into(),
+                ));
+            };
+            after_key = Some(last_key);
+        }
+    }
+
+    pub(crate) fn scan_group_aggregate(
+        &self,
+        spec: &crate::plan_v1::GroupAggSpec,
+        where_k: &crate::CompiledKernelWhere,
+        candidate_keys: Option<&[String]>,
+    ) -> Result<Option<crate::query_bytecode_v1::HostGroupAggregate>, Error> {
+        use crate::query_bytecode_v1::HostGroupAggregate;
+
+        let mut accumulator = crate::query_bytecode_v1::GroupAccumulator::new(spec);
+        let mut examined_documents = 0u64;
+        let mut examined_bytes = 0u64;
+        if let Some(keys) = candidate_keys {
+            if keys.len() > 4_096 {
+                return Ok(None);
+            }
+            let raw_keys = keys
+                .iter()
+                .map(|key| key.as_bytes().to_vec())
+                .collect::<Vec<_>>();
+            let identities = self
+                .store
+                .get_collection_versions(self.id.as_bytes(), &raw_keys)?;
+            if identities.len() != keys.len() {
+                return Ok(None);
+            }
+            let Ok(cache) = self.decoded_json_cache.lock() else {
+                return Ok(None);
+            };
+            for ((expected_key, expected_raw), (actual_raw, version)) in
+                keys.iter().zip(&raw_keys).zip(&identities)
+            {
+                if actual_raw != expected_raw {
+                    return Ok(None);
+                }
+                let Some(version) = version else {
+                    return Ok(None);
+                };
+                let Some((value, logical_bytes)) = cache.get_raw_ref_with_len(
+                    self.cap.heap_id().as_bytes(),
+                    self.id.as_bytes(),
+                    expected_key,
+                    version,
+                ) else {
+                    return Ok(None);
+                };
+                examined_documents = examined_documents.saturating_add(1);
+                examined_bytes = examined_bytes.saturating_add(logical_bytes);
+                if where_k.eval_doc(value)? {
+                    accumulator.ingest(value)?;
+                }
+            }
+            return Ok(Some(HostGroupAggregate {
+                rows: accumulator.finish()?,
+                examined_documents,
+                examined_bytes,
+            }));
+        }
+        let mut after_key: Option<Vec<u8>> = None;
+        loop {
+            let page = self.store.scan_collection_versions_page(
+                self.id.as_bytes(),
+                4_096,
+                after_key.as_deref(),
+            )?;
+            let Ok(cache) = self.decoded_json_cache.lock() else {
+                return Ok(None);
+            };
+            for (raw_key, version) in &page.entries {
+                let key = std::str::from_utf8(raw_key)
+                    .map_err(|_| Error::Internal("aggregate scan: non-UTF-8 key".into()))?;
+                let Some((value, logical_bytes)) = cache.get_raw_ref_with_len(
+                    self.cap.heap_id().as_bytes(),
+                    self.id.as_bytes(),
+                    key,
+                    version,
+                ) else {
+                    return Ok(None);
+                };
+                examined_documents = examined_documents.saturating_add(1);
+                examined_bytes = examined_bytes.saturating_add(logical_bytes);
+                if where_k.eval_doc(value)? {
+                    accumulator.ingest(value)?;
+                }
+            }
+            drop(cache);
+            if !page.has_more {
+                break;
+            }
+            let Some(next_key) = page.last_key else {
+                return Err(Error::Internal(
+                    "aggregate scan has_more without continuation key".into(),
+                ));
+            };
+            after_key = Some(next_key);
+        }
+        Ok(Some(HostGroupAggregate {
+            rows: accumulator.finish()?,
+            examined_documents,
+            examined_bytes,
+        }))
     }
 
     /// Create a field index over JSON documents. Requires IndexAdmin + Read for build.
@@ -1034,4 +1740,48 @@ fn lookup_named(
     Err(Error::ValidationMsg(format!(
         "heap object name not found: {name}"
     )))
+}
+
+#[cfg(test)]
+mod decoded_cache_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn key(name: &str) -> DecodedJsonKey {
+        DecodedJsonKey {
+            heap_id: [1; 16],
+            collection_id: [2; 16],
+            key: name.to_string(),
+        }
+    }
+
+    #[test]
+    fn decoded_cache_is_version_keyed_clone_isolated_and_bounded() {
+        let mut cache = DecodedJsonCache::new(160);
+        let first_key = key("a");
+        cache.insert(first_key.clone(), [3; 16], Arc::new(json!({"v": 1})), 4);
+        let mut returned = cache.get(&first_key, &[3; 16]).unwrap().as_ref().clone();
+        returned["v"] = json!(99);
+        assert_eq!(
+            cache.get(&first_key, &[3; 16]).unwrap().as_ref(),
+            &json!({"v": 1})
+        );
+        assert!(cache.get(&first_key, &[4; 16]).is_none());
+
+        cache.insert(first_key.clone(), [4; 16], Arc::new(json!({"v": 2})), 4);
+        assert!(cache.get(&first_key, &[3; 16]).is_none());
+        assert_eq!(
+            cache.get(&first_key, &[4; 16]).unwrap().as_ref(),
+            &json!({"v": 2})
+        );
+
+        let second_key = key("b");
+        cache.insert(second_key.clone(), [5; 16], Arc::new(json!({"v": 3})), 4);
+        assert!(cache.resident_charge <= cache.max_charge);
+        assert!(cache.get(&first_key, &[4; 16]).is_none());
+        assert_eq!(
+            cache.get(&second_key, &[5; 16]).unwrap().as_ref(),
+            &json!({"v": 3})
+        );
+    }
 }

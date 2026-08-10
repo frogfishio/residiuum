@@ -118,8 +118,7 @@ pub struct HeapWelcome {
 
 /// Unpadded base64url encode.
 pub fn b64u_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
     let mut i = 0;
     while i + 3 <= bytes.len() {

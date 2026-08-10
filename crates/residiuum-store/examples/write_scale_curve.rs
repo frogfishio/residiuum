@@ -1,4 +1,3 @@
-
 //! One-shot write scale curve: early vs late windows over ~128 MiB buffered puts.
 use residiuum_store::{DurabilityMode, Store};
 use std::time::Instant;
@@ -19,7 +18,9 @@ fn main() {
 
     while keys * (payload.len() as u64) < target_bytes {
         let key = format!("k{:020}", keys);
-        store.put(&key, &payload, DurabilityMode::Buffered).expect("put");
+        store
+            .put(&key, &payload, DurabilityMode::Buffered)
+            .expect("put");
         keys += 1;
         if keys % window == 0 {
             let elapsed = last_report_t.elapsed().as_secs_f64().max(1e-9);
@@ -45,5 +46,7 @@ fn main() {
     eprintln!("Interpretation:");
     eprintln!("  ratio_late_over_early={ratio:.3} (historic full-index-on-seal collapse ≈ 0.13).");
     eprintln!("  ratio ≳ 0.7 → asymptotic indexing failure fixed; residual drop is");
-    eprintln!("  synchronous lifecycle (auto-seal + rare persist_index_cache), not O(N) index inserts.");
+    eprintln!(
+        "  synchronous lifecycle (auto-seal + rare persist_index_cache), not O(N) index inserts."
+    );
 }

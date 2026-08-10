@@ -34,7 +34,7 @@ use crate::resource::{check_result_bytes, estimate_row_bytes, host_limits};
 use crate::rql_app_core::{compile_app_core, CompiledAppCore, DIAG_RQL_FEATURE_UNAVAILABLE};
 use residiuum_heap::{CollectionId, HeapId};
 use serde_json::{Map, Value as JsonValue};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::vm_exec::{lower_full, run_vm};
 use super::HostCapabilities;
@@ -1831,13 +1831,27 @@ fn eval_project_expr(
 ///
 /// `expect many` attaches a JSON array of matches, ordered by foreign key.
 /// Optional [`EnrichStepV1::candidate_where`] filters foreign docs first.
+#[cfg(test)]
 pub(crate) fn attach_enrich_rows(
     roots: &[(String, JsonValue)],
     foreign_docs: &[(String, JsonValue)],
     step: &EnrichStepV1,
     params: &BTreeMap<String, JsonValue>,
 ) -> Result<Vec<(String, JsonValue)>, Error> {
-    let mut by_right: BTreeMap<String, Vec<(String, JsonValue)>> = BTreeMap::new();
+    attach_enrich_rows_owned(roots.to_vec(), foreign_docs, step, params)
+}
+
+/// Ownership-preserving product attach path. Root documents are consumed and
+/// amended in place; the query-local foreign table borrows its inventory and
+/// clones only documents that are actually attached.
+pub(crate) fn attach_enrich_rows_owned(
+    roots: Vec<(String, JsonValue)>,
+    foreign_docs: &[(String, JsonValue)],
+    step: &EnrichStepV1,
+    params: &BTreeMap<String, JsonValue>,
+) -> Result<Vec<(String, JsonValue)>, Error> {
+    let mut by_right: hashbrown::HashMap<String, Vec<(&str, &JsonValue)>> =
+        hashbrown::HashMap::new();
     let candidate_k = match &step.candidate_where {
         Some(pred) => Some(super::kernel::compile_where(pred, params)?),
         None => None,
@@ -1852,7 +1866,7 @@ pub(crate) fn attach_enrich_rows(
             by_right
                 .entry(canonical_match_key(&v))
                 .or_default()
-                .push((fk.clone(), doc.clone()));
+                .push((fk.as_str(), doc));
         }
     }
     for entries in by_right.values_mut() {
@@ -1860,24 +1874,22 @@ pub(crate) fn attach_enrich_rows(
     }
 
     let mut out = Vec::with_capacity(roots.len());
-    for (key, root) in roots {
-        let left_key = match resolve_enrich_match_value(key, root, &step.left) {
+    for (key, mut root) in roots {
+        let left_key = match resolve_enrich_match_value(&key, &root, &step.left) {
             Some(v) => canonical_match_key(&v),
             None => match step.expect {
                 EnrichCardinality::Optional => {
-                    let mut row = root.clone();
-                    if let JsonValue::Object(map) = &mut row {
+                    if let JsonValue::Object(map) = &mut root {
                         map.insert(step.output.clone(), JsonValue::Null);
                     }
-                    out.push((key.clone(), row));
+                    out.push((key, root));
                     continue;
                 }
                 EnrichCardinality::Many => {
-                    let mut row = root.clone();
-                    if let JsonValue::Object(map) = &mut row {
+                    if let JsonValue::Object(map) = &mut root {
                         map.insert(step.output.clone(), JsonValue::Array(vec![]));
                     }
-                    out.push((key.clone(), row));
+                    out.push((key, root));
                     continue;
                 }
                 EnrichCardinality::ExactlyOne => {
@@ -1904,11 +1916,10 @@ pub(crate) fn attach_enrich_rows(
                 )));
             }
             (EnrichCardinality::Many, _) => {
-                JsonValue::Array(candidates.iter().map(|(_, d)| d.clone()).collect())
+                JsonValue::Array(candidates.iter().map(|(_, d)| (*d).clone()).collect())
             }
         };
-        let mut row = root.clone();
-        match &mut row {
+        match &mut root {
             JsonValue::Object(map) => {
                 map.insert(step.output.clone(), attached);
             }
@@ -1918,7 +1929,7 @@ pub(crate) fn attach_enrich_rows(
                 ));
             }
         }
-        out.push((key.clone(), row));
+        out.push((key, root));
     }
     Ok(out)
 }
@@ -2372,25 +2383,45 @@ pub(crate) fn load_foreign_docs_for_root_enrich<H: HostCapabilities>(
         }
     }
 
-    let mut by_key: BTreeMap<String, JsonValue> = BTreeMap::new();
+    let values = left_values.into_values().collect::<Vec<_>>();
     let limits = host_limits();
-    let mut materialized_bytes = 0u64;
-    for val in left_values.values() {
-        match host.lookup_index_keys(cid, &[(right_field.clone(), val.clone())])? {
-            None => {
-                return Ok((load_collection_docs(host, cid)?, EnrichAttachMode::Scan));
-            }
+    let mut candidate_keys = BTreeSet::new();
+    let mut candidate_key_bytes = 0u64;
+    for batch in values.chunks(4_096) {
+        match host.lookup_index_keys_many(cid, &right_field, batch)? {
+            None => return Ok((load_collection_docs(host, cid)?, EnrichAttachMode::Scan)),
             Some(keys) => {
-                for k in keys {
-                    if by_key.contains_key(&k) {
-                        continue;
+                for key in keys {
+                    let charge = 32 + u64::try_from(key.len()).unwrap_or(u64::MAX);
+                    if candidate_keys.insert(key) {
+                        candidate_key_bytes = candidate_key_bytes.saturating_add(charge);
+                        check_result_bytes(candidate_key_bytes, None, &limits)?;
                     }
-                    if let Some(doc) = host.get_json(cid, &k)? {
-                        materialized_bytes =
-                            materialized_bytes.saturating_add(estimate_row_bytes(&k, &doc));
-                        check_result_bytes(materialized_bytes, None, &limits)?;
-                        by_key.insert(k, doc);
-                    }
+                }
+            }
+        }
+    }
+
+    let mut by_key: BTreeMap<String, JsonValue> = BTreeMap::new();
+    let mut materialized_bytes = 0u64;
+    let candidate_keys = candidate_keys.into_iter().collect::<Vec<_>>();
+    for keys in candidate_keys.chunks(4_096) {
+        for (key, document) in host.get_json_covered_many(cid, keys)? {
+            match document {
+                super::HostDocument::Present { value, .. } => {
+                    let document = value.into_owned();
+                    materialized_bytes =
+                        materialized_bytes.saturating_add(estimate_row_bytes(&key, &document));
+                    check_result_bytes(materialized_bytes, None, &limits)?;
+                    by_key.insert(key, document);
+                }
+                // A concurrent delete cannot create a false match. Join
+                // cardinality validation below remains authoritative.
+                super::HostDocument::Absent => {}
+                super::HostDocument::Hole { code } => {
+                    return Err(Error::CoverageIncomplete(format!(
+                        "enrich candidate `{key}` incomplete: {code}"
+                    )));
                 }
             }
         }
@@ -2513,7 +2544,20 @@ fn load_collection_docs<H: HostCapabilities>(
 }
 
 fn canonical_match_key(v: &JsonValue) -> String {
-    serde_json::to_string(v).unwrap_or_else(|_| format!("{v:?}"))
+    match v {
+        JsonValue::Null => "n".into(),
+        JsonValue::Bool(value) => format!("b:{value}"),
+        JsonValue::Number(value) => format!("d:{value}"),
+        JsonValue::String(value) => {
+            let mut key = String::with_capacity(value.len() + 2);
+            key.push_str("s:");
+            key.push_str(value);
+            key
+        }
+        JsonValue::Array(_) | JsonValue::Object(_) => serde_json::to_string(v)
+            .map(|value| format!("j:{value}"))
+            .unwrap_or_else(|_| format!("j:{v:?}")),
+    }
 }
 
 #[cfg(test)]

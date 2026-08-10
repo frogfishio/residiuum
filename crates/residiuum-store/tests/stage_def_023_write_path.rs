@@ -64,12 +64,8 @@ fn delete_derived_state_reconstructs_identical_logical_results() {
     let expected: Vec<(String, Vec<u8>)> = {
         let mut store = Store::create(&root).unwrap();
         seed_retained_data(&mut store, 3, 10);
-        store
-            .put("alpha", b"A", DurabilityMode::Durable)
-            .unwrap();
-        store
-            .put("beta", b"B", DurabilityMode::Buffered)
-            .unwrap();
+        store.put("alpha", b"A", DurabilityMode::Durable).unwrap();
+        store.put("beta", b"B", DurabilityMode::Buffered).unwrap();
         store.delete("alpha", DurabilityMode::Durable).unwrap();
         store.persist_index_cache().unwrap();
         store
@@ -100,10 +96,7 @@ fn delete_derived_state_reconstructs_identical_logical_results() {
         "rebuild-from-segments must match pre-wipe logical state"
     );
     assert!(store.get("alpha").unwrap().is_none());
-    assert_eq!(
-        store.get("beta").unwrap().as_deref(),
-        Some(b"B".as_slice())
-    );
+    assert_eq!(store.get("beta").unwrap().as_deref(), Some(b"B".as_slice()));
 }
 
 #[test]
@@ -244,12 +237,18 @@ fn ingestion_never_rewrites_full_primary_checkpoint_at_fixed_operation_count() {
         initial_checkpoint,
         "fixed-count ingestion must not clone/rewrite the full primary checkpoint"
     );
-    assert_eq!(store.lifecycle_diag().unwrap().derived_ops_since_checkpoint, 65_537);
+    assert_eq!(
+        store.lifecycle_diag().unwrap().derived_ops_since_checkpoint,
+        65_537
+    );
 
     // Explicit checkpointing remains supported and clears the diagnostic lag.
     store.persist_index_cache().unwrap();
     assert_ne!(fs::read(&checkpoint).unwrap(), initial_checkpoint);
-    assert_eq!(store.lifecycle_diag().unwrap().derived_ops_since_checkpoint, 0);
+    assert_eq!(
+        store.lifecycle_diag().unwrap().derived_ops_since_checkpoint,
+        0
+    );
 }
 
 /// Seal must stay O(segment), not O(retained volume).

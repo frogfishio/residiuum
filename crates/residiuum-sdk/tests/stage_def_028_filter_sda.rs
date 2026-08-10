@@ -7,8 +7,7 @@
 //!
 //! and asserts agreement. Also checks versioned [`QueryPlan`] round-trips.
 
-use residiuum_sdk::{json, Residiuum, Filter, Pred, QueryOptions, QueryPlan, QUERY_PLAN_PROFILE};
-
+use residiuum_sdk::{json, Filter, Pred, QueryOptions, QueryPlan, Residiuum, QUERY_PLAN_PROFILE};
 
 use serde_json::Value as JsonValue;
 use tempfile::tempdir;
@@ -222,7 +221,8 @@ fn native_and_sda_agree_on_corpus() {
             .matches_sda(&c.doc)
             .unwrap_or_else(|e| panic!("{}: SDA error {e}; prog={}", c.name, c.filter.to_sda()));
         assert_eq!(
-            native, c.want,
+            native,
+            c.want,
             "{}: native={} want={}; prog={}",
             c.name,
             native,
@@ -230,7 +230,8 @@ fn native_and_sda_agree_on_corpus() {
             c.filter.to_sda()
         );
         assert_eq!(
-            sda, c.want,
+            sda,
+            c.want,
             "{}: sda={} want={}; prog={}",
             c.name,
             sda,
@@ -238,7 +239,8 @@ fn native_and_sda_agree_on_corpus() {
             c.filter.to_sda()
         );
         assert_eq!(
-            native, sda,
+            native,
+            sda,
             "{}: native≠sda; prog={}",
             c.name,
             c.filter.to_sda()
@@ -253,9 +255,18 @@ fn embedded_find_agrees_with_filter_matches() {
     let mut col = db.collection("docs").unwrap();
 
     let docs = [
-        ("d1", json!({"status": "active", "age": 21, "country": "TH", "name": "Alice", "tags": ["x", "y"]})),
-        ("d2", json!({"status": "paused", "age": 17, "country": "US", "name": "Bob", "tags": ["z"]})),
-        ("d3", json!({"status": "active", "age": 30, "country": "SG", "name": "Ada", "n": null})),
+        (
+            "d1",
+            json!({"status": "active", "age": 21, "country": "TH", "name": "Alice", "tags": ["x", "y"]}),
+        ),
+        (
+            "d2",
+            json!({"status": "paused", "age": 17, "country": "US", "name": "Bob", "tags": ["z"]}),
+        ),
+        (
+            "d3",
+            json!({"status": "active", "age": 30, "country": "SG", "name": "Ada", "n": null}),
+        ),
         ("d4", json!({"address": {"city": "Bangkok"}})),
         ("d5", json!({"a": "not-object"})),
     ];
@@ -293,11 +304,7 @@ fn embedded_find_agrees_with_filter_matches() {
             .map(|(k, _)| k)
             .collect();
         found.sort();
-        assert_eq!(
-            found, expected,
-            "find≠matches for prog={}",
-            filter.to_sda()
-        );
+        assert_eq!(found, expected, "find≠matches for prog={}", filter.to_sda());
 
         // Force-scan path must agree too.
         let mut forced: Vec<String> = col
@@ -307,7 +314,12 @@ fn embedded_find_agrees_with_filter_matches() {
             .map(|(k, _)| k)
             .collect();
         forced.sort();
-        assert_eq!(forced, expected, "force_scan≠matches for prog={}", filter.to_sda());
+        assert_eq!(
+            forced,
+            expected,
+            "force_scan≠matches for prog={}",
+            filter.to_sda()
+        );
     }
 }
 
@@ -332,7 +344,11 @@ fn query_plan_profile_roundtrip_and_reject_unknown() {
 fn sda_program_is_parseable() {
     for c in corpus() {
         sda_core::check(&c.filter.to_sda()).unwrap_or_else(|e| {
-            panic!("{}: SDA parse failed: {e}; prog={}", c.name, c.filter.to_sda())
+            panic!(
+                "{}: SDA parse failed: {e}; prog={}",
+                c.name,
+                c.filter.to_sda()
+            )
         });
     }
 }

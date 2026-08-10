@@ -59,7 +59,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// Build digests from rows.
 ///
 /// When `order_sensitive`, digest includes sequential order; otherwise multiset.
-pub fn canonicalize_rows(rows: &[ResultRow], order_sensitive: bool, coverage_complete: bool) -> CanonicalResult {
+pub fn canonicalize_rows(
+    rows: &[ResultRow],
+    order_sensitive: bool,
+    coverage_complete: bool,
+) -> CanonicalResult {
     let multiplicity = if order_sensitive {
         "ordered"
     } else {

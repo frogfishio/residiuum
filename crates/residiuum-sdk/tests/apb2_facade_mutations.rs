@@ -12,7 +12,7 @@ use residiuum_heap::{
     TrustedInstant, VerifiedCertificate,
 };
 use residiuum_sdk::{
-    ErrorCode, HeapClient, KEY_PROFILE_RANDOM_V1, KeyProfile, PutOptions, ResidiuumDeployment,
+    ErrorCode, HeapClient, KeyProfile, PutOptions, ResidiuumDeployment, KEY_PROFILE_RANDOM_V1,
 };
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
 use std::sync::Arc;
@@ -50,7 +50,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -200,10 +207,7 @@ fn facade_add_generated_key() {
     assert!(a.key.chars().all(|c| c.is_ascii_hexdigit()));
     assert_eq!(a.receipt.key, a.key);
     assert_eq!(a.receipt.version, a.receipt.event_id);
-    assert_eq!(
-        col.get(&a.key).unwrap().unwrap()["kind"],
-        "ping"
-    );
+    assert_eq!(col.get(&a.key).unwrap().unwrap()["kind"], "ping");
 
     let b = col
         .add_with(

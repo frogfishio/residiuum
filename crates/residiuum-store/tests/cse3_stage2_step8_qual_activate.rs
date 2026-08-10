@@ -11,8 +11,8 @@
 
 use residiuum_store::{
     chimera_dir, every_protected_has_verified_rsh, load_protected_coverage,
-    protected_frontier_gap_free, segment_id_from_filename, try_load_chimera_layout,
-    DurabilityMode, RecoveryMode, Store, StorePaths,
+    protected_frontier_gap_free, segment_id_from_filename, try_load_chimera_layout, DurabilityMode,
+    RecoveryMode, Store, StorePaths,
 };
 use std::collections::BTreeMap;
 use std::fs;

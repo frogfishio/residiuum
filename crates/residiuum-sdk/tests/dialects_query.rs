@@ -91,29 +91,46 @@ fn pure_sda_null_vs_absence_sql_is_null_collapses() {
     let missing = json!({});
     let present = json!({"nickname": "ada"});
 
-    let only_null = sda_core::Program::parse(
-        r#"getPath(input, Seq["nickname"]) = Some(null)"#,
-    )
-    .unwrap();
-    let only_absent = sda_core::Program::parse(
-        r#"getPath(input, Seq["nickname"]) = None"#,
-    )
-    .unwrap();
+    let only_null =
+        sda_core::Program::parse(r#"getPath(input, Seq["nickname"]) = Some(null)"#).unwrap();
+    let only_absent =
+        sda_core::Program::parse(r#"getPath(input, Seq["nickname"]) = None"#).unwrap();
 
-    assert_eq!(only_null.run_json("input", stored_null.clone()).unwrap(), json!(true));
-    assert_eq!(only_null.run_json("input", missing.clone()).unwrap(), json!(false));
-    assert_eq!(only_null.run_json("input", present.clone()).unwrap(), json!(false));
+    assert_eq!(
+        only_null.run_json("input", stored_null.clone()).unwrap(),
+        json!(true)
+    );
+    assert_eq!(
+        only_null.run_json("input", missing.clone()).unwrap(),
+        json!(false)
+    );
+    assert_eq!(
+        only_null.run_json("input", present.clone()).unwrap(),
+        json!(false)
+    );
 
-    assert_eq!(only_absent.run_json("input", stored_null.clone()).unwrap(), json!(false));
-    assert_eq!(only_absent.run_json("input", missing.clone()).unwrap(), json!(true));
-    assert_eq!(only_absent.run_json("input", present.clone()).unwrap(), json!(false));
+    assert_eq!(
+        only_absent.run_json("input", stored_null.clone()).unwrap(),
+        json!(false)
+    );
+    assert_eq!(
+        only_absent.run_json("input", missing.clone()).unwrap(),
+        json!(true)
+    );
+    assert_eq!(
+        only_absent.run_json("input", present.clone()).unwrap(),
+        json!(false)
+    );
 
     // SQL dialect: IS NULL matches both missing and stored null (mimicry).
     // RQL-DQ1: sql/json/mongo compile to a portable Filter (not SDA text).
     let sql = compile_dialect("sql", "nickname IS NULL").unwrap();
     let sql_p = sql.as_portable().expect("sql compiles to portable");
     assert!(
-        sql_p.notes.iter().any(|n| n.contains("absence") || n.contains("Null")),
+        sql_p
+            .notes
+            .iter()
+            .any(|n| n.contains("absence") || n.contains("Null")),
         "IS NULL must document Null≠absence collapse: {:?}",
         sql_p.notes
     );
@@ -123,10 +140,11 @@ fn pure_sda_null_vs_absence_sql_is_null_collapses() {
 
     // Mongo/JSON can split with $eq / $exists, but still is not full SDA carriers.
     let eq_null = compile_dialect("json", r#"{"nickname": null}"#).unwrap();
-    let exists_false =
-        compile_dialect("json", r#"{"nickname": {"$exists": false}}"#).unwrap();
+    let exists_false = compile_dialect("json", r#"{"nickname": {"$exists": false}}"#).unwrap();
     let eq_p = eq_null.as_portable().expect("json compiles to portable");
-    let ex_p = exists_false.as_portable().expect("json compiles to portable");
+    let ex_p = exists_false
+        .as_portable()
+        .expect("json compiles to portable");
     assert!(eq_p.filter.matches(&json!({"nickname": null})));
     assert!(!eq_p.filter.matches(&json!({})));
     assert!(ex_p.filter.matches(&json!({})));
@@ -142,9 +160,7 @@ fn find_dialect_sql_is_null_on_collection() {
         users
             .put("null_nick", &json!({"name": "N", "nickname": null}))
             .unwrap();
-        users
-            .put("missing_nick", &json!({"name": "M"}))
-            .unwrap();
+        users.put("missing_nick", &json!({"name": "M"})).unwrap();
         users
             .put("has_nick", &json!({"name": "H", "nickname": "hi"}))
             .unwrap();

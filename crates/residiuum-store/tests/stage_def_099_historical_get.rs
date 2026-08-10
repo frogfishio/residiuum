@@ -6,7 +6,9 @@ use residiuum_store::{
 use tempfile::tempdir;
 
 fn large(seed: u8, len: usize) -> Vec<u8> {
-    (0..len).map(|i| seed.wrapping_add((i % 251) as u8)).collect()
+    (0..len)
+        .map(|i| seed.wrapping_add((i % 251) as u8))
+        .collect()
 }
 
 #[test]
@@ -68,11 +70,7 @@ fn find_last_complete_after_replacements() {
 
     // Current is complete B; last complete before current is A.
     let found = store
-        .find_last_complete_version(
-            "k",
-            BeforeEvent::Current,
-            RecoveryReadOptions::default(),
-        )
+        .find_last_complete_version("k", BeforeEvent::Current, RecoveryReadOptions::default())
         .unwrap();
     assert!(found.found.is_some());
     let v = found.found.unwrap();
@@ -97,11 +95,7 @@ fn delete_boundary_stops_default_search() {
     // Last complete before current should be after-delete's predecessor path:
     // newest before current is the delete → stop, no resurrection of old.
     let found = store
-        .find_last_complete_version(
-            "k",
-            BeforeEvent::Current,
-            RecoveryReadOptions::default(),
-        )
+        .find_last_complete_version("k", BeforeEvent::Current, RecoveryReadOptions::default())
         .unwrap();
     assert!(found.found.is_none());
     assert!(found.tombstone_stopped);
@@ -158,7 +152,10 @@ fn missing_event_id_errors() {
     let err = store
         .get_payload_version("k", &[9u8; 16], ReadBudget::default())
         .unwrap_err();
-    assert!(matches!(err, residiuum_store::StoreError::HistoryEventNotFound));
+    assert!(matches!(
+        err,
+        residiuum_store::StoreError::HistoryEventNotFound
+    ));
 }
 
 #[test]
@@ -174,11 +171,7 @@ fn recovery_is_read_only() {
         .get_payload_version("k", &r1.event_id, ReadBudget::default())
         .unwrap();
     let _ = store
-        .find_last_complete_version(
-            "k",
-            BeforeEvent::Current,
-            RecoveryReadOptions::default(),
-        )
+        .find_last_complete_version("k", BeforeEvent::Current, RecoveryReadOptions::default())
         .unwrap();
     assert_eq!(store.live_count(), live_before);
     assert_eq!(store.get("k").unwrap().as_deref(), Some(b.as_slice()));

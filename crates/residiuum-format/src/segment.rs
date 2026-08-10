@@ -5,9 +5,7 @@
 //! envelopes are deterministic CBOR maps (empty map when no fields).
 
 use crate::cbor_envelope::EMPTY_ENVELOPE;
-use crate::frame::{
-    encode_frame, encode_frame_into, FrameHeader, FrameParts, FrameVerifyError,
-};
+use crate::frame::{encode_frame, encode_frame_into, FrameHeader, FrameParts, FrameVerifyError};
 use crate::kinds::FrameKind;
 use crate::limits::SafetyLimits;
 use thiserror::Error;
@@ -247,10 +245,7 @@ impl ActiveSegment {
     /// checkpoint) and retained length not shorter than the snapshot (only
     /// truncates appends). After partial physical I/O this must not be used —
     /// poison/reopen recovery owns that case.
-    pub fn restore_checkpoint(
-        &mut self,
-        cp: &ActiveSegmentCheckpoint,
-    ) -> Result<(), SegmentError> {
+    pub fn restore_checkpoint(&mut self, cp: &ActiveSegmentCheckpoint) -> Result<(), SegmentError> {
         if self.base_offset != cp.base_offset {
             return Err(SegmentError::CheckpointMismatch);
         }
@@ -755,8 +750,7 @@ mod tests {
 
     #[test]
     fn checkpoint_restore_truncates_appends_before_io() {
-        let mut active =
-            ActiveSegment::create(sample_ids(), SafetyLimits::default(), 0).unwrap();
+        let mut active = ActiveSegment::create(sample_ids(), SafetyLimits::default(), 0).unwrap();
         let cp = active.checkpoint();
         let before_seq = active.writer_sequence();
         let before_frames = active.frame_count();

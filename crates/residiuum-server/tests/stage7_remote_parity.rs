@@ -1,14 +1,14 @@
 //! Stage 7 remote parity: history, indexes, get_payload, server-side find.
 
+use residiuum_sdk::{
+    json, ErrorCode, Filter, IndexState, PayloadResult, QueryBudget, QueryOptions, Residiuum,
+};
 
-use residiuum_sdk::{json, Residiuum, ErrorCode, Filter, IndexState, PayloadResult, QueryBudget, QueryOptions};
-
-
+use residiuum_server::{serve_store_with, ServeOptions};
 use std::net::TcpListener;
 use std::thread;
 use std::time::Duration;
 use tempfile::tempdir;
-use residiuum_server::{serve_store_with, ServeOptions};
 
 fn free_bind() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -257,7 +257,11 @@ fn remote_put_is_idempotent_with_operation_id() {
     thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
         let mut store = Store::open(path_c).unwrap();
-        let _ = handle_connection_with(&mut store, stream, ServeOptions::default().legacy_token_server());
+        let _ = handle_connection_with(
+            &mut store,
+            stream,
+            ServeOptions::default().legacy_token_server(),
+        );
     });
 
     let mut stream = TcpStream::connect(addr).unwrap();

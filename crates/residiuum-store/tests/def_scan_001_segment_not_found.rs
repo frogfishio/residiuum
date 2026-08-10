@@ -63,11 +63,20 @@ fn mint_cap(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapCap {
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid16() -> [u8; 16] {
-    *residiuum_heap::CollectionId::new_random().unwrap().as_bytes()
+    *residiuum_heap::CollectionId::new_random()
+        .unwrap()
+        .as_bytes()
 }
 
 struct OpenedHeap {
@@ -114,7 +123,40 @@ fn open_heap_with_collection(name: &str) -> OpenedHeap {
     }
 }
 
-fn scan_all(heap: &residiuum_store::HeapStore, coll: &[u8; 16]) -> Result<CollectionScanPage, StoreError> {
+#[test]
+fn version_inventory_pages_are_strictly_ordered_and_complete() {
+    let ctx = open_heap_with_collection("version-inventory");
+    let mut expected = std::collections::BTreeMap::new();
+    for index in 0..9 {
+        let key = format!("k{index:02}");
+        let receipt = ctx
+            .heap
+            .put_collection(&ctx.collection_id, key.as_bytes(), b"value")
+            .unwrap();
+        expected.insert(key.into_bytes(), receipt.event_id);
+    }
+
+    let mut after = None;
+    let mut observed = Vec::new();
+    loop {
+        let page = ctx
+            .heap
+            .scan_collection_versions_page(&ctx.collection_id, 3, after.as_deref())
+            .unwrap();
+        assert!(!page.entries.is_empty());
+        observed.extend(page.entries.clone());
+        if !page.has_more {
+            break;
+        }
+        after = page.last_key;
+    }
+    assert_eq!(observed, expected.into_iter().collect::<Vec<_>>());
+}
+
+fn scan_all(
+    heap: &residiuum_store::HeapStore,
+    coll: &[u8; 16],
+) -> Result<CollectionScanPage, StoreError> {
     let mut entries = Vec::new();
     let mut incomplete = Vec::new();
     let mut after: Option<Vec<u8>> = None;
@@ -273,10 +315,7 @@ fn scan_collection_hard_fails_on_unresolved_locator() {
         .expect_err("legacy scan_collection must fail-closed on holes");
     match err {
         StoreError::LocatorFault(f) => {
-            assert_eq!(
-                f.kind,
-                residiuum_store::LocatorFaultKind::SegmentNotFound
-            );
+            assert_eq!(f.kind, residiuum_store::LocatorFaultKind::SegmentNotFound);
         }
         StoreError::SegmentNotFound => {}
         other => panic!("expected locator/segment fault, got {other:?}"),
@@ -398,7 +437,10 @@ fn missing_segment_scan_reports_holes_and_survivors() {
         .iter()
         .find(|h| h.reason == CollectionScanHoleReason::SegmentNotFound)
         .unwrap();
-    let loc = snf.locator.as_ref().expect("SegmentNotFound hole needs locator ctx");
+    let loc = snf
+        .locator
+        .as_ref()
+        .expect("SegmentNotFound hole needs locator ctx");
     assert_eq!(loc.kind, residiuum_store::LocatorFaultKind::SegmentNotFound);
     // segment_id is non-zero for real segments
     assert_ne!(loc.segment_id, [0u8; 16]);
@@ -657,10 +699,7 @@ fn index_build_with_unresolved_locator_is_partial_not_ready() {
     // only the hit list (A yes, B silently gone).
     let found = ctx
         .heap
-        .lookup_index_keys(
-            &ctx.collection_id,
-            &[("status".into(), json!("open"))],
-        )
+        .lookup_index_keys(&ctx.collection_id, &[("status".into(), json!("open"))])
         .unwrap();
     assert!(
         found.is_none(),

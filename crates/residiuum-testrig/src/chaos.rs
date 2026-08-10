@@ -54,10 +54,14 @@ pub fn run_chaos(cfg: &ChaosConfig) -> Result<ChaosReport, String> {
         return Err("bytes-per-hit must be > 0".into());
     }
     if !cfg.store.is_dir() {
-        return Err(format!("store path is not a directory: {}", cfg.store.display()));
+        return Err(format!(
+            "store path is not a directory: {}",
+            cfg.store.display()
+        ));
     }
 
-    let candidates = collect_residiuum_files(&cfg.store).map_err(|e| format!("scan segments: {e}"))?;
+    let candidates =
+        collect_residiuum_files(&cfg.store).map_err(|e| format!("scan segments: {e}"))?;
     if candidates.is_empty() {
         return Err("no .residiuum segment files found under store (run pump first?)".into());
     }
@@ -111,7 +115,10 @@ pub fn run_chaos(cfg: &ChaosConfig) -> Result<ChaosReport, String> {
             "no hits applied (skipped={skipped}); files too small for bytes-per-hit / protect margins"
         )
     } else if skipped > 0 {
-        format!("applied {} hits; skipped {skipped} (file too small)", hits.len())
+        format!(
+            "applied {} hits; skipped {skipped} (file too small)",
+            hits.len()
+        )
     } else {
         format!("applied {} offline garbage punches", hits.len())
     };
@@ -154,10 +161,7 @@ pub fn run_chaos(cfg: &ChaosConfig) -> Result<ChaosReport, String> {
             cfg.seed
         );
         for h in &hits {
-            println!(
-                "  punch {} offset={} len={}",
-                h.path, h.offset, h.bytes
-            );
+            println!("  punch {} offset={} len={}", h.path, h.offset, h.bytes);
         }
         if !note.is_empty() {
             println!("note: {note}");
@@ -182,7 +186,10 @@ fn usable_span(file_size: u64, cfg: &ChaosConfig) -> (u64, u64) {
     }
     // Scale protect margins down for small segment files so smoke stores still get hits.
     let head = cfg.protect_head.min(file_size / 8).min(file_size);
-    let tail = cfg.protect_tail.min(file_size / 16).min(file_size.saturating_sub(head));
+    let tail = cfg
+        .protect_tail
+        .min(file_size / 16)
+        .min(file_size.saturating_sub(head));
     let min_off = head;
     let max_end = file_size.saturating_sub(tail);
     (min_off, max_end.saturating_sub(min_off))
@@ -246,9 +253,7 @@ fn make_garbage(len: usize, seed: u64) -> Vec<u8> {
     out[..n].copy_from_slice(&header[..n]);
     let mut state = seed ^ 0xC4A05_u64;
     for b in out.iter_mut().skip(n) {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(7);
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(7);
         *b = (state >> 32) as u8;
     }
     out
@@ -262,7 +267,11 @@ struct Rng {
 impl Rng {
     fn new(seed: u64) -> Self {
         Self {
-            state: if seed == 0 { 0xDEAD_BEEF_CAFE_BABE } else { seed },
+            state: if seed == 0 {
+                0xDEAD_BEEF_CAFE_BABE
+            } else {
+                seed
+            },
         }
     }
 

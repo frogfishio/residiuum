@@ -135,7 +135,9 @@ fn run_pump_multi_process(cfg: &PumpConfig) -> Result<WorkloadManifest, String> 
         store_paths.push(store_path.display().to_string());
 
         // Distinct seed per store so payload patterns differ; keys remain independent.
-        let child_seed = cfg.seed.wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let child_seed = cfg
+            .seed
+            .wrapping_add((i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
 
         let mut cmd = Command::new(&exe);
         cmd.arg("pump")
@@ -274,7 +276,8 @@ fn run_pump_multi_process(cfg: &PumpConfig) -> Result<WorkloadManifest, String> 
         peak_cpu_pct: sum_cpu,
     };
 
-    write_manifest(&cfg.manifest_path, &manifest).map_err(|e| format!("write aggregate manifest: {e}"))?;
+    write_manifest(&cfg.manifest_path, &manifest)
+        .map_err(|e| format!("write aggregate manifest: {e}"))?;
 
     let report = json!({
         "prong": "pump",
@@ -413,7 +416,9 @@ fn run_pump_single(cfg: &PumpConfig) -> Result<WorkloadManifest, String> {
 
         // Safety: if payload is tiny and metadata dominates oddly, still stop.
         if keys_written >= 50_000_000 {
-            return Err("pump abort: 50M keys without reaching target (raise payload-size?)".into());
+            return Err(
+                "pump abort: 50M keys without reaching target (raise payload-size?)".into(),
+            );
         }
     }
 
@@ -592,12 +597,7 @@ fn sample_process(samples: &mut ProcessSamples) {
     };
     samples.sample_count += 1;
     samples.last_cpu_pct = Some(cpu);
-    samples.peak_cpu_pct = Some(
-        samples
-            .peak_cpu_pct
-            .map(|p| p.max(cpu))
-            .unwrap_or(cpu),
-    );
+    samples.peak_cpu_pct = Some(samples.peak_cpu_pct.map(|p| p.max(cpu)).unwrap_or(cpu));
     let rss_bytes = rss_kib.saturating_mul(1024);
     samples.peak_rss_bytes = Some(
         samples
@@ -631,9 +631,7 @@ fn fill_payload(buf: &mut [u8], seed: u64) {
     // Simple LCG fill — fast and reproducible for a given seed.
     let mut state = seed ^ 0xD1_160_B17_u64;
     for (i, b) in buf.iter_mut().enumerate() {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         *b = ((state >> 33) as u8).wrapping_add((i & 0xff) as u8);
     }
     // Magic prefix so corrupted regions are obvious in hex dumps.

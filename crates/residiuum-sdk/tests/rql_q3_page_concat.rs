@@ -260,6 +260,37 @@ fn q34_law_page_concat_equals_unpaged_field_order() {
 }
 
 #[test]
+fn q34_projected_page_cursor_retains_unprojected_order_field() {
+    let (_dir, mut client) = open_client();
+    let mut col = client.create_collection("orders").unwrap().collection;
+    for (key, score) in [("e", 2), ("d", 5), ("c", 1), ("b", 4), ("a", 3)] {
+        col.put(key, &json!({"score": score, "name": key})).unwrap();
+    }
+
+    // `score` establishes continuation order but is deliberately absent from
+    // the result. Cursor minting must therefore retain the accepted row's full
+    // document rather than deriving the tuple from its projection.
+    let source = "from orders order by score desc, _key asc project name";
+    let params = Parameters::default();
+    let pages = multipage_rql(&mut col, source, &params, 2);
+    let unpaged = unpaged_rql(&mut col, source, &params);
+
+    assert!(pages.len() >= 3);
+    assert_concat_equals_unpaged(&pages, &unpaged, true);
+    assert_eq!(
+        page_rows(&unpaged)
+            .into_iter()
+            .map(|row| row.key)
+            .collect::<Vec<_>>(),
+        ["d", "b", "a", "e", "c"]
+    );
+    assert!(unpaged
+        .rows
+        .iter()
+        .all(|row| row.value.get("score").is_none()));
+}
+
+#[test]
 fn q34_law_page_concat_filtered_equals_unpaged() {
     let (_dir, mut client) = open_client();
     let mut col = client.create_collection("orders").unwrap().collection;

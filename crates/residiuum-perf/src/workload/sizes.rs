@@ -3,15 +3,15 @@
 /// Mandatory fixed-size series (bytes). Crosses inline/chunk/RPC boundaries.
 pub const FIXED_PAYLOAD_SIZES: &[u64] = &[
     256,
-    1024,       // 1 KiB
-    4 * 1024,   // 4 KiB
-    8 * 1024,   // 8 KiB
-    16 * 1024,  // 16 KiB
-    64 * 1024,  // 64 KiB
-    256 * 1024, // 256 KiB
-    1024 * 1024,       // 1 MiB
-    4 * 1024 * 1024,   // 4 MiB
-    16 * 1024 * 1024,  // 16 MiB
+    1024,             // 1 KiB
+    4 * 1024,         // 4 KiB
+    8 * 1024,         // 8 KiB
+    16 * 1024,        // 16 KiB
+    64 * 1024,        // 64 KiB
+    256 * 1024,       // 256 KiB
+    1024 * 1024,      // 1 MiB
+    4 * 1024 * 1024,  // 4 MiB
+    16 * 1024 * 1024, // 16 MiB
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,12 +63,15 @@ mod tests {
     fn threshold_probes_cover_minus_at_plus() {
         let p = threshold_probes(&[4096, 1_048_576]);
         assert_eq!(p.len(), 2);
-        assert_eq!(p[0], ThresholdProbe {
-            threshold: 4096,
-            below: 4095,
-            at: 4096,
-            above: 4097,
-        });
+        assert_eq!(
+            p[0],
+            ThresholdProbe {
+                threshold: 4096,
+                below: 4095,
+                at: 4096,
+                above: 4097,
+            }
+        );
         assert_eq!(p[1].below, 1_048_575);
         assert_eq!(p[1].above, 1_048_577);
     }

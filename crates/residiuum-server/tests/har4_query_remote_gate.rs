@@ -64,8 +64,14 @@ fn qualified_listener_requires_tls_and_forbids_token() {
         "TLS required"
     );
     assert!(
-        validate_qualified_listener(true, Some("shared-token"), false, Some(&reg), Some(deployment))
-            .is_err(),
+        validate_qualified_listener(
+            true,
+            Some("shared-token"),
+            false,
+            Some(&reg),
+            Some(deployment)
+        )
+        .is_err(),
         "shared token forbidden on qualified path"
     );
     assert!(
@@ -113,9 +119,7 @@ fn baseline_ops_json_marks_118_active() {
     let raw = std::fs::read_to_string(&path).expect("operations-v1.json");
     let v: serde_json::Value = serde_json::from_str(&raw).expect("json");
     // apb.collection.rql wire 118 must be active with schemas.
-    let ops = v["operations"]
-        .as_array()
-        .expect("operations array");
+    let ops = v["operations"].as_array().expect("operations array");
     let rql = ops
         .iter()
         .find(|o| o["app_id"] == "apb.collection.rql")

@@ -2246,6 +2246,21 @@ impl crate::query_bytecode_v1::HostCapabilities for HeapClient {
         )
     }
 
+    fn lookup_index_keys_many(
+        &mut self,
+        collection_id: CollectionId,
+        field: &str,
+        values: &[serde_json::Value],
+    ) -> Result<Option<Vec<String>>, Error> {
+        let mut col = self.open_collection_by_id(collection_id)?;
+        <CollectionClient as crate::query_bytecode_v1::HostCapabilities>::lookup_index_keys_many(
+            &mut col,
+            collection_id,
+            field,
+            values,
+        )
+    }
+
     fn lookup_index_keys_with_constraints(
         &mut self,
         collection_id: CollectionId,
@@ -2271,6 +2286,57 @@ impl crate::query_bytecode_v1::HostCapabilities for HeapClient {
             &mut col,
             collection_id,
             order,
+        )
+    }
+
+    fn source_frontier(&mut self, collection_id: CollectionId) -> Result<Option<[u8; 32]>, Error> {
+        let mut col = self.open_collection_by_id(collection_id)?;
+        <CollectionClient as crate::query_bytecode_v1::HostCapabilities>::source_frontier(
+            &mut col,
+            collection_id,
+        )
+    }
+
+    fn lookup_covering_index_values(
+        &mut self,
+        collection_id: CollectionId,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<serde_json::Value>>>, Error> {
+        let mut col = self.open_collection_by_id(collection_id)?;
+        <CollectionClient as crate::query_bytecode_v1::HostCapabilities>::lookup_covering_index_values(
+            &mut col,
+            collection_id,
+            fields,
+        )
+    }
+
+    fn scan_projected_values(
+        &mut self,
+        collection_id: CollectionId,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<serde_json::Value>>>, Error> {
+        let mut col = self.open_collection_by_id(collection_id)?;
+        <CollectionClient as crate::query_bytecode_v1::HostCapabilities>::scan_projected_values(
+            &mut col,
+            collection_id,
+            fields,
+        )
+    }
+
+    fn scan_group_aggregate(
+        &mut self,
+        collection_id: CollectionId,
+        spec: &crate::plan_v1::GroupAggSpec,
+        where_k: &crate::CompiledKernelWhere,
+        candidate_keys: Option<&[String]>,
+    ) -> Result<Option<crate::query_bytecode_v1::HostGroupAggregate>, Error> {
+        let mut col = self.open_collection_by_id(collection_id)?;
+        <CollectionClient as crate::query_bytecode_v1::HostCapabilities>::scan_group_aggregate(
+            &mut col,
+            collection_id,
+            spec,
+            where_k,
+            candidate_keys,
         )
     }
 }
@@ -2317,7 +2383,10 @@ impl crate::query_bytecode_v1::HostCapabilities for CollectionClient {
             ));
         }
         match CollectionClient::get(self, key) {
-            Ok(Some(value)) => Ok(HostDocument::Present(value)),
+            Ok(Some(value)) => Ok(HostDocument::Present {
+                value: value.into(),
+                logical_bytes: None,
+            }),
             Ok(None) => Ok(HostDocument::Absent),
             Err(Error::Store(store_error)) => {
                 if let Some(reason) = CollectionScanHoleReason::from_store_error(&store_error) {
@@ -2389,6 +2458,23 @@ impl crate::query_bytecode_v1::HostCapabilities for CollectionClient {
         }
     }
 
+    fn lookup_index_keys_many(
+        &mut self,
+        collection_id: CollectionId,
+        field: &str,
+        values: &[serde_json::Value],
+    ) -> Result<Option<Vec<String>>, Error> {
+        if collection_id != self.collection_id {
+            return Err(Error::QueryInvalid(
+                "HostCapabilities: collection_id mismatch on CollectionClient".into(),
+            ));
+        }
+        match &self.backend {
+            CollectionBackend::Embedded(hc) => hc.lookup_index_keys_many(field, values),
+            CollectionBackend::Remote { .. } | CollectionBackend::Unbound => Ok(None),
+        }
+    }
+
     fn lookup_index_keys_with_constraints(
         &mut self,
         collection_id: CollectionId,
@@ -2426,6 +2512,72 @@ impl crate::query_bytecode_v1::HostCapabilities for CollectionClient {
         match &self.backend {
             CollectionBackend::Embedded(collection) => {
                 collection.lookup_ordered_index_keys(&field, field_descending, key_descending)
+            }
+            CollectionBackend::Remote { .. } | CollectionBackend::Unbound => Ok(None),
+        }
+    }
+
+    fn source_frontier(&mut self, collection_id: CollectionId) -> Result<Option<[u8; 32]>, Error> {
+        if collection_id != self.collection_id {
+            return Err(Error::QueryInvalid(
+                "HostCapabilities: collection_id mismatch on CollectionClient".into(),
+            ));
+        }
+        match &self.backend {
+            CollectionBackend::Embedded(collection) => collection.source_frontier().map(Some),
+            CollectionBackend::Remote { .. } | CollectionBackend::Unbound => Ok(None),
+        }
+    }
+
+    fn lookup_covering_index_values(
+        &mut self,
+        collection_id: CollectionId,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<serde_json::Value>>>, Error> {
+        if collection_id != self.collection_id {
+            return Err(Error::QueryInvalid(
+                "HostCapabilities: collection_id mismatch on CollectionClient".into(),
+            ));
+        }
+        match &self.backend {
+            CollectionBackend::Embedded(collection) => {
+                collection.lookup_covering_index_values(fields)
+            }
+            CollectionBackend::Remote { .. } | CollectionBackend::Unbound => Ok(None),
+        }
+    }
+
+    fn scan_projected_values(
+        &mut self,
+        collection_id: CollectionId,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<serde_json::Value>>>, Error> {
+        if collection_id != self.collection_id {
+            return Err(Error::QueryInvalid(
+                "HostCapabilities: collection_id mismatch on CollectionClient".into(),
+            ));
+        }
+        match &self.backend {
+            CollectionBackend::Embedded(collection) => collection.scan_projected_values(fields),
+            CollectionBackend::Remote { .. } | CollectionBackend::Unbound => Ok(None),
+        }
+    }
+
+    fn scan_group_aggregate(
+        &mut self,
+        collection_id: CollectionId,
+        spec: &crate::plan_v1::GroupAggSpec,
+        where_k: &crate::CompiledKernelWhere,
+        candidate_keys: Option<&[String]>,
+    ) -> Result<Option<crate::query_bytecode_v1::HostGroupAggregate>, Error> {
+        if collection_id != self.collection_id {
+            return Err(Error::QueryInvalid(
+                "HostCapabilities: collection_id mismatch on CollectionClient".into(),
+            ));
+        }
+        match &self.backend {
+            CollectionBackend::Embedded(collection) => {
+                collection.scan_group_aggregate(spec, where_k, candidate_keys)
             }
             CollectionBackend::Remote { .. } | CollectionBackend::Unbound => Ok(None),
         }
@@ -2508,6 +2660,50 @@ impl crate::query_bytecode_v1::DocScan for CollectionClient {
             self,
             self.collection_id,
             order,
+        )
+    }
+
+    fn try_source_frontier(&mut self) -> Result<Option<[u8; 32]>, Error> {
+        <Self as crate::query_bytecode_v1::HostCapabilities>::source_frontier(
+            self,
+            self.collection_id,
+        )
+    }
+
+    fn try_covering_index_values(
+        &mut self,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<serde_json::Value>>>, Error> {
+        <Self as crate::query_bytecode_v1::HostCapabilities>::lookup_covering_index_values(
+            self,
+            self.collection_id,
+            fields,
+        )
+    }
+
+    fn try_projected_values(
+        &mut self,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<serde_json::Value>>>, Error> {
+        <Self as crate::query_bytecode_v1::HostCapabilities>::scan_projected_values(
+            self,
+            self.collection_id,
+            fields,
+        )
+    }
+
+    fn try_group_aggregate(
+        &mut self,
+        spec: &crate::plan_v1::GroupAggSpec,
+        where_k: &crate::CompiledKernelWhere,
+        candidate_keys: Option<&[String]>,
+    ) -> Result<Option<crate::query_bytecode_v1::HostGroupAggregate>, Error> {
+        <Self as crate::query_bytecode_v1::HostCapabilities>::scan_group_aggregate(
+            self,
+            self.collection_id,
+            spec,
+            where_k,
+            candidate_keys,
         )
     }
 }

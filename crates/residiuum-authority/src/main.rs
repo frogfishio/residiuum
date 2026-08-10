@@ -2,8 +2,9 @@
 
 use clap::{Parser, Subcommand};
 use residiuum_authority::{
-    apply_reload_request, commit_genesis, issue_heap_key, AuthorityPaths, EphemeralMasterKeyProvider,
-    GenesisRequest, IssueRequest, MasterAuthorityStore, MasterKeyProvider,
+    apply_reload_request, commit_genesis, issue_heap_key, AuthorityPaths,
+    EphemeralMasterKeyProvider, GenesisRequest, IssueRequest, MasterAuthorityStore,
+    MasterKeyProvider,
 };
 use residiuum_heap::{DeploymentId, HeapId, Rights};
 use std::path::PathBuf;
@@ -173,7 +174,10 @@ fn run_genesis(
         "authority_chain_head={}",
         hex::encode(result.authority_chain_head_hash)
     );
-    println!("master_public_key={}", hex::encode(result.master_public_key));
+    println!(
+        "master_public_key={}",
+        hex::encode(result.master_public_key)
+    );
     Ok(())
 }
 

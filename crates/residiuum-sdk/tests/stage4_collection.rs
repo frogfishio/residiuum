@@ -1,7 +1,8 @@
 //! Stage 4a–4d: open, put/get/delete, bytes, scan, filters, error codes.
 
-use residiuum_sdk::{json, Residiuum, DurabilityMode, ErrorCode, Filter, PutOptions, QueryOptions, SortOrder};
-
+use residiuum_sdk::{
+    json, DurabilityMode, ErrorCode, Filter, PutOptions, QueryOptions, Residiuum, SortOrder,
+};
 
 use serde::Deserialize;
 use tempfile::tempdir;

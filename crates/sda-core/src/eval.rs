@@ -504,19 +504,15 @@ fn eval_binop(op: &BinOpKind, lhs: Value, rhs: Value) -> Result<Value, EvalError
         BinOpKind::Add => match (lhs, rhs) {
             (Value::Num(a), Value::Num(b)) => Ok(Value::Num(a.add(&b))),
             // ENR1 attach / mergeFail via `+` (Prod or Map; field collision → t_enr_field_collision).
-            (Value::Prod(left), Value::Prod(right)) => Ok(merge_record_fields(
-                left,
-                right,
-                RecordKind::Prod,
-            )),
+            (Value::Prod(left), Value::Prod(right)) => {
+                Ok(merge_record_fields(left, right, RecordKind::Prod))
+            }
             (Value::Map(left), Value::Map(right)) => {
                 Ok(merge_record_fields(left, right, RecordKind::Map))
             }
-            (Value::Prod(left), Value::Map(right)) => Ok(merge_record_fields(
-                left,
-                right,
-                RecordKind::Prod,
-            )),
+            (Value::Prod(left), Value::Map(right)) => {
+                Ok(merge_record_fields(left, right, RecordKind::Prod))
+            }
             (Value::Map(left), Value::Prod(right)) => {
                 Ok(merge_record_fields(left, right, RecordKind::Map))
             }

@@ -162,9 +162,7 @@ impl CursorKeyRing {
         if self.current.key_id == key_id {
             return Some(&self.current);
         }
-        self.previous
-            .as_ref()
-            .filter(|k| k.key_id == key_id)
+        self.previous.as_ref().filter(|k| k.key_id == key_id)
     }
 }
 
@@ -200,9 +198,7 @@ fn active_ring_slot() -> &'static Mutex<CursorKeyRing> {
 ///
 /// Returns the previous ring (for restore in tests).
 pub fn install_cursor_key_ring(ring: CursorKeyRing) -> CursorKeyRing {
-    let mut guard = active_ring_slot()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut guard = active_ring_slot().lock().unwrap_or_else(|e| e.into_inner());
     std::mem::replace(&mut *guard, ring)
 }
 
@@ -420,9 +416,7 @@ pub fn verify(
     })?;
     let expect = logical.mac_hex(&key.secret);
     if !constant_time_eq_hex(&expect, &mac_hex) {
-        return Err(Error::ConsistencyViolation(
-            "cursor mac invalid".into(),
-        ));
+        return Err(Error::ConsistencyViolation("cursor mac invalid".into()));
     }
     Ok(logical)
 }

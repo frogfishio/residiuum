@@ -426,13 +426,8 @@ mod tests {
         let paths = StorePaths::new(dir.path());
         fs::create_dir_all(paths.store_info()).unwrap();
         fs::write(segment_seq_path(&paths), b"not-a-valid-file").unwrap();
-        let err = reconstruct_reserved_thru(
-            &paths,
-            [1u8; 16],
-            1,
-            SafetyLimits::default(),
-        )
-        .unwrap_err();
+        let err =
+            reconstruct_reserved_thru(&paths, [1u8; 16], 1, SafetyLimits::default()).unwrap_err();
         assert!(matches!(err, StoreError::CorruptMeta(_)));
     }
 }

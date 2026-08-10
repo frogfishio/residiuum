@@ -57,13 +57,13 @@ mod endpoints;
 mod error;
 mod id;
 mod modes;
+pub mod multiproc;
 mod partition;
 pub mod raft;
 pub mod raft_persist;
 pub mod raft_rpc;
 mod rebalance;
 mod repair;
-pub mod multiproc;
 pub mod sim;
 
 pub use ack::ClusterWriteAck;
@@ -84,6 +84,7 @@ pub use endpoints::{
 pub use error::ClusterError;
 pub use id::{ClusterId, LogPosition, NodeId, PartitionId, PlacementEpoch, Term};
 pub use modes::{CommitStatus, ConsistencyMode, DeploymentProfile, ReadMode};
+pub use multiproc::{hex16 as multiproc_hex16, MultiprocHistory, MultiprocOp, MULTIPROC_PROFILE};
 pub use partition::{
     default_partition_key, PartitionMap, DEFAULT_VIRTUAL_PARTITIONS, HASH_PROFILE_BLAKE3_MOD,
 };
@@ -111,9 +112,6 @@ pub use repair::{
     RepairActionKind, RepairAuditEntry, RepairAuditFile, RepairOptions, RepairReport,
     ReplicaObservation, SourceSelectError, SubjectInventory, ANTI_ENTROPY_PROFILE,
     REPAIR_AUDIT_FILE,
-};
-pub use multiproc::{
-    hex16 as multiproc_hex16, MultiprocHistory, MultiprocOp, MULTIPROC_PROFILE,
 };
 pub use sim::{
     check_convergent_preserved, check_partition_linearizable, run_conformance_matrix, CaseReport,

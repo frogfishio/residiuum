@@ -16,9 +16,7 @@ pub use driver::{
     run_cell, CellRunReport, DatabaseState, DurabilityMode, LayerProfile, RunCellConfig,
 };
 pub use ledger::{AckLedger, LedgerError};
-pub use profiles::{
-    AdditiveFeature, BackgroundInterference, FeatureProfile, InterferenceProfile,
-};
+pub use profiles::{AdditiveFeature, BackgroundInterference, FeatureProfile, InterferenceProfile};
 pub use scheduler::{build_matrix_cells, MatrixCell, MatrixManifest, ScheduleSeed};
 
 use thiserror::Error;

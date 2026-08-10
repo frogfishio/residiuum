@@ -99,12 +99,7 @@ fn chunked_put_get_and_partial_missing_middle() {
                 continue;
             }
             if let Some(piece) = decode_chunk_body(&frame.body) {
-                resolved.push(resolve_piece(
-                    frame.header.event_id,
-                    piece,
-                    [0u8; 16],
-                    off,
-                ));
+                resolved.push(resolve_piece(frame.header.event_id, piece, [0u8; 16], off));
             }
         }
     }

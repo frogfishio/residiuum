@@ -35,6 +35,16 @@ pub fn decode_json(body: &[u8]) -> Result<serde_json::Value, Error> {
     }
 }
 
+/// Length of the compact JSON payload inside a typed store body.
+///
+/// Returning `None` for a non-JSON body lets query hosts fall back to measuring
+/// the decoded value rather than trusting incompatible storage metadata.
+pub(crate) fn encoded_json_payload_len(body: &[u8]) -> Option<u64> {
+    body.first()
+        .is_some_and(|tag| *tag == TAG_JSON)
+        .then(|| body.len().saturating_sub(1) as u64)
+}
+
 /// Decode a typed body as raw bytes.
 pub fn decode_bytes(body: &[u8]) -> Result<Vec<u8>, Error> {
     match body.split_first() {
@@ -57,6 +67,11 @@ mod tests {
         let v = json!({"name": "Alice"});
         let body = encode_json(&v).unwrap();
         assert_eq!(decode_json(&body).unwrap(), v);
+        assert_eq!(
+            encoded_json_payload_len(&body),
+            Some(serde_json::to_vec(&v).unwrap().len() as u64)
+        );
+        assert_eq!(encoded_json_payload_len(&encode_bytes(b"json?")), None);
     }
 
     #[test]

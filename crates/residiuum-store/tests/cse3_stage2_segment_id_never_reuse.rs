@@ -101,7 +101,10 @@ fn never_reuse_after_repeated_reopen_seal() {
             all_ids.len() >= prev,
             "ids must be monotonic: round={round}"
         );
-        assert_eq!(ids.len(), ids.iter().copied().collect::<BTreeSet<_>>().len());
+        assert_eq!(
+            ids.len(),
+            ids.iter().copied().collect::<BTreeSet<_>>().len()
+        );
         let before_lens = sealed_file_lens(dir.path());
         drop(store);
         store = Store::open(dir.path()).unwrap();
@@ -138,7 +141,10 @@ fn never_reuse_multi_shard_allocation() {
     store.seal_active().unwrap();
     store.wait_seals_applied().unwrap();
     let ids = sealed_ids(dir.path());
-    assert_eq!(ids.len(), ids.iter().copied().collect::<BTreeSet<_>>().len());
+    assert_eq!(
+        ids.len(),
+        ids.iter().copied().collect::<BTreeSet<_>>().len()
+    );
     drop(store);
     let mut store = Store::open(dir.path()).unwrap();
     put_n(&mut store, 8, "more");
@@ -146,7 +152,10 @@ fn never_reuse_multi_shard_allocation() {
     store.wait_seals_applied().unwrap();
     let after = sealed_ids(dir.path());
     assert!(after.is_superset(&ids));
-    assert_eq!(after.len(), after.iter().copied().collect::<BTreeSet<_>>().len());
+    assert_eq!(
+        after.len(),
+        after.iter().copied().collect::<BTreeSet<_>>().len()
+    );
 }
 
 fn crash_at(name: &'static str) {
@@ -194,7 +203,10 @@ fn crash_at(name: &'static str) {
     }
     let ids = sealed_ids(&root);
     assert!(ids.is_superset(&before));
-    assert_eq!(ids.len(), ids.iter().copied().collect::<BTreeSet<_>>().len());
+    assert_eq!(
+        ids.len(),
+        ids.iter().copied().collect::<BTreeSet<_>>().len()
+    );
 }
 
 #[test]

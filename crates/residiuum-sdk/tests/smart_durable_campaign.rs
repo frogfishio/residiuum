@@ -434,17 +434,14 @@ fn smart_client_durable_retained_media_campaign() {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(1);
-    let enrichment_enabled =
-        optional_bool("RESIDIUUM_SMART_DURABLE_ENRICHMENT_ENABLED", true);
+    let enrichment_enabled = optional_bool("RESIDIUUM_SMART_DURABLE_ENRICHMENT_ENABLED", true);
     let recovery_mode = match std::env::var("RESIDIUUM_SMART_DURABLE_RECOVERY_MODE")
         .as_deref()
         .unwrap_or("compact_shadow")
     {
         "compact_shadow" => RecoveryMode::CompactShadow,
         "materialized" => RecoveryMode::Materialized,
-        _ => panic!(
-            "RESIDIUUM_SMART_DURABLE_RECOVERY_MODE must be compact_shadow or materialized"
-        ),
+        _ => panic!("RESIDIUUM_SMART_DURABLE_RECOVERY_MODE must be compact_shadow or materialized"),
     };
     let minimum_free = std::env::var("RESIDIUUM_SMART_DURABLE_MIN_FREE_BYTES")
         .ok()
@@ -458,12 +455,11 @@ fn smart_client_durable_retained_media_campaign() {
                 .saturating_mul(client_batch.max(4))
                 .max(DEFAULT_EMBEDDED_QUEUE_CAPACITY)
         });
-    let scheduler_queue_byte_capacity = std::env::var(
-        "RESIDIUUM_SMART_DURABLE_QUEUE_BYTE_CAPACITY",
-    )
-    .ok()
-    .and_then(|value| value.parse::<usize>().ok())
-    .unwrap_or(64 * 1024 * 1024);
+    let scheduler_queue_byte_capacity =
+        std::env::var("RESIDIUUM_SMART_DURABLE_QUEUE_BYTE_CAPACITY")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(64 * 1024 * 1024);
     assert!(logical_target > 0);
     assert!(payload_bytes > 0);
     assert!(concurrency > 0);
@@ -482,10 +478,7 @@ fn smart_client_durable_retained_media_campaign() {
     match recovery_mode {
         RecoveryMode::CompactShadow => drop(ResidiuumDeployment::create(&store).unwrap()),
         RecoveryMode::Materialized => {
-            drop(StoreHost::create_with_recovery_mode(
-                &store,
-                RecoveryMode::Materialized,
-            ).unwrap())
+            drop(StoreHost::create_with_recovery_mode(&store, RecoveryMode::Materialized).unwrap())
         }
         RecoveryMode::Transitioning => unreachable!("campaign never creates transitioning mode"),
     }

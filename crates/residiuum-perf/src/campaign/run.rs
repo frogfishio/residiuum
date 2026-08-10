@@ -82,10 +82,7 @@ impl PresentationPin {
             // Honest cell id for artifacts (presentation pin visible).
             cell.cell_id = format!(
                 "{}-pin-b{}-c{}-o{}",
-                cell.cell_id,
-                cell.batch_size,
-                cell.concurrency,
-                cell.outstanding
+                cell.cell_id, cell.batch_size, cell.concurrency, cell.outstanding
             );
         }
     }
@@ -196,9 +193,7 @@ pub struct CampaignResult {
 /// genuine OS children barrier-synchronized via `residiuum-perf worker`.
 /// Unit tests keep sequential slots (`spawn_workers: false`) for speed.
 pub fn run_campaign(cfg: &CampaignConfig) -> Result<CampaignResult, CampaignError> {
-    cfg.plan
-        .validate()
-        .map_err(CampaignError::Msg)?;
+    cfg.plan.validate().map_err(CampaignError::Msg)?;
 
     if cfg.driver == DriverKind::RealStore {
         if !store_driver_compiled() {
@@ -250,8 +245,7 @@ pub fn run_campaign(cfg: &CampaignConfig) -> Result<CampaignResult, CampaignErro
         preflight_validity_id = Some(report.validity_id.clone());
         if let Some(env) = report.environment.as_ref() {
             environment_hash = Some(env.environment_hash.clone());
-            environment_fingerprint_json =
-                serde_json::to_value(env).ok();
+            environment_fingerprint_json = serde_json::to_value(env).ok();
         }
         preflight_report_json = serde_json::to_value(&report).ok();
     } else if let Some(work) = cfg.work_root.as_ref() {
@@ -302,9 +296,7 @@ pub fn run_campaign(cfg: &CampaignConfig) -> Result<CampaignResult, CampaignErro
         manifest
             .cells
             .iter()
-            .filter(|c| {
-                (c.payload_size == 4096 || c.payload_size == 8192) && c.concurrency >= 2
-            })
+            .filter(|c| (c.payload_size == 4096 || c.payload_size == 8192) && c.concurrency >= 2)
             .filter(|c| !cells.iter().any(|x| x.cell_id == c.cell_id))
             .take(4)
             .cloned()
@@ -316,43 +308,43 @@ pub fn run_campaign(cfg: &CampaignConfig) -> Result<CampaignResult, CampaignErro
     let surface = campaign_surface(cfg);
     let product_claim_eligible = product_eligible(cfg, surface);
 
-    let (repetitions, valid_runs, invalid_runs, workers_spawned, worker_pids) =
-        if cfg.spawn_workers {
-            run_campaign_spawned(cfg, &cells, &multiproc_cells, &process_slots, reps_per_proc)?
-        } else {
-            let mut repetitions = Vec::new();
-            let mut valid_runs = 0usize;
-            let mut invalid_runs = 0usize;
-            for cell in &cells {
+    let (repetitions, valid_runs, invalid_runs, workers_spawned, worker_pids) = if cfg.spawn_workers
+    {
+        run_campaign_spawned(cfg, &cells, &multiproc_cells, &process_slots, reps_per_proc)?
+    } else {
+        let mut repetitions = Vec::new();
+        let mut valid_runs = 0usize;
+        let mut invalid_runs = 0usize;
+        for cell in &cells {
+            run_cell_reps(
+                cfg,
+                cell,
+                &process_slots,
+                reps_per_proc,
+                false,
+                surface,
+                &mut repetitions,
+                &mut valid_runs,
+                &mut invalid_runs,
+            )?;
+        }
+        if cfg.plan.include_multiproc_finding {
+            for cell in &multiproc_cells {
                 run_cell_reps(
                     cfg,
                     cell,
                     &process_slots,
                     reps_per_proc,
-                    false,
+                    true,
                     surface,
                     &mut repetitions,
                     &mut valid_runs,
                     &mut invalid_runs,
                 )?;
             }
-            if cfg.plan.include_multiproc_finding {
-                for cell in &multiproc_cells {
-                    run_cell_reps(
-                        cfg,
-                        cell,
-                        &process_slots,
-                        reps_per_proc,
-                        true,
-                        surface,
-                        &mut repetitions,
-                        &mut valid_runs,
-                        &mut invalid_runs,
-                    )?;
-                }
-            }
-            (repetitions, valid_runs, invalid_runs, false, Vec::new())
-        };
+        }
+        (repetitions, valid_runs, invalid_runs, false, Vec::new())
+    };
 
     let mut withdrawals = vec![
         "WITHDRAWN: any prior smoke-mode primary bottleneck claim (including io_queue_underdriven from PQH-11 smoke multi-rep) is not qualification evidence".into(),
@@ -610,9 +602,9 @@ pub fn attach_primary_bottleneck(
         // Refuse to promote queue-underdriven without qualification evidence of
         // queue-depth response (smoke false positive path).
         if b.verdict == "io_queue_underdriven" && result.driver_kind != "real_store" {
-            result.withdrawals.push(
-                "WITHDRAWN: io_queue_underdriven on non-real_store surface".into(),
-            );
+            result
+                .withdrawals
+                .push("WITHDRAWN: io_queue_underdriven on non-real_store surface".into());
             return;
         }
         result.primary_bottleneck = Some(b.verdict.clone());
@@ -688,7 +680,9 @@ fn run_cell_reps(
             // Override surface/product flags at campaign honesty level.
             let mut report = drep.cell;
             if cfg.driver == DriverKind::Synthetic {
-                report.messages.push("NON-PRODUCT synthetic repetition".into());
+                report
+                    .messages
+                    .push("NON-PRODUCT synthetic repetition".into());
             }
 
             let prefix = if multiproc_tag { "mp-" } else { "" };
@@ -939,7 +933,10 @@ mod real_store_tests {
         assert!(!result.product_claim_eligible);
         assert!(!result.workers_spawned);
         assert!(result.valid_runs >= 5);
-        assert!(result.repetitions.iter().all(|r| r.driver_kind == "real_store"));
+        assert!(result
+            .repetitions
+            .iter()
+            .all(|r| r.driver_kind == "real_store"));
         assert!(result.repetitions.iter().all(|r| !r.run_id.is_empty()));
 
         let reports = build_campaign_reports(&result);

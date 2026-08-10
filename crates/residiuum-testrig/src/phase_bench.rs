@@ -36,9 +36,7 @@ struct Phase {
 fn fill_payload(buf: &mut [u8], seed: u64) {
     let mut state = seed ^ 0xD1_160_B17_u64;
     for (i, b) in buf.iter_mut().enumerate() {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         *b = ((state >> 33) as u8).wrapping_add((i & 0xff) as u8);
     }
 }
@@ -47,7 +45,13 @@ fn mib_s(bytes: u64, secs: f64) -> f64 {
     (bytes as f64 / (1024.0 * 1024.0)) / secs.max(1e-12)
 }
 
-fn phase(name: &'static str, ops: u64, bytes_per_op: u64, wall_s: f64, note: impl Into<String>) -> Phase {
+fn phase(
+    name: &'static str,
+    ops: u64,
+    bytes_per_op: u64,
+    wall_s: f64,
+    note: impl Into<String>,
+) -> Phase {
     Phase {
         name,
         wall_ms: wall_s * 1000.0,
@@ -158,7 +162,8 @@ pub fn run_phase_bench(cfg: &PhaseBenchConfig) -> Result<(), String> {
         for _ in 0..ops {
             f.seek(SeekFrom::Start(off))
                 .map_err(|e| format!("seek: {e}"))?;
-            f.write_all(&frame).map_err(|e| format!("seek write: {e}"))?;
+            f.write_all(&frame)
+                .map_err(|e| format!("seek write: {e}"))?;
             off += frame.len() as u64;
         }
         f.flush().map_err(|e| format!("seek flush: {e}"))?;
@@ -182,7 +187,8 @@ pub fn run_phase_bench(cfg: &PhaseBenchConfig) -> Result<(), String> {
             .map_err(|e| format!("open /dev/null: {e}"))?;
         let t0 = Instant::now();
         for _ in 0..ops {
-            f.write_all(&payload).map_err(|e| format!("null write: {e}"))?;
+            f.write_all(&payload)
+                .map_err(|e| format!("null write: {e}"))?;
         }
         let s = t0.elapsed().as_secs_f64();
         phases.push(phase(
@@ -206,7 +212,8 @@ pub fn run_phase_bench(cfg: &PhaseBenchConfig) -> Result<(), String> {
             .map_err(|e| format!("open raw-seq: {e}"))?;
         let t0 = Instant::now();
         for _ in 0..ops {
-            f.write_all(&payload).map_err(|e| format!("raw write: {e}"))?;
+            f.write_all(&payload)
+                .map_err(|e| format!("raw write: {e}"))?;
         }
         f.flush().map_err(|e| format!("raw flush: {e}"))?;
         let s = t0.elapsed().as_secs_f64();
@@ -236,7 +243,8 @@ pub fn run_phase_bench(cfg: &PhaseBenchConfig) -> Result<(), String> {
             .map_err(|e| format!("open raw-frame: {e}"))?;
         let t0 = Instant::now();
         for _ in 0..ops {
-            f.write_all(&frame).map_err(|e| format!("raw frame write: {e}"))?;
+            f.write_all(&frame)
+                .map_err(|e| format!("raw frame write: {e}"))?;
         }
         f.flush().map_err(|e| format!("raw frame flush: {e}"))?;
         let s = t0.elapsed().as_secs_f64();
@@ -255,8 +263,7 @@ pub fn run_phase_bench(cfg: &PhaseBenchConfig) -> Result<(), String> {
     {
         let store_path = cfg.work.join("mem-store");
         let _ = fs::remove_dir_all(&store_path);
-        let mut store =
-            Store::create(&store_path).map_err(|e| format!("create mem store: {e}"))?;
+        let mut store = Store::create(&store_path).map_err(|e| format!("create mem store: {e}"))?;
         let t0 = Instant::now();
         for i in 0..ops {
             let key = format!("m/{i:020}");
@@ -326,8 +333,7 @@ pub fn run_phase_bench(cfg: &PhaseBenchConfig) -> Result<(), String> {
         let wr_ms = snap.write_latency.sum_ns as f64 / 1e6;
         let sync_ms = snap.sync_latency.sum_ns as f64 / 1e6;
         let seal_ms = snap.seal_latency.sum_ns as f64 / 1e6;
-        let accounted_ms =
-            prep_ms + enc_ms + app_ms + pub_ms + post_ms + wr_ms + sync_ms + seal_ms;
+        let accounted_ms = prep_ms + enc_ms + app_ms + pub_ms + post_ms + wr_ms + sync_ms + seal_ms;
         let other_ms = (wall_ms - accounted_ms).max(0.0);
         let pct = |part: f64| 100.0 * part / wall_ms.max(1e-9);
         let probe_note = format!(
@@ -391,8 +397,8 @@ pub fn run_phase_bench(cfg: &PhaseBenchConfig) -> Result<(), String> {
     {
         let store_path = cfg.work.join("buf-no-index");
         let _ = fs::remove_dir_all(&store_path);
-        let mut store = Store::create(&store_path)
-            .map_err(|e| format!("create no-index store: {e}"))?;
+        let mut store =
+            Store::create(&store_path).map_err(|e| format!("create no-index store: {e}"))?;
         store.set_seal_threshold(512 * 1024 * 1024);
         store.set_diagnostic_skip_index(true);
         store.enable_boundary_probe();
@@ -430,8 +436,8 @@ pub fn run_phase_bench(cfg: &PhaseBenchConfig) -> Result<(), String> {
     {
         let store_path = cfg.work.join("buf-no-blake");
         let _ = fs::remove_dir_all(&store_path);
-        let mut store = Store::create(&store_path)
-            .map_err(|e| format!("create no-blake store: {e}"))?;
+        let mut store =
+            Store::create(&store_path).map_err(|e| format!("create no-blake store: {e}"))?;
         store.set_seal_threshold(512 * 1024 * 1024);
         store.set_diagnostic_skip_blake(true);
         store.enable_boundary_probe();
@@ -484,8 +490,8 @@ pub fn run_phase_bench(cfg: &PhaseBenchConfig) -> Result<(), String> {
     ] {
         let store_path = cfg.work.join(format!("buf-{label}"));
         let _ = fs::remove_dir_all(&store_path);
-        let mut store = Store::create(&store_path)
-            .map_err(|e| format!("create {label} store: {e}"))?;
+        let mut store =
+            Store::create(&store_path).map_err(|e| format!("create {label} store: {e}"))?;
         store.set_seal_threshold(512 * 1024 * 1024);
         store.set_diagnostic_skip_append_frame(true);
         store.set_diagnostic_skip_index(skip_idx);
@@ -544,8 +550,10 @@ pub fn run_phase_bench(cfg: &PhaseBenchConfig) -> Result<(), String> {
         while i < ops {
             let end = (i + batch as u64).min(ops);
             let keys: Vec<String> = (i..end).map(|k| format!("c{workers}/{k:020}")).collect();
-            let items: Vec<(&str, &[u8])> =
-                keys.iter().map(|k| (k.as_str(), payload.as_slice())).collect();
+            let items: Vec<(&str, &[u8])> = keys
+                .iter()
+                .map(|k| (k.as_str(), payload.as_slice()))
+                .collect();
             store
                 .put_many(&items, DurabilityMode::Buffered)
                 .map_err(|e| format!("put_many cook{workers}: {e}"))?;
@@ -568,7 +576,11 @@ pub fn run_phase_bench(cfg: &PhaseBenchConfig) -> Result<(), String> {
     }
 
     // Keep legacy name as alias of cook1 for older dashboards.
-    if let Some(p) = phases.iter().find(|p| p.name == "store_put_many_cook1").cloned() {
+    if let Some(p) = phases
+        .iter()
+        .find(|p| p.name == "store_put_many_cook1")
+        .cloned()
+    {
         phases.push(Phase {
             name: "store_put_many_buffered",
             wall_ms: p.wall_ms,
@@ -580,16 +592,32 @@ pub fn run_phase_bench(cfg: &PhaseBenchConfig) -> Result<(), String> {
 
     // Interpretation helper rates — disk bisection first
     let blake = phases.iter().find(|p| p.name == "blake3_body_hash_only");
-    let raw = phases.iter().find(|p| p.name == "raw_write_all_payload_only");
+    let raw = phases
+        .iter()
+        .find(|p| p.name == "raw_write_all_payload_only");
     let raw_null = phases.iter().find(|p| p.name == "raw_write_all_dev_null");
     let mem = phases.iter().find(|p| p.name == "store_put_memory");
-    let disc = phases.iter().find(|p| p.name == "store_put_buffered_discard_io");
-    let dnull = phases.iter().find(|p| p.name == "store_put_buffered_dev_null");
-    let buf1 = phases.iter().find(|p| p.name == "store_put_buffered_batch1");
-    let noidx = phases.iter().find(|p| p.name == "store_put_buffered_no_index");
-    let noapp = phases.iter().find(|p| p.name == "store_put_buffered_no_append");
-    let noapp_ni = phases.iter().find(|p| p.name == "store_put_buffered_no_append_no_index");
-    let noblake = phases.iter().find(|p| p.name == "store_put_buffered_no_blake");
+    let disc = phases
+        .iter()
+        .find(|p| p.name == "store_put_buffered_discard_io");
+    let dnull = phases
+        .iter()
+        .find(|p| p.name == "store_put_buffered_dev_null");
+    let buf1 = phases
+        .iter()
+        .find(|p| p.name == "store_put_buffered_batch1");
+    let noidx = phases
+        .iter()
+        .find(|p| p.name == "store_put_buffered_no_index");
+    let noapp = phases
+        .iter()
+        .find(|p| p.name == "store_put_buffered_no_append");
+    let noapp_ni = phases
+        .iter()
+        .find(|p| p.name == "store_put_buffered_no_append_no_index");
+    let noblake = phases
+        .iter()
+        .find(|p| p.name == "store_put_buffered_no_blake");
 
     let mut interpretation = Vec::new();
     if let (Some(full), Some(nb)) = (buf1, noblake) {

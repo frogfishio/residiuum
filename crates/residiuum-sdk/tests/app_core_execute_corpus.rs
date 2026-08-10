@@ -51,7 +51,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -226,9 +233,8 @@ fn core_execute_corpus_compile_execute_oracle() {
 
     // 2) missing + present.
     {
-        let src = format!(
-            "from {name} where missing(deleted_at) and present(customer.id) page size 8"
-        );
+        let src =
+            format!("from {name} where missing(deleted_at) and present(customer.id) page size 8");
         let got = drain_rql(&mut col, &src, &Parameters::default(), 8);
         let mut oracle = oracle_keys(&mut col, |v| {
             v.get("deleted_at").is_none() && v.pointer("/customer/id").is_some()
@@ -247,9 +253,7 @@ fn core_execute_corpus_compile_execute_oracle() {
         );
         let got = drain_rql(&mut col, &src, &Parameters::default(), 4);
         let mut oracle = oracle_keys(&mut col, |v| {
-            v["notes"]
-                .as_str()
-                .is_some_and(|n| n.contains("rush"))
+            v["notes"].as_str().is_some_and(|n| n.contains("rush"))
                 && v["sku"].as_str().is_some_and(|s| s.starts_with("AB"))
         });
         oracle.sort();
@@ -261,9 +265,8 @@ fn core_execute_corpus_compile_execute_oracle() {
 
     // 4) neq / or.
     {
-        let src = format!(
-            "from {name} where status != \"cancelled\" or region = \"us\" page size 3"
-        );
+        let src =
+            format!("from {name} where status != \"cancelled\" or region = \"us\" page size 3");
         let got = drain_rql(&mut col, &src, &Parameters::default(), 3);
         let mut oracle = oracle_keys(&mut col, |v| {
             v["status"] != "cancelled" || v["region"] == "us"

@@ -130,9 +130,8 @@ pub fn run_qualified_handshake<R: Read, W: Write>(
     let max_frame = residiuum_client::negotiate_max_frame(hello.max_frame);
     let mut nonce = params.server_nonce.unwrap_or([0u8; 32]);
     if params.server_nonce.is_none() {
-        getrandom::fill(&mut nonce).map_err(|_| {
-            Error::Internal("getrandom failed for heap challenge nonce".into())
-        })?;
+        getrandom::fill(&mut nonce)
+            .map_err(|_| Error::Internal("getrandom failed for heap challenge nonce".into()))?;
     }
     let challenge = build_challenge(params.deployment_id.to_string(), &nonce);
     write_json_frame(writer, &challenge).map_err(Error::from)?;
@@ -240,9 +239,8 @@ pub fn run_qualified_handshake_buffered<S: Read + Write>(
     let max_frame = residiuum_client::negotiate_max_frame(hello.max_frame);
     let mut nonce = params.server_nonce.unwrap_or([0u8; 32]);
     if params.server_nonce.is_none() {
-        getrandom::fill(&mut nonce).map_err(|_| {
-            Error::Internal("getrandom failed for heap challenge nonce".into())
-        })?;
+        getrandom::fill(&mut nonce)
+            .map_err(|_| Error::Internal("getrandom failed for heap challenge nonce".into()))?;
     }
     let challenge = build_challenge(params.deployment_id.to_string(), &nonce);
     write_json_frame(reader.get_mut(), &challenge).map_err(Error::from)?;
@@ -325,11 +323,7 @@ pub fn serve_qualified_requests_with_host<S: Read + Write>(
         };
         let outcome = match (heap_store.as_ref(), layout.as_ref()) {
             (Some(store), Some(layout)) => {
-                dispatch_heap_request_with(
-                    &session.cap,
-                    &raw,
-                    Some(HeapDataCtx { store, layout }),
-                )
+                dispatch_heap_request_with(&session.cap, &raw, Some(HeapDataCtx { store, layout }))
             }
             _ => dispatch_heap_request(&session.cap, &raw),
         };

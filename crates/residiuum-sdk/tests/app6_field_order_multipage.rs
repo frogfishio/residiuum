@@ -5,9 +5,7 @@ use residiuum_heap::{
     HeapAdministrativeState, HeapId, HeapSecuritySnapshot, HeapSlot, Rights, SecurityRevision,
     TrustedInstant, VerifiedCertificate,
 };
-use residiuum_sdk::{
-    HeapClient, OrderDir, Parameters, QueryRunOptions, ResidiuumDeployment,
-};
+use residiuum_sdk::{HeapClient, OrderDir, Parameters, QueryRunOptions, ResidiuumDeployment};
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
 use std::sync::Arc;
 use tempfile::{tempdir, TempDir};
@@ -44,7 +42,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -131,7 +136,11 @@ fn multipage_field_order_desc_matches_oracle() {
         .run(&Parameters::default(), opts.clone())
         .expect("page2");
     let k2: Vec<_> = p2.rows.iter().map(|r| r.key.clone()).collect();
-    assert_eq!(k2, oracle[2..4], "page2 must continue field order, not key order");
+    assert_eq!(
+        k2,
+        oracle[2..4],
+        "page2 must continue field order, not key order"
+    );
     assert!(!p2.exhausted);
     let cont2 = p2.next.expect("continuation after page2");
 
@@ -192,11 +201,7 @@ fn multipage_field_order_rql_and_builder_agree() {
         .unwrap();
     opts.after = r1.next;
     let r2 = col
-        .rql(
-            "from items order by n asc",
-            &Parameters::default(),
-            opts,
-        )
+        .rql("from items order by n asc", &Parameters::default(), opts)
         .unwrap();
     assert_eq!(
         b2.rows.iter().map(|r| r.key.clone()).collect::<Vec<_>>(),

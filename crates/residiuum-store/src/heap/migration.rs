@@ -201,8 +201,7 @@ pub struct CutoverGate {
 impl CutoverGate {
     /// Whether phase 6 may proceed (`HEAP_SPEC` §36).
     pub fn allows_cutover(&self) -> bool {
-        self.source_frames
-            == self.rewritten_frames + self.intentionally_quarantined_frames
+        self.source_frames == self.rewritten_frames + self.intentionally_quarantined_frames
             && self.unlabelled_active_frames == 0
             && self.cross_heap_segments == 0
     }
@@ -249,9 +248,7 @@ impl HeapMigrationJob {
         let job_id = random_id()?;
         let inv_hash = inventory.inventory_hash()?;
         let now = now_unix()?;
-        let root = store_root
-            .join(HEAP_MIGRATE_DIR)
-            .join(hex16(&job_id));
+        let root = store_root.join(HEAP_MIGRATE_DIR).join(hex16(&job_id));
         if root.exists() {
             return Err(StoreError::HeapAdmit("migration job dir exists".into()));
         }
@@ -286,10 +283,12 @@ impl HeapMigrationJob {
     }
 
     /// Reload a job from disk (crash resume).
-    pub fn open(store_root: &Path, job_id: [u8; 16], inventory: SourceInventory) -> Result<Self, StoreError> {
-        let root = store_root
-            .join(HEAP_MIGRATE_DIR)
-            .join(hex16(&job_id));
+    pub fn open(
+        store_root: &Path,
+        job_id: [u8; 16],
+        inventory: SourceInventory,
+    ) -> Result<Self, StoreError> {
+        let root = store_root.join(HEAP_MIGRATE_DIR).join(hex16(&job_id));
         let state = load_state(&root.join(STATE_FILE))?;
         if state.job_id != job_id {
             return Err(StoreError::HeapAdmit("migration job id mismatch".into()));
@@ -566,8 +565,8 @@ fn encode_state(state: &MigrationStateV1) -> Result<Vec<u8>, StoreError> {
 
 fn load_state(path: &Path) -> Result<MigrationStateV1, StoreError> {
     let bytes = fs::read(path)?;
-    let map = decode_deterministic_uint_map(&bytes)
-        .map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
+    let map =
+        decode_deterministic_uint_map(&bytes).map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
     let get = |k: u64| {
         map.iter()
             .find(|(kk, _)| *kk == k)
@@ -638,8 +637,8 @@ fn load_assignments(path: &Path) -> Result<BTreeMap<String, [u8; 16]>, StoreErro
         return Ok(BTreeMap::new());
     }
     let bytes = fs::read(path)?;
-    let map = decode_deterministic_uint_map(&bytes)
-        .map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
+    let map =
+        decode_deterministic_uint_map(&bytes).map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
     let mut out = BTreeMap::new();
     for (_, v) in map {
         match v {
@@ -671,11 +670,8 @@ fn encode_admitted(
         .iter()
         .map(|h| CborValue::Bytes(h.to_vec()))
         .collect();
-    encode_deterministic_uint_map(&[
-        (1u64, CborValue::Array(adm)),
-        (2, CborValue::Array(qua)),
-    ])
-    .map_err(|e| StoreError::HeapAdmit(e.to_string()))
+    encode_deterministic_uint_map(&[(1u64, CborValue::Array(adm)), (2, CborValue::Array(qua))])
+        .map_err(|e| StoreError::HeapAdmit(e.to_string()))
 }
 
 fn load_admitted(path: &Path) -> Result<(BTreeSet<[u8; 32]>, BTreeSet<[u8; 32]>), StoreError> {
@@ -683,8 +679,8 @@ fn load_admitted(path: &Path) -> Result<(BTreeSet<[u8; 32]>, BTreeSet<[u8; 32]>)
         return Ok((BTreeSet::new(), BTreeSet::new()));
     }
     let bytes = fs::read(path)?;
-    let map = decode_deterministic_uint_map(&bytes)
-        .map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
+    let map =
+        decode_deterministic_uint_map(&bytes).map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
     let mut admitted = BTreeSet::new();
     let mut quarantined = BTreeSet::new();
     for (k, v) in map {

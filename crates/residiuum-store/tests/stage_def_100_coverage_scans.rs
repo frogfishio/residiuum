@@ -4,7 +4,9 @@ use residiuum_store::{DurabilityMode, IncompleteReason, PayloadResult, Store};
 use tempfile::tempdir;
 
 fn large(seed: u8, len: usize) -> Vec<u8> {
-    (0..len).map(|i| seed.wrapping_add((i % 251) as u8)).collect()
+    (0..len)
+        .map(|i| seed.wrapping_add((i % 251) as u8))
+        .collect()
 }
 
 #[test]
@@ -31,10 +33,7 @@ fn key_scan_lists_keys_without_body_reassembly() {
     assert!(page.coverage_complete);
     assert!(page.coverage_gaps.is_empty());
     // Key scan must not depend on body completeness.
-    assert_eq!(
-        page.keys,
-        vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
-    );
+    assert_eq!(page.keys, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
 }
 
 #[test]

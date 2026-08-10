@@ -82,17 +82,13 @@ impl EwmaEstimate {
 
     /// Lower uncertainty bound `max(0, m - 3d)`.
     pub fn lower_ns(&self) -> u64 {
-        let three_d = self
-            .deviation_ns
-            .saturating_mul(DEVIATION_MULTIPLIER);
+        let three_d = self.deviation_ns.saturating_mul(DEVIATION_MULTIPLIER);
         self.mean_ns.saturating_sub(three_d)
     }
 
     /// Upper uncertainty bound `m + 3d` (saturating).
     pub fn upper_ns(&self) -> u64 {
-        let three_d = self
-            .deviation_ns
-            .saturating_mul(DEVIATION_MULTIPLIER);
+        let three_d = self.deviation_ns.saturating_mul(DEVIATION_MULTIPLIER);
         self.mean_ns.saturating_add(three_d)
     }
 
@@ -159,11 +155,7 @@ pub fn payload_bucket(payload_bytes: u64, cap: u64) -> u64 {
     }
     let pot = 1u64 << (63 - payload_bytes.leading_zeros());
     // floor power of two of payload_bytes
-    let floor = if pot > payload_bytes {
-        pot >> 1
-    } else {
-        pot
-    };
+    let floor = if pot > payload_bytes { pot >> 1 } else { pot };
     let floor = floor.max(1);
     if cap == 0 {
         floor

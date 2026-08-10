@@ -12,9 +12,7 @@
 //!   --test cse3_stage2_step2l_tps_ab step2l_tps_ab -- --nocapture
 //! ```
 
-use residiuum_store::{
-    DurabilityMode, RecoveryMode, SealStageBreakdown, Store,
-};
+use residiuum_store::{DurabilityMode, RecoveryMode, SealStageBreakdown, Store};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -165,25 +163,27 @@ fn run_arm(arm: Arm, target_bytes: u64) -> ArmReport {
     let ack_t0 = Instant::now();
     while written < target_bytes {
         let k = format!("step2l/{}/{ops:020}", arm.label());
-        store
-            .put(&k, &payload, DurabilityMode::Buffered)
-            .unwrap();
+        store.put(&k, &payload, DurabilityMode::Buffered).unwrap();
         ops += 1;
         written += PAYLOAD as u64;
         since_seal += PAYLOAD as u64;
         if since_seal >= SEAL_EVERY {
-            accumulate(&mut seal_breakdown, store.seal_active_with_breakdown().unwrap());
+            accumulate(
+                &mut seal_breakdown,
+                store.seal_active_with_breakdown().unwrap(),
+            );
             since_seal = 0;
         }
     }
     for i in 0..16u64 {
         let k = format!("continue/{}/{i:04}", arm.label());
-        store
-            .put(&k, &payload, DurabilityMode::Buffered)
-            .unwrap();
+        store.put(&k, &payload, DurabilityMode::Buffered).unwrap();
         ops += 1;
     }
-    accumulate(&mut seal_breakdown, store.seal_active_with_breakdown().unwrap());
+    accumulate(
+        &mut seal_breakdown,
+        store.seal_active_with_breakdown().unwrap(),
+    );
     store.wait_seals_applied().unwrap();
     let lifecycle_wall = ack_t0.elapsed();
 

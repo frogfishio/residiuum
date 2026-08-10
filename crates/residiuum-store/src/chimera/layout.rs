@@ -111,15 +111,12 @@ impl ChimeraLayout {
         let container;
         match loc {
             ValueLocator::PointContainer { container_id, .. } => {
-                container = self
-                    .containers
-                    .get(*container_id as usize)
-                    .ok_or_else(|| {
-                        StoreError::Io(std::io::Error::new(
-                            std::io::ErrorKind::NotFound,
-                            "chimera container id out of range",
-                        ))
-                    })?;
+                container = self.containers.get(*container_id as usize).ok_or_else(|| {
+                    StoreError::Io(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "chimera container id out of range",
+                    ))
+                })?;
                 ctx.point_container = Some(container);
             }
             ValueLocator::LargeValueLog { .. } => {
@@ -244,12 +241,9 @@ pub fn build_layout(
     for (k, v) in &unique {
         match super::classify_value(v.len(), classify_opts) {
             ValueClass::Tiny => {
-                layout.entries.insert(
-                    k.clone(),
-                    ValueLocator::Inline {
-                        bytes: v.clone(),
-                    },
-                );
+                layout
+                    .entries
+                    .insert(k.clone(), ValueLocator::Inline { bytes: v.clone() });
             }
             ValueClass::Medium => medium_pairs.push((k.clone(), v.clone())),
             ValueClass::Large => large_pairs.push((k.clone(), v.clone())),
@@ -273,9 +267,7 @@ pub fn build_layout(
     }
 
     for (k, v) in large_pairs {
-        let (offset, len) = layout
-            .value_log
-            .append(&ValueLogRecord::new(generation, v));
+        let (offset, len) = layout.value_log.append(&ValueLogRecord::new(generation, v));
         layout.entries.insert(
             k,
             ValueLocator::LargeValueLog {
@@ -663,7 +655,11 @@ mod tests {
         assert!(layout.containers.is_empty());
         assert!(layout.value_log.as_bytes().is_empty());
         // In-layout get cannot resolve segment frames without store pread.
-        assert!(layout.get(b"k00000").unwrap_err().to_string().contains("store resolve"));
+        assert!(layout
+            .get(b"k00000")
+            .unwrap_err()
+            .to_string()
+            .contains("store resolve"));
 
         let path = chimera_layout_path(&paths, &seg);
         write_chimera_layout(&path, store_id, seg, &layout).unwrap();

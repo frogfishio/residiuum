@@ -68,6 +68,7 @@ use residiuum_format::{
     encode_store_descriptor_frame, scan_forward, ActiveSegment, FrameFlags, FrameHeader, FrameKind,
     FrameParts, SafetyLimits, SegmentId, WIRE_MAJOR, WIRE_MINOR,
 };
+use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
@@ -85,6 +86,10 @@ const META_VERSION: &str = "residiuum-store-9\n";
 const DEFAULT_SEAL_THRESHOLD: u64 = 64 * 1024 * 1024;
 /// Maximum resident bytes in the derived cache of previously verified bodies.
 const DEFAULT_VERIFIED_BODY_CACHE_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum resident bytes in decoded covering-index projections.
+const DEFAULT_COVERING_SECONDARY_CACHE_BYTES: usize = 64 * 1024 * 1024;
+/// Maximum on-disk bytes represented by cached decoded secondary indexes.
+const DEFAULT_LOADED_SECONDARY_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 struct CachedVerifiedBody {
@@ -175,6 +180,148 @@ impl VerifiedBodyCache {
                 }
             }
         }
+    }
+}
+
+type CoveringProjectionKey = (String, Vec<String>);
+
+#[derive(Debug)]
+struct CachedCoveringProjection {
+    rows: Vec<Vec<JsonValue>>,
+    charge: usize,
+}
+
+/// Bounded FIFO cache of validated, decoded covering-index projections.
+#[derive(Debug)]
+struct CoveringSecondaryCache {
+    entries: HashMap<CoveringProjectionKey, CachedCoveringProjection>,
+    admission_order: VecDeque<CoveringProjectionKey>,
+    resident_bytes: usize,
+    max_bytes: usize,
+}
+
+impl CoveringSecondaryCache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            admission_order: VecDeque::new(),
+            resident_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn get(&self, collection: &str, fields: &[String]) -> Option<Vec<Vec<JsonValue>>> {
+        self.entries
+            .get(&(collection.to_string(), fields.to_vec()))
+            .map(|entry| entry.rows.clone())
+    }
+
+    fn insert(
+        &mut self,
+        collection: &str,
+        fields: &[String],
+        rows: Vec<Vec<JsonValue>>,
+        charge: usize,
+    ) {
+        if charge > self.max_bytes {
+            return;
+        }
+        let key = (collection.to_string(), fields.to_vec());
+        if let Some(previous) = self.entries.remove(&key) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(previous.charge);
+            self.admission_order.retain(|candidate| candidate != &key);
+        }
+        self.resident_bytes = self.resident_bytes.saturating_add(charge);
+        self.entries
+            .insert(key.clone(), CachedCoveringProjection { rows, charge });
+        self.admission_order.push_back(key);
+        while self.resident_bytes > self.max_bytes {
+            let Some(oldest) = self.admission_order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.resident_bytes = self.resident_bytes.saturating_sub(removed.charge);
+            }
+        }
+    }
+
+    fn clear_collection(&mut self, collection: &str) {
+        let removed_charge = self
+            .entries
+            .iter()
+            .filter_map(|((scope, _), entry)| (scope == collection).then_some(entry.charge))
+            .fold(0usize, usize::saturating_add);
+        self.entries.retain(|(scope, _), _| scope != collection);
+        self.resident_bytes = self.resident_bytes.saturating_sub(removed_charge);
+        self.admission_order
+            .retain(|(scope, _)| scope != collection);
+    }
+}
+
+#[derive(Debug)]
+struct CachedLoadedSecondary {
+    indexes: Arc<Vec<SecondaryIndex>>,
+    charge: usize,
+}
+
+/// Bounded FIFO cache of secondary-index files after successful validation and
+/// decode. Empty collections are cached too, eliminating repeated directory
+/// scans for queries that have no usable index.
+#[derive(Debug)]
+struct LoadedSecondaryCache {
+    entries: HashMap<String, CachedLoadedSecondary>,
+    admission_order: VecDeque<String>,
+    resident_bytes: usize,
+    max_bytes: usize,
+}
+
+impl LoadedSecondaryCache {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            admission_order: VecDeque::new(),
+            resident_bytes: 0,
+            max_bytes,
+        }
+    }
+
+    fn get(&self, collection: &str) -> Option<Arc<Vec<SecondaryIndex>>> {
+        self.entries
+            .get(collection)
+            .map(|entry| Arc::clone(&entry.indexes))
+    }
+
+    fn insert(&mut self, collection: &str, indexes: Arc<Vec<SecondaryIndex>>, charge: usize) {
+        if charge > self.max_bytes {
+            return;
+        }
+        if let Some(previous) = self.entries.remove(collection) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(previous.charge);
+            self.admission_order
+                .retain(|candidate| candidate != collection);
+        }
+        self.resident_bytes = self.resident_bytes.saturating_add(charge);
+        self.entries.insert(
+            collection.to_string(),
+            CachedLoadedSecondary { indexes, charge },
+        );
+        self.admission_order.push_back(collection.to_string());
+        while self.resident_bytes > self.max_bytes {
+            let Some(oldest) = self.admission_order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.entries.remove(&oldest) {
+                self.resident_bytes = self.resident_bytes.saturating_sub(removed.charge);
+            }
+        }
+    }
+
+    fn clear_collection(&mut self, collection: &str) {
+        if let Some(removed) = self.entries.remove(collection) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(removed.charge);
+        }
+        self.admission_order
+            .retain(|candidate| candidate != collection);
     }
 }
 
@@ -754,6 +901,11 @@ pub struct Store {
     /// Process-local validated order projections for secondary indexes.
     /// Derived only; every secondary-index write/delete invalidates its scope.
     ordered_secondary_cache: Mutex<HashMap<(String, String, bool, bool), Vec<Vec<u8>>>>,
+    /// Process-local validated field rows for covering secondary execution.
+    covering_secondary_cache: Mutex<CoveringSecondaryCache>,
+    /// Process-local validated secondary-index files, bounded by represented
+    /// on-disk bytes and invalidated with every index publication.
+    loaded_secondary_cache: Mutex<LoadedSecondaryCache>,
     /// Bounded derived cache of logical bodies after full frame verification.
     verified_body_cache: Mutex<VerifiedBodyCache>,
     /// Buffered/durable ops since the last derived-state disk checkpoint (DEF-023).
@@ -1105,6 +1257,12 @@ impl Store {
             index: PrimaryIndex::new(),
             durable_index: PrimaryIndex::new(),
             ordered_secondary_cache: Mutex::new(HashMap::new()),
+            covering_secondary_cache: Mutex::new(CoveringSecondaryCache::new(
+                DEFAULT_COVERING_SECONDARY_CACHE_BYTES,
+            )),
+            loaded_secondary_cache: Mutex::new(LoadedSecondaryCache::new(
+                DEFAULT_LOADED_SECONDARY_CACHE_BYTES,
+            )),
             verified_body_cache: Mutex::new(VerifiedBodyCache::new(
                 DEFAULT_VERIFIED_BODY_CACHE_BYTES,
             )),
@@ -1249,6 +1407,12 @@ impl Store {
             index: PrimaryIndex::new(),
             durable_index: PrimaryIndex::new(),
             ordered_secondary_cache: Mutex::new(HashMap::new()),
+            covering_secondary_cache: Mutex::new(CoveringSecondaryCache::new(
+                DEFAULT_COVERING_SECONDARY_CACHE_BYTES,
+            )),
+            loaded_secondary_cache: Mutex::new(LoadedSecondaryCache::new(
+                DEFAULT_LOADED_SECONDARY_CACHE_BYTES,
+            )),
             verified_body_cache: Mutex::new(VerifiedBodyCache::new(
                 DEFAULT_VERIFIED_BODY_CACHE_BYTES,
             )),
@@ -1518,6 +1682,12 @@ impl Store {
             index: PrimaryIndex::new(),
             durable_index: PrimaryIndex::new(),
             ordered_secondary_cache: Mutex::new(HashMap::new()),
+            covering_secondary_cache: Mutex::new(CoveringSecondaryCache::new(
+                DEFAULT_COVERING_SECONDARY_CACHE_BYTES,
+            )),
+            loaded_secondary_cache: Mutex::new(LoadedSecondaryCache::new(
+                DEFAULT_LOADED_SECONDARY_CACHE_BYTES,
+            )),
             verified_body_cache: Mutex::new(VerifiedBodyCache::new(
                 DEFAULT_VERIFIED_BODY_CACHE_BYTES,
             )),
@@ -6039,7 +6209,7 @@ impl Store {
 
     /// Persist a secondary index file (derived only).
     pub fn write_secondary_index(&self, index: &SecondaryIndex) -> Result<PathBuf, StoreError> {
-        self.ordered_secondary_cache_clear(&index.meta.collection);
+        self.secondary_projection_cache_clear(&index.meta.collection);
         let path = secondary_index_path(&self.paths, &index.meta.collection, &index.meta.name);
         write_secondary_index(&path, self.store_id, index)?;
         Ok(path)
@@ -6069,9 +6239,45 @@ impl Store {
         Ok(out)
     }
 
+    /// Return validated decoded secondary indexes from a bounded process-local
+    /// cache. Cache admission is charged by represented index-file bytes plus
+    /// scope overhead; oversize collections are decoded normally and bypass it.
+    pub fn cached_secondary_indexes(
+        &self,
+        collection: &str,
+    ) -> Result<Arc<Vec<SecondaryIndex>>, StoreError> {
+        if let Some(indexes) = self
+            .loaded_secondary_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(collection))
+        {
+            return Ok(indexes);
+        }
+        let paths = list_secondary_index_paths(&self.paths, collection)?;
+        let mut charge = collection.len().saturating_add(128);
+        let mut indexes = Vec::with_capacity(paths.len());
+        for path in paths {
+            charge = charge.saturating_add(
+                fs::metadata(&path)
+                    .ok()
+                    .and_then(|metadata| usize::try_from(metadata.len()).ok())
+                    .unwrap_or(0),
+            );
+            if let Some(index) = try_load_secondary_index(&path, self.store_id)? {
+                indexes.push(index);
+            }
+        }
+        let indexes = Arc::new(indexes);
+        if let Ok(mut cache) = self.loaded_secondary_cache.lock() {
+            cache.insert(collection, Arc::clone(&indexes), charge);
+        }
+        Ok(indexes)
+    }
+
     /// Delete a secondary index file (never touches segments).
     pub fn delete_secondary_index(&self, collection: &str, name: &str) -> Result<(), StoreError> {
-        self.ordered_secondary_cache_clear(collection);
+        self.secondary_projection_cache_clear(collection);
         let path = secondary_index_path(&self.paths, collection, name);
         delete_secondary_index(&path)
     }
@@ -6118,9 +6324,40 @@ impl Store {
         }
     }
 
-    fn ordered_secondary_cache_clear(&self, collection: &str) {
+    /// Read a validated process-local covering secondary projection.
+    pub fn covering_secondary_cache_get(
+        &self,
+        collection: &str,
+        fields: &[String],
+    ) -> Option<Vec<Vec<JsonValue>>> {
+        self.covering_secondary_cache
+            .lock()
+            .ok()?
+            .get(collection, fields)
+    }
+
+    /// Install a validated process-local covering secondary projection.
+    pub fn covering_secondary_cache_put(
+        &self,
+        collection: &str,
+        fields: &[String],
+        rows: Vec<Vec<JsonValue>>,
+        charge: usize,
+    ) {
+        if let Ok(mut cache) = self.covering_secondary_cache.lock() {
+            cache.insert(collection, fields, rows, charge);
+        }
+    }
+
+    fn secondary_projection_cache_clear(&self, collection: &str) {
         if let Ok(mut cache) = self.ordered_secondary_cache.lock() {
             cache.retain(|(scope, _, _, _), _| scope != collection);
+        }
+        if let Ok(mut cache) = self.covering_secondary_cache.lock() {
+            cache.clear_collection(collection);
+        }
+        if let Ok(mut cache) = self.loaded_secondary_cache.lock() {
+            cache.clear_collection(collection);
         }
     }
 
@@ -11494,6 +11731,42 @@ mod tests {
             .unwrap();
         assert_ne!(first.event_id, second.event_id);
         assert_eq!(store.get("cache/key").unwrap().unwrap(), b"second");
+    }
+
+    #[test]
+    fn covering_secondary_cache_is_bounded_and_scope_invalidated() {
+        let mut cache = CoveringSecondaryCache::new(10);
+        let fields = vec!["region".to_string()];
+        cache.insert("a", &fields, vec![vec![JsonValue::from("us")]], 6);
+        cache.insert("b", &fields, vec![vec![JsonValue::from("eu")]], 6);
+        assert!(cache.resident_bytes <= cache.max_bytes);
+        assert!(cache.get("a", &fields).is_none());
+        assert!(cache.get("b", &fields).is_some());
+
+        cache.clear_collection("b");
+        assert!(cache.get("b", &fields).is_none());
+        assert_eq!(cache.resident_bytes, 0);
+
+        cache.insert("oversize", &fields, vec![vec![JsonValue::Null]], 11);
+        assert!(cache.get("oversize", &fields).is_none());
+    }
+
+    #[test]
+    fn loaded_secondary_cache_is_bounded_and_scope_invalidated() {
+        let mut cache = LoadedSecondaryCache::new(10);
+        let empty = Arc::new(Vec::new());
+        cache.insert("a", Arc::clone(&empty), 6);
+        cache.insert("b", Arc::clone(&empty), 6);
+        assert!(cache.resident_bytes <= cache.max_bytes);
+        assert!(cache.get("a").is_none());
+        assert!(cache.get("b").is_some());
+
+        cache.clear_collection("b");
+        assert!(cache.get("b").is_none());
+        assert_eq!(cache.resident_bytes, 0);
+
+        cache.insert("oversize", empty, 11);
+        assert!(cache.get("oversize").is_none());
     }
 
     #[test]

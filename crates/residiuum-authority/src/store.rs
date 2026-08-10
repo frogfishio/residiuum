@@ -6,9 +6,7 @@ use crate::slot::{
     decode_slot_file, encode_slot_file, read_selector, sha256, slot_path, write_atomic,
     write_selector, Slot,
 };
-use residiuum_format::{
-    decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue,
-};
+use residiuum_format::{decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,7 +18,11 @@ pub struct AuthorityPaths {
 
 impl AuthorityPaths {
     /// Construct for one heap under `authority_root`.
-    pub fn new(authority_root: impl AsRef<Path>, deployment_id: &[u8; 16], heap_id: &[u8; 16]) -> Self {
+    pub fn new(
+        authority_root: impl AsRef<Path>,
+        deployment_id: &[u8; 16],
+        heap_id: &[u8; 16],
+    ) -> Self {
         Self {
             root: authority_root
                 .as_ref()
@@ -59,8 +61,7 @@ impl AuthorityPaths {
     }
 
     fn event_path(&self, epoch: u64, revision: u64) -> PathBuf {
-        self.events_dir(epoch)
-            .join(format!("{revision:020}.cbor"))
+        self.events_dir(epoch).join(format!("{revision:020}.cbor"))
     }
 
     fn receipts_dir(&self, epoch: u64) -> PathBuf {
@@ -174,7 +175,10 @@ impl MasterAuthorityStore {
         }
     }
 
-    fn try_load_slot(&self, slot: Slot) -> Result<Option<(AuthorityHead, [u8; 32])>, AuthorityError> {
+    fn try_load_slot(
+        &self,
+        slot: Slot,
+    ) -> Result<Option<(AuthorityHead, [u8; 32])>, AuthorityError> {
         let path = self.paths.head_path(slot);
         if !path.is_file() {
             return Ok(None);
@@ -238,9 +242,15 @@ impl MasterAuthorityStore {
             (4, CborValue::Uint(head.trusted_time_floor)),
             (5, CborValue::Uint(head.file_sequence)),
             (6, CborValue::Uint(0)),
-            (7, CborValue::Uint(head.trusted_time_floor.saturating_mul(1_000_000_000))),
+            (
+                7,
+                CborValue::Uint(head.trusted_time_floor.saturating_mul(1_000_000_000)),
+            ),
             (8, CborValue::Uint(0)),
-            (9, CborValue::Array(vec![CborValue::Uint(0), CborValue::Uint(0)])),
+            (
+                9,
+                CborValue::Array(vec![CborValue::Uint(0), CborValue::Uint(0)]),
+            ),
         ])
         .map_err(|e| AuthorityError::Crypto(e.to_string()))?;
         let tf_slot = encode_slot_file(&tf_payload)?;
@@ -255,8 +265,7 @@ impl MasterAuthorityStore {
         // 5. Advance anchor (logical commit precedes selector; crash after this
         //    still recovers via anchor hash match).
         let prev_counter = if self.paths.anchor().is_file() {
-            AnchorValue::decode(&fs::read(self.paths.anchor())?)?
-                .monotonic_counter
+            AnchorValue::decode(&fs::read(self.paths.anchor())?)?.monotonic_counter
         } else {
             0
         };

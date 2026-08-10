@@ -418,7 +418,11 @@ impl ClientDirectoryCache {
 mod tests {
     use super::*;
 
-    fn balanced_snapshot(virtual_partitions: u32, node_count: u32, epoch: u64) -> DirectorySnapshot {
+    fn balanced_snapshot(
+        virtual_partitions: u32,
+        node_count: u32,
+        epoch: u64,
+    ) -> DirectorySnapshot {
         assert!(node_count >= 1);
         let replicas: Vec<u32> = (0..node_count).collect();
         let mut assignments = Vec::with_capacity(virtual_partitions as usize);

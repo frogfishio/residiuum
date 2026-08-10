@@ -327,9 +327,8 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 /// Load PEM certificates from a file (one or more CERTIFICATE blocks).
 pub fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
-    let data = fs::read(path).map_err(|e| {
-        Error::ValidationMsg(format!("read cert {}: {e}", path.display()))
-    })?;
+    let data = fs::read(path)
+        .map_err(|e| Error::ValidationMsg(format!("read cert {}: {e}", path.display())))?;
     let mut reader = io::Cursor::new(data);
     let certs = rustls_pemfile::certs(&mut reader)
         .collect::<Result<Vec<_>, _>>()
@@ -345,15 +344,12 @@ pub fn load_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, Error> {
 
 /// Load a PEM private key (PKCS#8 or PKCS#1).
 pub fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, Error> {
-    let data = fs::read(path).map_err(|e| {
-        Error::ValidationMsg(format!("read key {}: {e}", path.display()))
-    })?;
+    let data = fs::read(path)
+        .map_err(|e| Error::ValidationMsg(format!("read key {}: {e}", path.display())))?;
     let mut reader = io::Cursor::new(data);
     rustls_pemfile::private_key(&mut reader)
         .map_err(|e| Error::ValidationMsg(format!("parse key {}: {e}", path.display())))?
-        .ok_or_else(|| {
-            Error::ValidationMsg(format!("no private key found in {}", path.display()))
-        })
+        .ok_or_else(|| Error::ValidationMsg(format!("no private key found in {}", path.display())))
 }
 
 fn load_roots(path: &Path) -> Result<RootCertStore, Error> {
@@ -547,10 +543,8 @@ impl ServerCertVerifier for IdentityServerVerifier {
             ocsp_response,
             now,
         )?;
-        let identity =
-            PeerIdentity::from_cert_der(end_entity.as_ref()).map_err(|e| {
-                RustlsError::General(e.to_string())
-            })?;
+        let identity = PeerIdentity::from_cert_der(end_entity.as_ref())
+            .map_err(|e| RustlsError::General(e.to_string()))?;
         identity
             .check_not_revoked(&self.revoked_serials_hex)
             .map_err(|e| RustlsError::General(e.to_string()))?;
@@ -611,17 +605,16 @@ pub fn build_client_config(options: &TlsClientOptions) -> Result<Arc<ClientConfi
         .dangerous()
         .with_custom_certificate_verifier(verifier);
 
-    let mut config = if let (Some(cert), Some(key)) =
-        (&options.client_cert_path, &options.client_key_path)
-    {
-        let certs = load_certs(cert)?;
-        let key = load_private_key(key)?;
-        builder
-            .with_client_auth_cert(certs, key)
-            .map_err(|e| Error::ValidationMsg(format!("client identity: {e}")))?
-    } else {
-        builder.with_no_client_auth()
-    };
+    let mut config =
+        if let (Some(cert), Some(key)) = (&options.client_cert_path, &options.client_key_path) {
+            let certs = load_certs(cert)?;
+            let key = load_private_key(key)?;
+            builder
+                .with_client_auth_cert(certs, key)
+                .map_err(|e| Error::ValidationMsg(format!("client identity: {e}")))?
+        } else {
+            builder.with_no_client_auth()
+        };
     config.alpn_protocols = vec![b"residiuum-rpc-v1".to_vec()];
     Ok(Arc::new(config))
 }
@@ -634,10 +627,7 @@ pub fn client_connect(
     let config = build_client_config(options)?;
     let server_name = ServerName::try_from(options.server_name.as_str())
         .map_err(|_| {
-            Error::ValidationMsg(format!(
-                "invalid TLS server_name {:?}",
-                options.server_name
-            ))
+            Error::ValidationMsg(format!("invalid TLS server_name {:?}", options.server_name))
         })?
         .to_owned();
     let conn = ClientConnection::new(config, server_name).map_err(tls_err)?;

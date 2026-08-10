@@ -572,9 +572,9 @@ pub(crate) fn map_cluster(e: ClusterError) -> Error {
         },
         ClusterError::ConsistencyViolation(m) => Error::ConsistencyViolation(m),
         ClusterError::Rebalance(m) => Error::Internal(format!("rebalance: {m}")),
-        ClusterError::ContinuationInvalid(m) => Error::ValidationMsg(format!(
-            "distributed query continuation invalid: {m}"
-        )),
+        ClusterError::ContinuationInvalid(m) => {
+            Error::ValidationMsg(format!("distributed query continuation invalid: {m}"))
+        }
         ClusterError::AlreadyExists(p) => {
             Error::ValidationMsg(format!("cluster already exists: {p}"))
         }

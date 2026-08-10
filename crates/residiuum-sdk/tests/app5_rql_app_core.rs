@@ -30,9 +30,7 @@ fn read_json(rel: &str) -> Value {
 
 fn bindings_from(map: &Value) -> CollectionBindings {
     let mut b = CollectionBindings::default();
-    let obj = map
-        .as_object()
-        .expect("default_bindings object");
+    let obj = map.as_object().expect("default_bindings object");
     for (name, id) in obj {
         let s = id.as_str().unwrap_or_else(|| panic!("binding {name} id"));
         b.bind(name, CollectionId::from_str(s).expect("collection id"));
@@ -69,9 +67,8 @@ fn app5_corpus_accept_and_reject() {
         let src = v["source_rql"]
             .as_str()
             .unwrap_or_else(|| panic!("{id}: source_rql"));
-        let compiled = compile_app_core(src, &bindings).unwrap_or_else(|e| {
-            panic!("{id}: expected accept, got error: {e}\n source: {src}")
-        });
+        let compiled = compile_app_core(src, &bindings)
+            .unwrap_or_else(|e| panic!("{id}: expected accept, got error: {e}\n source: {src}"));
         assert_eq!(compiled.profile, APP_CORE_PROFILE, "{id}");
 
         if let Some(hex) = v.get("plan_hash_hex").and_then(|h| h.as_str()) {
@@ -188,8 +185,7 @@ fn app5_corpus_accept_and_reject() {
         for n in needles {
             let s = n.as_str().expect("needle string");
             assert!(
-                msg.to_ascii_lowercase()
-                    .contains(&s.to_ascii_lowercase()),
+                msg.to_ascii_lowercase().contains(&s.to_ascii_lowercase()),
                 "{id}: error `{msg}` missing diagnostic `{s}`"
             );
         }

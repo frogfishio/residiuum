@@ -81,9 +81,10 @@ impl CompressedRadixIndex {
             }
             depth += node.prefix.len();
             if depth == key.len() {
-                return node.leaf.map(|li| self.leaves[li as usize].offset).filter(|_| {
-                    self.leaves[node.leaf.unwrap() as usize].key.as_slice() == key
-                });
+                return node
+                    .leaf
+                    .map(|li| self.leaves[li as usize].offset)
+                    .filter(|_| self.leaves[node.leaf.unwrap() as usize].key.as_slice() == key);
             }
             let b = key[depth];
             match node.edges.binary_search_by_key(&b, |e| e.byte) {
@@ -234,12 +235,7 @@ mod tests {
         sorted.sort_by(|a, b| a.0.cmp(&b.0));
         let idx = CompressedRadixIndex::build(&sorted);
         for (k, o) in &sorted {
-            assert_eq!(
-                idx.get(k),
-                Some(*o),
-                "key {:?}",
-                String::from_utf8_lossy(k)
-            );
+            assert_eq!(idx.get(k), Some(*o), "key {:?}", String::from_utf8_lossy(k));
         }
         assert!(idx.get(b"user/x/meta").is_none());
         let page = idx.scan_after(None, 3);

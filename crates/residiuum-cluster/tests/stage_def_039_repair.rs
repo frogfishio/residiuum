@@ -23,10 +23,8 @@ fn profile_label_is_stable() {
 fn missing_replica_converges_from_majority() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("miss");
-    let mut cluster = Cluster::create(
-        ClusterConfig::dependable_local(&root).with_virtual_partitions(4),
-    )
-    .unwrap();
+    let mut cluster =
+        Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(4)).unwrap();
 
     let subject = "repair/missing-key";
     cluster
@@ -41,10 +39,7 @@ fn missing_replica_converges_from_majority() {
     cluster
         .store_delete_local(victim, subject, DurabilityMode::Durable)
         .unwrap();
-    assert!(cluster
-        .store_get_local(victim, subject)
-        .unwrap()
-        .is_none());
+    assert!(cluster.store_get_local(victim, subject).unwrap().is_none());
 
     let inv = cluster.inventory_partition(p).unwrap();
     let subj = inv
@@ -96,10 +91,8 @@ fn missing_replica_converges_from_majority() {
 fn divergent_newer_body_never_overwrites_majority() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("div");
-    let mut cluster = Cluster::create(
-        ClusterConfig::dependable_local(&root).with_virtual_partitions(4),
-    )
-    .unwrap();
+    let mut cluster =
+        Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(4)).unwrap();
 
     let subject = "repair/divergent-key";
     cluster
@@ -143,9 +136,7 @@ fn divergent_newer_body_never_overwrites_majority() {
         .iter()
         .any(|e| e.action == RepairActionKind::Copied && e.subject == subject));
     assert!(audit.entries.iter().any(|e| {
-        e.action == RepairActionKind::Copied
-            && e.subject == subject
-            && e.destination == Some(evil)
+        e.action == RepairActionKind::Copied && e.subject == subject && e.destination == Some(evil)
     }));
 }
 
@@ -153,10 +144,8 @@ fn divergent_newer_body_never_overwrites_majority() {
 fn equal_split_preserves_conflict_without_mtime_winner() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("conf");
-    let mut cluster = Cluster::create(
-        ClusterConfig::dependable_local(&root).with_virtual_partitions(4),
-    )
-    .unwrap();
+    let mut cluster =
+        Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(4)).unwrap();
 
     let subject = "repair/conflict-key";
     let p = cluster.partition_for_subject(subject);
@@ -204,10 +193,8 @@ fn equal_split_preserves_conflict_without_mtime_winner() {
 fn empty_cluster_repair_is_noop() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("hole");
-    let mut cluster = Cluster::create(
-        ClusterConfig::dependable_local(&root).with_virtual_partitions(2),
-    )
-    .unwrap();
+    let mut cluster =
+        Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(2)).unwrap();
 
     let inv = cluster.inventory_cluster().unwrap();
     assert_eq!(inv.needs_repair, 0);
@@ -220,10 +207,8 @@ fn empty_cluster_repair_is_noop() {
 fn rate_limit_bounds_repair_pass() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("rate");
-    let mut cluster = Cluster::create(
-        ClusterConfig::dependable_local(&root).with_virtual_partitions(8),
-    )
-    .unwrap();
+    let mut cluster =
+        Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(8)).unwrap();
 
     for i in 0..40 {
         let s = format!("repair/rate/{i}");
@@ -265,10 +250,9 @@ fn audit_survives_coordinator_restart() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("aud");
     {
-        let mut cluster = Cluster::create(
-            ClusterConfig::dependable_local(&root).with_virtual_partitions(4),
-        )
-        .unwrap();
+        let mut cluster =
+            Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(4))
+                .unwrap();
         let subject = "repair/audit-key";
         cluster
             .put(subject, b"v1", DurabilityMode::Durable)
@@ -291,10 +275,8 @@ fn audit_survives_coordinator_restart() {
 fn segment_fingerprints_appear_in_inventory() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("seg");
-    let mut cluster = Cluster::create(
-        ClusterConfig::dependable_local(&root).with_virtual_partitions(4),
-    )
-    .unwrap();
+    let mut cluster =
+        Cluster::create(ClusterConfig::dependable_local(&root).with_virtual_partitions(4)).unwrap();
     cluster
         .put("repair/seg", b"x", DurabilityMode::Durable)
         .unwrap();

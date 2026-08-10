@@ -394,9 +394,8 @@ impl Filter {
     /// ([`Self::matches_compiled_sda`]). [`Self::matches_sda`] recompiles
     /// every call for convenience.
     pub fn compile_sda(&self) -> Result<sda_core::Program, Error> {
-        sda_core::Program::parse(&self.to_sda()).map_err(|e| {
-            Error::QueryInvalid(format!("filter SDA compile failed: {e}"))
-        })
+        sda_core::Program::parse(&self.to_sda())
+            .map_err(|e| Error::QueryInvalid(format!("filter SDA compile failed: {e}")))
     }
 
     /// Evaluate a pre-compiled filter program against `doc`.
@@ -635,10 +634,7 @@ impl QueryPlan {
     /// Encode as JSON (round-trips via [`Self::from_json`]).
     pub fn to_json(&self) -> JsonValue {
         let mut map = serde_json::Map::new();
-        map.insert(
-            "profile".into(),
-            JsonValue::String(self.profile.clone()),
-        );
+        map.insert("profile".into(), JsonValue::String(self.profile.clone()));
         map.insert("filter".into(), self.filter.to_json());
         map.insert("options".into(), options_to_json(&self.options));
         JsonValue::Object(map)
@@ -646,9 +642,9 @@ impl QueryPlan {
 
     /// Parse a plan object; rejects unknown or missing profile tags.
     pub fn from_json(value: &JsonValue) -> Result<Self, Error> {
-        let obj = value.as_object().ok_or_else(|| {
-            Error::QueryInvalid("query plan must be a JSON object".into())
-        })?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| Error::QueryInvalid("query plan must be a JSON object".into()))?;
         let profile = obj
             .get("profile")
             .and_then(|v| v.as_str())
@@ -727,9 +723,9 @@ fn options_to_json(opts: &QueryOptions) -> JsonValue {
 }
 
 fn options_from_json(value: &JsonValue) -> Result<QueryOptions, Error> {
-    let obj = value.as_object().ok_or_else(|| {
-        Error::QueryInvalid("query plan options must be a JSON object".into())
-    })?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| Error::QueryInvalid("query plan options must be a JSON object".into()))?;
     let mut opts = QueryOptions::default();
     if let Some(n) = obj.get("limit") {
         let n = n
@@ -739,9 +735,9 @@ fn options_from_json(value: &JsonValue) -> Result<QueryOptions, Error> {
         opts.limit = Some(n);
     }
     if let Some(ob) = obj.get("order_by") {
-        let ob = ob.as_object().ok_or_else(|| {
-            Error::QueryInvalid("options.order_by must be an object".into())
-        })?;
+        let ob = ob
+            .as_object()
+            .ok_or_else(|| Error::QueryInvalid("options.order_by must be an object".into()))?;
         let field = ob
             .get("field")
             .and_then(|v| v.as_str())
@@ -956,9 +952,7 @@ fn path_expr(path: &str) -> String {
     let segs: Vec<String> = if path.is_empty() {
         Vec::new()
     } else {
-        path.split('.')
-            .map(sda_string_literal)
-            .collect()
+        path.split('.').map(sda_string_literal).collect()
     };
     format!("getPath(input, Seq[{}])", segs.join(", "))
 }
@@ -1052,7 +1046,9 @@ fn json_to_sda_literal(v: &JsonValue) -> String {
         JsonValue::Object(map) => {
             let inner = map
                 .iter()
-                .map(|(k, val)| format!("{} -> {}", sda_string_literal(k), json_to_sda_literal(val)))
+                .map(|(k, val)| {
+                    format!("{} -> {}", sda_string_literal(k), json_to_sda_literal(val))
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("Map{{{inner}}}")
@@ -1348,11 +1344,7 @@ mod tests {
                 json!({"n": null}),
                 true,
             ),
-            (
-                Filter::field("n").eq(JsonValue::Null),
-                json!({}),
-                false,
-            ),
+            (Filter::field("n").eq(JsonValue::Null), json!({}), false),
             (Filter::field("missing").ne(1), json!({}), true),
             (Filter::field("age").gte(18), json!({"age": 21}), true),
             (Filter::field("age").gte(18), json!({"age": 10}), false),
@@ -1416,20 +1408,27 @@ mod tests {
         ];
         for (i, (filter, doc, want)) in cases.iter().enumerate() {
             let native = filter.matches(doc);
-            let sda = filter.matches_sda(doc).unwrap_or_else(|e| {
-                panic!("case {i} SDA error: {e}; program={}", filter.to_sda())
-            });
+            let sda = filter
+                .matches_sda(doc)
+                .unwrap_or_else(|e| panic!("case {i} SDA error: {e}; program={}", filter.to_sda()));
             assert_eq!(
-                native, *want,
+                native,
+                *want,
                 "case {i} native mismatch; program={}",
                 filter.to_sda()
             );
             assert_eq!(
-                sda, *want,
+                sda,
+                *want,
                 "case {i} sda mismatch; program={}",
                 filter.to_sda()
             );
-            assert_eq!(native, sda, "case {i} native≠sda; program={}", filter.to_sda());
+            assert_eq!(
+                native,
+                sda,
+                "case {i} native≠sda; program={}",
+                filter.to_sda()
+            );
         }
     }
 
@@ -1458,7 +1457,9 @@ mod tests {
     fn query_plan_roundtrip() {
         let plan = QueryPlan::new(
             Filter::field("status").eq("active"),
-            QueryOptions::new().limit(10).order_by("age", SortOrder::Desc),
+            QueryOptions::new()
+                .limit(10)
+                .order_by("age", SortOrder::Desc),
         );
         let j = plan.to_json();
         assert_eq!(j["profile"], QUERY_PLAN_PROFILE);

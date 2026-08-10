@@ -169,12 +169,15 @@ impl FilesystemImageHarness {
     }
 
     /// Portable campaign: create a tempfile-backed image root.
-    pub fn run_portable_campaign(&mut self, parent: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    pub fn run_portable_campaign(
+        &mut self,
+        parent: &std::path::Path,
+    ) -> Result<std::path::PathBuf, String> {
         if !self.ready {
             return Err("filesystem-image harness not ready".into());
         }
-        let img = crate::csq5_campaign::PortableFsImage::create(parent)
-            .map_err(|e| e.to_string())?;
+        let img =
+            crate::csq5_campaign::PortableFsImage::create(parent).map_err(|e| e.to_string())?;
         self.image_root = Some(img.root.clone());
         Ok(img.store_path)
     }

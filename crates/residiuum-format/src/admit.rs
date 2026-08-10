@@ -1,6 +1,8 @@
 //! One-heap frame admission (`HEAP_SPEC` §34.1 / §34.6).
 
-use crate::ownership::{agree_ownership, parse_ownership_envelope, OwnershipError, OwnershipEvidence};
+use crate::ownership::{
+    agree_ownership, parse_ownership_envelope, OwnershipError, OwnershipEvidence,
+};
 use crate::subject_v2::{decode_subject_v2, SubjectObjectKind, SubjectV2Error};
 use thiserror::Error;
 
@@ -64,9 +66,7 @@ pub fn admit_frame_to_heap(
     match &agreed {
         OwnershipEvidence::Unknown => return AdmitDecision::RejectUnknown,
         OwnershipEvidence::Known { heap_id, .. } if heap_id != bound_heap => {
-            return AdmitDecision::RejectWrongHeap {
-                claimed: *heap_id,
-            };
+            return AdmitDecision::RejectWrongHeap { claimed: *heap_id };
         }
         OwnershipEvidence::Known { .. } => {}
     }
@@ -142,13 +142,8 @@ mod tests {
         let heap_b = [0xBBu8; 16];
         let env_a = encode_heap_binding_envelope(&heap_a).unwrap();
         let env_b = encode_heap_binding_envelope(&heap_b).unwrap();
-        let subj = encode_subject_v2(
-            &heap_a,
-            SubjectObjectKind::Collection,
-            &[0x11u8; 16],
-            b"k",
-        )
-        .unwrap();
+        let subj =
+            encode_subject_v2(&heap_a, SubjectObjectKind::Collection, &[0x11u8; 16], b"k").unwrap();
         // Collection subject needs collection_id on envelope — use binding-only for segment
         // and build a richer frame envelope.
         let frame_env = crate::cbor_envelope::encode_deterministic_uint_map(&[
@@ -178,8 +173,13 @@ mod tests {
         let heap_b = [0x02u8; 16];
         let env_a = encode_heap_binding_envelope(&heap_a).unwrap();
         let env_b = encode_heap_binding_envelope(&heap_b).unwrap();
-        let subj = encode_subject_v2(&heap_a, SubjectObjectKind::HeapMetadata, &[0u8; 16], &[0x01])
-            .unwrap();
+        let subj = encode_subject_v2(
+            &heap_a,
+            SubjectObjectKind::HeapMetadata,
+            &[0u8; 16],
+            &[0x01],
+        )
+        .unwrap();
         // Segment claims B, frame+subject claim A → conflict or wrong heap for binder A.
         let d = admit_frame_to_heap(&heap_a, &env_b, &env_a, Some(&subj));
         assert!(

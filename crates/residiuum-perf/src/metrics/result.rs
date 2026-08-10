@@ -155,10 +155,7 @@ fn unit_for_counter(name: &str) -> &'static str {
 fn insert_latency(map: &mut MetricMap, name: &str, v: Option<u64>) {
     match v {
         Some(n) => {
-            map.insert(
-                name.into(),
-                MetricObservation::available(n as f64, "ns"),
-            );
+            map.insert(name.into(), MetricObservation::available(n as f64, "ns"));
         }
         None => {
             map.insert(name.into(), MetricObservation::unavailable("not_sampled"));

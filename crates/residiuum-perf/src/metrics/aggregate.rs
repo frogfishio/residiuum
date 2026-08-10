@@ -66,8 +66,7 @@ pub fn merge_thread_aggregates(parts: &[ThreadAggregate]) -> ThreadAggregate {
 
 /// Approximate memory footprint of one aggregate (bounded, for tests).
 pub fn approx_bytes(agg: &ThreadAggregate) -> usize {
-    std::mem::size_of_val(agg)
-        + agg.stage_latency.len() * std::mem::size_of::<LatencyHistogram>()
+    std::mem::size_of_val(agg) + agg.stage_latency.len() * std::mem::size_of::<LatencyHistogram>()
 }
 
 #[cfg(test)]

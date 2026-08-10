@@ -1,7 +1,8 @@
 //! Stage 6 SDK: secondary indexes, history, query budget, catalog rebuild.
 
-use residiuum_sdk::{json, Residiuum, ErrorCode, Filter, IndexState, QueryBudget, QueryOptions, SortOrder};
-
+use residiuum_sdk::{
+    json, ErrorCode, Filter, IndexState, QueryBudget, QueryOptions, Residiuum, SortOrder,
+};
 
 use std::fs;
 use tempfile::tempdir;

@@ -513,13 +513,18 @@ pub fn migrate_apply(job: &MigrationJob) -> Result<MigrationJob, StoreError> {
     let mut bytes_applied = 0u64;
 
     for plan in &job.files {
-        let rel = plan.relative_path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let rel = plan
+            .relative_path
+            .replace('/', std::path::MAIN_SEPARATOR_STR);
         let from = source_root.join(&rel);
         let to = dest_root.join(&rel);
         if !from.is_file() {
             let mut failed = job.clone();
             failed.phase = MigratePhase::Failed;
-            failed.error = Some(format!("source file missing during apply: {}", plan.relative_path));
+            failed.error = Some(format!(
+                "source file missing during apply: {}",
+                plan.relative_path
+            ));
             failed.updated_unix_ns = now_ns();
             failed.content_hash_hex = hash_job(&failed)?;
             let _ = persist_job_on_source(&source_root, &failed);
@@ -592,7 +597,9 @@ pub fn migrate_verify(job: &MigrationJob) -> Result<MigrationJob, StoreError> {
 
     // Verify every planned file still matches.
     for plan in &job.files {
-        let rel = plan.relative_path.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let rel = plan
+            .relative_path
+            .replace('/', std::path::MAIN_SEPARATOR_STR);
         let to = dest_root.join(&rel);
         if !to.is_file() {
             return fail_job(
@@ -809,10 +816,7 @@ fn walk_classify(
         if path.is_dir() {
             // Skip source recovery/migration directory contents except we still
             // copy other recovery artifacts; migration/ is re-created on dest.
-            if path
-                .file_name()
-                .and_then(|s| s.to_str())
-                == Some(MIGRATE_DIR)
+            if path.file_name().and_then(|s| s.to_str()) == Some(MIGRATE_DIR)
                 && path
                     .parent()
                     .and_then(|p| p.file_name())
@@ -846,10 +850,7 @@ fn classify_one(
         .to_path_buf();
     let rel_str = path_to_posix(&rel);
     if under_store_info {
-        let base = src_file
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
+        let base = src_file.file_name().and_then(|s| s.to_str()).unwrap_or("");
         if SKIP_STORE_INFO_NAMES.contains(&base) {
             return Ok(());
         }
@@ -885,9 +886,7 @@ fn classify_one(
                 MigrateFileAction::PreserveUnsupported,
                 Some(wire_major),
                 None,
-                Some(
-                    "unsupported wire major; preserve opaque bytes (no in-place rewrite)".into(),
-                ),
+                Some("unsupported wire major; preserve opaque bytes (no in-place rewrite)".into()),
             ),
             FormatClassification::Unreadable {
                 byte_len: _,
@@ -1125,7 +1124,8 @@ mod tests {
 
         // Re-open exclusive for flush path consistency.
         let store = Store::open(&src).unwrap();
-        let report = migrate_store(&src, &dst, store.store_id(), MigrateOptions::default()).unwrap();
+        let report =
+            migrate_store(&src, &dst, store.store_id(), MigrateOptions::default()).unwrap();
         assert_eq!(report.phase, MigratePhase::Done);
         assert!(report.files_applied > 0);
         assert_eq!(report.verified_live_subjects, Some(1));

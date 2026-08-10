@@ -12,9 +12,13 @@ mod op;
 mod scheduler;
 mod sizes;
 
-pub use digest::{digest_stream, result_must_not_contain_payloads, stream_stats, StreamDigest, StreamStats};
+pub use digest::{
+    digest_stream, result_must_not_contain_payloads, stream_stats, StreamDigest, StreamStats,
+};
 pub use distribution::{DistributionId, SizeSampler};
-pub use generator::{fill_payload, fill_payload_range, generate_key, payload_digest, PayloadProfile};
+pub use generator::{
+    fill_payload, fill_payload_range, generate_key, payload_digest, PayloadProfile,
+};
 pub use manifest::{WorkloadManifest, WorkloadMode, WorkloadOracle};
 pub use op::{LogicalOp, OpCursor, OpKind};
 pub use scheduler::{

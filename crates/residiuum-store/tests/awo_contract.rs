@@ -58,6 +58,11 @@ fn golden_decisions_twelve_match_pure_model() {
             "plan {}",
             item.id
         );
-        assert_eq!(d.reason, item.expected_reason.as_str(), "reason {}", item.id);
+        assert_eq!(
+            d.reason,
+            item.expected_reason.as_str(),
+            "reason {}",
+            item.id
+        );
     }
 }

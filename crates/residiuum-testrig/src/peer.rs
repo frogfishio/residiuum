@@ -238,8 +238,7 @@ pub fn segment_growth_policy(
         PeerSegmentGrowth::GrowOnAppend => {
             if capacity_mib.is_some() || chunk_mib.is_some() {
                 return Err(
-                    "--wm-capacity-mib / --wm-chunk-mib require --segment-growth watermark"
-                        .into(),
+                    "--wm-capacity-mib / --wm-chunk-mib require --segment-growth watermark".into(),
                 );
             }
             Ok(SegmentGrowthPolicy::GrowOnAppend)
@@ -264,9 +263,7 @@ pub fn parse_segment_growth(s: &str) -> Result<PeerSegmentGrowth, String> {
     match s.to_ascii_lowercase().as_str() {
         "grow" | "grow-on-append" | "default" | "off" => Ok(PeerSegmentGrowth::GrowOnAppend),
         "watermark" | "wm" | "ahead" => Ok(PeerSegmentGrowth::Watermark),
-        other => Err(format!(
-            "unknown segment-growth `{other}` (grow|watermark)"
-        )),
+        other => Err(format!("unknown segment-growth `{other}` (grow|watermark)")),
     }
 }
 
@@ -282,9 +279,7 @@ pub fn parse_engine(s: &str) -> Result<PeerEngine, String> {
     match s.to_ascii_lowercase().as_str() {
         "residiuum" | "res" | "rr" => Ok(PeerEngine::Residiuum),
         "sqlite" | "sql" => Ok(PeerEngine::Sqlite),
-        other => Err(format!(
-            "unknown engine `{other}` (residiuum|sqlite)"
-        )),
+        other => Err(format!("unknown engine `{other}` (residiuum|sqlite)")),
     }
 }
 
@@ -317,12 +312,10 @@ pub fn run_peer_pump(cfg: &PeerConfig) -> Result<(), String> {
     }
     if cfg.diag_io == PeerDiagIo::Coalesce100k && cfg.concurrency <= 1 {
         return Err(
-            "--diag-io coalesce100k requires --concurrency > 1 (250ms floor hangs QD=1)"
-                .into(),
+            "--diag-io coalesce100k requires --concurrency > 1 (250ms floor hangs QD=1)".into(),
         );
     }
-    if cfg.segment_growth != PeerSegmentGrowth::GrowOnAppend
-        && cfg.engine != PeerEngine::Residiuum
+    if cfg.segment_growth != PeerSegmentGrowth::GrowOnAppend && cfg.engine != PeerEngine::Residiuum
     {
         return Err("--segment-growth requires --engine residiuum".into());
     }
@@ -581,11 +574,7 @@ fn apply_segment_growth(store: &mut Store, cfg: &PeerConfig) -> Result<(), Strin
         }
         return Ok(());
     }
-    let policy = segment_growth_policy(
-        cfg.segment_growth,
-        cfg.wm_capacity_mib,
-        cfg.wm_chunk_mib,
-    )?;
+    let policy = segment_growth_policy(cfg.segment_growth, cfg.wm_capacity_mib, cfg.wm_chunk_mib)?;
     store
         .set_segment_growth_policy(policy)
         .map_err(|e| format!("set_segment_growth_policy: {e}"))?;
@@ -597,10 +586,7 @@ fn apply_segment_growth(store: &mut Store, cfg: &PeerConfig) -> Result<(), Strin
     Ok(())
 }
 
-fn attach_awo(
-    store: &mut Store,
-    mode: PeerAwoMode,
-) -> Result<Option<AdaptiveWriteHandle>, String> {
+fn attach_awo(store: &mut Store, mode: PeerAwoMode) -> Result<Option<AdaptiveWriteHandle>, String> {
     if !mode.lease_active() {
         return Ok(None);
     }
@@ -626,8 +612,8 @@ fn pump_residiuum(cfg: &PeerConfig, payload: &[u8]) -> Result<PeerResult, String
         fs::remove_dir_all(&store_path)
             .map_err(|e| format!("remove prior residiuum store: {e}"))?;
     }
-    let mut store = Store::create_with_shards(&store_path, 1)
-        .map_err(|e| format!("create store: {e}"))?;
+    let mut store =
+        Store::create_with_shards(&store_path, 1).map_err(|e| format!("create store: {e}"))?;
     let seal = if cfg.seal_threshold == 0 {
         64 * 1024 * 1024
     } else {
@@ -821,8 +807,8 @@ fn pump_residiuum_concurrent_mode_a(
         fs::remove_dir_all(&store_path)
             .map_err(|e| format!("remove prior residiuum store: {e}"))?;
     }
-    let mut store = Store::create_with_shards(&store_path, 1)
-        .map_err(|e| format!("create store: {e}"))?;
+    let mut store =
+        Store::create_with_shards(&store_path, 1).map_err(|e| format!("create store: {e}"))?;
     let seal = if cfg.seal_threshold == 0 {
         64 * 1024 * 1024
     } else {
@@ -842,10 +828,7 @@ fn pump_residiuum_concurrent_mode_a(
         }
     }
 
-    let target_keys = cfg
-        .target_bytes
-        .div_ceil(cfg.payload_size as u64)
-        .max(1);
+    let target_keys = cfg.target_bytes.div_ceil(cfg.payload_size as u64).max(1);
     let awo = attach_awo(&mut store, cfg.awo_mode)?;
     let store_arc = Arc::new(Mutex::new(store));
     if let Some(ref h) = awo {
@@ -865,66 +848,64 @@ fn pump_residiuum_concurrent_mode_a(
             let err = Arc::clone(&err);
             let payload = Arc::clone(&payload);
             let awo = awo.clone();
-            scope.spawn(move || {
-                loop {
-                    if err.lock().ok().and_then(|g| g.clone()).is_some() {
-                        break;
-                    }
-                    let seq = next.fetch_add(1, Ordering::Relaxed);
-                    if seq >= target_keys {
-                        break;
-                    }
-                    let key = format!("peer/{:020}", seq);
-                    let put_err = if let Some(ref handle) = awo {
-                        let admitted = {
-                            let mut g = match store_arc.lock() {
-                                Ok(g) => g,
-                                Err(_) => {
-                                    let _ = err.lock().map(|mut e| {
-                                        *e = Some("store lock poisoned during admit".into());
-                                    });
-                                    break;
-                                }
-                            };
-                            handle.admit_put(
-                                &mut g,
-                                key.as_bytes(),
-                                payload.as_slice(),
-                                DurabilityMode::Buffered,
-                                WriteCondition::Unconditional,
-                            )
-                        };
-                        match admitted {
-                            AdmissionResult::Admitted(c) => c
-                                .wait()
-                                .map(|_| ())
-                                .map_err(|e| format!("admit_put wait: {}", e.as_str())),
-                            AdmissionResult::Rejected(e) => {
-                                Err(format!("admit_put rejected: {}", e.as_str()))
-                            }
-                        }
-                    } else {
+            scope.spawn(move || loop {
+                if err.lock().ok().and_then(|g| g.clone()).is_some() {
+                    break;
+                }
+                let seq = next.fetch_add(1, Ordering::Relaxed);
+                if seq >= target_keys {
+                    break;
+                }
+                let key = format!("peer/{:020}", seq);
+                let put_err = if let Some(ref handle) = awo {
+                    let admitted = {
                         let mut g = match store_arc.lock() {
                             Ok(g) => g,
                             Err(_) => {
                                 let _ = err.lock().map(|mut e| {
-                                    *e = Some("store lock poisoned during put".into());
+                                    *e = Some("store lock poisoned during admit".into());
                                 });
                                 break;
                             }
                         };
-                        g.put_many(&[(&key[..], payload.as_slice())], DurabilityMode::Buffered)
-                            .map(|_| ())
-                            .map_err(|e| format!("put_many: {e}"))
+                        handle.admit_put(
+                            &mut g,
+                            key.as_bytes(),
+                            payload.as_slice(),
+                            DurabilityMode::Buffered,
+                            WriteCondition::Unconditional,
+                        )
                     };
-                    if let Err(e) = put_err {
-                        let _ = err.lock().map(|mut slot| {
-                            if slot.is_none() {
-                                *slot = Some(e);
-                            }
-                        });
-                        break;
+                    match admitted {
+                        AdmissionResult::Admitted(c) => c
+                            .wait()
+                            .map(|_| ())
+                            .map_err(|e| format!("admit_put wait: {}", e.as_str())),
+                        AdmissionResult::Rejected(e) => {
+                            Err(format!("admit_put rejected: {}", e.as_str()))
+                        }
                     }
+                } else {
+                    let mut g = match store_arc.lock() {
+                        Ok(g) => g,
+                        Err(_) => {
+                            let _ = err.lock().map(|mut e| {
+                                *e = Some("store lock poisoned during put".into());
+                            });
+                            break;
+                        }
+                    };
+                    g.put_many(&[(&key[..], payload.as_slice())], DurabilityMode::Buffered)
+                        .map(|_| ())
+                        .map_err(|e| format!("put_many: {e}"))
+                };
+                if let Err(e) = put_err {
+                    let _ = err.lock().map(|mut slot| {
+                        if slot.is_none() {
+                            *slot = Some(e);
+                        }
+                    });
+                    break;
                 }
             });
         }
@@ -947,10 +928,7 @@ fn pump_residiuum_concurrent_mode_a(
             let _ = g.seal_active();
         }
         h.join_after_detach();
-        format!(
-            "concurrent_admit_put+collection workers={}",
-            workers
-        )
+        format!("concurrent_admit_put+collection workers={}", workers)
     } else {
         {
             let mut g = store_arc
@@ -1075,10 +1053,7 @@ fn pump_sqlite(cfg: &PeerConfig, payload: &[u8]) -> Result<PeerResult, String> {
 }
 
 /// N SQLite connections (WAL), Mode A autocommit — concurrent client feed peer.
-fn pump_sqlite_concurrent_mode_a(
-    cfg: &PeerConfig,
-    payload: &[u8],
-) -> Result<PeerResult, String> {
+fn pump_sqlite_concurrent_mode_a(cfg: &PeerConfig, payload: &[u8]) -> Result<PeerResult, String> {
     let db_path = cfg.work.join("peer.sqlite");
     if db_path.exists() {
         fs::remove_file(&db_path).map_err(|e| format!("remove prior sqlite: {e}"))?;
@@ -1099,10 +1074,7 @@ fn pump_sqlite_concurrent_mode_a(
         .map_err(|e| format!("sqlite setup: {e}"))?;
     }
 
-    let target_keys = cfg
-        .target_bytes
-        .div_ceil(cfg.payload_size as u64)
-        .max(1);
+    let target_keys = cfg.target_bytes.div_ceil(cfg.payload_size as u64).max(1);
     let next = Arc::new(AtomicU64::new(0));
     let err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let workers = cfg.concurrency.max(1);
@@ -1138,7 +1110,8 @@ fn pump_sqlite_concurrent_mode_a(
                         break;
                     }
                     let key = format!("peer/{:020}", seq);
-                    if let Err(e) = conn.execute(insert_sql, rusqlite::params![key, payload.as_slice()])
+                    if let Err(e) =
+                        conn.execute(insert_sql, rusqlite::params![key, payload.as_slice()])
                     {
                         let _ = err.lock().map(|mut slot| {
                             if slot.is_none() {
@@ -1228,9 +1201,7 @@ fn finish_result(
 fn fill_payload(buf: &mut [u8], seed: u64) {
     let mut state = seed ^ 0xD1_160_B17_u64;
     for (i, b) in buf.iter_mut().enumerate() {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         *b = ((state >> 33) as u8).wrapping_add((i & 0xff) as u8);
     }
     let magic = b"RESIDIUUM-PEER-SQL-PAYLOAD-v1\n";
@@ -1244,12 +1215,7 @@ fn sample_process(samples: &mut ProcessSamples) {
     };
     samples.sample_count += 1;
     samples.last_cpu_pct = Some(cpu);
-    samples.peak_cpu_pct = Some(
-        samples
-            .peak_cpu_pct
-            .map(|p| p.max(cpu))
-            .unwrap_or(cpu),
-    );
+    samples.peak_cpu_pct = Some(samples.peak_cpu_pct.map(|p| p.max(cpu)).unwrap_or(cpu));
     let rss_bytes = rss_kib.saturating_mul(1024);
     samples.peak_rss_bytes = Some(
         samples

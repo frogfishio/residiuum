@@ -161,9 +161,13 @@ impl ShadowWriter {
 
     /// Finish into complete wire bytes (sorted, hashed trailer).
     pub fn finish(mut self) -> Vec<u8> {
-        self.records
-            .sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
-        encode_shadow_sorted(self.store_id, self.segment_id, self.generation, &self.records)
+        self.records.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
+        encode_shadow_sorted(
+            self.store_id,
+            self.segment_id,
+            self.generation,
+            &self.records,
+        )
     }
 }
 
@@ -212,11 +216,7 @@ fn encode_shadow_sorted(
     push(&mut out, &mut content, &store_id);
     push(&mut out, &mut content, &segment_id);
     push(&mut out, &mut content, &generation.to_le_bytes());
-    push(
-        &mut out,
-        &mut content,
-        &(sorted.len() as u32).to_le_bytes(),
-    );
+    push(&mut out, &mut content, &(sorted.len() as u32).to_le_bytes());
 
     for rec in sorted {
         match rec {
@@ -277,11 +277,7 @@ pub fn encode_shadow_from_live_map(
     push(&mut out, &mut content, &store_id);
     push(&mut out, &mut content, &segment_id);
     push(&mut out, &mut content, &generation.to_le_bytes());
-    push(
-        &mut out,
-        &mut content,
-        &(live.len() as u32).to_le_bytes(),
-    );
+    push(&mut out, &mut content, &(live.len() as u32).to_le_bytes());
 
     for (key, (val, gen)) in live {
         match val {

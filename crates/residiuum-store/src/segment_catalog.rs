@@ -167,10 +167,7 @@ pub fn summarize_segment_bytes(
 }
 
 /// Upsert one sealed segment into an existing catalog (incremental, DEF-023 scale).
-pub fn upsert_sealed_summary(
-    catalog: &mut SegmentCatalog,
-    summary: SegmentSummary,
-) {
+pub fn upsert_sealed_summary(catalog: &mut SegmentCatalog, summary: SegmentSummary) {
     catalog.upsert(summary);
 }
 
@@ -244,14 +241,8 @@ pub fn rebuild_segment_catalog(
         }
         let (hash, size) = crate::tier::hash_file(&path)?;
         let tier = placement.get(&id).map(|p| p.tier).unwrap_or(TierClass::Hot);
-        let summary = summarize_segment_file(
-            id,
-            tier,
-            &path,
-            ContentHashState::Known(hash),
-            size,
-            limits,
-        )?;
+        let summary =
+            summarize_segment_file(id, tier, &path, ContentHashState::Known(hash), size, limits)?;
         cat.upsert(summary);
     }
 
@@ -438,13 +429,9 @@ mod tests {
         let mut prior = SegmentCatalog::new();
         prior.upsert(expected.clone());
 
-        let rebuilt = rebuild_segment_catalog(
-            &paths,
-            &placement,
-            Some(&prior),
-            SafetyLimits::default(),
-        )
-        .unwrap();
+        let rebuilt =
+            rebuild_segment_catalog(&paths, &placement, Some(&prior), SafetyLimits::default())
+                .unwrap();
         assert_eq!(rebuilt.get(&segment_id), Some(&expected));
     }
 }

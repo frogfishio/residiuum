@@ -27,7 +27,7 @@ use std::time::Instant;
 use super::core_page::DocScan;
 use super::core_phases::CoreFrame;
 use super::full_attach::{
-    apply_project_rows, attach_enrich_rows, ensure_foreign_docs, filter_rows,
+    apply_project_rows, attach_enrich_rows_owned, ensure_foreign_docs, filter_rows,
     load_foreign_docs_for_root_enrich, within_enter, within_leave, EnrichAttachMode,
     EnrichLoadEvidence, EnrichStepV1, FullPipelineStepV1, ProjectItemV1, WithinStepV1,
 };
@@ -78,6 +78,24 @@ impl<'a, H: HostCapabilities> CountingHost<'a, H> {
             self.host_read_calls = self.host_read_calls.saturating_add(1);
         }
     }
+
+    fn account_document(&mut self, document: &HostDocument) -> Result<(), Error> {
+        if let HostDocument::Present {
+            value,
+            logical_bytes,
+        } = document
+        {
+            if let Some(logical_bytes) = logical_bytes {
+                self.logical_bytes_examined =
+                    self.logical_bytes_examined.saturating_add(*logical_bytes);
+                Ok(())
+            } else {
+                self.account(value.as_value())
+            }
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl<H: HostCapabilities> HostCapabilities for CountingHost<'_, H> {
@@ -115,9 +133,7 @@ impl<H: HostCapabilities> HostCapabilities for CountingHost<'_, H> {
         let started = self.collect_diagnostics.then(Instant::now);
         let document = self.inner.get_json_covered(collection_id, key)?;
         self.account_host_call(started);
-        if let HostDocument::Present(value) = &document {
-            self.account(value)?;
-        }
+        self.account_document(&document)?;
         Ok(document)
     }
 
@@ -133,9 +149,7 @@ impl<H: HostCapabilities> HostCapabilities for CountingHost<'_, H> {
             .scan_json_covered_page(collection_id, limit, after_key)?;
         self.account_host_call(started);
         for (_, document) in &documents {
-            if let HostDocument::Present(value) = document {
-                self.account(value)?;
-            }
+            self.account_document(document)?;
         }
         Ok(documents)
     }
@@ -149,9 +163,7 @@ impl<H: HostCapabilities> HostCapabilities for CountingHost<'_, H> {
         let documents = self.inner.get_json_covered_many(collection_id, keys)?;
         self.account_host_call(started);
         for (_, document) in &documents {
-            if let HostDocument::Present(value) = document {
-                self.account(value)?;
-            }
+            self.account_document(document)?;
         }
         Ok(documents)
     }
@@ -163,6 +175,20 @@ impl<H: HostCapabilities> HostCapabilities for CountingHost<'_, H> {
     ) -> Result<Option<Vec<String>>, Error> {
         let started = self.collect_diagnostics.then(Instant::now);
         let result = self.inner.lookup_index_keys(collection_id, equalities);
+        self.account_host_call(started);
+        result
+    }
+
+    fn lookup_index_keys_many(
+        &mut self,
+        collection_id: CollectionId,
+        field: &str,
+        values: &[JsonValue],
+    ) -> Result<Option<Vec<String>>, Error> {
+        let started = self.collect_diagnostics.then(Instant::now);
+        let result = self
+            .inner
+            .lookup_index_keys_many(collection_id, field, values);
         self.account_host_call(started);
         result
     }
@@ -190,6 +216,52 @@ impl<H: HostCapabilities> HostCapabilities for CountingHost<'_, H> {
     ) -> Result<Option<Vec<String>>, Error> {
         let started = self.collect_diagnostics.then(Instant::now);
         let result = self.inner.lookup_ordered_index_keys(collection_id, order);
+        self.account_host_call(started);
+        result
+    }
+
+    fn source_frontier(&mut self, collection_id: CollectionId) -> Result<Option<[u8; 32]>, Error> {
+        let started = self.collect_diagnostics.then(Instant::now);
+        let result = self.inner.source_frontier(collection_id);
+        self.account_host_call(started);
+        result
+    }
+
+    fn lookup_covering_index_values(
+        &mut self,
+        collection_id: CollectionId,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<JsonValue>>>, Error> {
+        let started = self.collect_diagnostics.then(Instant::now);
+        let result = self
+            .inner
+            .lookup_covering_index_values(collection_id, fields);
+        self.account_host_call(started);
+        result
+    }
+
+    fn scan_projected_values(
+        &mut self,
+        collection_id: CollectionId,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<JsonValue>>>, Error> {
+        let started = self.collect_diagnostics.then(Instant::now);
+        let result = self.inner.scan_projected_values(collection_id, fields);
+        self.account_host_call(started);
+        result
+    }
+
+    fn scan_group_aggregate(
+        &mut self,
+        collection_id: CollectionId,
+        spec: &crate::plan_v1::GroupAggSpec,
+        where_k: &super::CompiledKernelWhere,
+        candidate_keys: Option<&[String]>,
+    ) -> Result<Option<super::HostGroupAggregate>, Error> {
+        let started = self.collect_diagnostics.then(Instant::now);
+        let result = self
+            .inner
+            .scan_group_aggregate(collection_id, spec, where_k, candidate_keys);
         self.account_host_call(started);
         result
     }
@@ -259,6 +331,35 @@ impl<H: HostCapabilities> DocScan for HostScan<'_, H> {
     ) -> Result<Option<Vec<String>>, Error> {
         self.host
             .lookup_ordered_index_keys(self.collection_id, order)
+    }
+
+    fn try_source_frontier(&mut self) -> Result<Option<[u8; 32]>, Error> {
+        self.host.source_frontier(self.collection_id)
+    }
+
+    fn try_covering_index_values(
+        &mut self,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<JsonValue>>>, Error> {
+        self.host
+            .lookup_covering_index_values(self.collection_id, fields)
+    }
+
+    fn try_projected_values(
+        &mut self,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<JsonValue>>>, Error> {
+        self.host.scan_projected_values(self.collection_id, fields)
+    }
+
+    fn try_group_aggregate(
+        &mut self,
+        spec: &crate::plan_v1::GroupAggSpec,
+        where_k: &super::CompiledKernelWhere,
+        candidate_keys: Option<&[String]>,
+    ) -> Result<Option<super::HostGroupAggregate>, Error> {
+        self.host
+            .scan_group_aggregate(self.collection_id, spec, where_k, candidate_keys)
     }
 }
 
@@ -901,7 +1002,9 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                     .map(|r| (r.key.clone(), r.value.clone()))
                     .collect();
                 page = Some(p);
-                check_full_materialization(&rows, &foreign_cache, budget)?;
+                // Core ProjectPaths has already enforced the page's query and
+                // host result-memory limits. Full checks resume after the
+                // first opcode that can expand or retain additional values.
                 // CoreFrame no longer needed; free borrow of pool/params.
                 frame = None;
                 pc += 1;
@@ -930,7 +1033,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                             .entry(e.using_id)
                             .or_insert_with(|| foreign.clone());
                     }
-                    rows = attach_enrich_rows(&rows, &foreign, e, params)?;
+                    rows = attach_enrich_rows_owned(rows, &foreign, e, params)?;
                 } else {
                     ensure_foreign_docs(&mut host, e.using_id, &mut foreign_cache)?;
                     let foreign = foreign_cache.get(&e.using_id).ok_or_else(|| {
@@ -939,7 +1042,7 @@ pub(crate) fn run_vm<H: HostCapabilities>(
                             e.using_id, e.using_name
                         ))
                     })?;
-                    rows = attach_enrich_rows(&rows, foreign, e, params)?;
+                    rows = attach_enrich_rows_owned(rows, foreign, e, params)?;
                 }
                 check_full_materialization(&rows, &foreign_cache, budget)?;
                 pc += 1;
@@ -1161,10 +1264,27 @@ mod tests {
         assert!(host.get_json(id, "present").unwrap().is_some());
         assert!(matches!(
             host.get_json_covered(id, "present").unwrap(),
-            HostDocument::Present(_)
+            HostDocument::Present { .. }
         ));
         assert!(host.get_json(id, "absent").unwrap().is_none());
         assert_eq!(host.logical_bytes_examined, expected * 2);
+    }
+
+    #[test]
+    fn counting_host_prefers_preserved_logical_byte_length() {
+        let value = serde_json::json!({"would": "otherwise be serialized"});
+        let mut inner = ByteHost {
+            value: value.clone(),
+        };
+        let mut host = CountingHost::new(&mut inner, false);
+
+        host.account_document(&HostDocument::Present {
+            value: value.into(),
+            logical_bytes: Some(17),
+        })
+        .expect("account preserved length");
+
+        assert_eq!(host.logical_bytes_examined, 17);
     }
 
     #[test]

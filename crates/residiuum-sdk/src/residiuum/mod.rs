@@ -8,9 +8,9 @@
 mod flat;
 
 #[cfg(feature = "legacy-flat-sdk")]
-pub use flat::Residiuum;
-#[cfg(feature = "legacy-flat-sdk")]
 pub(crate) use flat::Backend;
+#[cfg(feature = "legacy-flat-sdk")]
+pub use flat::Residiuum;
 
 #[cfg(not(feature = "legacy-flat-sdk"))]
 mod heap_only {

@@ -4,10 +4,15 @@
 //! churn bounds, expensive-op concurrency budgets, and operation-id replay
 //! windows return useful overload / auth errors under abuse.
 
+use residiuum_sdk::{
+    client_handshake, json, read_frame, write_frame, ConnectOptions, ErrorCode, Residiuum,
+    DEFAULT_MAX_FRAME_BYTES,
+};
 
-use residiuum_sdk::{client_handshake, json, read_frame, write_frame, ConnectOptions, Residiuum, ErrorCode, DEFAULT_MAX_FRAME_BYTES};
-
-
+use residiuum_server::{
+    serve_store_with, AdmissionController, AdmissionLimits, AuthzPolicy, PrivilegeSet,
+    ServeOptions, ADMISSION_PROFILE,
+};
 use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +20,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
-use residiuum_server::{ADMISSION_PROFILE, AdmissionController, AdmissionLimits, AuthzPolicy, PrivilegeSet, ServeOptions, serve_store_with};
 
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")
@@ -38,7 +42,12 @@ fn wait_for_server(bind: &str) {
 fn start_server(
     dir: &TempDir,
     options: ServeOptions,
-) -> (String, Arc<AtomicBool>, Arc<AdmissionController>, thread::JoinHandle<()>) {
+) -> (
+    String,
+    Arc<AtomicBool>,
+    Arc<AdmissionController>,
+    thread::JoinHandle<()>,
+) {
     let store_path = dir.path().join("admission.residiuum");
     drop(Residiuum::open(&store_path).unwrap());
     let port = free_port();
@@ -89,7 +98,12 @@ fn rpc_raw(
     serde_json::from_slice(&bytes).unwrap()
 }
 
-fn rpc_once(bind: &str, token: Option<&str>, op: &str, extra: serde_json::Value) -> serde_json::Value {
+fn rpc_once(
+    bind: &str,
+    token: Option<&str>,
+    op: &str,
+    extra: serde_json::Value,
+) -> serde_json::Value {
     let (mut stream, mut reader) = framed_connect(bind);
     let mut req = serde_json::json!({
         "id": 1u64,
@@ -129,7 +143,8 @@ fn global_rate_limit_returns_resource_limit() {
         .unwrap();
     let (bind, stop, ctrl, handle) = start_server(
         &dir,
-        ServeOptions::new().legacy_token_server()
+        ServeOptions::new()
+            .legacy_token_server()
             .authz(policy)
             .admission_limits(limits)
             .admission(Arc::clone(&admission)),
@@ -173,7 +188,8 @@ fn auth_failure_lockout() {
         .unwrap();
     let (bind, stop, ctrl, handle) = start_server(
         &dir,
-        ServeOptions::new().legacy_token_server()
+        ServeOptions::new()
+            .legacy_token_server()
             .authz(policy)
             .admission_limits(limits),
     );
@@ -223,7 +239,8 @@ fn connect_churn_limit_rejects() {
     let admission = AdmissionController::new(limits.clone());
     let (bind, stop, ctrl, handle) = start_server(
         &dir,
-        ServeOptions::new().legacy_token_server()
+        ServeOptions::new()
+            .legacy_token_server()
             .admission_limits(limits)
             .admission(Arc::clone(&admission))
             .max_connections(64),
@@ -288,7 +305,8 @@ fn expensive_op_concurrency_budget() {
     let admission = AdmissionController::new(limits.clone());
     let (bind, stop, ctrl, handle) = start_server(
         &dir,
-        ServeOptions::new().legacy_token_server()
+        ServeOptions::new()
+            .legacy_token_server()
             .admission_limits(limits)
             .admission(Arc::clone(&admission)),
     );
@@ -369,7 +387,8 @@ fn operation_id_replay_window_allows_retry() {
     let admission = AdmissionController::new(limits.clone());
     let (bind, stop, ctrl, handle) = start_server(
         &dir,
-        ServeOptions::new().legacy_token_server()
+        ServeOptions::new()
+            .legacy_token_server()
             .admission_limits(limits)
             .admission(Arc::clone(&admission)),
     );
@@ -439,7 +458,9 @@ fn sdk_client_sees_resource_limit_on_rate() {
     };
     let (bind, stop, _ctrl, handle) = start_server(
         &dir,
-        ServeOptions::new().legacy_token_server().admission_limits(limits),
+        ServeOptions::new()
+            .legacy_token_server()
+            .admission_limits(limits),
     );
 
     let url = format!("residiuum://{bind}");

@@ -41,9 +41,9 @@
 //!     "#)?;
 //! ```
 
-use crate::residiuum::Residiuum;
 use crate::error::Error;
 use crate::filter::{Filter, QueryOptions};
+use crate::residiuum::Residiuum;
 use crate::subject::validate_collection_name;
 use serde_json::{json, Map, Value as JsonValue};
 
@@ -71,9 +71,7 @@ pub fn eval_sda_program(program: &str, input: JsonValue) -> Result<JsonValue, Er
     } else {
         prog.run_json("input", input)
     };
-    result.map_err(|e| {
-        Error::QueryInvalid(format!("SDA/ENR text eval failed: {e}; src={program}"))
-    })
+    result.map_err(|e| Error::QueryInvalid(format!("SDA/ENR text eval failed: {e}; src={program}")))
 }
 
 /// One named collection binding for a multi-collection text program.
@@ -98,7 +96,9 @@ pub struct SdaTextQuery<'a> {
 
 impl<'a> SdaTextQuery<'a> {
     pub(crate) fn new(residiuum: &'a mut Residiuum) -> Self {
-        Self { residiuum, sources: Vec::new(),
+        Self {
+            residiuum,
+            sources: Vec::new(),
         }
     }
 

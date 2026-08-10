@@ -9,6 +9,7 @@
 //! (`VERUS_PROOFS_CONNECTED`). CPR-005 external review remains open.
 
 use crate::authority::{BlacklistEntry, BlacklistKind};
+use crate::authority_model::{AuthorityModel, ModelAdminState, ModelCert};
 use crate::capability::sha256;
 use crate::certificate::VerifiedCertificate;
 use crate::constraints::Constraints;
@@ -18,11 +19,10 @@ use crate::decide::{
 use crate::ids::{
     AuthorityEpoch, AuthorityGeneration, CertificateId, DeploymentId, HeapId, SecurityRevision,
 };
+use crate::isolation_model::{IsolationModel, ModelUnit};
 use crate::rights::Rights;
 use crate::security_time::TrustedInstant;
 use crate::snapshot::{HeapAdministrativeState, HeapSecuritySnapshot};
-use crate::authority_model::{AuthorityModel, ModelAdminState, ModelCert};
-use crate::isolation_model::{IsolationModel, ModelUnit};
 
 fn uuidish(seed: u8) -> [u8; 16] {
     let mut id = [seed; 16];

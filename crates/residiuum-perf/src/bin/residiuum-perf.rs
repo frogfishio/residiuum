@@ -115,9 +115,8 @@ fn has_flag(args: &[String], name: &str) -> bool {
 
 fn parse_awo_mode(args: &[String]) -> Result<AwoMode, String> {
     let raw = flag_value(args, "--awo-mode").unwrap_or_else(|| "disabled".into());
-    AwoMode::parse(&raw).ok_or_else(|| {
-        format!("bad --awo-mode {raw}; expected disabled|static|adaptive")
-    })
+    AwoMode::parse(&raw)
+        .ok_or_else(|| format!("bad --awo-mode {raw}; expected disabled|static|adaptive"))
 }
 
 fn parse_presentation_pin(args: &[String]) -> Result<PresentationPin, String> {
@@ -185,9 +184,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     let driver = flag_value(args, "--driver").unwrap_or_else(|| "synthetic".into());
     let kind = DriverKind::parse(&driver).ok_or_else(|| format!("bad --driver {driver}"))?;
     if kind == DriverKind::RealStore && !store_driver_compiled() {
-        return Err(
-            "real_store driver not compiled; rebuild with --features store-driver".into(),
-        );
+        return Err("real_store driver not compiled; rebuild with --features store-driver".into());
     }
 
     let platform = flag_value(args, "--platform").unwrap_or_else(|| "synthetic".into());
@@ -207,8 +204,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         return Err("--controlled requires --driver real_store".into());
     }
     let class_s = flag_value(args, "--class").unwrap_or_else(|| "smoke".into());
-    let run_class =
-        RunClass::parse(&class_s).ok_or_else(|| format!("bad --class {class_s}"))?;
+    let run_class = RunClass::parse(&class_s).ok_or_else(|| format!("bad --class {class_s}"))?;
     if controlled && !run_class.may_emit_bottleneck_verdict() {
         return Err("--controlled requires --class qualification (or soak)".into());
     }
@@ -285,9 +281,9 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
                 "no primary bottleneck attached (smoke or missing sustained window/floors)".into(),
             );
         }
-        reports.notes.push(
-            "NO optimisations applied; follow-up cards are stubs only".into(),
-        );
+        reports
+            .notes
+            .push("NO optimisations applied; follow-up cards are stubs only".into());
         reports.multiproc_finding.overstates_product = false;
     }
 

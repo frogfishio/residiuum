@@ -79,11 +79,9 @@ impl IsolationModel {
     }
 
     fn read_confinement(&self) -> bool {
-        self.admitted.iter().all(|u| {
-            self.owners
-                .get(u)
-                .is_some_and(|h| *h == self.bound_heap)
-        })
+        self.admitted
+            .iter()
+            .all(|u| self.owners.get(u).is_some_and(|h| *h == self.bound_heap))
     }
 
     fn write_confinement(&self) -> bool {
@@ -102,9 +100,7 @@ impl IsolationModel {
     }
 
     fn revocation_closed(&self) -> bool {
-        self.admitted
-            .iter()
-            .all(|u| self.owners.contains_key(u))
+        self.admitted.iter().all(|u| self.owners.contains_key(u))
     }
 }
 

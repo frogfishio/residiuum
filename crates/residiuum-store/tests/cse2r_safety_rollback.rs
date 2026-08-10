@@ -37,10 +37,18 @@ fn expected_body(key: &str) -> Vec<u8> {
 /// Frozen Materialized recoverable sets from CSE-0 `baseline.json` (RHS).
 fn materialized_baseline(failure: &str) -> (BTreeSet<String>, BTreeSet<String>, BTreeSet<String>) {
     match failure {
-        "F0_control" => (bset(&["l", "m", "t"]), bset(&["l", "m", "t"]), bset(&["l", "m", "t"])),
+        "F0_control" => (
+            bset(&["l", "m", "t"]),
+            bset(&["l", "m", "t"]),
+            bset(&["l", "m", "t"]),
+        ),
         "F1_wipe_chimera" => (bset(&["l", "m", "t"]), bset(&[]), bset(&[])),
         "F2_corrupt_chimera" => (bset(&["l", "m", "t"]), bset(&[]), bset(&[])),
-        "F3_corrupt_auth_body_t" => (bset(&["l", "m"]), bset(&["l", "m", "t"]), bset(&["l", "m", "t"])),
+        "F3_corrupt_auth_body_t" => (
+            bset(&["l", "m"]),
+            bset(&["l", "m", "t"]),
+            bset(&["l", "m", "t"]),
+        ),
         "F4_delete_sealed_segment" => (bset(&[]), bset(&[]), bset(&["l", "m", "t"])),
         "F5_corrupt_auth_t_wipe_chimera" => (bset(&["l", "m"]), bset(&[]), bset(&[])),
         other => panic!("unknown CSE-0 failure id {other}"),
@@ -66,12 +74,9 @@ fn seed_product_seal_fixture() -> Fixture {
     let dir = tempdir().unwrap();
     let root = dir.keep();
 
-    let mut store = Store::create_with_shards_mode(
-        &root,
-        1,
-        residiuum_store::RecoveryMode::Materialized,
-    )
-    .unwrap();
+    let mut store =
+        Store::create_with_shards_mode(&root, 1, residiuum_store::RecoveryMode::Materialized)
+            .unwrap();
     for k in KEYS {
         store
             .put(k, &expected_body(k), DurabilityMode::Durable)
@@ -116,7 +121,9 @@ fn seed_product_seal_fixture() -> Fixture {
         .map(|k| {
             (
                 (*k).to_string(),
-                *last.get(*k).unwrap_or_else(|| panic!("missing frame for {k}")),
+                *last
+                    .get(*k)
+                    .unwrap_or_else(|| panic!("missing frame for {k}")),
             )
         })
         .collect();
@@ -174,8 +181,8 @@ fn xor_frame_body(path: &Path, frame_offset: u64, xor: u8) {
     let mut bytes = fs::read(path).unwrap();
     let off = frame_offset as usize;
     assert!(off < bytes.len(), "frame_offset out of range");
-    let (_h, _e, body, _hash, _flen) =
-        verify_frame_at(&bytes[off..], SafetyLimits::default()).expect("frame must verify before damage");
+    let (_h, _e, body, _hash, _flen) = verify_frame_at(&bytes[off..], SafetyLimits::default())
+        .expect("frame must verify before damage");
     let body_rel = body.as_ptr() as usize - bytes[off..].as_ptr() as usize;
     let start = off + body_rel;
     let end = (start + body.len().min(64)).max(start + 1);

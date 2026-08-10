@@ -206,10 +206,8 @@ pub fn compare_tuning_candidate(
     let c = mean(candidate_samples);
     let delta = c - b;
     // Simple sign-stable CI proxy: all paired direction or bootstrap overlap
-    let ci_excludes_zero = delta > 0.0
-        && baseline_samples.len() >= 3
-        && candidate_samples.len() >= 3
-        && {
+    let ci_excludes_zero =
+        delta > 0.0 && baseline_samples.len() >= 3 && candidate_samples.len() >= 3 && {
             let bci = super::stats::bootstrap_ci_mean(baseline_samples, 100, 1, 0.95);
             let cci = super::stats::bootstrap_ci_mean(candidate_samples, 100, 2, 0.95);
             match (bci, cci) {
@@ -217,10 +215,7 @@ pub fn compare_tuning_candidate(
                 _ => false,
             }
         };
-    let accepted = delta > 0.0
-        && ci_excludes_zero
-        && durability_unchanged
-        && correctness_green;
+    let accepted = delta > 0.0 && ci_excludes_zero && durability_unchanged && correctness_green;
     TuningCandidateComparison {
         parameter: parameter.into(),
         baseline_throughput: b,

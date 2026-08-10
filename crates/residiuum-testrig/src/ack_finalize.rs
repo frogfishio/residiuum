@@ -157,9 +157,7 @@ fn fill_payload(size: usize, seed: u64) -> Vec<u8> {
     let mut out = vec![0u8; size];
     let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
     for b in &mut out {
-        state = state
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1);
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         *b = (state >> 33) as u8;
     }
     out
@@ -315,11 +313,10 @@ pub fn run_ack_finalize_matrix(
 fn run_store_cell(cfg: &AckFinalizeConfig) -> Result<AckFinalizeResult, String> {
     let store_path = cfg.work.join("store");
     if store_path.exists() {
-        fs::remove_dir_all(&store_path)
-            .map_err(|e| format!("remove prior store: {e}"))?;
+        fs::remove_dir_all(&store_path).map_err(|e| format!("remove prior store: {e}"))?;
     }
-    let mut store = Store::create_with_shards(&store_path, 1)
-        .map_err(|e| format!("create store: {e}"))?;
+    let mut store =
+        Store::create_with_shards(&store_path, 1).map_err(|e| format!("create store: {e}"))?;
     let seal_thr = if cfg.seal_threshold == 0 {
         64 * 1024 * 1024
     } else {
@@ -340,10 +337,7 @@ fn run_store_cell(cfg: &AckFinalizeConfig) -> Result<AckFinalizeResult, String> 
         store.set_diagnostic_skip_index(true);
     }
 
-    let target_keys = cfg
-        .target_bytes
-        .div_ceil(cfg.payload_size as u64)
-        .max(1);
+    let target_keys = cfg.target_bytes.div_ceil(cfg.payload_size as u64).max(1);
     let payload = Arc::new(fill_payload(cfg.payload_size, cfg.seed));
     let expected_hash = body_hash(payload.as_slice());
     let store_arc = Arc::new(Mutex::new(store));
@@ -381,38 +375,36 @@ fn run_store_cell(cfg: &AckFinalizeConfig) -> Result<AckFinalizeResult, String> 
             let next = Arc::clone(&next);
             let err = Arc::clone(&err);
             let payload = Arc::clone(&payload);
-            joins.push(scope.spawn(move || {
-                loop {
-                    if err.lock().ok().and_then(|g| g.clone()).is_some() {
-                        break;
-                    }
-                    let seq = next.fetch_add(1, Ordering::Relaxed);
-                    if seq >= target_keys {
-                        break;
-                    }
-                    let key = format!("peer/{:020}", seq);
-                    let put_err = {
-                        let mut g = match store_arc.lock() {
-                            Ok(g) => g,
-                            Err(_) => {
-                                let _ = err.lock().map(|mut e| {
-                                    *e = Some("store lock poisoned during put".into());
-                                });
-                                break;
-                            }
-                        };
-                        g.put_many(&[(&key[..], payload.as_slice())], DurabilityMode::Buffered)
-                            .map(|_| ())
-                            .map_err(|e| format!("put_many: {e}"))
+            joins.push(scope.spawn(move || loop {
+                if err.lock().ok().and_then(|g| g.clone()).is_some() {
+                    break;
+                }
+                let seq = next.fetch_add(1, Ordering::Relaxed);
+                if seq >= target_keys {
+                    break;
+                }
+                let key = format!("peer/{:020}", seq);
+                let put_err = {
+                    let mut g = match store_arc.lock() {
+                        Ok(g) => g,
+                        Err(_) => {
+                            let _ = err.lock().map(|mut e| {
+                                *e = Some("store lock poisoned during put".into());
+                            });
+                            break;
+                        }
                     };
-                    if let Err(e) = put_err {
-                        let _ = err.lock().map(|mut slot| {
-                            if slot.is_none() {
-                                *slot = Some(e);
-                            }
-                        });
-                        break;
-                    }
+                    g.put_many(&[(&key[..], payload.as_slice())], DurabilityMode::Buffered)
+                        .map(|_| ())
+                        .map_err(|e| format!("put_many: {e}"))
+                };
+                if let Err(e) = put_err {
+                    let _ = err.lock().map(|mut slot| {
+                        if slot.is_none() {
+                            *slot = Some(e);
+                        }
+                    });
+                    break;
                 }
             }));
         }
@@ -443,13 +435,15 @@ fn run_store_cell(cfg: &AckFinalizeConfig) -> Result<AckFinalizeResult, String> 
     let pending_seal_inflight_at_last_ack = store.pending_seal_inflight();
     let enrichment_backlog_at_last_ack = store.enrichment_backlog();
     let rotation_stages = store.rotation_stage_totals();
-    let (pending_seal_paths_at_last_ack, sealed_segments_at_last_ack) =
-        match store.lifecycle_diag() {
-            Ok(d) => (d.pending_seals, d.sealed_segments),
-            Err(e) => {
-                return Err(format!("lifecycle_diag at last ack failed (fail-closed): {e}"));
-            }
-        };
+    let (pending_seal_paths_at_last_ack, sealed_segments_at_last_ack) = match store.lifecycle_diag()
+    {
+        Ok(d) => (d.pending_seals, d.sealed_segments),
+        Err(e) => {
+            return Err(format!(
+                "lifecycle_diag at last ack failed (fail-closed): {e}"
+            ));
+        }
+    };
 
     let samples = backlog_samples
         .lock()
@@ -471,8 +465,8 @@ fn run_store_cell(cfg: &AckFinalizeConfig) -> Result<AckFinalizeResult, String> 
     let seal_complete_unix_ns = unix_ns_now();
     let seal_elapsed = t_seal.elapsed();
     let drain_elapsed = Duration::from_nanos(seal_breakdown.drain_lifecycle_ns);
-    let drain_complete_unix_ns = last_successful_ack_unix_ns
-        .saturating_add(u128::from(seal_breakdown.drain_lifecycle_ns));
+    let drain_complete_unix_ns =
+        last_successful_ack_unix_ns.saturating_add(u128::from(seal_breakdown.drain_lifecycle_ns));
 
     let backlog_after_seal = store.enrichment_backlog();
     let t_enrich_drain = Instant::now();
@@ -519,9 +513,8 @@ fn run_store_cell(cfg: &AckFinalizeConfig) -> Result<AckFinalizeResult, String> 
     } else {
         0.0
     };
-    let lifecycle_wall = ack_elapsed
-        + Duration::from_nanos(seal_breakdown.total_ns())
-        + enrichment_drain_elapsed;
+    let lifecycle_wall =
+        ack_elapsed + Duration::from_nanos(seal_breakdown.total_ns()) + enrichment_drain_elapsed;
     let complete_lifecycle_ops_per_sec =
         keys_written as f64 / lifecycle_wall.as_secs_f64().max(1e-12);
 
@@ -531,7 +524,8 @@ fn run_store_cell(cfg: &AckFinalizeConfig) -> Result<AckFinalizeResult, String> 
     let close_elapsed = t_close.elapsed();
 
     let t_reopen = Instant::now();
-    let store = Store::open(&store_path).map_err(|e| format!("reopen failed (fail-closed): {e}"))?;
+    let store =
+        Store::open(&store_path).map_err(|e| format!("reopen failed (fail-closed): {e}"))?;
     let reopen_complete_unix_ns = unix_ns_now();
     let reopen_elapsed = t_reopen.elapsed();
 
@@ -676,11 +670,7 @@ fn verify_index_query_sample(
         return Ok(true);
     }
     // Point-get endpoints + mid-key: dual-index / primary path must serve bodies.
-    let probes = [
-        0u64,
-        keys_written / 2,
-        keys_written.saturating_sub(1),
-    ];
+    let probes = [0u64, keys_written / 2, keys_written.saturating_sub(1)];
     for seq in probes {
         let key = format!("peer/{:020}", seq);
         let got = store
@@ -828,11 +818,8 @@ fn run_raw_mimic(cfg: &AckFinalizeConfig) -> Result<AckFinalizeResult, String> {
     let verify_elapsed = t_verify.elapsed();
     drop(f);
 
-    let lifecycle_elapsed = drain_elapsed
-        + seal_elapsed
-        + close_elapsed
-        + reopen_elapsed
-        + verify_elapsed;
+    let lifecycle_elapsed =
+        drain_elapsed + seal_elapsed + close_elapsed + reopen_elapsed + verify_elapsed;
     let campaign_elapsed = ack_elapsed + lifecycle_elapsed;
     let ack_secs = ack_elapsed.as_secs_f64().max(1e-12);
     let campaign_secs = campaign_elapsed.as_secs_f64().max(1e-12);
@@ -928,7 +915,10 @@ fn result_json(r: &AckFinalizeResult) -> Value {
     let mean_read_decode = mean(st.read_ns.saturating_add(st.decode_ns));
     let mean_blake3 = mean(st.blake3_ns);
     let mean_hydra = mean(st.hydra_construct_ns.saturating_add(st.hydra_persist_ns));
-    let mean_chimera = mean(st.chimera_construct_ns.saturating_add(st.chimera_persist_ns));
+    let mean_chimera = mean(
+        st.chimera_construct_ns
+            .saturating_add(st.chimera_persist_ns),
+    );
     let mean_catalog = mean(st.catalog_ns);
     let stage_breakdown = json!({
         "samples": st.samples,
@@ -1085,10 +1075,7 @@ fn render_markdown_table(rows: &[AckFinalizeResult]) -> String {
                 r.reopen_verify_mode,
             ));
         } else {
-            out.push_str(&format!(
-                "| {} | — | — | — | — | — |\n",
-                cell.label()
-            ));
+            out.push_str(&format!("| {} | — | — | — | — | — |\n", cell.label()));
         }
     }
     out

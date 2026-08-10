@@ -16,7 +16,7 @@
 use crate::error::StoreError;
 use crate::ids::hex16;
 use crate::layout::{list_residiuum_files, segment_id_from_filename, StorePaths};
-use crate::tier::{hash_file, available_sealed_paths, TierPlacement};
+use crate::tier::{available_sealed_paths, hash_file, TierPlacement};
 use residiuum_format::{scan_forward, SafetyLimits};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -617,9 +617,7 @@ pub fn status_from_state(state: &ScrubState) -> ScrubStatus {
         failures_cycle: state.failures_cycle,
         failures_total: state.failures_total,
         open_findings: state.open_findings,
-        last_complete_age_ns: state
-            .last_complete_cycle_ns
-            .map(|t| now.saturating_sub(t)),
+        last_complete_age_ns: state.last_complete_cycle_ns.map(|t| now.saturating_sub(t)),
         last_complete_cycle_ns: state.last_complete_cycle_ns,
         last_progress_ns: state.last_progress_ns,
     }
@@ -635,7 +633,9 @@ fn upsert_finding(doc: &mut ScrubFindingsDoc, finding: ScrubFinding) {
         existing.cycle_id = finding.cycle_id;
         existing.detail = finding.detail;
         existing.observed_hash_hex = finding.observed_hash_hex;
-        existing.quarantine_path = finding.quarantine_path.or_else(|| existing.quarantine_path.clone());
+        existing.quarantine_path = finding
+            .quarantine_path
+            .or_else(|| existing.quarantine_path.clone());
     } else {
         doc.findings.push(finding);
     }

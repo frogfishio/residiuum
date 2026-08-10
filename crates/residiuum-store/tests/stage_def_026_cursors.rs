@@ -94,9 +94,7 @@ fn tampered_token_rejected() {
     let mut store = Store::create(dir.path().join("s")).unwrap();
     put_n(&mut store, 30, "k/");
 
-    let page = store
-        .scan_live_page(&LiveScanPageOptions::new(5))
-        .unwrap();
+    let page = store.scan_live_page(&LiveScanPageOptions::new(5)).unwrap();
     let mut tok = page.continuation.expect("more pages");
     let last = tok.len() - 1;
     tok[last] ^= 0x5a;
@@ -133,15 +131,11 @@ fn mutation_stales_cursor_generation() {
     let mut store = Store::create(dir.path().join("s")).unwrap();
     put_n(&mut store, 25, "k/");
 
-    let page = store
-        .scan_live_page(&LiveScanPageOptions::new(5))
-        .unwrap();
+    let page = store.scan_live_page(&LiveScanPageOptions::new(5)).unwrap();
     let tok = page.continuation.expect("more pages");
 
     // Change live count → generation fence.
-    store
-        .put("k/extra", b"x", DurabilityMode::Durable)
-        .unwrap();
+    store.put("k/extra", b"x", DurabilityMode::Durable).unwrap();
 
     let err = store
         .scan_live_page(&LiveScanPageOptions::new(5).continuation(tok))
@@ -173,12 +167,8 @@ fn prefix_not_starved_by_earlier_keys() {
     store
         .put("aaa/early", b"1", DurabilityMode::Durable)
         .unwrap();
-    store
-        .put("users/a", b"A", DurabilityMode::Durable)
-        .unwrap();
-    store
-        .put("users/c", b"C", DurabilityMode::Durable)
-        .unwrap();
+    store.put("users/a", b"A", DurabilityMode::Durable).unwrap();
+    store.put("users/c", b"C", DurabilityMode::Durable).unwrap();
     store
         .put("zzz/late", b"9", DurabilityMode::Durable)
         .unwrap();

@@ -1359,7 +1359,10 @@ impl crate::HostCapabilities for DriverHeapHost {
         use residiuum_store::CollectionScanHoleReason;
 
         match self.heap.collection_by_id(collection_id)?.get(key) {
-            Ok(Some(value)) => Ok(HostDocument::Present(value)),
+            Ok(Some(value)) => Ok(HostDocument::Present {
+                value: value.into(),
+                logical_bytes: None,
+            }),
             Ok(None) => Ok(HostDocument::Absent),
             Err(SdkError::Store(store_error)) => {
                 if let Some(reason) = CollectionScanHoleReason::from_store_error(&store_error) {
@@ -1396,13 +1399,21 @@ impl crate::HostCapabilities for DriverHeapHost {
         use crate::query_bytecode_v1::HostDocument;
 
         let collection = self.heap.collection_by_id(collection_id)?;
+        if let Some(documents) = collection
+            .scan_json_covered_page_cached(limit.unwrap_or(256), after_key.map(str::as_bytes))?
+        {
+            return Ok(documents);
+        }
         let page = collection.scan_page_raw(limit.unwrap_or(256), after_key.map(str::as_bytes))?;
         let mut documents = std::collections::BTreeMap::new();
-        for (key, body, _) in page.entries {
+        for (key, body, version) in page.entries {
             let key = String::from_utf8(key)
                 .map_err(|_| SdkError::Internal("scan: non-UTF-8 application key".into()))?;
-            let document = match crate::value::decode_json(&body) {
-                Ok(value) => HostDocument::Present(value),
+            let document = match collection.decode_json_versioned_shared(&key, &body, version) {
+                Ok(value) => HostDocument::Present {
+                    value: value.into(),
+                    logical_bytes: crate::value::encoded_json_payload_len(&body),
+                },
                 Err(error) => HostDocument::Hole {
                     code: error.code().as_str().to_string(),
                 },
@@ -1442,6 +1453,17 @@ impl crate::HostCapabilities for DriverHeapHost {
             .lookup_index_keys(equalities)
     }
 
+    fn lookup_index_keys_many(
+        &mut self,
+        collection_id: CollectionId,
+        field: &str,
+        values: &[serde_json::Value],
+    ) -> Result<Option<Vec<String>>, SdkError> {
+        self.heap
+            .collection_by_id(collection_id)?
+            .lookup_index_keys_many(field, values)
+    }
+
     fn lookup_index_keys_with_constraints(
         &mut self,
         collection_id: CollectionId,
@@ -1466,6 +1488,48 @@ impl crate::HostCapabilities for DriverHeapHost {
         self.heap
             .collection_by_id(collection_id)?
             .lookup_ordered_index_keys(&field, field_descending, key_descending)
+    }
+
+    fn source_frontier(
+        &mut self,
+        collection_id: CollectionId,
+    ) -> Result<Option<[u8; 32]>, SdkError> {
+        self.heap
+            .collection_by_id(collection_id)?
+            .source_frontier()
+            .map(Some)
+    }
+
+    fn lookup_covering_index_values(
+        &mut self,
+        collection_id: CollectionId,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<serde_json::Value>>>, SdkError> {
+        self.heap
+            .collection_by_id(collection_id)?
+            .lookup_covering_index_values(fields)
+    }
+
+    fn scan_projected_values(
+        &mut self,
+        collection_id: CollectionId,
+        fields: &[String],
+    ) -> Result<Option<Vec<Vec<serde_json::Value>>>, SdkError> {
+        self.heap
+            .collection_by_id(collection_id)?
+            .scan_projected_values(fields)
+    }
+
+    fn scan_group_aggregate(
+        &mut self,
+        collection_id: CollectionId,
+        spec: &crate::plan_v1::GroupAggSpec,
+        where_k: &crate::CompiledKernelWhere,
+        candidate_keys: Option<&[String]>,
+    ) -> Result<Option<crate::query_bytecode_v1::HostGroupAggregate>, SdkError> {
+        self.heap
+            .collection_by_id(collection_id)?
+            .scan_group_aggregate(spec, where_k, candidate_keys)
     }
 }
 

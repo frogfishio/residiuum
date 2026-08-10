@@ -176,9 +176,9 @@ fn write_hashes(layout: &RunArtifactLayout) -> Result<(), RunnerError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::budget::RunBudgets;
     use crate::runner::marker::ensure_work_root_marker;
     use crate::runner::preflight::{preflight_work_root, PreflightConfig};
-    use crate::runner::budget::RunBudgets;
     use crate::runner::BuildMode;
 
     #[test]

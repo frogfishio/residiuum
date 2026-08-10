@@ -129,10 +129,7 @@ pub fn confine_operational_observation_under(
 ///
 /// An ordinary `HeapCap` may only export its own heap. Requesting any other heap
 /// (or an empty multi-heap bag that would imply deployment inventory) fails closed.
-pub fn confine_export_heaps(
-    cap: &HeapCap,
-    requested: &[HeapId],
-) -> Result<Vec<HeapId>, HeapError> {
+pub fn confine_export_heaps(cap: &HeapCap, requested: &[HeapId]) -> Result<Vec<HeapId>, HeapError> {
     refresh_capability_or_terminate(cap)?;
     let bound = cap.heap_id();
     if requested.is_empty() {
@@ -359,7 +356,14 @@ mod tests {
             expires_at: 4_000_000_000,
             issuer_master_key_id: [5u8; 32],
         };
-        mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+        mint_capability(
+            slot,
+            &cert,
+            TrustedInstant {
+                unix_s: 1_700_000_000,
+            },
+        )
+        .unwrap()
     }
 
     #[test]

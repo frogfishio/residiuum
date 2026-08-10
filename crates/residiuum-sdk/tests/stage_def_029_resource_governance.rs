@@ -1,7 +1,9 @@
 //! DEF-029: resource governance — budgets, host limits, cancellation.
 
-use residiuum_sdk::{json, CancelToken, Residiuum, ErrorCode, Filter, QueryBudget, QueryOptions, ResourceLimits, DEFAULT_MAX_JSON_DEPTH, RESOURCE_PROFILE};
-
+use residiuum_sdk::{
+    json, CancelToken, ErrorCode, Filter, QueryBudget, QueryOptions, Residiuum, ResourceLimits,
+    DEFAULT_MAX_JSON_DEPTH, RESOURCE_PROFILE,
+};
 
 use serde_json::Value as JsonValue;
 use tempfile::tempdir;
@@ -150,7 +152,6 @@ fn cancel_token_stops_find() {
 #[test]
 fn query_plan_serializes_extended_budget() {
     use residiuum_sdk::{QueryPlan, QUERY_PLAN_PROFILE};
-
 
     let plan = QueryPlan::new(
         Filter::field("tag").eq("x"),

@@ -62,13 +62,7 @@ pub fn run_l0_calibration(cfg: &L0Config) -> L0Report {
     for seq in 0..cfg.ops {
         // generator
         let key = generate_key(cfg.seed, seq);
-        fill_payload(
-            cfg.seed,
-            seq,
-            0,
-            PayloadProfile::Incompressible,
-            &mut buf,
-        );
+        fill_payload(cfg.seed, seq, 0, PayloadProfile::Incompressible, &mut buf);
         gen_cost = gen_cost
             .saturating_add(64)
             .saturating_add(key.len() as u64)
@@ -93,7 +87,9 @@ pub fn run_l0_calibration(cfg: &L0Config) -> L0Report {
     probe.end_timed_path();
 
     // Post-timed: result serialization proxy (outside timed path).
-    let post = serde_json::to_vec(&hist).map(|b| b.len() as u64).unwrap_or(0);
+    let post = serde_json::to_vec(&hist)
+        .map(|b| b.len() as u64)
+        .unwrap_or(0);
 
     let total = gen_cost
         .saturating_add(copy_cost)

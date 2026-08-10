@@ -188,25 +188,25 @@ impl WriterLock {
 
         // In-process registry first (same process cannot open two writers).
         {
-            let mut held = held_paths()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut held = held_paths().lock().unwrap_or_else(|e| e.into_inner());
             if held.contains(&root) {
                 let diag = read_diagnostic(&paths.store_info().join(WRITER_LOCK_FILE));
-                return Err(StoreError::WriterLockHeld(Box::new(WriterLockObservation {
-                    class: WriterLockClass::InProcess,
-                    diagnostic_pid: diag.pid.or(Some(std::process::id())),
-                    diagnostic_pid_liveness: PidLiveness::Alive,
-                    diagnostic_acquired_ns: diag.acquired_ns,
-                    os_lock_authoritative: true,
-                    waited: start.elapsed(),
-                    retryable: false,
-                    detail: format!(
-                        "another writer handle is already open for {} in this process \
+                return Err(StoreError::WriterLockHeld(Box::new(
+                    WriterLockObservation {
+                        class: WriterLockClass::InProcess,
+                        diagnostic_pid: diag.pid.or(Some(std::process::id())),
+                        diagnostic_pid_liveness: PidLiveness::Alive,
+                        diagnostic_acquired_ns: diag.acquired_ns,
+                        os_lock_authoritative: true,
+                        waited: start.elapsed(),
+                        retryable: false,
+                        detail: format!(
+                            "another writer handle is already open for {} in this process \
                          (drop the other handle; do not delete writer.lock)",
-                        root.display()
-                    ),
-                })));
+                            root.display()
+                        ),
+                    },
+                )));
             }
             held.insert(root.clone());
         }
@@ -216,7 +216,9 @@ impl WriterLock {
             std::fs::create_dir_all(parent)?;
         }
 
-        let poll = options.writer_lock_poll_interval.max(Duration::from_millis(1));
+        let poll = options
+            .writer_lock_poll_interval
+            .max(Duration::from_millis(1));
         let deadline = options.writer_lock_wait.map(|w| start + w);
 
         let acquired = loop {
@@ -280,20 +282,22 @@ impl WriterLock {
                     ));
                 }
                 Err(AcquireOsError::Io(e)) => {
-                    break Err(StoreError::WriterLockHeld(Box::new(WriterLockObservation {
-                        class: WriterLockClass::IoFailure,
-                        diagnostic_pid: read_diagnostic(&lock_path).pid,
-                        diagnostic_pid_liveness: PidLiveness::Unknown,
-                        diagnostic_acquired_ns: read_diagnostic(&lock_path).acquired_ns,
-                        os_lock_authoritative: true,
-                        waited: start.elapsed(),
-                        retryable: true,
-                        detail: format!(
-                            "I/O error acquiring writer lock on {}: {e} \
+                    break Err(StoreError::WriterLockHeld(Box::new(
+                        WriterLockObservation {
+                            class: WriterLockClass::IoFailure,
+                            diagnostic_pid: read_diagnostic(&lock_path).pid,
+                            diagnostic_pid_liveness: PidLiveness::Unknown,
+                            diagnostic_acquired_ns: read_diagnostic(&lock_path).acquired_ns,
+                            os_lock_authoritative: true,
+                            waited: start.elapsed(),
+                            retryable: true,
+                            detail: format!(
+                                "I/O error acquiring writer lock on {}: {e} \
                              (not database absence; do not delete writer.lock to 'fix')",
-                            lock_path.display()
-                        ),
-                    })));
+                                lock_path.display()
+                            ),
+                        },
+                    )));
                 }
             }
         };
@@ -301,9 +305,7 @@ impl WriterLock {
         match acquired {
             Ok((file, path)) => Ok(Self { root, file, path }),
             Err(e) => {
-                let mut held = held_paths()
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner());
+                let mut held = held_paths().lock().unwrap_or_else(|err| err.into_inner());
                 held.remove(&root);
                 Err(e)
             }
@@ -325,9 +327,7 @@ impl WriterLock {
         let diag = read_diagnostic(&lock_path);
 
         {
-            let held = held_paths()
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let held = held_paths().lock().unwrap_or_else(|e| e.into_inner());
             if held.contains(&root) {
                 return WriterLockObservation {
                     class: WriterLockClass::InProcess,
@@ -410,9 +410,7 @@ impl WriterLock {
 impl Drop for WriterLock {
     fn drop(&mut self) {
         let _ = unlock_exclusive(&self.file);
-        let mut held = held_paths()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut held = held_paths().lock().unwrap_or_else(|e| e.into_inner());
         held.remove(&self.root);
     }
 }
@@ -526,7 +524,7 @@ fn probe_pid_liveness(pid: u32) -> PidLiveness {
         }
         let err = io::Error::last_os_error();
         match err.raw_os_error() {
-            Some(3) => PidLiveness::Dead, // ESRCH
+            Some(3) => PidLiveness::Dead,  // ESRCH
             Some(1) => PidLiveness::Alive, // EPERM — exists but not signalable
             _ => PidLiveness::Unknown,
         }

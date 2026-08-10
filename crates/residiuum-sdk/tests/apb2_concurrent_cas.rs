@@ -49,7 +49,14 @@ fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapC
         expires_at: 4_000_000_000,
         issuer_master_key_id: [5u8; 32],
     };
-    mint_capability(slot, &cert, TrustedInstant { unix_s: 1_700_000_000 }).unwrap()
+    mint_capability(
+        slot,
+        &cert,
+        TrustedInstant {
+            unix_s: 1_700_000_000,
+        },
+    )
+    .unwrap()
 }
 
 fn uuid() -> [u8; 16] {
@@ -147,9 +154,7 @@ fn concurrent_create_if_absent_one_wins() {
 #[test]
 fn concurrent_delete_if_version_one_wins() {
     let (_dir, col) = open_collection();
-    let r0 = col
-        .put("d", &serde_json::json!({"n": 1}))
-        .expect("seed");
+    let r0 = col.put("d", &serde_json::json!({"n": 1})).expect("seed");
     let v0 = r0.version;
     let n = 6usize;
     let barrier = Arc::new(Barrier::new(n));

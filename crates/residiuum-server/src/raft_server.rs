@@ -8,9 +8,6 @@
 //! attached must go through [`RaftServerState::propose_and_apply`] so acks are
 //! only returned after quorum commit and local state-machine apply.
 
-use residiuum_sdk::DirectorySnapshot;
-use residiuum_sdk::Error;
-use residiuum_sdk::{ConnectOptions, RemoteClient, RpcRequest};
 use residiuum_cluster::raft_rpc::{
     AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse,
     NetworkRaftNode, RaftTransport, ReadIndexRequest, ReadIndexResponse, RequestVoteRequest,
@@ -20,6 +17,9 @@ use residiuum_cluster::{
     ClusterId, ClusterMeta, LogCommand, NodeId, PartitionDirectory, PartitionId, PlacementEpoch,
     ProposeError, ProposeResult, RaftPeerStore, RaftRole,
 };
+use residiuum_sdk::DirectorySnapshot;
+use residiuum_sdk::Error;
+use residiuum_sdk::{ConnectOptions, RemoteClient, RpcRequest};
 use residiuum_store::{DurabilityMode, Store, WriteReceipt as StoreWriteReceipt};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
@@ -69,7 +69,10 @@ impl RaftServerState {
             )));
         }
         let cluster_id = ClusterId::from_hex(&meta.cluster_id).ok_or_else(|| {
-            Error::Internal(format!("invalid cluster_id hex in meta: {}", meta.cluster_id))
+            Error::Internal(format!(
+                "invalid cluster_id hex in meta: {}",
+                meta.cluster_id
+            ))
         })?;
         let directory = PartitionDirectory::load(cluster_root)
             .map_err(|e| Error::Internal(format!("placement: {e}")))?
@@ -152,12 +155,7 @@ impl RaftServerState {
 
     /// Online peers we have an endpoint for (routing hint; not authority).
     pub fn online_hint(&self) -> Vec<NodeId> {
-        let mut v: Vec<NodeId> = self
-            .endpoints
-            .keys()
-            .copied()
-            .map(NodeId::new)
-            .collect();
+        let mut v: Vec<NodeId> = self.endpoints.keys().copied().map(NodeId::new).collect();
         if !v.contains(&self.local) {
             v.push(self.local);
         }
@@ -192,10 +190,7 @@ impl RaftServerState {
 
     /// Local term for `partition` (0 if unknown).
     pub fn term(&self, partition: u32) -> u64 {
-        self.nodes
-            .get(&partition)
-            .map(|n| n.term().0)
-            .unwrap_or(0)
+        self.nodes.get(&partition).map(|n| n.term().0).unwrap_or(0)
     }
 
     /// Overlay live leader/term from Raft onto a directory snapshot (routing hints).
@@ -208,17 +203,13 @@ impl RaftServerState {
                 if n.is_leader() {
                     a.leader = self.local.index();
                     a.term = n.term().0;
-                } else if let Some(known) = n
-                    .group()
-                    .peer(n.local)
-                    .and_then(|p| {
-                        if p.role == RaftRole::Follower {
-                            p.voted_for
-                        } else {
-                            None
-                        }
-                    })
-                {
+                } else if let Some(known) = n.group().peer(n.local).and_then(|p| {
+                    if p.role == RaftRole::Follower {
+                        p.voted_for
+                    } else {
+                        None
+                    }
+                }) {
                     // Best-effort: last known leader from vote/append. Not write
                     // authority — clients still refresh on fence errors.
                     a.leader = known.index();
@@ -229,7 +220,10 @@ impl RaftServerState {
     }
 
     /// Ensure local leadership for `partition` (campaign when needed).
-    pub fn ensure_leader(&mut self, partition: u32) -> Result<(NodeId, residiuum_cluster::Term), Error> {
+    pub fn ensure_leader(
+        &mut self,
+        partition: u32,
+    ) -> Result<(NodeId, residiuum_cluster::Term), Error> {
         if self.is_leader(partition) {
             let t = self.term(partition);
             return Ok((self.local, residiuum_cluster::Term(t)));
@@ -339,11 +333,7 @@ impl RaftServerState {
     }
 
     /// Linearizable read barrier: ensure leadership and catch up apply index.
-    pub fn read_index_barrier(
-        &mut self,
-        partition: u32,
-        store: &mut Store,
-    ) -> Result<(), Error> {
+    pub fn read_index_barrier(&mut self, partition: u32, store: &mut Store) -> Result<(), Error> {
         self.ensure_leader(partition)?;
         // Apply everything committed so far before serving the read.
         let _ = self.apply_committed(partition, store, DurabilityMode::Durable)?;
@@ -360,9 +350,7 @@ impl RaftServerState {
                     .nodes
                     .get_mut(&req.partition)
                     .ok_or_else(|| Error::ValidationMsg("unknown partition".into()))?;
-                let resp = node
-                    .handle_request_vote(&req)
-                    .map_err(raft_err)?;
+                let resp = node.handle_request_vote(&req).map_err(raft_err)?;
                 Ok(serde_json::to_value(resp).expect("serialize"))
             }
             "raft_append_entries" => {
@@ -372,9 +360,7 @@ impl RaftServerState {
                     .nodes
                     .get_mut(&req.partition)
                     .ok_or_else(|| Error::ValidationMsg("unknown partition".into()))?;
-                let resp = node
-                    .handle_append_entries(&req)
-                    .map_err(raft_err)?;
+                let resp = node.handle_append_entries(&req).map_err(raft_err)?;
                 Ok(serde_json::to_value(resp).expect("serialize"))
             }
             "raft_install_snapshot" => {
@@ -384,9 +370,7 @@ impl RaftServerState {
                     .nodes
                     .get_mut(&req.partition)
                     .ok_or_else(|| Error::ValidationMsg("unknown partition".into()))?;
-                let resp = node
-                    .handle_install_snapshot(&req)
-                    .map_err(raft_err)?;
+                let resp = node.handle_install_snapshot(&req).map_err(raft_err)?;
                 Ok(serde_json::to_value(resp).expect("serialize"))
             }
             "raft_read_index" => {
@@ -423,9 +407,9 @@ fn map_propose_err(partition: u32, e: ProposeError) -> Error {
             partition,
             message: format!("leader stepped down at term {} (code=not_leader)", t.0),
         },
-        ProposeError::PersistFailed => Error::DurabilityUnavailable(
-            "raft log persist failed before replication".into(),
-        ),
+        ProposeError::PersistFailed => {
+            Error::DurabilityUnavailable("raft log persist failed before replication".into())
+        }
     }
 }
 
@@ -433,9 +417,7 @@ fn map_elect_err(partition: u32, e: residiuum_cluster::ElectError) -> Error {
     match e {
         residiuum_cluster::ElectError::NoQuorum { votes, need } => Error::StaleRoute {
             partition,
-            message: format!(
-                "election no quorum votes={votes} need={need} (code=not_leader)"
-            ),
+            message: format!("election no quorum votes={votes} need={need} (code=not_leader)"),
         },
         residiuum_cluster::ElectError::NotAVoter => Error::StaleRoute {
             partition,
@@ -561,8 +543,9 @@ impl RaftTransport for TcpRaftTransport {
         to: NodeId,
         req: &ReadIndexRequest,
     ) -> Result<ReadIndexResponse, residiuum_cluster::RaftRpcError> {
-        let body = serde_json::to_value(req)
-            .map_err(|e| residiuum_cluster::RaftRpcError::Protocol(format!("encode read_index: {e}")))?;
+        let body = serde_json::to_value(req).map_err(|e| {
+            residiuum_cluster::RaftRpcError::Protocol(format!("encode read_index: {e}"))
+        })?;
         let v = self
             .call_json(to, "raft_read_index", &body)
             .map_err(|e| residiuum_cluster::RaftRpcError::Unavailable(e.to_string()))?;
@@ -580,5 +563,3 @@ pub fn shared_raft_state(
     let state = RaftServerState::open(cluster_root.as_ref(), node_index, peer_token)?;
     Ok(Arc::new(Mutex::new(state)))
 }
-
-

@@ -175,10 +175,7 @@ pub fn copy_verified_frames(
                     let dest_offset = out_buf.len() as u64;
                     out_buf.extend_from_slice(slice);
                     frames_copied += 1;
-                    let kind_name = frame
-                        .header
-                        .known_kind()
-                        .map(|k| format!("{k:?}"));
+                    let kind_name = frame.header.known_kind().map(|k| format!("{k:?}"));
                     frame_ev.push(FrameEvidence {
                         source_start: range.start,
                         source_end: range.end,
