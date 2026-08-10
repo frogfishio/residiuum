@@ -80,7 +80,7 @@ type MutationIdentity = ([u8; 16], [u8; 32]);
 const META_VERSION: &str = "residiuum-store-9\n";
 
 /// Soft max size of the active segment before auto-seal (bytes).
-const DEFAULT_SEAL_THRESHOLD: u64 = 128 * 1024 * 1024;
+const DEFAULT_SEAL_THRESHOLD: u64 = 64 * 1024 * 1024;
 
 /// Default writer shard count (legacy single-active segment).
 const DEFAULT_WRITER_SHARDS: usize = 1;
