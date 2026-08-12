@@ -1,0 +1,120 @@
+{
+  "profile": "residiuum-graph-grf01-acceptance-v1",
+  "packages": {
+    "GRF-0": {
+      "claims": [],
+      "proof_obligations": ["G-AUTH-1", "G-ISO-1", "G-ADJ-1", "G-COV-1"],
+      "required_suites": [
+        "grf0.ids_names",
+        "grf0.definition_vectors",
+        "grf0.hostile_decode",
+        "grf0.record_schema",
+        "grf0.canonical_json",
+        "grf0.hash_domains",
+        "grf0.oracle_source_analysis",
+        "grf0.model_properties"
+      ],
+      "required_artifacts": [
+        "spec/graph/cbor-v1.json",
+        "spec/graph/records-v1.schema.json",
+        "spec/graph/source-analysis-v1.json",
+        "out/graph/grf01/corpus-results.json",
+        "out/graph/grf01/manifest.json"
+      ],
+      "negative_controls": [
+        "uuid_zero_bad_version_bad_variant",
+        "name_invalid_reserved_overlong",
+        "definition_duplicate_unsorted_unknown_key",
+        "definition_hash_flip",
+        "record_unknown_metadata",
+        "record_wrong_graph_definition_generation_type",
+        "cross_heap_reference",
+        "oracle_incomplete_empty_not_absent"
+      ]
+    },
+    "GRF-1": {
+      "entry_gate": "embedded LocalHeap residiuum-atomic-v1 has passed ATM-5 and driver Capabilities.atomics is true",
+      "claims": ["G-AUTH-1", "G-ISO-1", "G-ADJ-1", "G-COV-1", "G-REC-1"],
+      "required_suites": [
+        "grf1.catalog",
+        "grf1.point",
+        "grf1.scan",
+        "grf1.adjacency_codec",
+        "grf1.adjacency",
+        "grf1.pagination",
+        "grf1.bulk_generation",
+        "grf1.activation",
+        "grf1.recovery",
+        "grf1.damage",
+        "grf1.authority",
+        "grf1.multi_heap",
+        "grf1.architecture",
+        "grf1.performance"
+      ],
+      "required_artifacts": [
+        "spec/graph/adjacency-v1.json",
+        "out/graph/grf01/report.json",
+        "out/graph/grf01/junit.xml",
+        "out/graph/grf01/corpus-results.json",
+        "out/graph/grf01/crash-matrix.json",
+        "out/graph/grf01/performance.json",
+        "out/graph/grf01/manifest.json"
+      ],
+      "negative_controls": [
+        "reserved_collection_user_create_refused",
+        "reserved_collection_collision_graph_only_refusal",
+        "generation_binding_validated_atomic_crash",
+        "graph_publication_atomic_crash",
+        "same_operation_changed_definition_conflict",
+        "same_job_changed_manifest_conflict",
+        "same_logical_key_two_generations_isolated",
+        "strict_missing_endpoint_rejected",
+        "unpublished_adjacency_empty_not_absence",
+        "partial_adjacency_hit_not_complete",
+        "rebuild_reproduces_bound_manifest_without_record_mutation",
+        "new_generation_load_does_not_invalidate_active_adjacency",
+        "damaged_edge_not_silently_skipped",
+        "continuation_wrong_heap_graph_generation_filter_budget",
+        "active_generation_cas_conflict",
+        "remote_profile_refused",
+        "no_recursive_sdk_executor"
+      ],
+      "resource_gates": {
+        "max_page_size": 1000,
+        "max_client_buffered_pages": 2,
+        "high_degree_page_must_not_materialize_all_postings": true,
+        "ordinary_graph_open_full_scan_forbidden": true,
+        "ordinary_store_open_graph_rebuild_forbidden": true
+      }
+    }
+  },
+  "required_commands": [
+    "cargo test -p residiuum-graph",
+    "cargo test -p residiuum-sdk --test grf1_catalog",
+    "cargo test -p residiuum-sdk --test grf1_point",
+    "cargo test -p residiuum-sdk --test grf1_scan",
+    "cargo test -p residiuum-sdk --test grf1_adjacency",
+    "cargo test -p residiuum-sdk --test grf1_bulk_generation",
+    "cargo test -p residiuum-sdk --test grf1_recovery",
+    "cargo test -p residiuum-sdk --test grf1_authority",
+    "bash scripts/check_query_runtime_architecture.sh",
+    "bash scripts/verify-graph-grf01.sh"
+  ],
+  "capability_gate": {
+    "advertise_only_after_accept": [
+      "residiuum-graph-model-v1",
+      "residiuum-graph-client-v0.1",
+      "residiuum-graph-adjacency-v1",
+      "residiuum-graph-bulk-generation-v1"
+    ],
+    "must_remain_false": [
+      "residiuum-graph-traversal-v0.1",
+      "residiuum-graph-path-v0.1",
+      "residiuum-graph-physical-v1",
+      "residiuum-graph-integrity-v1",
+      "residiuum-graph-analytics-v1",
+      "residiuum-graph-cluster-v1",
+      "residiuum-graph-gold-v1"
+    ]
+  }
+}

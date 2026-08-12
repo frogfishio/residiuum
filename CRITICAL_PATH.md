@@ -108,6 +108,12 @@ The following do **not** enter the active lane merely because they are useful:
 - Studio and other management UI work;
 - website or marketing expansion;
 - text, vector or geospatial search;
+- native graph traversal, path, analytics or graph-storage implementation
+  (destination and staged profiles are recorded in
+  [doc/todo/graph/](./doc/todo/graph/));
+- Kiku/COBOL/ISAM rehosting implementation (the provisional architecture is
+  recorded in
+  [KIKU_COBOL_ISAM_REHOSTING_SPEC.md](./doc/todo/integrations/KIKU_COBOL_ISAM_REHOSTING_SPEC.md));
 - broad SDK proliferation;
 - general product polish;
 - speculative storage optimisation;

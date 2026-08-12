@@ -30,6 +30,11 @@ Later programs:
 - [RRE and collection contracts](rre/)
 - [Direct Access](direct-access/)
 - [Order Wavelets](order-wavelets/)
+- [Graph Engine](graph/) — gold-standard destination and staged profiles;
+  specified for future admission, not an active implementation lane
+- [Kiku / COBOL / ISAM lateral rehosting](integrations/KIKU_COBOL_ISAM_REHOSTING_SPEC.md)
+  — provisional codec/runtime architecture for behavior-preserving indexed-file
+  rehosting; requires real-estate refinement before developer handoff
 - Evidence, Telemetry, Studio, clustering (including the
   [Medusa Durability Fabric](cluster/MEDUSA_DURABILITY_FABRIC_SPEC.md)), and
   deferred expansion programs

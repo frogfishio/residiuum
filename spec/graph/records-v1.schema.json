@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://residiuumdb.org/spec/graph/records-v1.schema.json",
+  "title": "Residiuum canonical graph records v1",
+  "$comment": "Schema validation is necessary but not sufficient: implementations also enforce UTF-8 byte limits, duplicate-name refusal and the canonical byte encoding in GRF01_DEVELOPER_HANDOFF.md.",
+  "oneOf": [
+    { "$ref": "#/$defs/vertex" },
+    { "$ref": "#/$defs/edge" }
+  ],
+  "$defs": {
+    "uuidv4": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "revision": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "label": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,62}$",
+      "not": { "pattern": "^_residiuum" }
+    },
+    "key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2015,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "canonical_value": {
+      "oneOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "string" },
+        { "type": "integer", "minimum": -9223372036854775808, "maximum": 18446744073709551615 },
+        { "type": "array", "items": { "$ref": "#/$defs/canonical_value" } },
+        { "type": "object", "additionalProperties": { "$ref": "#/$defs/canonical_value" } }
+      ]
+    },
+    "endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "collection", "key"],
+      "properties": {
+        "type": { "$ref": "#/$defs/uuidv4" },
+        "collection": { "$ref": "#/$defs/uuidv4" },
+        "key": { "$ref": "#/$defs/key" }
+      }
+    },
+    "common_meta": {
+      "type": "object",
+      "properties": {
+        "v": { "const": 1 },
+        "graph": { "$ref": "#/$defs/uuidv4" },
+        "definition": { "$ref": "#/$defs/revision" },
+        "generation": { "$ref": "#/$defs/uuidv4" },
+        "type": { "$ref": "#/$defs/uuidv4" }
+      }
+    },
+    "vertex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["_rgraph", "properties"],
+      "properties": {
+        "_rgraph": {
+          "allOf": [
+            { "$ref": "#/$defs/common_meta" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["v", "kind", "graph", "definition", "generation", "type", "labels"],
+              "properties": {
+                "v": { "const": 1 },
+                "kind": { "const": "vertex" },
+                "graph": { "$ref": "#/$defs/uuidv4" },
+                "definition": { "$ref": "#/$defs/revision" },
+                "generation": { "$ref": "#/$defs/uuidv4" },
+                "type": { "$ref": "#/$defs/uuidv4" },
+                "labels": {
+                  "type": "array",
+                  "minItems": 1,
+                  "maxItems": 16,
+                  "uniqueItems": true,
+                  "items": { "$ref": "#/$defs/label" }
+                }
+              }
+            }
+          ]
+        },
+        "properties": { "$ref": "#/$defs/canonical_value" }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["_rgraph", "properties"],
+      "properties": {
+        "_rgraph": {
+          "allOf": [
+            { "$ref": "#/$defs/common_meta" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["v", "kind", "graph", "definition", "generation", "type", "label", "from", "to"],
+              "properties": {
+                "v": { "const": 1 },
+                "kind": { "const": "edge" },
+                "graph": { "$ref": "#/$defs/uuidv4" },
+                "definition": { "$ref": "#/$defs/revision" },
+                "generation": { "$ref": "#/$defs/uuidv4" },
+                "type": { "$ref": "#/$defs/uuidv4" },
+                "label": { "$ref": "#/$defs/label" },
+                "from": { "$ref": "#/$defs/endpoint" },
+                "to": { "$ref": "#/$defs/endpoint" }
+              }
+            }
+          ]
+        },
+        "properties": { "$ref": "#/$defs/canonical_value" }
+      }
+    }
+  }
+}

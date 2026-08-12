@@ -1,0 +1,253 @@
+{
+  "profile": "residiuum-graph-definition-cbor-v1",
+  "status": "frozen",
+  "deterministic_cbor": {
+    "top_level": "one definite unsigned-integer-keyed map",
+    "shortest_integers_and_lengths": true,
+    "sorted_encoded_map_keys": true,
+    "duplicate_keys_rejected": true,
+    "indefinite_items_rejected": true,
+    "floats_rejected": true,
+    "tags_rejected": true,
+    "unknown_keys_rejected": true,
+    "utf8_required": true,
+    "max_nesting_depth": 8,
+    "max_document_bytes": 262144
+  },
+  "domains": {
+    "definition_revision": "RESIDIUUM-GRAPH-DEFINITION-REVISION-V1",
+    "generation_manifest": "RESIDIUUM-GRAPH-GENERATION-MANIFEST-V1",
+    "generation_record": "RESIDIUUM-GRAPH-GENERATION-RECORD-V1",
+    "generation_content": "RESIDIUUM-GRAPH-GENERATION-CONTENT-V1",
+    "source_frontier": "RESIDIUUM-GRAPH-SOURCE-FRONTIER-V1",
+    "member_operation": "RESIDIUUM-GRAPH-MEMBER-OPERATION-V1",
+    "bootstrap_operation": "RESIDIUUM-GRAPH-BOOTSTRAP-OPERATION-V1",
+    "validation_atomic_operation": "RESIDIUUM-GRAPH-VALIDATION-ATOMIC-OPERATION-V1",
+    "adjacency_artifact": "RESIDIUUM-GRAPH-ADJACENCY-ARTIFACT-V1",
+    "adjacency_manifest": "RESIDIUUM-GRAPH-ADJACENCY-MANIFEST-V1",
+    "adjacency_payload": "RESIDIUUM-GRAPH-ADJACENCY-PAYLOAD-V1",
+    "adjacency_cursor": "RESIDIUUM-GRAPH-ADJACENCY-CURSOR-V1",
+    "graph_scan_cursor": "RESIDIUUM-GRAPH-SCAN-CURSOR-V1"
+  },
+  "physical_key_codec": {
+    "profile": "residiuum-graph-generation-key-v1",
+    "encoding": "lowercase hex of 16 raw generation UUID bytes, then ASCII slash, then logical-key UTF-8 bytes",
+    "prefix_bytes": 33,
+    "logical_key_bytes": "1..=2015",
+    "physical_key_bytes": "34..=2048",
+    "nul_forbidden": true,
+    "canonical_example": "808182838485468788898a8b8c8d8e8f/module/a",
+    "decoded_example_generation": "80818283-8485-4687-8889-8a8b8c8d8e8f",
+    "decoded_example_logical_key": "module/a",
+    "rejected_examples": [
+      "80818283-8485-4687-8889-8a8b8c8d8e8f/module/a",
+      "808182838485468788898A8B8C8D8E8F/module/a",
+      "808182838485468788898a8b8c8d8e8f/",
+      "808182838485468788898a8b8c8d8e8/module/a"
+    ]
+  },
+  "definition_document": {
+    "1": { "field": "profile_version", "type": "uint", "rule": "exactly 1" },
+    "2": { "field": "content", "type": "bstr", "rule": "canonical graph_definition_content bytes" },
+    "3": { "field": "revision", "type": "bstr(32)", "rule": "definition revision hash" }
+  },
+  "graph_definition_content": {
+    "1": { "field": "semantic_profile", "type": "text", "rule": "exactly residiuum-graph-model-v1" },
+    "2": { "field": "heap_id", "type": "bstr(16)", "rule": "non-zero UUIDv4" },
+    "3": { "field": "graph_id", "type": "bstr(16)", "rule": "non-zero UUIDv4" },
+    "4": { "field": "name", "type": "text", "rule": "portable graph name" },
+    "5": { "field": "vertex_types", "type": "array", "rule": "1..=256, sorted unique by type_id" },
+    "6": { "field": "edge_types", "type": "array", "rule": "0..=512, sorted unique by type_id" },
+    "7": { "field": "constraints", "type": "array", "rule": "empty in GRF-1" },
+    "8": { "field": "temporal_profile", "type": "null", "rule": "null in GRF-1" },
+    "9": { "field": "physical_hints", "type": "map", "rule": "empty in GRF-1" }
+  },
+  "vertex_type": {
+    "1": { "field": "type_id", "type": "bstr(16)", "rule": "non-zero UUIDv4" },
+    "2": { "field": "name", "type": "text", "rule": "portable type name" },
+    "3": { "field": "collection_id", "type": "bstr(16)", "rule": "same Heap" },
+    "4": { "field": "source_profile", "type": "uint", "rule": "exactly 1 CanonicalRecordV1" },
+    "5": { "field": "labels", "type": "array", "rule": "1..=16 sorted unique portable labels" },
+    "6": { "field": "properties_profile", "type": "uint", "rule": "exactly 1 WholePropertiesMember" },
+    "7": { "field": "membership_predicate", "type": "null", "rule": "null in GRF-1" }
+  },
+  "edge_type": {
+    "1": { "field": "type_id", "type": "bstr(16)", "rule": "non-zero UUIDv4" },
+    "2": { "field": "name", "type": "text", "rule": "portable type name" },
+    "3": { "field": "collection_id", "type": "bstr(16)", "rule": "same Heap" },
+    "4": { "field": "source_profile", "type": "uint", "rule": "exactly 1 CanonicalRecordV1" },
+    "5": { "field": "label", "type": "text", "rule": "portable label" },
+    "6": { "field": "from_types", "type": "array", "rule": "1..=64 sorted unique bstr(16)" },
+    "7": { "field": "to_types", "type": "array", "rule": "1..=64 sorted unique bstr(16)" },
+    "8": { "field": "properties_profile", "type": "uint", "rule": "exactly 1 WholePropertiesMember" },
+    "9": { "field": "membership_predicate", "type": "null", "rule": "null in GRF-1" },
+    "10": { "field": "endpoint_policy", "type": "uint", "rule": "1 Strict, 2 Deferred" },
+    "11": { "field": "deletion_policy", "type": "uint", "rule": "exactly 1 Restrict in GRF-1" }
+  },
+  "name_binding": {
+    "1": { "field": "profile_version", "type": "uint", "rule": "exactly 1" },
+    "2": { "field": "heap_id", "type": "bstr(16)" },
+    "3": { "field": "graph_id", "type": "bstr(16)" },
+    "4": { "field": "name", "type": "text" },
+    "5": { "field": "definition_revision", "type": "null | bstr(32)", "rule": "null while Creating" },
+    "6": { "field": "state", "type": "uint", "rule": "1 Creating, 2 Active" },
+    "7": { "field": "parent_operation_id", "type": "bstr(16)" },
+    "8": { "field": "sequence", "type": "uint", "rule": "1..=u64::MAX" }
+  },
+  "graph_head": {
+    "1": { "field": "profile_version", "type": "uint", "rule": "exactly 1" },
+    "2": { "field": "heap_id", "type": "bstr(16)" },
+    "3": { "field": "graph_id", "type": "bstr(16)" },
+    "4": { "field": "name", "type": "text" },
+    "5": { "field": "current_definition_revision", "type": "bstr(32)" },
+    "6": { "field": "active_generation", "type": "null | bstr(16)" },
+    "7": { "field": "state", "type": "uint", "rule": "1 Active, 2 Disabled" },
+    "8": { "field": "sequence", "type": "uint", "rule": "1..=u64::MAX" }
+  },
+  "generation_manifest": {
+    "1": { "field": "profile_version", "type": "uint", "rule": "exactly 1" },
+    "2": { "field": "job_id", "type": "bstr(16)" },
+    "3": { "field": "generation_id", "type": "bstr(16)" },
+    "4": { "field": "graph_id", "type": "bstr(16)" },
+    "5": { "field": "definition_revision", "type": "bstr(32)" },
+    "6": { "field": "source_fingerprint", "type": "bstr", "rule": "1..=1024 bytes" },
+    "7": { "field": "expected_vertex_counts", "type": "array", "rule": "all vertex types sorted" },
+    "8": { "field": "expected_edge_counts", "type": "array", "rule": "all edge types sorted" },
+    "9": { "field": "expected_content_root", "type": "bstr(32)" }
+  },
+  "generation_binding": {
+    "1": { "field": "profile_version", "type": "uint", "rule": "exactly 1" },
+    "2": { "field": "heap_id", "type": "bstr(16)" },
+    "3": { "field": "graph_id", "type": "bstr(16)" },
+    "4": { "field": "definition_revision", "type": "bstr(32)" },
+    "5": { "field": "generation_id", "type": "bstr(16)" },
+    "6": { "field": "job_id", "type": "bstr(16)" },
+    "7": { "field": "manifest_root", "type": "bstr(32)" },
+    "8": { "field": "content_root", "type": "bstr(32)" },
+    "9": { "field": "vertex_counts", "type": "array", "rule": "sorted count_entry" },
+    "10": { "field": "edge_counts", "type": "array", "rule": "sorted count_entry" },
+    "11": { "field": "coverage_complete", "type": "bool" },
+    "12": { "field": "violation_count", "type": "uint" },
+    "13": { "field": "source_frontiers", "type": "array", "rule": "sorted source_frontier entries" },
+    "14": { "field": "adjacency_manifest_id", "type": "bstr(32)" },
+    "15": { "field": "adjacency_artifacts", "type": "array", "rule": "sorted adjacency_artifact entries" }
+  },
+  "collection_binding": {
+    "1": { "field": "profile_version", "type": "uint", "rule": "exactly 1" },
+    "2": { "field": "heap_id", "type": "bstr(16)" },
+    "3": { "field": "collection_id", "type": "bstr(16)" },
+    "4": { "field": "graph_id", "type": "bstr(16)" },
+    "5": { "field": "record_kind", "type": "uint", "rule": "1 vertex, 2 edge" },
+    "6": { "field": "type_ids", "type": "array", "rule": "non-empty sorted unique bstr(16)" },
+    "7": { "field": "parent_operation_id", "type": "bstr(16)" },
+    "8": { "field": "state", "type": "uint", "rule": "exactly 1 Active" }
+  },
+  "count_entry": {
+    "1": { "field": "type_id", "type": "bstr(16)" },
+    "2": { "field": "count", "type": "uint" }
+  },
+  "generation_job": {
+    "1": { "field": "profile_version", "type": "uint", "rule": "exactly 1" },
+    "2": { "field": "heap_id", "type": "bstr(16)" },
+    "3": { "field": "job_id", "type": "bstr(16)" },
+    "4": { "field": "graph_id", "type": "bstr(16)" },
+    "5": { "field": "definition_revision", "type": "bstr(32)" },
+    "6": { "field": "generation_id", "type": "bstr(16)" },
+    "7": { "field": "manifest", "type": "bstr", "rule": "canonical generation_manifest bytes" },
+    "8": { "field": "manifest_root", "type": "bstr(32)" },
+    "9": { "field": "state", "type": "uint", "rule": "1 Declared, 2 Loading, 3 Validating, 4 Validated, 5 Activated, 6 Rejected, 7 Damaged" },
+    "10": { "field": "computed_vertex_counts", "type": "array", "rule": "sorted count_entry; empty before validation" },
+    "11": { "field": "computed_edge_counts", "type": "array", "rule": "sorted count_entry; empty before validation" },
+    "12": { "field": "computed_content_root", "type": "null | bstr(32)" },
+    "13": { "field": "source_frontiers", "type": "array", "rule": "sorted source_frontier entries" },
+    "14": { "field": "adjacency_manifest_id", "type": "null | bstr(32)", "rule": "null before adjacency publication" },
+    "15": { "field": "adjacency_artifacts", "type": "array", "rule": "sorted adjacency_artifact entries; empty before adjacency publication" },
+    "16": { "field": "reported_violations", "type": "array", "rule": "at most 1000 sorted violation entries" },
+    "17": { "field": "violation_count", "type": "uint" },
+    "18": { "field": "last_phase", "type": "uint", "rule": "0 none, 1 inventory, 2 content, 3 endpoints, 4 adjacency, 5 publish, 6 activate" },
+    "19": { "field": "failure_code", "type": "null | text", "rule": "stable error string" },
+    "20": { "field": "activation_head_version", "type": "null | bstr(16)" },
+    "21": { "field": "sequence", "type": "uint", "rule": "1..=u64::MAX" },
+    "22": { "field": "validation_frontier", "type": "null | validation_frontier" },
+    "23": { "field": "work_fragments", "type": "array", "rule": "sorted work_fragment entries; empty outside Validating" }
+  },
+  "source_frontier": {
+    "1": { "field": "collection_id", "type": "bstr(16)" },
+    "2": { "field": "frontier", "type": "bstr(32)" },
+    "3": { "field": "complete", "type": "bool" },
+    "4": { "field": "examined_records", "type": "uint" },
+    "5": { "field": "examined_bytes", "type": "uint" }
+  },
+  "validation_frontier": {
+    "1": { "field": "phase", "type": "uint", "rule": "1 inventory, 2 content, 3 endpoints, 4 adjacency, 5 publish" },
+    "2": { "field": "collection_id", "type": "null | bstr(16)" },
+    "3": { "field": "after_logical_key", "type": "null | text", "rule": "canonical graph key when present" },
+    "4": { "field": "examined_documents", "type": "uint" },
+    "5": { "field": "examined_bytes", "type": "uint" },
+    "6": { "field": "vertex_counts", "type": "array", "rule": "sorted partial count_entry" },
+    "7": { "field": "edge_counts", "type": "array", "rule": "sorted partial count_entry" },
+    "8": { "field": "violation_count", "type": "uint" }
+  },
+  "work_fragment": {
+    "1": { "field": "kind", "type": "uint", "rule": "1 record_digest, 2 violation, 3 outgoing_adjacency, 4 incoming_adjacency" },
+    "2": { "field": "collection_id", "type": "null | bstr(16)" },
+    "3": { "field": "ordinal", "type": "uint" },
+    "4": { "field": "content_hash", "type": "bstr(32)", "rule": "BLAKE3-256 of complete fragment bytes" },
+    "5": { "field": "encoded_bytes", "type": "uint" },
+    "6": { "field": "entry_count", "type": "uint" }
+  },
+  "adjacency_artifact": {
+    "1": { "field": "collection_id", "type": "bstr(16)" },
+    "2": { "field": "artifact_id", "type": "bstr(32)" },
+    "3": { "field": "build_id", "type": "bstr(16)" },
+    "4": { "field": "direction", "type": "uint", "rule": "1 outgoing, 2 incoming" },
+    "5": { "field": "payload_root", "type": "bstr(32)" },
+    "6": { "field": "entry_count", "type": "uint" },
+    "7": { "field": "generation_content_root", "type": "bstr(32)" },
+    "8": { "field": "block_count", "type": "uint" },
+    "9": { "field": "complete", "type": "bool" }
+  },
+  "adjacency_manifest": {
+    "1": { "field": "profile_version", "type": "uint", "rule": "exactly 1" },
+    "2": { "field": "heap_id", "type": "bstr(16)" },
+    "3": { "field": "graph_id", "type": "bstr(16)" },
+    "4": { "field": "definition_revision", "type": "bstr(32)" },
+    "5": { "field": "generation_id", "type": "bstr(16)" },
+    "6": { "field": "build_id", "type": "bstr(16)", "rule": "non-zero UUIDv4" },
+    "7": { "field": "generation_content_root", "type": "bstr(32)" },
+    "8": { "field": "artifacts", "type": "array", "rule": "one adjacency_artifact per declared edge collection and direction, sorted by collection_id then direction" },
+    "9": { "field": "complete", "type": "bool", "rule": "exactly true in a published manifest" }
+  },
+  "violation": {
+    "1": { "field": "code", "type": "text" },
+    "2": { "field": "kind", "type": "uint", "rule": "1 vertex, 2 edge" },
+    "3": { "field": "collection_id", "type": "bstr(16)" },
+    "4": { "field": "key", "type": "null | text" },
+    "5": { "field": "endpoint", "type": "null | vertex_locator" }
+  },
+  "vertex_locator": {
+    "1": { "field": "vertex_type_id", "type": "bstr(16)" },
+    "2": { "field": "collection_id", "type": "bstr(16)" },
+    "3": { "field": "key", "type": "text" }
+  },
+  "limits": {
+    "graph_name_bytes": 63,
+    "type_or_label_bytes": 63,
+    "vertex_types": 256,
+    "edge_types": 512,
+    "labels_per_vertex_type": 16,
+    "endpoint_type_alternatives": 64,
+    "source_fingerprint_bytes": 1024,
+    "logical_graph_key_bytes": 2015,
+    "physical_collection_key_bytes": 2048,
+    "record_body_bytes": 16777216,
+    "reported_violations": 1000,
+    "validation_memory_min_bytes": 8388608,
+    "validation_memory_default_bytes": 67108864,
+    "validation_memory_max_bytes": 1073741824,
+    "validation_temporary_min_bytes": 16777216,
+    "validation_temporary_default_bytes": 4294967296,
+    "validation_temporary_max_bytes": 1099511627776,
+    "validation_work_fragments": 2048
+  }
+}

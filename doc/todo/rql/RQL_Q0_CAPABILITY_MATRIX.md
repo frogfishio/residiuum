@@ -118,7 +118,7 @@ amendment of this matrix and the programme §2 tables.
 | TC-FTS | Full-text search | `deliberate-exclusion` | FUTURE_ROADMAP |
 | TC-VEC | Vector search | `deliberate-exclusion` | FUTURE_ROADMAP |
 | TC-GEO | Geospatial search | `deliberate-exclusion` | FUTURE_ROADMAP |
-| TC-GRAPH | Recursive graph traversal | `deliberate-exclusion` | FUTURE_ROADMAP |
+| TC-GRAPH | Native graph pattern, traversal, path and analytics | `deliberate-exclusion` | [GRAPH_ENGINE_SPEC](../graph/GRAPH_ENGINE_SPEC.md) + staged plan |
 | TC-CHANGE | Change streams / live queries | `deliberate-exclusion` | FUTURE_ROADMAP |
 | TC-SPILL | Analytics-scale external-spill pipelines | `deliberate-exclusion` | FUTURE_ROADMAP |
 | TC-WRITE-Q | Server-side write/update query pipelines | `deliberate-exclusion` | RQL read-only doctrine |

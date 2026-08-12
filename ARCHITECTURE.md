@@ -34,6 +34,8 @@ Governing recovery rule: *What is gone is gone. What remains still lives.*
 | Residiuum Rule Expression (RRE) constraint language and Invariant Core | [RRE_SPEC.md](./doc/todo/rre/RRE_SPEC.md) |
 | Collection-owned behaviour and default scope confinement | [COLLECTION_CONTRACT_SPEC.md](./doc/todo/rre/COLLECTION_CONTRACT_SPEC.md) |
 | Bounded serializable state transitions and relationship integrity | [ATOMICS_SPEC.md](./doc/todo/atomics/ATOMICS_SPEC.md) |
+| Native property graph model, traversal, paths, analytics and staged delivery | [GRAPH_ENGINE_SPEC.md](./doc/todo/graph/GRAPH_ENGINE_SPEC.md), [delivery plan](./doc/todo/graph/GRAPH_ENGINE_DELIVERY_PLAN.md), [GRF-0/1 developer handoff](./doc/todo/graph/GRF01_DEVELOPER_HANDOFF.md) |
+| Provisional Kiku/COBOL indexed-file lateral rehosting | [KIKU_COBOL_ISAM_REHOSTING_SPEC.md](./doc/todo/integrations/KIKU_COBOL_ISAM_REHOSTING_SPEC.md) |
 | Durable security and administrative evidence | [EVIDENCE_LEDGER_SPEC.md](./doc/todo/evidence/EVIDENCE_LEDGER_SPEC.md) |
 | Operational telemetry collection and Ratatouille export | [TELEMETRY_SPEC.md](./doc/todo/telemetry/TELEMETRY_SPEC.md) |
 | First-party desktop database IDE | [STUDIO_SPEC.md](./doc/todo/studio/STUDIO_SPEC.md), [implementation plan](./doc/todo/studio/STUDIO_IMPLEMENTATION_PLAN.md) |

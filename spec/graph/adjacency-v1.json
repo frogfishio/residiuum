@@ -1,0 +1,110 @@
+{
+  "profile": "residiuum-graph-adjacency-v1",
+  "status": "frozen",
+  "byte_order": "little-endian except tuple string lengths, which are big-endian",
+  "artifact_identity": {
+    "algorithm": "BLAKE3-256",
+    "domain": "RESIDIUUM-GRAPH-ADJACENCY-ARTIFACT-V1",
+    "input": [
+      "domain_utf8_without_terminator",
+      "heap_id_16",
+      "graph_id_16",
+      "definition_revision_32",
+      "generation_id_16",
+      "edge_collection_id_16",
+      "direction_u8"
+    ]
+  },
+  "path_root": "deployment derived-data root, never authoritative segment or Recovery Shadow namespaces",
+  "artifact_path": "graph/adjacency/<artifact_id_first_byte_lower_hex>/<artifact_id_lower_hex>.gai",
+  "header": {
+    "encoded_length": 204,
+    "fields_in_order": [
+      { "name": "magic", "type": "bytes[8]", "value_ascii": "RGADJ001" },
+      { "name": "version", "type": "u32le", "value": 1 },
+      { "name": "header_len", "type": "u32le", "value": 204 },
+      { "name": "heap_id", "type": "bytes[16]" },
+      { "name": "graph_id", "type": "bytes[16]" },
+      { "name": "definition_revision", "type": "bytes[32]" },
+      { "name": "generation_id", "type": "bytes[16]" },
+      { "name": "edge_collection_id", "type": "bytes[16]" },
+      { "name": "direction", "type": "u8", "values": { "1": "outgoing", "2": "incoming" } },
+      { "name": "reserved", "type": "bytes[7]", "value_hex": "00000000000000" },
+      { "name": "entry_count", "type": "u64le" },
+      { "name": "block_count", "type": "u32le" },
+      { "name": "block_entry_limit", "type": "u32le", "value": 4096 },
+      { "name": "generation_content_root", "type": "bytes[32]" },
+      { "name": "payload_root", "type": "bytes[32]" },
+      { "name": "header_crc32c", "type": "u32le", "covers": "header bytes [0,200)" }
+    ]
+  },
+  "tuple": {
+    "max_encoded_length": 4082,
+    "fields_in_order": [
+      { "name": "endpoint_vertex_type_id", "type": "bytes[16]" },
+      { "name": "endpoint_collection_id", "type": "bytes[16]" },
+      { "name": "endpoint_key_len", "type": "u16be", "range": "1..=2015" },
+      { "name": "endpoint_key", "type": "utf8[endpoint_key_len]", "nul_forbidden": true },
+      { "name": "edge_type_id", "type": "bytes[16]" },
+      { "name": "edge_key_len", "type": "u16be", "range": "1..=2015" },
+      { "name": "edge_key", "type": "utf8[edge_key_len]", "nul_forbidden": true }
+    ],
+    "ordering": "unsigned lexicographic comparison of the encoded tuple bytes",
+    "duplicates": "rejected"
+  },
+  "directory_entry": {
+    "fields_in_order": [
+      { "name": "file_offset", "type": "u64le", "rule": "absolute offset to block encoded_len" },
+      { "name": "encoded_len", "type": "u32le", "rule": "entire block including prefix and crc" },
+      { "name": "entry_count", "type": "u32le", "range": "1..=4096" },
+      { "name": "first_tuple_len", "type": "u32le", "range": "54..=4082" },
+      { "name": "first_tuple", "type": "bytes[first_tuple_len]" },
+      { "name": "last_tuple_len", "type": "u32le", "range": "54..=4082" },
+      { "name": "last_tuple", "type": "bytes[last_tuple_len]" },
+      { "name": "block_hash", "type": "bytes[32]", "rule": "BLAKE3-256 of the entire encoded block" }
+    ]
+  },
+  "block": {
+    "fields_in_order": [
+      { "name": "encoded_len", "type": "u32le", "rule": "entire block including prefix and crc" },
+      { "name": "entry_count", "type": "u32le", "range": "1..=4096" },
+      { "name": "entries", "type": "repeat(entry_count, u32le tuple_len + tuple bytes)" },
+      { "name": "block_crc32c", "type": "u32le", "covers": "all preceding bytes in this block" }
+    ]
+  },
+  "payload_root": {
+    "algorithm": "BLAKE3-256",
+    "domain": "RESIDIUUM-GRAPH-ADJACENCY-PAYLOAD-V1",
+    "input": ["domain_utf8_without_terminator", "directory_block_hashes_in_order"]
+  },
+  "manifest": {
+    "codec": "deterministic CBOR adjacency_manifest map from cbor-v1.json",
+    "identity": "BLAKE3-256(RESIDIUUM-GRAPH-ADJACENCY-MANIFEST-V1 || canonical_manifest_cbor)",
+    "path": "graph/adjacency/manifests/<manifest_id_first_byte_lower_hex>/<manifest_id_lower_hex>.gam",
+    "publication": "write artifacts and manifest to a same-filesystem temporary build directory; sync artifact files; sync temporary directory; rename artifacts to final immutable paths; sync artifact parent directories; rename manifest last; sync manifest parent directory",
+    "current": "only a verified manifest whose complete field is true and whose identity is named by the immutable generation binding"
+  },
+  "decoder_invariants": [
+    "all length and offset arithmetic is checked before allocation or seek",
+    "file length equals the end of the final block; no trailing bytes",
+    "zero entries implies zero blocks and an empty directory",
+    "non-zero entries implies one or more blocks",
+    "directory offsets are strictly increasing and non-overlapping",
+    "directory entry counts sum exactly to header entry_count",
+    "first_tuple and last_tuple equal their decoded block boundaries",
+    "tuples are strictly increasing within and across blocks",
+    "all header identities equal the lookup binding",
+    "every manifest artifact build_id equals the manifest build_id and every required collection-direction pair appears exactly once",
+    "CRC32C and BLAKE3 checks all pass before the artifact can claim coverage"
+  ],
+  "golden_one_entry_outgoing": {
+    "description": "source-analysis-v1 DependsOn edge depends/a/b indexed from module/a",
+    "artifact_id_hex": "8d378ae8e80f2c77d07d931f92095319ce773ce4b8447620f4a6d9c42235b9d8",
+    "payload_root_hex": "cf03e2c8215580d63ac3ab5371a6a88ea7053c249d98dc590a99e6f50c540ea7",
+    "block_hash_hex": "c5d72adbd288a3155c85095a89ab758856086f12eb61ce3e2cf9476d9184d020",
+    "header_crc32c_hex_le_bytes": "5c914d30",
+    "block_crc32c_hex_le_bytes": "fc946679",
+    "file_length": 489,
+    "file_hex": "524741444a30303101000000cc000000101112131415461798191a1b1c1d1e1f2021222324254627a8292a2b2c2d2e2f502468ecde1b3c14aa24992564bea33849387a24efd4b32535595aa9257d087b808182838485468788898a8b8c8d8e8f7172737475764878897a7b7c7d7e7f8001000000000000000100000000000000010000000010000006b5212d69af8c5a35f2d8c0601ba33ad04ab0e8880ab1af9bef97684f05c528cf03e2c8215580d63ac3ab5371a6a88ea7053c249d98dc590a99e6f50c540ea75c914d3092010000000000005700000001000000470000003031323334354637b8393a3b3c3d3e3f6061626364654667a8696a6b6c6d6e6f00086d6f64756c652f61505152535455465798595a5b5c5d5e5f000b646570656e64732f612f62470000003031323334354637b8393a3b3c3d3e3f6061626364654667a8696a6b6c6d6e6f00086d6f64756c652f61505152535455465798595a5b5c5d5e5f000b646570656e64732f612f62c5d72adbd288a3155c85095a89ab758856086f12eb61ce3e2cf9476d9184d0205700000001000000470000003031323334354637b8393a3b3c3d3e3f6061626364654667a8696a6b6c6d6e6f00086d6f64756c652f61505152535455465798595a5b5c5d5e5f000b646570656e64732f612f62fc946679"
+  }
+}

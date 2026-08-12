@@ -107,6 +107,9 @@ RQL v1 deliberately excludes:
 - arbitrary user functions;
 - callbacks, recursion, and loops;
 - implicit cross-Heap reads;
+- native graph pattern, traversal, path, and algorithm constructs until a
+  profile from
+  [GRAPH_ENGINE_SPEC.md](../../todo/graph/GRAPH_ENGINE_SPEC.md) is admitted;
 - unbounded recursive traversal;
 - SQL-style flattening joins;
 - SQL-style offset execution that silently enumerates and discards a prefix;
