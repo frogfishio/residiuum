@@ -2,6 +2,9 @@
 
 Status: Draft v0.1
 
+Designer-ready long-form product and landing-page source:
+[TECHNICAL_SALES_MASTER_COPY.md](./TECHNICAL_SALES_MASTER_COPY.md).
+
 ## 1. The problem
 
 Most databases behave as a single logical machine.
