@@ -13,6 +13,7 @@ plan codec. ATM-0.3 freezes accepted/rejected vectors in
 ATM-0.4 is the hostile decoder corpus
 ([`spec/atomics/hostile-corpus.json`](../../spec/atomics/hostile-corpus.json)).
 ATM-0.5 is the serial in-memory oracle and shared history format.
+ATM-0.6 writes `target/atomics-evidence/atm-0/manifest.json` (semantic/byte freeze).
 
 Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 §§4–13. Programme: [`ATOMICS_IMPLEMENTATION_PLAN.md`](../../doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md) §4 and §6.
@@ -27,6 +28,6 @@ Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 | `canonical` | Domain separators, CBOR codec, content root, target order |
 | `evidence` | Prepare / member / decision records and lifecycle phases |
 | `outcome` | Logical/material status, receipts, abort and refuse reasons |
-| `oracle` | Reserved crate boundary; serial oracle is ATM-0.5 |
+| `oracle` | Serial in-memory oracle and shared history format |
 
 License: MIT.
