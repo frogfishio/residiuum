@@ -292,7 +292,11 @@ impl AtomicDecision {
     }
 
     /// Compact lifetime tombstone that copies the abort reason when present.
-    pub fn tombstone(self, content_root: ContentRoot, decision_hash: [u8; 32]) -> DecisionTombstone {
+    pub fn tombstone(
+        &self,
+        content_root: ContentRoot,
+        decision_hash: [u8; 32],
+    ) -> DecisionTombstone {
         DecisionTombstone {
             atomic_id: self.atomic_id,
             content_root,
@@ -304,7 +308,7 @@ impl AtomicDecision {
     }
 
     /// Reconstruct [`AtomicOutcome::NotCommitted`] from this decision.
-    pub fn not_committed_outcome(self) -> Result<AtomicOutcome, AtomicsError> {
+    pub fn not_committed_outcome(&self) -> Result<AtomicOutcome, AtomicsError> {
         not_committed_outcome(self.atomic_id, self.decision, self.abort_reason)
     }
 }
@@ -316,7 +320,7 @@ impl DecisionTombstone {
     }
 
     /// Reconstruct [`AtomicOutcome::NotCommitted`] after detail removal.
-    pub fn not_committed_outcome(self) -> Result<AtomicOutcome, AtomicsError> {
+    pub fn not_committed_outcome(&self) -> Result<AtomicOutcome, AtomicsError> {
         not_committed_outcome(self.atomic_id, self.decision, self.abort_reason)
     }
 }

@@ -256,7 +256,10 @@ mod tests {
         );
         assert_eq!(AtomicAbortReason::PreconditionConflict.wire_code(), 1);
         assert_eq!(AtomicAbortReason::CoverageIncomplete.wire_code(), 4);
-        assert_eq!(AtomicAbortReason::from_wire_code(3), Some(AtomicAbortReason::RecoveryAbort));
+        assert_eq!(
+            AtomicAbortReason::from_wire_code(3),
+            Some(AtomicAbortReason::RecoveryAbort)
+        );
         assert_eq!(AtomicAbortReason::from_wire_code(0), None);
         assert_eq!(
             AtomicRefuseReason::AtomicIdConflict.as_str(),

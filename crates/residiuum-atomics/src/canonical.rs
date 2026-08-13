@@ -478,7 +478,10 @@ pub(crate) fn as_map(v: &Value) -> Result<&[(u64, Value)], AtomicsError> {
     }
 }
 
-pub(crate) fn require_value<'a>(map: &'a [(u64, Value)], key: u64) -> Result<&'a Value, AtomicsError> {
+pub(crate) fn require_value<'a>(
+    map: &'a [(u64, Value)],
+    key: u64,
+) -> Result<&'a Value, AtomicsError> {
     map.iter()
         .find(|(k, _)| *k == key)
         .map(|(_, v)| v)
@@ -532,7 +535,10 @@ pub(crate) fn require_bstr32(map: &[(u64, Value)], key: u64) -> Result<[u8; 32],
     <[u8; 32]>::try_from(b).map_err(|_| AtomicsError::Refused(AtomicRefuseReason::MalformedInput))
 }
 
-pub(crate) fn optional_bytes(map: &[(u64, Value)], key: u64) -> Result<Option<Vec<u8>>, AtomicsError> {
+pub(crate) fn optional_bytes(
+    map: &[(u64, Value)],
+    key: u64,
+) -> Result<Option<Vec<u8>>, AtomicsError> {
     match map.iter().find(|(k, _)| *k == key) {
         None => Ok(None),
         Some((_, Value::Bytes(b))) => Ok(Some(b.clone())),
@@ -540,7 +546,10 @@ pub(crate) fn optional_bytes(map: &[(u64, Value)], key: u64) -> Result<Option<Ve
     }
 }
 
-pub(crate) fn optional_bstr32(map: &[(u64, Value)], key: u64) -> Result<Option<[u8; 32]>, AtomicsError> {
+pub(crate) fn optional_bstr32(
+    map: &[(u64, Value)],
+    key: u64,
+) -> Result<Option<[u8; 32]>, AtomicsError> {
     match optional_bytes(map, key)? {
         None => Ok(None),
         Some(b) => Ok(Some(<[u8; 32]>::try_from(b).map_err(|_| {
@@ -549,7 +558,10 @@ pub(crate) fn optional_bstr32(map: &[(u64, Value)], key: u64) -> Result<Option<[
     }
 }
 
-pub(crate) fn optional_version(map: &[(u64, Value)], key: u64) -> Result<Option<VersionId>, AtomicsError> {
+pub(crate) fn optional_version(
+    map: &[(u64, Value)],
+    key: u64,
+) -> Result<Option<VersionId>, AtomicsError> {
     match optional_bytes(map, key)? {
         None => Ok(None),
         Some(b) => {
@@ -574,7 +586,10 @@ fn optional_collection(
     }
 }
 
-pub(crate) fn refuse_unknown_keys(map: &[(u64, Value)], allowed: &[u64]) -> Result<(), AtomicsError> {
+pub(crate) fn refuse_unknown_keys(
+    map: &[(u64, Value)],
+    allowed: &[u64],
+) -> Result<(), AtomicsError> {
     for (k, _) in map {
         if !allowed.contains(k) {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));

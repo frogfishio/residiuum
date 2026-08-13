@@ -6,15 +6,14 @@
 use crate::canonical::{
     as_map, decode_key, decode_limits, encode_key_map, encode_limits, key_order_bytes,
     optional_bstr32, optional_version, refuse_unknown_keys, require_bstr16, require_bstr32,
-    require_u32, require_u8, require_value,
-    DOMAIN_ATOMIC_DECISION, DOMAIN_ATOMIC_MANIFEST, DOMAIN_ATOMIC_MEMBER, DOMAIN_ATOMIC_PREPARE,
-    DOMAIN_ATOMIC_TOMBSTONE,
+    require_u32, require_u8, require_value, DOMAIN_ATOMIC_DECISION, DOMAIN_ATOMIC_MANIFEST,
+    DOMAIN_ATOMIC_MEMBER, DOMAIN_ATOMIC_PREPARE, DOMAIN_ATOMIC_TOMBSTONE,
 };
 use crate::cbor::{self, Value};
 use crate::error::AtomicsError;
 use crate::evidence::{
-    validate_decision_axis, AtomicDecision, AtomicMember, AtomicPrepare, DecisionCode,
-    DecisionTombstone, Durability, ObjectIdentity,
+    AtomicDecision, AtomicMember, AtomicPrepare, DecisionCode, DecisionTombstone, Durability,
+    ObjectIdentity,
 };
 use crate::id::{AtomicId, CollectionId, ContentRoot, HeapId};
 use crate::outcome::{AtomicAbortReason, AtomicRefuseReason};
@@ -78,12 +77,17 @@ fn optional_u64(map: &[(u64, Value)], key: u64) -> Result<Option<u64>, AtomicsEr
     }
 }
 
-fn optional_abort(map: &[(u64, Value)], key: u64) -> Result<Option<AtomicAbortReason>, AtomicsError> {
+fn optional_abort(
+    map: &[(u64, Value)],
+    key: u64,
+) -> Result<Option<AtomicAbortReason>, AtomicsError> {
     match optional_u64(map, key)? {
         None => Ok(None),
         Some(n) => {
             let code = u8::try_from(n).map_err(|_| malformed())?;
-            AtomicAbortReason::from_wire_code(code).ok_or_else(malformed)
+            Ok(Some(
+                AtomicAbortReason::from_wire_code(code).ok_or_else(malformed)?,
+            ))
         }
     }
 }
@@ -115,16 +119,31 @@ fn decode_object_identity(v: &Value) -> Result<ObjectIdentity, AtomicsError> {
 /// Encode a prepare record to deterministic CBOR.
 pub fn encode_prepare(prepare: &AtomicPrepare) -> Result<Vec<u8>, AtomicsError> {
     cbor::encode_map(&[
-        (PREP_ATOMIC_ID, Value::Bytes(prepare.atomic_id.to_bytes().to_vec())),
-        (PREP_HEAP_ID, Value::Bytes(prepare.heap_id.to_bytes().to_vec())),
-        (PREP_SCOPE, Value::Uint(u64::from(prepare.scope.wire_code()))),
-        (PREP_CONTENT_ROOT, Value::Bytes(prepare.content_root.to_bytes().to_vec())),
+        (
+            PREP_ATOMIC_ID,
+            Value::Bytes(prepare.atomic_id.to_bytes().to_vec()),
+        ),
+        (
+            PREP_HEAP_ID,
+            Value::Bytes(prepare.heap_id.to_bytes().to_vec()),
+        ),
+        (
+            PREP_SCOPE,
+            Value::Uint(u64::from(prepare.scope.wire_code())),
+        ),
+        (
+            PREP_CONTENT_ROOT,
+            Value::Bytes(prepare.content_root.to_bytes().to_vec()),
+        ),
         (PREP_FRONTIER, Value::Bytes(prepare.frontier.to_vec())),
         (
             PREP_MANIFEST_ROOT,
             Value::Bytes(prepare.ordered_member_manifest_root.to_vec()),
         ),
-        (PREP_READ_SET_ROOT, Value::Bytes(prepare.read_set_root.to_vec())),
+        (
+            PREP_READ_SET_ROOT,
+            Value::Bytes(prepare.read_set_root.to_vec()),
+        ),
         (
             PREP_PREDICATE_SET_ROOT,
             Value::Bytes(prepare.predicate_set_root.to_vec()),
@@ -141,7 +160,8 @@ pub fn encode_prepare(prepare: &AtomicPrepare) -> Result<Vec<u8>, AtomicsError> 
 pub fn decode_prepare(bytes: &[u8]) -> Result<AtomicPrepare, AtomicsError> {
     let map = cbor::decode_map(bytes)?;
     refuse_unknown_keys(&map, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])?;
-    let scope = CoordinationScope::from_wire_code(require_u8(&map, PREP_SCOPE)?).ok_or_else(malformed)?;
+    let scope =
+        CoordinationScope::from_wire_code(require_u8(&map, PREP_SCOPE)?).ok_or_else(malformed)?;
     Ok(AtomicPrepare {
         atomic_id: AtomicId::from_bytes(require_bstr32(&map, PREP_ATOMIC_ID)?)?,
         heap_id: HeapId::from_bytes(require_bstr16(&map, PREP_HEAP_ID)?)?,
@@ -158,16 +178,28 @@ pub fn decode_prepare(bytes: &[u8]) -> Result<AtomicPrepare, AtomicsError> {
 
 /// `BLAKE3-256(RESIDIUUM-ATOMIC-PREPARE-V1 || canonical_bytes)`.
 pub fn prepare_hash(prepare: &AtomicPrepare) -> Result<[u8; 32], AtomicsError> {
-    Ok(domain_hash(DOMAIN_ATOMIC_PREPARE, &encode_prepare(prepare)?))
+    Ok(domain_hash(
+        DOMAIN_ATOMIC_PREPARE,
+        &encode_prepare(prepare)?,
+    ))
 }
 
 /// Encode a member record to deterministic CBOR.
 pub fn encode_member(member: &AtomicMember) -> Result<Vec<u8>, AtomicsError> {
     let mut entries = vec![
-        (MEM_ATOMIC_ID, Value::Bytes(member.atomic_id.to_bytes().to_vec())),
+        (
+            MEM_ATOMIC_ID,
+            Value::Bytes(member.atomic_id.to_bytes().to_vec()),
+        ),
         (MEM_ORDINAL, Value::Uint(u64::from(member.ordinal))),
-        (MEM_OBJECT_IDENTITY, encode_object_identity(&member.object_identity)?),
-        (MEM_KIND, Value::Uint(u64::from(member.member_kind.wire_code()))),
+        (
+            MEM_OBJECT_IDENTITY,
+            encode_object_identity(&member.object_identity)?,
+        ),
+        (
+            MEM_KIND,
+            Value::Uint(u64::from(member.member_kind.wire_code())),
+        ),
     ];
     if let Some(v) = member.before_version {
         entries.push((MEM_BEFORE_VERSION, Value::Bytes(v.to_bytes().to_vec())));
@@ -175,7 +207,10 @@ pub fn encode_member(member: &AtomicMember) -> Result<Vec<u8>, AtomicsError> {
     if let Some(h) = member.after_content_hash {
         entries.push((MEM_AFTER_HASH, Value::Bytes(h.to_vec())));
     }
-    entries.push((MEM_EVENT_ID, Value::Bytes(member.event_id.to_bytes().to_vec())));
+    entries.push((
+        MEM_EVENT_ID,
+        Value::Bytes(member.event_id.to_bytes().to_vec()),
+    ));
     cbor::encode_map(&entries)
 }
 
@@ -183,9 +218,9 @@ pub fn encode_member(member: &AtomicMember) -> Result<Vec<u8>, AtomicsError> {
 pub fn decode_member(bytes: &[u8]) -> Result<AtomicMember, AtomicsError> {
     let map = cbor::decode_map(bytes)?;
     refuse_unknown_keys(&map, &[1, 2, 3, 4, 5, 6, 7])?;
-    let kind = MutationKind::from_wire_code(require_u8(&map, MEM_KIND)?).ok_or(AtomicsError::Refused(
-        AtomicRefuseReason::UnknownMutationKind,
-    ))?;
+    let kind = MutationKind::from_wire_code(require_u8(&map, MEM_KIND)?).ok_or(
+        AtomicsError::Refused(AtomicRefuseReason::UnknownMutationKind),
+    )?;
     Ok(AtomicMember {
         atomic_id: AtomicId::from_bytes(require_bstr32(&map, MEM_ATOMIC_ID)?)?,
         ordinal: require_u32(&map, MEM_ORDINAL)?,
@@ -245,11 +280,23 @@ pub fn ordered_member_manifest_root(
 pub fn encode_decision(decision: &AtomicDecision) -> Result<Vec<u8>, AtomicsError> {
     decision.validate()?;
     let mut entries = vec![
-        (DEC_ATOMIC_ID, Value::Bytes(decision.atomic_id.to_bytes().to_vec())),
-        (DEC_PREPARE_HASH, Value::Bytes(decision.prepare_hash.to_vec())),
+        (
+            DEC_ATOMIC_ID,
+            Value::Bytes(decision.atomic_id.to_bytes().to_vec()),
+        ),
+        (
+            DEC_PREPARE_HASH,
+            Value::Bytes(decision.prepare_hash.to_vec()),
+        ),
         (DEC_MEMBER_ROOT, Value::Bytes(decision.member_root.to_vec())),
-        (DEC_MEMBER_COUNT, Value::Uint(u64::from(decision.member_count))),
-        (DEC_DECISION, Value::Uint(u64::from(decision.decision.wire_code()))),
+        (
+            DEC_MEMBER_COUNT,
+            Value::Uint(u64::from(decision.member_count)),
+        ),
+        (
+            DEC_DECISION,
+            Value::Uint(u64::from(decision.decision.wire_code())),
+        ),
     ];
     if let Some(pos) = decision.commit_position {
         entries.push((DEC_COMMIT_POSITION, Value::Uint(pos)));
@@ -284,19 +331,28 @@ pub fn decode_decision(bytes: &[u8]) -> Result<AtomicDecision, AtomicsError> {
 
 /// `BLAKE3-256(RESIDIUUM-ATOMIC-DECISION-V1 || canonical_bytes)`.
 pub fn decision_hash(decision: &AtomicDecision) -> Result<[u8; 32], AtomicsError> {
-    Ok(domain_hash(DOMAIN_ATOMIC_DECISION, &encode_decision(decision)?))
+    Ok(domain_hash(
+        DOMAIN_ATOMIC_DECISION,
+        &encode_decision(decision)?,
+    ))
 }
 
 /// Encode a lifetime tombstone to deterministic CBOR.
 pub fn encode_tombstone(tombstone: &DecisionTombstone) -> Result<Vec<u8>, AtomicsError> {
     tombstone.validate()?;
     let mut entries = vec![
-        (TOMB_ATOMIC_ID, Value::Bytes(tombstone.atomic_id.to_bytes().to_vec())),
+        (
+            TOMB_ATOMIC_ID,
+            Value::Bytes(tombstone.atomic_id.to_bytes().to_vec()),
+        ),
         (
             TOMB_CONTENT_ROOT,
             Value::Bytes(tombstone.content_root.to_bytes().to_vec()),
         ),
-        (TOMB_DECISION, Value::Uint(u64::from(tombstone.decision.wire_code()))),
+        (
+            TOMB_DECISION,
+            Value::Uint(u64::from(tombstone.decision.wire_code())),
+        ),
     ];
     if let Some(pos) = tombstone.commit_position {
         entries.push((TOMB_COMMIT_POSITION, Value::Uint(pos)));
@@ -306,7 +362,10 @@ pub fn encode_tombstone(tombstone: &DecisionTombstone) -> Result<Vec<u8>, Atomic
         Value::Bytes(tombstone.decision_hash.to_vec()),
     ));
     if let Some(reason) = tombstone.abort_reason {
-        entries.push((TOMB_ABORT_REASON, Value::Uint(u64::from(reason.wire_code()))));
+        entries.push((
+            TOMB_ABORT_REASON,
+            Value::Uint(u64::from(reason.wire_code())),
+        ));
     }
     cbor::encode_map(&entries)
 }
@@ -329,7 +388,10 @@ pub fn decode_tombstone(bytes: &[u8]) -> Result<DecisionTombstone, AtomicsError>
 
 /// `BLAKE3-256(RESIDIUUM-ATOMIC-TOMBSTONE-V1 || canonical_bytes)`.
 pub fn tombstone_hash(tombstone: &DecisionTombstone) -> Result<[u8; 32], AtomicsError> {
-    Ok(domain_hash(DOMAIN_ATOMIC_TOMBSTONE, &encode_tombstone(tombstone)?))
+    Ok(domain_hash(
+        DOMAIN_ATOMIC_TOMBSTONE,
+        &encode_tombstone(tombstone)?,
+    ))
 }
 
 #[cfg(test)]
@@ -435,7 +497,11 @@ mod tests {
         let ab = encode_decision(&aborted).unwrap();
         let again = decode_decision(&ab).unwrap();
         assert_eq!(again.abort_reason, Some(AtomicAbortReason::RecoveryAbort));
-        match again.tombstone(root(), decision_hash(&again).unwrap()).not_committed_outcome().unwrap() {
+        match again
+            .tombstone(root(), decision_hash(&again).unwrap())
+            .not_committed_outcome()
+            .unwrap()
+        {
             crate::outcome::AtomicOutcome::NotCommitted { reason, .. } => {
                 assert_eq!(reason, AtomicAbortReason::RecoveryAbort);
             }
@@ -461,6 +527,23 @@ mod tests {
         );
         bad.abort_reason = None;
         assert!(encode_decision(&bad).is_err());
+    }
+
+    #[test]
+    fn unknown_decision_code_is_refused() {
+        let bytes = cbor::encode_map(&[
+            (1, Value::Bytes(aid().to_bytes().to_vec())),
+            (2, Value::Bytes([1u8; 32].to_vec())),
+            (3, Value::Bytes([2u8; 32].to_vec())),
+            (4, Value::Uint(0)),
+            (5, Value::Uint(3)),
+            (7, Value::Uint(1)),
+        ])
+        .unwrap();
+        assert_eq!(
+            decode_decision(&bytes).unwrap_err().as_str(),
+            "malformed_input"
+        );
     }
 
     #[test]

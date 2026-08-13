@@ -263,9 +263,7 @@ impl<'a> Cursor<'a> {
                 }
                 Ok(Value::Array(items))
             }
-            5 => {
-                Ok(Value::Map(self.read_canonical_map(depth)?))
-            }
+            5 => Ok(Value::Map(self.read_canonical_map(depth)?)),
             6 => Err(CborError::TagRejected.into()),
             7 => Err(CborError::Unsupported.into()),
             3 => Err(CborError::Unsupported.into()),

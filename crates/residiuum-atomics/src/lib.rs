@@ -33,9 +33,9 @@ pub use evidence::{
     DecisionTombstone, Durability, MemberPhase, ObjectIdentity, PreparePhase, PublicationPhase,
 };
 pub use evidence_cbor::{
-    decision_hash, decode_decision, decode_member, decode_prepare, decode_tombstone, encode_decision,
-    encode_member, encode_prepare, encode_tombstone, member_hash, ordered_member_manifest_root,
-    prepare_hash, tombstone_hash,
+    decision_hash, decode_decision, decode_member, decode_prepare, decode_tombstone,
+    encode_decision, encode_member, encode_prepare, encode_tombstone, member_hash,
+    ordered_member_manifest_root, prepare_hash, tombstone_hash,
 };
 pub use id::{AtomicId, CollectionId, ContentRoot, HeapId, VersionId};
 pub use limits::ResourceLimits;
