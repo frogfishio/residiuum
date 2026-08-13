@@ -427,19 +427,37 @@ pub(crate) fn decode_key(v: &Value) -> Result<CanonicalKey, AtomicsError> {
     refuse_unknown_keys(map, &[1, 2, 3])?;
     let kind = require_u8(map, 1)?;
     let payload = require_bytes(map, 2)?;
+    let has_scale = map.iter().any(|(k, _)| *k == 3);
     match kind {
         1 => {
+            refuse_scale_on_non_decimal(has_scale)?;
             let s = String::from_utf8(payload)
                 .map_err(|_| AtomicsError::Refused(AtomicRefuseReason::InvalidValue))?;
             Ok(CanonicalKey::String(s))
         }
-        2 => Ok(CanonicalKey::Opaque(payload)),
-        3 => Ok(CanonicalKey::Integer(payload)),
+        2 => {
+            refuse_scale_on_non_decimal(has_scale)?;
+            Ok(CanonicalKey::Opaque(payload))
+        }
+        3 => {
+            refuse_scale_on_non_decimal(has_scale)?;
+            Ok(CanonicalKey::Integer(payload))
+        }
         4 => Ok(CanonicalKey::Decimal {
             coefficient: payload,
             scale: decode_int(require_value(map, 3)?)?,
         }),
         _ => Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue)),
+    }
+}
+
+fn refuse_scale_on_non_decimal(has_scale: bool) -> Result<(), AtomicsError> {
+    if has_scale {
+        // Field 3 is decimal-only. Ignoring it would accept two byte encodings
+        // for one logical string/opaque/integer key.
+        Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))
+    } else {
+        Ok(())
     }
 }
 
@@ -678,5 +696,44 @@ mod tests {
                 }
             }
         }
+    }
+
+    fn key_map(kind: u64, payload: &[u8], scale: Option<i64>) -> Value {
+        let mut e = vec![(1, Value::Uint(kind)), (2, Value::Bytes(payload.to_vec()))];
+        if let Some(s) = scale {
+            e.push((3, encode_int(s)));
+        }
+        Value::Map(e)
+    }
+
+    #[test]
+    fn scale_is_decimal_only() {
+        assert_eq!(
+            decode_key(&key_map(1, b"k", Some(0))).unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+        );
+        assert_eq!(
+            decode_key(&key_map(2, b"k", Some(0))).unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+        );
+        assert_eq!(
+            decode_key(&key_map(3, b"k", Some(0))).unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+        );
+        assert_eq!(
+            decode_key(&key_map(4, b"\x01", None)).unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+        );
+        assert_eq!(
+            decode_key(&key_map(4, b"\x01", Some(2))).unwrap(),
+            CanonicalKey::Decimal {
+                coefficient: vec![1],
+                scale: 2,
+            }
+        );
+        assert_eq!(
+            decode_key(&key_map(1, b"k", None)).unwrap(),
+            CanonicalKey::String("k".into())
+        );
     }
 }

@@ -133,7 +133,7 @@
   "canonical_key_labels": {
     "1": { "field": "kind", "type": "uint", "required": true },
     "2": { "field": "payload", "type": "bstr", "required": true },
-    "3": { "field": "scale", "type": "int", "required": false, "rule": "decimal only" }
+    "3": { "field": "scale", "type": "int", "required": false, "rule": "required for decimal; forbidden otherwise" }
   },
   "mutation_labels": {
     "1": { "field": "kind", "type": "uint", "required": true },
