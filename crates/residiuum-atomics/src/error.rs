@@ -40,6 +40,28 @@ pub enum CborError {
     /// CBOR tags are rejected.
     #[error("CBOR tags are not allowed")]
     TagRejected,
+    /// Nested maps/arrays exceed the declared decode depth.
+    #[error("CBOR nesting exceeds declared depth")]
+    DepthExceeded,
+}
+
+impl CborError {
+    /// Stable snake_case family name for the hostile corpus.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Truncated => "truncated",
+            Self::TrailingBytes => "trailing_bytes",
+            Self::NotMap => "not_map",
+            Self::Indefinite => "indefinite",
+            Self::NonShortest => "non_shortest",
+            Self::DuplicateKey => "duplicate_key",
+            Self::UnsortedKeys => "unsorted_keys",
+            Self::NonUintKey => "non_uint_key",
+            Self::Unsupported => "unsupported",
+            Self::TagRejected => "tag_rejected",
+            Self::DepthExceeded => "depth_exceeded",
+        }
+    }
 }
 
 /// Fail-closed error for identity and constructor validation.
@@ -65,7 +87,7 @@ impl AtomicsError {
         match self {
             Self::InvalidIdentity(_) => "invalid_identity",
             Self::EntropyUnavailable => "entropy_unavailable",
-            Self::Cbor(_) => "cbor",
+            Self::Cbor(err) => err.as_str(),
             Self::Refused(reason) => reason.as_str(),
         }
     }

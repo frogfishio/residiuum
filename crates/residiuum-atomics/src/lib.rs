@@ -4,6 +4,7 @@
 //! freezes identity, scope, limits, vocabulary, outcomes, and formal lifecycle
 //! states. ATM-0.2 adds deterministic CBOR, content-root hashing, and
 //! canonical target order. The serial oracle is ATM-0.5.
+//! ATM-0.4 is the hostile decoder corpus.
 
 #![deny(missing_docs)]
 
@@ -23,6 +24,7 @@ pub use canonical::{
     DOMAIN_ATOMIC_MANIFEST, DOMAIN_ATOMIC_MEMBER, DOMAIN_ATOMIC_PREDICATES, DOMAIN_ATOMIC_PREPARE,
     DOMAIN_ATOMIC_READSET,
 };
+pub use cbor::MAX_CBOR_DEPTH;
 pub use error::{AtomicsError, CborError};
 pub use evidence::{
     AtomicDecision, AtomicLifecycle, AtomicMember, AtomicPrepare, DecisionCode, DecisionPhase,

@@ -10,6 +10,8 @@ It has no file, network, thread, store, or SDK dependency. ATM-0.2 freezes
 [`spec/atomics/cbor-v1.json`](../../spec/atomics/cbor-v1.json) and the canonical
 plan codec. ATM-0.3 freezes accepted/rejected vectors in
 [`spec/atomics/protocol-vectors.json`](../../spec/atomics/protocol-vectors.json).
+ATM-0.4 is the hostile decoder corpus
+([`spec/atomics/hostile-corpus.json`](../../spec/atomics/hostile-corpus.json)).
 
 Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 §§4–13. Programme: [`ATOMICS_IMPLEMENTATION_PLAN.md`](../../doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md) §4 and §6.

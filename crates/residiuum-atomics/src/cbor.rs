@@ -1,9 +1,13 @@
 //! Deterministic CBOR (FORMAT_SPEC §4.4 / §5 condition 6).
 //!
 //! Kept inside this crate so `residiuum-atomics` does not depend on format,
-//! store, heap, or SDK. Hostile-corpus depth is ATM-0.4; length is still bounded.
+//! store, heap, or SDK. Length is bounded by remaining bytes before allocation.
+//! Nesting is bounded by [`MAX_CBOR_DEPTH`] (ATM-0.4).
 
 use crate::error::{AtomicsError, CborError};
+
+/// Maximum nested map/array depth. Plan maps nest at most three levels.
+pub const MAX_CBOR_DEPTH: u8 = 8;
 
 pub(crate) type Map = Vec<(u64, Value)>;
 
@@ -41,7 +45,7 @@ pub(crate) fn decode_map(bytes: &[u8]) -> Result<Map, AtomicsError> {
     let mut out = Vec::new();
     for _ in 0..n {
         let key = cur.read_uint()?;
-        let val = cur.read_value()?;
+        let val = cur.read_value(1)?;
         out.push((key, val));
     }
     if !cur.is_empty() {
@@ -52,7 +56,7 @@ pub(crate) fn decode_map(bytes: &[u8]) -> Result<Map, AtomicsError> {
 
 fn validate_map(bytes: &[u8]) -> Result<(), AtomicsError> {
     let mut cur = Cursor::new(bytes);
-    cur.skip_map()?;
+    cur.skip_map(0)?;
     if !cur.is_empty() {
         return Err(CborError::TrailingBytes.into());
     }
@@ -196,7 +200,10 @@ impl<'a> Cursor<'a> {
         Ok(arg)
     }
 
-    fn skip_map(&mut self) -> Result<(), AtomicsError> {
+    fn skip_map(&mut self, depth: u8) -> Result<(), AtomicsError> {
+        if depth > MAX_CBOR_DEPTH {
+            return Err(CborError::DepthExceeded.into());
+        }
         let n = self.read_map_len()?;
         let mut prev: Option<Vec<u8>> = None;
         let mut seen = Vec::new();
@@ -214,17 +221,20 @@ impl<'a> Cursor<'a> {
                 }
             }
             prev = Some(enc);
-            self.skip_value()?;
+            self.skip_value(depth)?;
         }
         Ok(())
     }
 
-    fn skip_value(&mut self) -> Result<(), AtomicsError> {
-        let _ = self.read_value()?;
+    fn skip_value(&mut self, depth: u8) -> Result<(), AtomicsError> {
+        let _ = self.read_value(depth)?;
         Ok(())
     }
 
-    fn read_value(&mut self) -> Result<Value, AtomicsError> {
+    fn read_value(&mut self, depth: u8) -> Result<Value, AtomicsError> {
+        if depth > MAX_CBOR_DEPTH {
+            return Err(CborError::DepthExceeded.into());
+        }
         if self.remaining() == 0 {
             return Err(CborError::Truncated.into());
         }
@@ -249,7 +259,7 @@ impl<'a> Cursor<'a> {
                 let n = self.bound_len(arg, 1)?;
                 let mut items = Vec::new();
                 for _ in 0..n {
-                    items.push(self.read_value()?);
+                    items.push(self.read_value(depth + 1)?);
                 }
                 Ok(Value::Array(items))
             }
@@ -258,7 +268,7 @@ impl<'a> Cursor<'a> {
                 let mut items = Vec::new();
                 for _ in 0..n {
                     let k = self.read_uint()?;
-                    let v = self.read_value()?;
+                    let v = self.read_value(depth + 1)?;
                     items.push((k, v));
                 }
                 Ok(Value::Map(items))

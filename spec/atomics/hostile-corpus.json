@@ -1,0 +1,84 @@
+{
+  "profile": "residiuum-atomics-v1",
+  "max_cbor_depth": 8,
+  "rule": "Decoder MUST enforce declared bounds before allocating. Hostile families: depth, count, byte, duplicate-key, integer, unknown-kind, trailing-data.",
+  "vectors": [
+    {
+      "name": "nested_maps_beyond_depth",
+      "family": "depth",
+      "note": "ten nested maps; MAX_CBOR_DEPTH is 8",
+      "bytes_hex": "a101a101a101a101a101a101a101a101a101a101a0",
+      "reason": "depth_exceeded"
+    },
+    {
+      "name": "map_len_u64_max",
+      "family": "count",
+      "note": "definite map claiming 2^64-1 entries (DEF-091)",
+      "bytes_hex": "bbffffffffffffffff",
+      "reason": "truncated"
+    },
+    {
+      "name": "array_len_u64_max",
+      "family": "count",
+      "note": "map{1: array(u64::MAX)}",
+      "bytes_hex": "a1019bffffffffffffffff",
+      "reason": "truncated"
+    },
+    {
+      "name": "bstr_len_u64_max",
+      "family": "byte",
+      "note": "map{1: bstr(u64::MAX)}",
+      "bytes_hex": "a1015bffffffffffffffff",
+      "reason": "truncated"
+    },
+    {
+      "name": "duplicate_uint_key",
+      "family": "duplicate-key",
+      "note": "map{1:0, 1:1}",
+      "bytes_hex": "a201000101",
+      "reason": "duplicate_key"
+    },
+    {
+      "name": "non_shortest_uint_key",
+      "family": "integer",
+      "note": "uint 1 encoded as 0x18 0x01",
+      "bytes_hex": "a1180100",
+      "reason": "non_shortest"
+    },
+    {
+      "name": "indefinite_map",
+      "family": "integer",
+      "note": "indefinite map + break (ai=31)",
+      "bytes_hex": "bfff",
+      "reason": "indefinite"
+    },
+    {
+      "name": "cbor_tag",
+      "family": "unknown-kind",
+      "note": "map{1: tag(0) + uint 0}",
+      "bytes_hex": "a101c000",
+      "reason": "tag_rejected"
+    },
+    {
+      "name": "cbor_float16",
+      "family": "unknown-kind",
+      "note": "map{1: half-float 0}",
+      "bytes_hex": "a101f90000",
+      "reason": "unsupported"
+    },
+    {
+      "name": "text_value",
+      "family": "unknown-kind",
+      "note": "map{1: text \"a\"}; text is not in the Atomic CBOR value set",
+      "bytes_hex": "a1016161",
+      "reason": "unsupported"
+    },
+    {
+      "name": "trailing_uint",
+      "family": "trailing-data",
+      "note": "empty map plus extra 0x00",
+      "bytes_hex": "a000",
+      "reason": "trailing_bytes"
+    }
+  ]
+}
