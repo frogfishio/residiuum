@@ -1,0 +1,47 @@
+{
+  "profile": "residiuum-atomics-v1",
+  "vectors": [
+    {
+      "bytes_hex": "",
+      "name": "empty",
+      "note": "no bytes",
+      "reason": "cbor"
+    },
+    {
+      "bytes_hex": "80",
+      "name": "empty_array",
+      "note": "top-level array, not a map",
+      "reason": "cbor"
+    },
+    {
+      "bytes_hex": "a0",
+      "name": "empty_map",
+      "note": "map missing required plan fields",
+      "reason": "malformed_input"
+    },
+    {
+      "bytes_hex": "a10101",
+      "name": "profile_only",
+      "note": "only field 1",
+      "reason": "malformed_input"
+    },
+    {
+      "bytes_hex": "f4",
+      "name": "bool_false",
+      "note": "simple value, not a map",
+      "reason": "cbor"
+    },
+    {
+      "name": "duplicate_mutation_target",
+      "note": "same (collection_id, canonical key) twice as a mutation",
+      "reason": "duplicate_target",
+      "stage": "close"
+    },
+    {
+      "name": "create_missing_value",
+      "note": "create without encoded_value",
+      "reason": "invalid_value",
+      "stage": "close"
+    }
+  ]
+}

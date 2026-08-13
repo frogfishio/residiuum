@@ -8,7 +8,8 @@ the formal prepare / member / decision / publication state types.
 
 It has no file, network, thread, store, or SDK dependency. ATM-0.2 freezes
 [`spec/atomics/cbor-v1.json`](../../spec/atomics/cbor-v1.json) and the canonical
-plan codec. Fixtures, the hostile corpus, and the serial oracle are later cards.
+plan codec. ATM-0.3 freezes accepted/rejected vectors in
+[`spec/atomics/protocol-vectors.json`](../../spec/atomics/protocol-vectors.json).
 
 Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 §§4–13. Programme: [`ATOMICS_IMPLEMENTATION_PLAN.md`](../../doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md) §4 and §6.
