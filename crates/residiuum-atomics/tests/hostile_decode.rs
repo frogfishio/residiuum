@@ -24,7 +24,7 @@ fn spec_path() -> PathBuf {
 }
 
 fn evidence_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/atomics-evidence/atm-0")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/atomics-evidence/atm-0-scratch")
 }
 
 #[test]

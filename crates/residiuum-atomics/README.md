@@ -23,6 +23,9 @@ ATM-0.9 seals `AtomicProfile::Unknown` so known wire codes cannot be constructed
 as unknown and cannot alias `LocalHeapV1`.
 ATM-0.10 freezes `AtomicReceipt.durability = durable` and returns the committed
 receipt on `AtomicStatus` when committed material permits it. `NotFound` stays off the logical decision axis.
+ATM-0.11 replaces ceremonial model evidence with a finite lifecycle model and
+derived proofs. One generator writes the ATM-0 evidence pack; a separate test
+recomputes every manifest hash.
 
 Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 §§4–13. Programme: [`ATOMICS_IMPLEMENTATION_PLAN.md`](../../doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md) §4 and §6.

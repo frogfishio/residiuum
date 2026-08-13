@@ -15,6 +15,7 @@ pub mod error;
 pub mod evidence;
 mod evidence_cbor;
 pub mod id;
+pub mod lifecycle;
 pub mod limits;
 pub mod oracle;
 pub mod outcome;
@@ -38,6 +39,9 @@ pub use evidence_cbor::{
     ordered_member_manifest_root, prepare_hash, tombstone_hash,
 };
 pub use id::{AtomicId, CollectionId, ContentRoot, HeapId, VersionId};
+pub use lifecycle::{
+    check_model, LifecycleError, LifecycleEvent, LifecycleTrace, ModelCheckReport, ModelProofs,
+};
 pub use limits::ResourceLimits;
 pub use oracle::{OracleCell, OracleHistoryKind, OracleHistoryRecord, SerialOracle};
 pub use outcome::{

@@ -27,16 +27,9 @@ fn spec_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-fn write_evidence(name: &str, body: &str) {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/atomics-evidence/atm-0");
-    let _ = fs::create_dir_all(&dir);
-    let _ = fs::write(dir.join(name), body);
-}
-
 #[test]
 fn accepted_vectors_roundtrip_and_match_roots() {
     let raw = fs::read_to_string(spec_path("protocol-vectors.json")).unwrap();
-    write_evidence("protocol-vectors.json", &raw);
     let doc: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(doc["profile"], "residiuum-atomics-v1");
     let vectors = doc["vectors"].as_array().expect("vectors");
@@ -62,7 +55,6 @@ fn accepted_vectors_roundtrip_and_match_roots() {
 #[test]
 fn rejected_vectors_fail_as_documented() {
     let raw = fs::read_to_string(spec_path("rejected-vectors.json")).unwrap();
-    write_evidence("rejected-vectors.json", &raw);
     let doc: Value = serde_json::from_str(&raw).unwrap();
     let vectors = doc["vectors"].as_array().expect("vectors");
     assert!(vectors.len() >= 5);

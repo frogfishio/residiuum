@@ -37,9 +37,6 @@ fn aid() -> AtomicId {
 #[test]
 fn evidence_vectors_roundtrip_and_match_hashes() {
     let raw = fs::read_to_string(spec_path()).unwrap();
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/atomics-evidence/atm-0");
-    let _ = fs::create_dir_all(&dir);
-    let _ = fs::write(dir.join("evidence-vectors.json"), &raw);
     let doc: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(doc["profile"], "residiuum-atomics-v1");
     let accepted = doc["accepted"].as_array().expect("accepted");
