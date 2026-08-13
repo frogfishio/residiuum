@@ -214,14 +214,16 @@ pub struct AtomicMember {
 impl AtomicMember {
     /// Refuse kind/field combinations that cannot be a real member.
     ///
-    /// Mirrors closed plan mutation shapes: create/put have an after-hash and
-    /// no before-version; replace has both; delete has a before-version and no
+    /// Create has an after-hash and no before-version. Put is an upsert: after-hash
+    /// is required, before-version is present when an existing object is overwritten
+    /// and absent on insert. Replace has both; delete has a before-version and no
     /// after-hash (`ATOMICS_SPEC` §9).
     pub fn validate(&self) -> Result<(), AtomicsError> {
         let before = self.before_version.is_some();
         let after = self.after_content_hash.is_some();
         let legal = match self.member_kind {
-            MutationKind::Create | MutationKind::Put => !before && after,
+            MutationKind::Create => !before && after,
+            MutationKind::Put => after,
             MutationKind::Replace => before && after,
             MutationKind::Delete => before && !after,
         };

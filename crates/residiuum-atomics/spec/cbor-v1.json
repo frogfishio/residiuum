@@ -182,7 +182,7 @@
     "2": { "field": "ordinal", "type": "uint", "required": true },
     "3": { "field": "object_identity", "type": "map(object_identity_labels)", "required": true },
     "4": { "field": "member_kind", "type": "uint", "required": true },
-    "5": { "field": "before_version", "type": "bstr(16)", "required": false, "rule": "required on replace/delete; omitted on create/put" },
+    "5": { "field": "before_version", "type": "bstr(16)", "required": false, "rule": "required on replace/delete; omitted on create; optional on put (present when overwrite)" },
     "6": { "field": "after_content_hash", "type": "bstr(32)", "required": false, "rule": "required on create/put/replace; omitted on delete" },
     "7": { "field": "event_id", "type": "bstr(16)", "required": true }
   },

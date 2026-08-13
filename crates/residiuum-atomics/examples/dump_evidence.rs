@@ -78,6 +78,17 @@ fn main() {
     };
     let member_b = encode_member(&member).unwrap();
     let member_h = member_hash(&member).unwrap();
+    let put_overwrite = AtomicMember {
+        atomic_id: member.atomic_id,
+        ordinal: member.ordinal,
+        object_identity: member.object_identity.clone(),
+        member_kind: MutationKind::Put,
+        before_version: Some(vid(3)),
+        after_content_hash: member.after_content_hash,
+        event_id: member.event_id,
+    };
+    let put_b = encode_member(&put_overwrite).unwrap();
+    let put_h = member_hash(&put_overwrite).unwrap();
     let manifest = ordered_member_manifest_root(hid(1), std::slice::from_ref(&member)).unwrap();
     let prepare = AtomicPrepare {
         atomic_id: aid(9),
@@ -126,6 +137,13 @@ fn main() {
             "create member names collection plus canonical key",
             &member_b,
             member_h,
+        ),
+        ev(
+            "member_put_overwrite_with_before_version",
+            "member",
+            "put overwrite records before_version and after_content_hash",
+            &put_b,
+            put_h,
         ),
         ev(
             "decision_committed",
@@ -198,13 +216,6 @@ fn main() {
             "member",
             "put requires after_content_hash",
             "a50158200900000000000000000000000000000000000000000000000000000000000000020003a201500100000000000000000000000000000002a2010102416b0402075003000000000000000000000000000000",
-            "invalid_value",
-        ),
-        ev_rej(
-            "member_put_with_before_version",
-            "member",
-            "put must omit before_version",
-            "a70158200900000000000000000000000000000000000000000000000000000000000000020003a201500100000000000000000000000000000002a2010102416b04020550030000000000000000000000000000000658200808080808080808080808080808080808080808080808080808080808080808075003000000000000000000000000000000",
             "invalid_value",
         ),
         ev_rej(

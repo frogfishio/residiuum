@@ -561,7 +561,6 @@ mod tests {
             (MutationKind::Create, Some(vid()), Some(hash)),
             (MutationKind::Create, Some(vid()), None),
             (MutationKind::Put, None, None),
-            (MutationKind::Put, Some(vid()), Some(hash)),
             (MutationKind::Put, Some(vid()), None),
             (MutationKind::Replace, None, Some(hash)),
             (MutationKind::Replace, None, None),
@@ -593,6 +592,21 @@ mod tests {
                 after.is_some()
             );
         }
+    }
+
+    #[test]
+    fn put_overwrite_may_record_before_version() {
+        let m = AtomicMember {
+            member_kind: MutationKind::Put,
+            before_version: Some(vid()),
+            after_content_hash: Some([8u8; 32]),
+            ..member("k")
+        };
+        let bytes = encode_member(&m).unwrap();
+        let again = decode_member(&bytes).unwrap();
+        assert_eq!(again.before_version, m.before_version);
+        assert_eq!(again.after_content_hash, m.after_content_hash);
+        assert_eq!(again.member_kind, MutationKind::Put);
     }
 
     #[test]
