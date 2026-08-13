@@ -13,10 +13,16 @@ use crate::evidence::{
 pub enum LifecycleEvent {
     /// Record a valid prepare.
     Prepare,
-    /// Append staged members (still invisible).
-    StageMembers,
-    /// Members reach the durable-invisible stable boundary.
-    StabilizeMembers,
+    /// Append `member_count` staged members (still invisible).
+    StageMembers {
+        /// Members written to the staged set.
+        member_count: u32,
+    },
+    /// Confirm `member_count` members at the durable-invisible stable boundary.
+    StabilizeMembers {
+        /// Members that reached the durable-invisible boundary.
+        member_count: u32,
+    },
     /// Write a committed decision naming `member_count` durable members.
     DecideCommitted {
         /// Members named by the decision/manifest.
@@ -35,8 +41,8 @@ impl LifecycleEvent {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Prepare => "prepare",
-            Self::StageMembers => "stage_members",
-            Self::StabilizeMembers => "stabilize_members",
+            Self::StageMembers { .. } => "stage_members",
+            Self::StabilizeMembers { .. } => "stabilize_members",
             Self::DecideCommitted { .. } => "decide_committed",
             Self::DecideNotCommitted => "decide_not_committed",
             Self::DiscoverConflict => "discover_conflict",
@@ -59,6 +65,8 @@ pub enum LifecycleError {
 pub struct LifecycleTrace {
     /// Formal phases.
     pub state: AtomicLifecycle,
+    /// Members recorded by staging / stabilize. Independent of the decision.
+    pub durable_members: u32,
     /// Members named by a committed decision / prepare manifest.
     pub named_members: u32,
     /// Members included in a published delta.
@@ -70,6 +78,7 @@ impl LifecycleTrace {
     pub const fn empty() -> Self {
         Self {
             state: AtomicLifecycle::empty(),
+            durable_members: 0,
             named_members: 0,
             published_members: 0,
         }
@@ -83,6 +92,7 @@ impl LifecycleTrace {
             mut decision,
             mut publication,
         } = self.state;
+        let mut durable = self.durable_members;
         let mut named = self.named_members;
         let mut published = self.published_members;
 
@@ -96,7 +106,7 @@ impl LifecycleTrace {
                 }
                 prepare = PreparePhase::Prepared;
             }
-            LifecycleEvent::StageMembers => {
+            LifecycleEvent::StageMembers { member_count } => {
                 if prepare != PreparePhase::Prepared
                     || members != MemberPhase::Absent
                     || decision != DecisionPhase::None
@@ -104,9 +114,13 @@ impl LifecycleTrace {
                     return Err(LifecycleError::Illegal);
                 }
                 members = MemberPhase::Staged;
+                durable = member_count;
             }
-            LifecycleEvent::StabilizeMembers => {
+            LifecycleEvent::StabilizeMembers { member_count } => {
                 if members != MemberPhase::Staged || decision != DecisionPhase::None {
+                    return Err(LifecycleError::Illegal);
+                }
+                if member_count != durable {
                     return Err(LifecycleError::Illegal);
                 }
                 members = MemberPhase::DurableInvisible;
@@ -116,8 +130,11 @@ impl LifecycleTrace {
                     if prepare != PreparePhase::Prepared {
                         return Err(LifecycleError::Illegal);
                     }
-                    let members_ready = members == MemberPhase::DurableInvisible
-                        || (members == MemberPhase::Absent && member_count == 0);
+                    let members_ready = match members {
+                        MemberPhase::DurableInvisible => member_count == durable,
+                        MemberPhase::Absent => member_count == 0 && durable == 0,
+                        MemberPhase::Staged => false,
+                    };
                     if !members_ready {
                         return Err(LifecycleError::Illegal);
                     }
@@ -166,8 +183,11 @@ impl LifecycleTrace {
                 if !members_ready {
                     return Err(LifecycleError::Illegal);
                 }
+                if named != durable {
+                    return Err(LifecycleError::Illegal);
+                }
                 publication = PublicationPhase::Published;
-                published = named;
+                published = durable;
             }
         }
 
@@ -178,6 +198,7 @@ impl LifecycleTrace {
                 decision,
                 publication,
             },
+            durable_members: durable,
             named_members: named,
             published_members: published,
         })
@@ -186,11 +207,12 @@ impl LifecycleTrace {
     /// Compact label for evidence summaries.
     pub fn label(self) -> String {
         format!(
-            "{}/{}/{}/{}/n{}/p{}",
+            "{}/{}/{}/{}/d{}/n{}/p{}",
             phase(self.state.prepare),
             mem(self.state.members),
             dec(self.state.decision),
             pubp(self.state.publication),
+            self.durable_members,
             self.named_members,
             self.published_members
         )
@@ -230,8 +252,10 @@ fn pubp(p: PublicationPhase) -> &'static str {
 
 const CANDIDATES: &[LifecycleEvent] = &[
     LifecycleEvent::Prepare,
-    LifecycleEvent::StageMembers,
-    LifecycleEvent::StabilizeMembers,
+    LifecycleEvent::StageMembers { member_count: 0 },
+    LifecycleEvent::StageMembers { member_count: 2 },
+    LifecycleEvent::StabilizeMembers { member_count: 0 },
+    LifecycleEvent::StabilizeMembers { member_count: 2 },
     LifecycleEvent::DecideCommitted { member_count: 0 },
     LifecycleEvent::DecideCommitted { member_count: 2 },
     LifecycleEvent::DecideNotCommitted,
@@ -307,7 +331,11 @@ pub fn check_model() -> ModelCheckReport {
             || s.state.decision == DecisionPhase::Committed
     });
     let committed_publication_names_all_durable_members = reachable.iter().all(|s| {
-        s.state.publication != PublicationPhase::Published || s.published_members == s.named_members
+        let committed_names_durable =
+            s.state.decision != DecisionPhase::Committed || s.named_members == s.durable_members;
+        let published_names_durable = s.state.publication != PublicationPhase::Published
+            || (s.published_members == s.named_members && s.published_members == s.durable_members);
+        committed_names_durable && published_names_durable
     });
     let not_committed_never_published = reachable.iter().all(|s| {
         s.state.decision != DecisionPhase::NotCommitted
@@ -393,6 +421,14 @@ mod tests {
             "{}",
             report.reachable_state_count
         );
+        assert!(
+            report
+                .reachable
+                .iter()
+                .any(|label| label.contains("/d2/n2/p2")),
+            "model must explore a 2-member published path: {:?}",
+            report.reachable
+        );
         assert!(report.proofs.all_held(), "{:?}", report.proofs);
     }
 
@@ -401,11 +437,13 @@ mod tests {
         let staged = LifecycleTrace::empty()
             .apply(LifecycleEvent::Prepare)
             .unwrap()
-            .apply(LifecycleEvent::StageMembers)
+            .apply(LifecycleEvent::StageMembers { member_count: 2 })
             .unwrap();
         assert!(!staged.state.ordinary_visible());
+        assert_eq!(staged.durable_members, 2);
+        assert_eq!(staged.named_members, 0);
         let published = staged
-            .apply(LifecycleEvent::StabilizeMembers)
+            .apply(LifecycleEvent::StabilizeMembers { member_count: 2 })
             .unwrap()
             .apply(LifecycleEvent::DecideCommitted { member_count: 2 })
             .unwrap()
@@ -414,5 +452,35 @@ mod tests {
         assert!(published.state.ordinary_visible());
         assert_eq!(published.published_members, 2);
         assert_eq!(published.named_members, 2);
+        assert_eq!(published.durable_members, 2);
+    }
+
+    #[test]
+    fn invented_decision_count_is_refused() {
+        let prepared = LifecycleTrace::empty()
+            .apply(LifecycleEvent::Prepare)
+            .unwrap();
+        assert_eq!(
+            prepared.apply(LifecycleEvent::DecideCommitted { member_count: 2 }),
+            Err(LifecycleError::Illegal)
+        );
+
+        let durable = prepared
+            .apply(LifecycleEvent::StageMembers { member_count: 2 })
+            .unwrap()
+            .apply(LifecycleEvent::StabilizeMembers { member_count: 2 })
+            .unwrap();
+        assert_eq!(durable.durable_members, 2);
+        assert_eq!(
+            durable.apply(LifecycleEvent::DecideCommitted { member_count: 0 }),
+            Err(LifecycleError::Illegal)
+        );
+        assert_eq!(
+            durable.apply(LifecycleEvent::StabilizeMembers { member_count: 0 }),
+            Err(LifecycleError::Illegal)
+        );
+        assert!(durable
+            .apply(LifecycleEvent::DecideCommitted { member_count: 2 })
+            .is_ok());
     }
 }
