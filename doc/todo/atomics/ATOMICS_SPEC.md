@@ -401,7 +401,7 @@ plan mutation shapes. Encode and decode MUST refuse any other combination:
 | `member_kind` | `before_version` | `after_content_hash` |
 |---|---|---|
 | create | omitted | required |
-| put | omitted | required |
+| put | optional (present on overwrite) | required |
 | replace | required | required |
 | delete | required | omitted |
 
