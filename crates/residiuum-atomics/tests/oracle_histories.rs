@@ -95,7 +95,7 @@ fn same_id_different_root_conflicts() {
 fn unknown_profile_is_refused_not_issued() {
     let mut o = SerialOracle::new(hid());
     let mut parts = AtomicPlanParts {
-        profile: AtomicProfile::Unknown(99),
+        profile: AtomicProfile::from_wire_code(99),
         atomic_id: aid(3),
         heap_id: hid(),
         scope: CoordinationScope::LocalHeap,

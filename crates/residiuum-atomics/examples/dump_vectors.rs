@@ -182,7 +182,7 @@ fn main() {
             "unknown_profile_preserved",
             "unknown profile decodes; execution_supported is false",
             AtomicPlan::close(parts(
-                AtomicProfile::Unknown(99),
+                AtomicProfile::from_wire_code(99),
                 vec![create(1, "k", b"v")],
             ))
             .unwrap(),

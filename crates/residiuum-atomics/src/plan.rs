@@ -54,6 +54,20 @@ impl CoordinationScope {
     }
 }
 
+/// Unrecognized profile wire code. The inner code is private so callers cannot
+/// manufacture [`AtomicProfile::Unknown`] with a known code such as `1`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct UnknownProfile {
+    code: u16,
+}
+
+impl UnknownProfile {
+    /// The original unrecognized wire code.
+    pub const fn wire_code(self) -> u16 {
+        self.code
+    }
+}
+
 /// Named Atomic profile. Unknown codes are preserved for examination and
 /// refused by execution (`ATOMICS_SPEC` ATM-0 properties).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -61,7 +75,8 @@ pub enum AtomicProfile {
     /// First shipped capability. Must not be advertised until ATM-5.
     LocalHeapV1,
     /// Unrecognized profile code. Execution MUST refuse; examination MAY keep it.
-    Unknown(u16),
+    /// Only [`AtomicProfile::from_wire_code`] can construct this variant.
+    Unknown(UnknownProfile),
 }
 
 impl AtomicProfile {
@@ -82,15 +97,18 @@ impl AtomicProfile {
     pub const fn wire_code(self) -> u16 {
         match self {
             Self::LocalHeapV1 => 1,
-            Self::Unknown(code) => code,
+            Self::Unknown(unknown) => unknown.wire_code(),
         }
     }
 
     /// Decode a profile code.
+    ///
+    /// Known codes always become the named variant. Unknown codes are preserved
+    /// and never alias a supported profile.
     pub const fn from_wire_code(code: u16) -> Self {
         match code {
             1 => Self::LocalHeapV1,
-            other => Self::Unknown(other),
+            other => Self::Unknown(UnknownProfile { code: other }),
         }
     }
 }
@@ -527,7 +545,30 @@ mod tests {
     #[test]
     fn unknown_profile_is_not_executable() {
         assert!(AtomicProfile::LocalHeapV1.execution_supported());
-        assert!(!AtomicProfile::Unknown(99).execution_supported());
+        assert!(!AtomicProfile::from_wire_code(99).execution_supported());
+    }
+
+    #[test]
+    fn known_wire_code_cannot_alias_as_unknown() {
+        assert!(matches!(
+            AtomicProfile::from_wire_code(1),
+            AtomicProfile::LocalHeapV1
+        ));
+        assert_eq!(AtomicProfile::from_wire_code(1).wire_code(), 1);
+        assert!(AtomicProfile::from_wire_code(1).execution_supported());
+
+        let unknown = AtomicProfile::from_wire_code(99);
+        assert!(!unknown.execution_supported());
+        assert_eq!(unknown.wire_code(), 99);
+        match unknown {
+            AtomicProfile::Unknown(u) => assert_eq!(u.wire_code(), 99),
+            AtomicProfile::LocalHeapV1 => panic!("unknown code aliased LocalHeapV1"),
+        }
+        assert_ne!(unknown, AtomicProfile::LocalHeapV1);
+        assert_ne!(
+            AtomicProfile::from_wire_code(1).wire_code(),
+            AtomicProfile::from_wire_code(99).wire_code()
+        );
     }
 
     #[test]

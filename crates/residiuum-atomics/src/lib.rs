@@ -46,7 +46,7 @@ pub use outcome::{
 };
 pub use plan::{
     AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CanonicalKeyKind, CoordinationScope,
-    MutationKind, PlanMutation, PlanPredicate, PredicateKind, ReadWitness,
+    MutationKind, PlanMutation, PlanPredicate, PredicateKind, ReadWitness, UnknownProfile,
 };
 
 #[cfg(test)]

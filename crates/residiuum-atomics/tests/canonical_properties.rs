@@ -284,3 +284,23 @@ fn prior_read_without_frontier_is_refused() {
 fn write_only_plan_may_omit_frontier() {
     AtomicPlan::close(parts(1, vec![create(1, "k", b"v")])).unwrap();
 }
+
+#[test]
+fn unknown_profile_does_not_alias_local_heap_bytes_or_root() {
+    let known = AtomicPlan::close(parts(1, vec![create(1, "k", b"v")])).unwrap();
+    let mut unknown_parts = parts(1, vec![create(1, "k", b"v")]);
+    unknown_parts.profile = AtomicProfile::from_wire_code(99);
+    let unknown = AtomicPlan::close(unknown_parts).unwrap();
+    assert!(!unknown.profile().execution_supported());
+    assert_ne!(
+        encode_canonical_plan(&known).unwrap(),
+        encode_canonical_plan(&unknown).unwrap()
+    );
+    assert_ne!(
+        plan_content_root(&known).unwrap(),
+        plan_content_root(&unknown).unwrap()
+    );
+    let again = decode_canonical_plan(&encode_canonical_plan(&unknown).unwrap()).unwrap();
+    assert!(!again.profile().execution_supported());
+    assert_eq!(again.profile().wire_code(), 99);
+}
