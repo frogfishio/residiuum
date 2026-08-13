@@ -3,8 +3,9 @@
 //! Pure crate: no file, network, thread, store, or SDK dependency. ATM-0.1
 //! freezes identity, scope, limits, vocabulary, outcomes, and formal lifecycle
 //! states. ATM-0.2 adds deterministic CBOR, content-root hashing, and
-//! canonical target order. The serial oracle is ATM-0.5.
-//! ATM-0.4 is the hostile decoder corpus.
+//! canonical target order. ATM-0.7 freezes prepare/member/decision/tombstone
+//! codecs, member object identity, and not-committed abort-reason preservation.
+//! The serial oracle is ATM-0.5. ATM-0.4 is the hostile decoder corpus.
 
 #![deny(missing_docs)]
 
@@ -12,6 +13,7 @@ pub mod canonical;
 mod cbor;
 pub mod error;
 pub mod evidence;
+mod evidence_cbor;
 pub mod id;
 pub mod limits;
 pub mod oracle;
@@ -22,13 +24,18 @@ pub use canonical::{
     decode_canonical_plan, encode_canonical_plan, plan_content_root, CANONICAL_TARGET_ORDER,
     CBOR_V1_REL, DOMAIN_ATOMIC_CONTENT, DOMAIN_ATOMIC_DECISION, DOMAIN_ATOMIC_ID,
     DOMAIN_ATOMIC_MANIFEST, DOMAIN_ATOMIC_MEMBER, DOMAIN_ATOMIC_PREDICATES, DOMAIN_ATOMIC_PREPARE,
-    DOMAIN_ATOMIC_READSET,
+    DOMAIN_ATOMIC_READSET, DOMAIN_ATOMIC_TOMBSTONE,
 };
 pub use cbor::MAX_CBOR_DEPTH;
 pub use error::{AtomicsError, CborError};
 pub use evidence::{
     AtomicDecision, AtomicLifecycle, AtomicMember, AtomicPrepare, DecisionCode, DecisionPhase,
-    DecisionTombstone, Durability, MemberPhase, PreparePhase, PublicationPhase,
+    DecisionTombstone, Durability, MemberPhase, ObjectIdentity, PreparePhase, PublicationPhase,
+};
+pub use evidence_cbor::{
+    decision_hash, decode_decision, decode_member, decode_prepare, decode_tombstone, encode_decision,
+    encode_member, encode_prepare, encode_tombstone, member_hash, ordered_member_manifest_root,
+    prepare_hash, tombstone_hash,
 };
 pub use id::{AtomicId, CollectionId, ContentRoot, HeapId, VersionId};
 pub use limits::ResourceLimits;

@@ -22,6 +22,7 @@
     "prepare": "RESIDIUUM-ATOMIC-PREPARE-V1",
     "member": "RESIDIUUM-ATOMIC-MEMBER-V1",
     "decision": "RESIDIUUM-ATOMIC-DECISION-V1",
+    "tombstone": "RESIDIUUM-ATOMIC-TOMBSTONE-V1",
     "manifest": "RESIDIUUM-ATOMIC-MANIFEST-V1",
     "readset": "RESIDIUUM-ATOMIC-READSET-V1",
     "predicates": "RESIDIUUM-ATOMIC-PREDICATES-V1"
@@ -67,6 +68,25 @@
     "8": "collection_lifecycle_state",
     "9": "heap_authority_revision"
   },
+  "decision_codes": {
+    "1": "committed",
+    "2": "not_committed"
+  },
+  "durability_codes": {
+    "1": "durable"
+  },
+  "abort_reason_codes": {
+    "1": "precondition_conflict",
+    "2": "rule_rejected",
+    "3": "recovery_abort",
+    "4": "coverage_incomplete"
+  },
+  "decision_axis_rules": [
+    "committed requires commit_position (nonzero) and omits abort_reason",
+    "not_committed requires abort_reason and omits commit_position",
+    "durability is always encoded and is durable in v1",
+    "tombstone copies abort_reason so AtomicOutcome::NotCommitted is reconstructible after detail removal"
+  ],
   "canonical_key_kinds": {
     "1": "string",
     "2": "opaque",
@@ -121,6 +141,49 @@
     "8": { "field": "active_rule_revisions", "type": "uint", "required": true },
     "9": { "field": "construction_deadline_ms", "type": "uint", "required": true },
     "10": { "field": "emitted_violations", "type": "uint", "required": true }
+  },
+  "object_identity_labels": {
+    "1": { "field": "collection_id", "type": "bstr(16)", "required": true },
+    "2": { "field": "key", "type": "map(canonical_key_labels)", "required": true }
+  },
+  "prepare_labels": {
+    "1": { "field": "atomic_id", "type": "bstr(32)", "required": true },
+    "2": { "field": "heap_id", "type": "bstr(16)", "required": true },
+    "3": { "field": "scope", "type": "uint", "required": true },
+    "4": { "field": "content_root", "type": "bstr(32)", "required": true },
+    "5": { "field": "frontier", "type": "bstr(32)", "required": true },
+    "6": { "field": "ordered_member_manifest_root", "type": "bstr(32)", "required": true },
+    "7": { "field": "read_set_root", "type": "bstr(32)", "required": true },
+    "8": { "field": "predicate_set_root", "type": "bstr(32)", "required": true },
+    "9": { "field": "active_rule_revision_root", "type": "bstr(32)", "required": true },
+    "10": { "field": "limits", "type": "map(limits_labels)", "required": true }
+  },
+  "member_labels": {
+    "1": { "field": "atomic_id", "type": "bstr(32)", "required": true },
+    "2": { "field": "ordinal", "type": "uint", "required": true },
+    "3": { "field": "object_identity", "type": "map(object_identity_labels)", "required": true },
+    "4": { "field": "member_kind", "type": "uint", "required": true },
+    "5": { "field": "before_version", "type": "bstr(16)", "required": false },
+    "6": { "field": "after_content_hash", "type": "bstr(32)", "required": false, "rule": "absent on delete" },
+    "7": { "field": "event_id", "type": "bstr(16)", "required": true }
+  },
+  "decision_labels": {
+    "1": { "field": "atomic_id", "type": "bstr(32)", "required": true },
+    "2": { "field": "prepare_hash", "type": "bstr(32)", "required": true },
+    "3": { "field": "member_root", "type": "bstr(32)", "required": true },
+    "4": { "field": "member_count", "type": "uint", "required": true },
+    "5": { "field": "decision", "type": "uint", "required": true },
+    "6": { "field": "commit_position", "type": "uint", "required": false, "rule": "committed only; nonzero" },
+    "7": { "field": "durability", "type": "uint", "required": true },
+    "8": { "field": "abort_reason", "type": "uint", "required": false, "rule": "not_committed only" }
+  },
+  "tombstone_labels": {
+    "1": { "field": "atomic_id", "type": "bstr(32)", "required": true },
+    "2": { "field": "content_root", "type": "bstr(32)", "required": true },
+    "3": { "field": "decision", "type": "uint", "required": true },
+    "4": { "field": "commit_position", "type": "uint", "required": false, "rule": "committed only; nonzero" },
+    "5": { "field": "decision_hash", "type": "bstr(32)", "required": true },
+    "6": { "field": "abort_reason", "type": "uint", "required": false, "rule": "not_committed only" }
   },
   "hard_ceilings": {
     "key": {

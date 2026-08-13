@@ -32,6 +32,18 @@
       "reason": "cbor"
     },
     {
+      "bytes_hex": "a101a201000101",
+      "name": "nested_duplicate_key",
+      "note": "nested map inside field 1 has duplicate key 1",
+      "reason": "cbor"
+    },
+    {
+      "bytes_hex": "a101a202000100",
+      "name": "nested_unsorted_keys",
+      "note": "nested map inside field 1 has keys 2 then 1",
+      "reason": "cbor"
+    },
+    {
       "name": "duplicate_mutation_target",
       "note": "same (collection_id, canonical key) twice as a mutation",
       "reason": "duplicate_target",

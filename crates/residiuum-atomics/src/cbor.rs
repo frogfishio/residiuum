@@ -264,19 +264,60 @@ impl<'a> Cursor<'a> {
                 Ok(Value::Array(items))
             }
             5 => {
-                let n = self.read_map_len()?;
-                let mut items = Vec::new();
-                for _ in 0..n {
-                    let k = self.read_uint()?;
-                    let v = self.read_value(depth + 1)?;
-                    items.push((k, v));
-                }
-                Ok(Value::Map(items))
+                Ok(Value::Map(self.read_canonical_map(depth)?))
             }
             6 => Err(CborError::TagRejected.into()),
             7 => Err(CborError::Unsupported.into()),
             3 => Err(CborError::Unsupported.into()),
             _ => Err(CborError::Unsupported.into()),
         }
+    }
+
+    /// Decode a definite map and refuse duplicate or unsorted integer keys.
+    /// Applied at every nesting level, not only the top-level item.
+    fn read_canonical_map(&mut self, depth: u8) -> Result<Map, AtomicsError> {
+        let n = self.read_map_len()?;
+        let mut items = Vec::new();
+        let mut prev: Option<Vec<u8>> = None;
+        let mut seen = Vec::new();
+        for _ in 0..n {
+            let start = self.pos;
+            let k = self.read_uint()?;
+            let enc = self.bytes[start..self.pos].to_vec();
+            if seen.contains(&k) {
+                return Err(CborError::DuplicateKey.into());
+            }
+            seen.push(k);
+            if let Some(p) = &prev {
+                if enc.as_slice() <= p.as_slice() {
+                    return Err(CborError::UnsortedKeys.into());
+                }
+            }
+            prev = Some(enc);
+            let v = self.read_value(depth + 1)?;
+            items.push((k, v));
+        }
+        Ok(items)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_duplicate_key_is_refused() {
+        // map{1: map{1:0, 1:1}}
+        let bytes = [0xa1, 0x01, 0xa2, 0x01, 0x00, 0x01, 0x01];
+        let err = decode_map(&bytes).unwrap_err();
+        assert!(matches!(err, AtomicsError::Cbor(CborError::DuplicateKey)));
+    }
+
+    #[test]
+    fn nested_unsorted_keys_are_refused() {
+        // map{1: map{2:0, 1:0}}
+        let bytes = [0xa1, 0x01, 0xa2, 0x02, 0x00, 0x01, 0x00];
+        let err = decode_map(&bytes).unwrap_err();
+        assert!(matches!(err, AtomicsError::Cbor(CborError::UnsortedKeys)));
     }
 }

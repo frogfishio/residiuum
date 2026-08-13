@@ -1,11 +1,14 @@
 //! Authoritative evidence and formal lifecycle phases (`ATOMICS_SPEC` §§9–11).
 //!
-//! These types are the semantic freeze. Persistent CBOR field numbers are ATM-0.2.
+//! These types are the semantic freeze. Persistent CBOR field numbers and
+//! codecs for prepare/member/decision/tombstone are ATM-0.7.
 //! No store append path lives here.
 
 use crate::id::{AtomicId, CollectionId, ContentRoot, HeapId, VersionId};
 use crate::limits::ResourceLimits;
-use crate::plan::{CoordinationScope, MutationKind};
+use crate::outcome::{AtomicAbortReason, AtomicOutcome, AtomicRefuseReason};
+use crate::plan::{CanonicalKey, CoordinationScope, MutationKind};
+use crate::AtomicsError;
 
 /// Decision written by the engine. Examination-only states are not decisions.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -46,6 +49,23 @@ impl DecisionCode {
 pub enum Durability {
     /// Durable acknowledgement. Buffering/group commit may exist internally.
     Durable,
+}
+
+impl Durability {
+    /// Wire code (`spec/atomics/cbor-v1.json`).
+    pub const fn wire_code(self) -> u8 {
+        match self {
+            Self::Durable => 1,
+        }
+    }
+
+    /// Decode a known durability code.
+    pub const fn from_wire_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Durable),
+            _ => None,
+        }
+    }
 }
 
 /// Formal prepare phase. Not a store file state.
@@ -121,6 +141,25 @@ impl AtomicLifecycle {
     }
 }
 
+/// Canonical object identity: collection plus key (`ATOMICS_SPEC` §§7, 9).
+///
+/// Bound into the member hash and ordered manifest so recovery can verify
+/// which object a member represents without consulting the plan.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ObjectIdentity {
+    /// Collection that owns the key.
+    pub collection_id: CollectionId,
+    /// Canonical key inside that collection.
+    pub key: CanonicalKey,
+}
+
+impl ObjectIdentity {
+    /// Construct an identity from a collection and key.
+    pub const fn new(collection_id: CollectionId, key: CanonicalKey) -> Self {
+        Self { collection_id, key }
+    }
+}
+
 /// Prepare record shape (`ATOMICS_SPEC` §9). Hashing is ATM-0.2.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AtomicPrepare {
@@ -153,8 +192,8 @@ pub struct AtomicMember {
     pub atomic_id: AtomicId,
     /// Manifest ordinal.
     pub ordinal: u32,
-    /// Target collection.
-    pub collection_id: CollectionId,
+    /// Target object: collection plus canonical key.
+    pub object_identity: ObjectIdentity,
     /// Mutation kind after assertions have been folded.
     pub member_kind: MutationKind,
     /// Observed before-version, if any.
@@ -182,6 +221,9 @@ pub struct AtomicDecision {
     pub commit_position: Option<u64>,
     /// Durability class of the acknowledgement.
     pub durability: Durability,
+    /// Exact abort reason. Required when `not_committed`; omitted when committed.
+    /// Frozen so a durable decision reconstructs [`AtomicOutcome::NotCommitted`].
+    pub abort_reason: Option<AtomicAbortReason>,
 }
 
 /// Compact lifetime tombstone (`ATOMICS_SPEC` §12).
@@ -197,6 +239,119 @@ pub struct DecisionTombstone {
     pub commit_position: Option<u64>,
     /// Decision evidence hash. Encoding is ATM-0.2.
     pub decision_hash: [u8; 32],
+    /// Exact abort reason. Required when `not_committed`; omitted when committed.
+    pub abort_reason: Option<AtomicAbortReason>,
+}
+
+impl AtomicDecision {
+    /// Durable committed decision. `commit_position` must be nonzero.
+    pub fn committed(
+        atomic_id: AtomicId,
+        prepare_hash: [u8; 32],
+        member_root: [u8; 32],
+        member_count: u32,
+        commit_position: u64,
+    ) -> Result<Self, AtomicsError> {
+        let rec = Self {
+            atomic_id,
+            prepare_hash,
+            member_root,
+            member_count,
+            decision: DecisionCode::Committed,
+            commit_position: Some(commit_position),
+            durability: Durability::Durable,
+            abort_reason: None,
+        };
+        rec.validate()?;
+        Ok(rec)
+    }
+
+    /// Durable not-committed decision. Preserves the exact abort reason.
+    pub fn not_committed(
+        atomic_id: AtomicId,
+        prepare_hash: [u8; 32],
+        member_root: [u8; 32],
+        member_count: u32,
+        reason: AtomicAbortReason,
+    ) -> Self {
+        Self {
+            atomic_id,
+            prepare_hash,
+            member_root,
+            member_count,
+            decision: DecisionCode::NotCommitted,
+            commit_position: None,
+            durability: Durability::Durable,
+            abort_reason: Some(reason),
+        }
+    }
+
+    /// Refuse committed/not-committed field combinations that cannot be decoded.
+    pub fn validate(&self) -> Result<(), AtomicsError> {
+        validate_decision_axis(self.decision, self.commit_position, self.abort_reason)
+    }
+
+    /// Compact lifetime tombstone that copies the abort reason when present.
+    pub fn tombstone(self, content_root: ContentRoot, decision_hash: [u8; 32]) -> DecisionTombstone {
+        DecisionTombstone {
+            atomic_id: self.atomic_id,
+            content_root,
+            decision: self.decision,
+            commit_position: self.commit_position,
+            decision_hash,
+            abort_reason: self.abort_reason,
+        }
+    }
+
+    /// Reconstruct [`AtomicOutcome::NotCommitted`] from this decision.
+    pub fn not_committed_outcome(self) -> Result<AtomicOutcome, AtomicsError> {
+        not_committed_outcome(self.atomic_id, self.decision, self.abort_reason)
+    }
+}
+
+impl DecisionTombstone {
+    /// Refuse committed/not-committed field combinations that cannot be decoded.
+    pub fn validate(self) -> Result<(), AtomicsError> {
+        validate_decision_axis(self.decision, self.commit_position, self.abort_reason)
+    }
+
+    /// Reconstruct [`AtomicOutcome::NotCommitted`] after detail removal.
+    pub fn not_committed_outcome(self) -> Result<AtomicOutcome, AtomicsError> {
+        not_committed_outcome(self.atomic_id, self.decision, self.abort_reason)
+    }
+}
+
+pub(crate) fn validate_decision_axis(
+    decision: DecisionCode,
+    commit_position: Option<u64>,
+    abort_reason: Option<AtomicAbortReason>,
+) -> Result<(), AtomicsError> {
+    match decision {
+        DecisionCode::Committed => {
+            if matches!(commit_position, Some(0) | None) || abort_reason.is_some() {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+            }
+        }
+        DecisionCode::NotCommitted => {
+            if commit_position.is_some() || abort_reason.is_none() {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn not_committed_outcome(
+    atomic_id: AtomicId,
+    decision: DecisionCode,
+    abort_reason: Option<AtomicAbortReason>,
+) -> Result<AtomicOutcome, AtomicsError> {
+    match (decision, abort_reason) {
+        (DecisionCode::NotCommitted, Some(reason)) => {
+            Ok(AtomicOutcome::NotCommitted { atomic_id, reason })
+        }
+        _ => Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput)),
+    }
 }
 
 #[cfg(test)]
@@ -209,6 +364,35 @@ mod tests {
         assert_eq!(DecisionCode::NotCommitted.wire_code(), 2);
         assert_eq!(DecisionCode::from_wire_code(3), None);
         assert_eq!(DecisionCode::NotCommitted.as_str(), "not_committed");
+    }
+
+    #[test]
+    fn not_committed_decision_preserves_abort_reason() {
+        let mut id = [0u8; 32];
+        id[0] = 1;
+        let atomic_id = AtomicId::from_bytes(id).unwrap();
+        let d = AtomicDecision::not_committed(
+            atomic_id,
+            [2u8; 32],
+            [3u8; 32],
+            0,
+            AtomicAbortReason::PreconditionConflict,
+        );
+        match d.not_committed_outcome().unwrap() {
+            AtomicOutcome::NotCommitted { reason, .. } => {
+                assert_eq!(reason, AtomicAbortReason::PreconditionConflict);
+            }
+            other => panic!("{other:?}"),
+        }
+        let root = ContentRoot::from_bytes([4u8; 32]).unwrap();
+        let stone = d.tombstone(root, [5u8; 32]);
+        match stone.not_committed_outcome().unwrap() {
+            AtomicOutcome::NotCommitted { reason, .. } => {
+                assert_eq!(reason, AtomicAbortReason::PreconditionConflict);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(AtomicDecision::committed(atomic_id, [2u8; 32], [3u8; 32], 0, 0).is_err());
     }
 
     #[test]

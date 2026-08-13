@@ -385,6 +385,13 @@ AtomicMember {
     event_id
 }
 
+```
+
+`object_identity` is the pair `(collection_id, canonical_key)`. It is bound
+into the member hash and the ordered member manifest. Recovery MUST be able to
+verify which object a member represents from the member record alone.
+
+```text
 AtomicDecision {
     atomic_id
     prepare_hash
@@ -393,6 +400,7 @@ AtomicDecision {
     decision
     commit_position?
     durability
+    abort_reason?
 }
 ```
 
@@ -412,10 +420,18 @@ Domain separators:
 RESIDIUUM-ATOMIC-PREPARE-V1
 RESIDIUUM-ATOMIC-MEMBER-V1
 RESIDIUUM-ATOMIC-DECISION-V1
+RESIDIUUM-ATOMIC-TOMBSTONE-V1
 RESIDIUUM-ATOMIC-MANIFEST-V1
 RESIDIUUM-ATOMIC-READSET-V1
 RESIDIUUM-ATOMIC-PREDICATES-V1
 ```
+
+A durable `not_committed` decision MUST record `abort_reason` as one of the
+closed `AtomicAbortReason` codes (`precondition_conflict`, `rule_rejected`,
+`recovery_abort`, `coverage_incomplete`). The field is omitted on a committed
+decision and MUST NOT appear together with `commit_position`. The lifetime
+tombstone copies `abort_reason` so same-ID replay after detail removal still
+reconstructs `AtomicOutcome::NotCommitted { reason }`.
 
 Persistent v1 uses deterministic CBOR under the repository canonical-CBOR
 profile. Exact numeric field assignments MUST land in
@@ -573,7 +589,7 @@ rebuild path with an `OpenReport` reason.
 A compact exact tombstone:
 
 ```text
-(atomic_id, content_root, decision, commit_position?, decision_hash)
+(atomic_id, content_root, decision, commit_position?, decision_hash, abort_reason?)
 ```
 
 is retained for the lifetime of the Heap identity and removed only by complete

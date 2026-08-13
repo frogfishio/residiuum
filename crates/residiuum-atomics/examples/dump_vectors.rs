@@ -1,10 +1,13 @@
-//! Write ATM-0.3 protocol vector fixtures. Run from repo root:
+//! Write ATM-0.3 plan vectors and ATM-0.7 evidence vectors. Run from repo root:
 //! `cargo run -p residiuum-atomics --example dump_vectors`
 
 use residiuum_atomics::{
-    encode_canonical_plan, plan_content_root, AtomicId, AtomicPlan, AtomicPlanParts, AtomicProfile,
-    CanonicalKey, CollectionId, CoordinationScope, HeapId, MutationKind, PlanMutation,
-    PlanPredicate, PredicateKind, ReadWitness, ResourceLimits, VersionId,
+    decision_hash, encode_canonical_plan, encode_decision, encode_member, encode_prepare,
+    encode_tombstone, member_hash, ordered_member_manifest_root, plan_content_root, prepare_hash,
+    tombstone_hash, AtomicAbortReason, AtomicDecision, AtomicId, AtomicMember, AtomicPlan,
+    AtomicPlanParts, AtomicPrepare, AtomicProfile, CanonicalKey, CollectionId, ContentRoot,
+    CoordinationScope, HeapId, MutationKind, ObjectIdentity, PlanMutation, PlanPredicate,
+    PredicateKind, ReadWitness, ResourceLimits, VersionId,
 };
 use std::fmt::Write as _;
 use std::fs;
@@ -200,6 +203,18 @@ fn main() {
         ),
         rejected("profile_only", "only field 1", "a10101", "malformed_input"),
         rejected("bool_false", "simple value, not a map", "f4", "cbor"),
+        rejected(
+            "nested_duplicate_key",
+            "nested map inside field 1 has duplicate key 1",
+            "a101a201000101",
+            "cbor",
+        ),
+        rejected(
+            "nested_unsorted_keys",
+            "nested map inside field 1 has keys 2 then 1",
+            "a101a202000100",
+            "cbor",
+        ),
         serde_json::json!({
             "name": "duplicate_mutation_target",
             "note": "same (collection_id, canonical key) twice as a mutation",

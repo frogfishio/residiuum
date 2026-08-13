@@ -28,6 +28,27 @@ impl AtomicAbortReason {
             Self::CoverageIncomplete => "coverage_incomplete",
         }
     }
+
+    /// Wire code recorded on a durable not-committed decision (`spec/atomics/cbor-v1.json`).
+    pub const fn wire_code(self) -> u8 {
+        match self {
+            Self::PreconditionConflict => 1,
+            Self::RuleRejected => 2,
+            Self::RecoveryAbort => 3,
+            Self::CoverageIncomplete => 4,
+        }
+    }
+
+    /// Decode a known abort-reason code.
+    pub const fn from_wire_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::PreconditionConflict),
+            2 => Some(Self::RuleRejected),
+            3 => Some(Self::RecoveryAbort),
+            4 => Some(Self::CoverageIncomplete),
+            _ => None,
+        }
+    }
 }
 
 /// Structural refusal before acceptance. No Atomic is issued.
@@ -233,6 +254,10 @@ mod tests {
             AtomicAbortReason::PreconditionConflict.as_str(),
             "precondition_conflict"
         );
+        assert_eq!(AtomicAbortReason::PreconditionConflict.wire_code(), 1);
+        assert_eq!(AtomicAbortReason::CoverageIncomplete.wire_code(), 4);
+        assert_eq!(AtomicAbortReason::from_wire_code(3), Some(AtomicAbortReason::RecoveryAbort));
+        assert_eq!(AtomicAbortReason::from_wire_code(0), None);
         assert_eq!(
             AtomicRefuseReason::AtomicIdConflict.as_str(),
             "atomic_id_conflict"

@@ -39,6 +39,20 @@
       "reason": "duplicate_key"
     },
     {
+      "name": "nested_duplicate_uint_key",
+      "family": "duplicate-key",
+      "note": "map{1: map{1:0, 1:1}}; nested maps must refuse duplicates",
+      "bytes_hex": "a101a201000101",
+      "reason": "duplicate_key"
+    },
+    {
+      "name": "nested_unsorted_uint_keys",
+      "family": "duplicate-key",
+      "note": "map{1: map{2:0, 1:0}}; nested maps must refuse unsorted keys",
+      "bytes_hex": "a101a202000100",
+      "reason": "unsorted_keys"
+    },
+    {
       "name": "non_shortest_uint_key",
       "family": "integer",
       "note": "uint 1 encoded as 0x18 0x01",

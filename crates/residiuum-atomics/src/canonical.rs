@@ -29,6 +29,9 @@ pub const DOMAIN_ATOMIC_MEMBER: &[u8] = b"RESIDIUUM-ATOMIC-MEMBER-V1";
 /// Decision evidence (`ATOMICS_SPEC` §9).
 pub const DOMAIN_ATOMIC_DECISION: &[u8] = b"RESIDIUUM-ATOMIC-DECISION-V1";
 
+/// Lifetime decision tombstone (`ATOMICS_SPEC` §12).
+pub const DOMAIN_ATOMIC_TOMBSTONE: &[u8] = b"RESIDIUUM-ATOMIC-TOMBSTONE-V1";
+
 /// Ordered member manifest root (`ATOMICS_SPEC` §9).
 pub const DOMAIN_ATOMIC_MANIFEST: &[u8] = b"RESIDIUUM-ATOMIC-MANIFEST-V1";
 
@@ -274,7 +277,7 @@ fn plan_entries(plan: &AtomicPlan) -> Result<Vec<(u64, Value)>, AtomicsError> {
     Ok(entries)
 }
 
-fn encode_key_map(key: &CanonicalKey) -> Result<Vec<(u64, Value)>, AtomicsError> {
+pub(crate) fn encode_key_map(key: &CanonicalKey) -> Result<Vec<(u64, Value)>, AtomicsError> {
     let mut entries = vec![
         (1, Value::Uint(u64::from(key.kind().wire_code()))),
         (
@@ -344,7 +347,7 @@ fn encode_predicate(p: &PlanPredicate) -> Result<Value, AtomicsError> {
     Ok(Value::Map(e))
 }
 
-fn encode_limits(l: ResourceLimits) -> Vec<(u64, Value)> {
+pub(crate) fn encode_limits(l: ResourceLimits) -> Vec<(u64, Value)> {
     vec![
         (1, Value::Uint(u64::from(l.caller_mutations))),
         (2, Value::Uint(u64::from(l.total_generated_members))),
@@ -362,7 +365,7 @@ fn encode_limits(l: ResourceLimits) -> Vec<(u64, Value)> {
     ]
 }
 
-fn decode_key(v: &Value) -> Result<CanonicalKey, AtomicsError> {
+pub(crate) fn decode_key(v: &Value) -> Result<CanonicalKey, AtomicsError> {
     let map = as_map(v)?;
     refuse_unknown_keys(map, &[1, 2, 3])?;
     let kind = require_u8(&map, 1)?;
@@ -428,7 +431,7 @@ fn decode_predicate(v: &Value) -> Result<PlanPredicate, AtomicsError> {
     })
 }
 
-fn decode_limits(map: &[(u64, Value)]) -> Result<ResourceLimits, AtomicsError> {
+pub(crate) fn decode_limits(map: &[(u64, Value)]) -> Result<ResourceLimits, AtomicsError> {
     refuse_unknown_keys(map, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])?;
     Ok(ResourceLimits {
         caller_mutations: require_u32(map, 1)?,
@@ -468,28 +471,28 @@ fn decode_int(v: &Value) -> Result<i64, AtomicsError> {
     }
 }
 
-fn as_map(v: &Value) -> Result<&[(u64, Value)], AtomicsError> {
+pub(crate) fn as_map(v: &Value) -> Result<&[(u64, Value)], AtomicsError> {
     match v {
         Value::Map(m) => Ok(m),
         _ => Err(CborError::NotMap.into()),
     }
 }
 
-fn require_value<'a>(map: &'a [(u64, Value)], key: u64) -> Result<&'a Value, AtomicsError> {
+pub(crate) fn require_value<'a>(map: &'a [(u64, Value)], key: u64) -> Result<&'a Value, AtomicsError> {
     map.iter()
         .find(|(k, _)| *k == key)
         .map(|(_, v)| v)
         .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))
 }
 
-fn require_u64(map: &[(u64, Value)], key: u64) -> Result<u64, AtomicsError> {
+pub(crate) fn require_u64(map: &[(u64, Value)], key: u64) -> Result<u64, AtomicsError> {
     match require_value(map, key)? {
         Value::Uint(n) => Ok(*n),
         _ => Err(CborError::Unsupported.into()),
     }
 }
 
-fn require_u32(map: &[(u64, Value)], key: u64) -> Result<u32, AtomicsError> {
+pub(crate) fn require_u32(map: &[(u64, Value)], key: u64) -> Result<u32, AtomicsError> {
     u32::try_from(require_u64(map, key)?).map_err(|_| CborError::Unsupported.into())
 }
 
@@ -497,11 +500,11 @@ fn require_u16(map: &[(u64, Value)], key: u64) -> Result<u16, AtomicsError> {
     u16::try_from(require_u64(map, key)?).map_err(|_| CborError::Unsupported.into())
 }
 
-fn require_u8(map: &[(u64, Value)], key: u64) -> Result<u8, AtomicsError> {
+pub(crate) fn require_u8(map: &[(u64, Value)], key: u64) -> Result<u8, AtomicsError> {
     u8::try_from(require_u64(map, key)?).map_err(|_| CborError::Unsupported.into())
 }
 
-fn require_bytes(map: &[(u64, Value)], key: u64) -> Result<Vec<u8>, AtomicsError> {
+pub(crate) fn require_bytes(map: &[(u64, Value)], key: u64) -> Result<Vec<u8>, AtomicsError> {
     match require_value(map, key)? {
         Value::Bytes(b) => Ok(b.clone()),
         _ => Err(CborError::Unsupported.into()),
@@ -519,17 +522,17 @@ fn require_map(map: &[(u64, Value)], key: u64) -> Result<&[(u64, Value)], Atomic
     as_map(require_value(map, key)?)
 }
 
-fn require_bstr16(map: &[(u64, Value)], key: u64) -> Result<[u8; 16], AtomicsError> {
+pub(crate) fn require_bstr16(map: &[(u64, Value)], key: u64) -> Result<[u8; 16], AtomicsError> {
     let b = require_bytes(map, key)?;
     <[u8; 16]>::try_from(b).map_err(|_| AtomicsError::Refused(AtomicRefuseReason::MalformedInput))
 }
 
-fn require_bstr32(map: &[(u64, Value)], key: u64) -> Result<[u8; 32], AtomicsError> {
+pub(crate) fn require_bstr32(map: &[(u64, Value)], key: u64) -> Result<[u8; 32], AtomicsError> {
     let b = require_bytes(map, key)?;
     <[u8; 32]>::try_from(b).map_err(|_| AtomicsError::Refused(AtomicRefuseReason::MalformedInput))
 }
 
-fn optional_bytes(map: &[(u64, Value)], key: u64) -> Result<Option<Vec<u8>>, AtomicsError> {
+pub(crate) fn optional_bytes(map: &[(u64, Value)], key: u64) -> Result<Option<Vec<u8>>, AtomicsError> {
     match map.iter().find(|(k, _)| *k == key) {
         None => Ok(None),
         Some((_, Value::Bytes(b))) => Ok(Some(b.clone())),
@@ -537,7 +540,7 @@ fn optional_bytes(map: &[(u64, Value)], key: u64) -> Result<Option<Vec<u8>>, Ato
     }
 }
 
-fn optional_bstr32(map: &[(u64, Value)], key: u64) -> Result<Option<[u8; 32]>, AtomicsError> {
+pub(crate) fn optional_bstr32(map: &[(u64, Value)], key: u64) -> Result<Option<[u8; 32]>, AtomicsError> {
     match optional_bytes(map, key)? {
         None => Ok(None),
         Some(b) => Ok(Some(<[u8; 32]>::try_from(b).map_err(|_| {
@@ -546,7 +549,7 @@ fn optional_bstr32(map: &[(u64, Value)], key: u64) -> Result<Option<[u8; 32]>, A
     }
 }
 
-fn optional_version(map: &[(u64, Value)], key: u64) -> Result<Option<VersionId>, AtomicsError> {
+pub(crate) fn optional_version(map: &[(u64, Value)], key: u64) -> Result<Option<VersionId>, AtomicsError> {
     match optional_bytes(map, key)? {
         None => Ok(None),
         Some(b) => {
@@ -571,7 +574,7 @@ fn optional_collection(
     }
 }
 
-fn refuse_unknown_keys(map: &[(u64, Value)], allowed: &[u64]) -> Result<(), AtomicsError> {
+pub(crate) fn refuse_unknown_keys(map: &[(u64, Value)], allowed: &[u64]) -> Result<(), AtomicsError> {
     for (k, _) in map {
         if !allowed.contains(k) {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
@@ -592,6 +595,7 @@ mod tests {
             DOMAIN_ATOMIC_PREPARE,
             DOMAIN_ATOMIC_MEMBER,
             DOMAIN_ATOMIC_DECISION,
+            DOMAIN_ATOMIC_TOMBSTONE,
             DOMAIN_ATOMIC_MANIFEST,
             DOMAIN_ATOMIC_READSET,
             DOMAIN_ATOMIC_PREDICATES,
