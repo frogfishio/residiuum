@@ -247,17 +247,23 @@ fn main() {
         "vectors": rejected,
     });
 
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spec/atomics");
-    fs::create_dir_all(&root).unwrap();
-    fs::write(
-        root.join("protocol-vectors.json"),
-        format!("{}\n", serde_json::to_string_pretty(&proto).unwrap()),
-    )
-    .unwrap();
-    fs::write(
-        root.join("rejected-vectors.json"),
-        format!("{}\n", serde_json::to_string_pretty(&rej).unwrap()),
-    )
-    .unwrap();
-    eprintln!("wrote {}", root.display());
+    write_spec(
+        "protocol-vectors.json",
+        &format!("{}\n", serde_json::to_string_pretty(&proto).unwrap()),
+    );
+    write_spec(
+        "rejected-vectors.json",
+        &format!("{}\n", serde_json::to_string_pretty(&rej).unwrap()),
+    );
+}
+
+fn write_spec(name: &str, body: &str) {
+    let crate_spec = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("spec");
+    fs::create_dir_all(&crate_spec).unwrap();
+    fs::write(crate_spec.join(name), body).unwrap();
+    eprintln!("wrote {}", crate_spec.join(name).display());
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spec/atomics");
+    if workspace.is_dir() {
+        fs::write(workspace.join(name), body).unwrap();
+    }
 }

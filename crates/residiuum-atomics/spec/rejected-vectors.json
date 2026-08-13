@@ -1,0 +1,71 @@
+{
+  "profile": "residiuum-atomics-v1",
+  "vectors": [
+    {
+      "bytes_hex": "",
+      "name": "empty",
+      "note": "no bytes",
+      "reason": "cbor"
+    },
+    {
+      "bytes_hex": "80",
+      "name": "empty_array",
+      "note": "top-level array, not a map",
+      "reason": "cbor"
+    },
+    {
+      "bytes_hex": "a0",
+      "name": "empty_map",
+      "note": "map missing required plan fields",
+      "reason": "malformed_input"
+    },
+    {
+      "bytes_hex": "a10101",
+      "name": "profile_only",
+      "note": "only field 1",
+      "reason": "malformed_input"
+    },
+    {
+      "bytes_hex": "f4",
+      "name": "bool_false",
+      "note": "simple value, not a map",
+      "reason": "cbor"
+    },
+    {
+      "bytes_hex": "a101a201000101",
+      "name": "nested_duplicate_key",
+      "note": "nested map inside field 1 has duplicate key 1",
+      "reason": "cbor"
+    },
+    {
+      "bytes_hex": "a101a202000100",
+      "name": "nested_unsorted_keys",
+      "note": "nested map inside field 1 has keys 2 then 1",
+      "reason": "cbor"
+    },
+    {
+      "name": "duplicate_mutation_target",
+      "note": "same (collection_id, canonical key) twice as a mutation",
+      "reason": "duplicate_target",
+      "stage": "close"
+    },
+    {
+      "name": "create_missing_value",
+      "note": "create without encoded_value",
+      "reason": "invalid_value",
+      "stage": "close"
+    },
+    {
+      "name": "duplicate_read_identity",
+      "note": "same (collection_id, canonical key) twice as a read witness",
+      "reason": "malformed_input",
+      "stage": "close"
+    },
+    {
+      "name": "reads_without_frontier",
+      "note": "prior-read witnesses require read_frontier",
+      "reason": "malformed_input",
+      "stage": "close"
+    }
+  ]
+}

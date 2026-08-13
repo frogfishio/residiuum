@@ -10,7 +10,7 @@ description = "Residiuum Atomic protocol types: identity, limits, vocabulary, ou
 readme = "README.md"
 keywords = ["residiuum", "atomics", "protocol"]
 categories = ["data-structures"]
-include = ["Cargo.toml", "README.md", "src/**", "tests/**"]
+include = ["Cargo.toml", "README.md", "src/**", "tests/**", "examples/**", "spec/**"]
 
 [dependencies]
 blake3.workspace = true

@@ -7,7 +7,8 @@ use residiuum_atomics::{
 };
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+
+include!("support/spec_dir.rs");
 
 fn parse_hex(s: &str) -> Vec<u8> {
     assert!(
@@ -23,12 +24,6 @@ fn parse_hex(s: &str) -> Vec<u8> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-fn spec_path(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../spec/atomics")
-        .join(name)
 }
 
 #[test]

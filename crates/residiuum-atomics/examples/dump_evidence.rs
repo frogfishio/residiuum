@@ -262,9 +262,16 @@ fn main() {
         "accepted": accepted,
         "rejected": rejected,
     });
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spec/atomics");
-    fs::create_dir_all(&root).unwrap();
     let body = serde_json::to_string_pretty(&doc).unwrap() + "\n";
-    fs::write(root.join("evidence-vectors.json"), body).unwrap();
-    eprintln!("wrote {}", root.join("evidence-vectors.json").display());
+    let crate_spec = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("spec");
+    fs::create_dir_all(&crate_spec).unwrap();
+    fs::write(crate_spec.join("evidence-vectors.json"), &body).unwrap();
+    eprintln!(
+        "wrote {}",
+        crate_spec.join("evidence-vectors.json").display()
+    );
+    let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spec/atomics");
+    if workspace.is_dir() {
+        fs::write(workspace.join("evidence-vectors.json"), body).unwrap();
+    }
 }

@@ -143,7 +143,7 @@ fn encode_decode_roundtrip() {
 #[test]
 fn spec_field_numbers_match_codec() {
     let spec: serde_json::Value =
-        serde_json::from_str(include_str!("../../../spec/atomics/cbor-v1.json")).unwrap();
+        serde_json::from_str(include_str!("../spec/cbor-v1.json")).unwrap();
     assert_eq!(spec["plan_labels"]["1"]["field"], "profile");
     assert_eq!(spec["plan_labels"]["2"]["field"], "atomic_id");
     assert_eq!(spec["plan_labels"]["8"]["field"], "mutations");

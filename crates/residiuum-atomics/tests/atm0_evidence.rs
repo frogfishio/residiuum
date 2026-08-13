@@ -11,9 +11,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-fn spec_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spec/atomics")
-}
+include!("support/spec_dir.rs");
 
 fn evidence_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/atomics-evidence/atm-0")

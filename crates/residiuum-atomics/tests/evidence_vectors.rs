@@ -10,7 +10,8 @@ use residiuum_atomics::{
 };
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+
+include!("support/spec_dir.rs");
 
 fn parse_hex(s: &str) -> Vec<u8> {
     assert!(s.len().is_multiple_of(2), "hex length must be even");
@@ -24,10 +25,6 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn spec_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spec/atomics/evidence-vectors.json")
-}
-
 fn aid() -> AtomicId {
     let mut b = [0u8; 32];
     b[0] = 9;
@@ -36,7 +33,7 @@ fn aid() -> AtomicId {
 
 #[test]
 fn evidence_vectors_roundtrip_and_match_hashes() {
-    let raw = fs::read_to_string(spec_path()).unwrap();
+    let raw = fs::read_to_string(spec_path("evidence-vectors.json")).unwrap();
     let doc: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(doc["profile"], "residiuum-atomics-v1");
     let accepted = doc["accepted"].as_array().expect("accepted");
@@ -101,7 +98,7 @@ fn evidence_vectors_roundtrip_and_match_hashes() {
 
 #[test]
 fn evidence_rejected_vectors_fail_as_documented() {
-    let raw = fs::read_to_string(spec_path()).unwrap();
+    let raw = fs::read_to_string(spec_path("evidence-vectors.json")).unwrap();
     let doc: Value = serde_json::from_str(&raw).unwrap();
     for v in doc["rejected"].as_array().expect("rejected") {
         let name = v["name"].as_str().unwrap();

@@ -11,16 +11,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Instant;
 
+include!("support/spec_dir.rs");
+
 fn parse_hex(s: &str) -> Vec<u8> {
     assert!(s.len().is_multiple_of(2), "hex length must be even");
     (0..s.len())
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
         .collect()
-}
-
-fn spec_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spec/atomics/hostile-corpus.json")
 }
 
 fn evidence_dir() -> PathBuf {
@@ -30,7 +28,7 @@ fn evidence_dir() -> PathBuf {
 #[test]
 fn hostile_corpus_covers_required_families_and_refuses() {
     assert_eq!(MAX_CBOR_DEPTH, 8);
-    let raw = fs::read_to_string(spec_path()).unwrap();
+    let raw = fs::read_to_string(spec_path("hostile-corpus.json")).unwrap();
     let doc: Value = serde_json::from_str(&raw).unwrap();
     assert_eq!(doc["max_cbor_depth"], MAX_CBOR_DEPTH);
 
