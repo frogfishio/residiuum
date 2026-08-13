@@ -202,7 +202,7 @@ fn pred_order(heap: &HeapId, p: &PlanPredicate) -> (Vec<u8>, Vec<u8>, Vec<u8>, u
 }
 
 /// Order/identity bytes for a key: kind tag plus profile payload, not CBOR length prefixes.
-fn key_order_bytes(key: &CanonicalKey) -> Vec<u8> {
+pub(crate) fn key_order_bytes(key: &CanonicalKey) -> Vec<u8> {
     let mut out = vec![key.kind().wire_code()];
     match key {
         CanonicalKey::String(s) => out.extend_from_slice(s.as_bytes()),

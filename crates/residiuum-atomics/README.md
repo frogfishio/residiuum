@@ -12,6 +12,7 @@ plan codec. ATM-0.3 freezes accepted/rejected vectors in
 [`spec/atomics/protocol-vectors.json`](../../spec/atomics/protocol-vectors.json).
 ATM-0.4 is the hostile decoder corpus
 ([`spec/atomics/hostile-corpus.json`](../../spec/atomics/hostile-corpus.json)).
+ATM-0.5 is the serial in-memory oracle and shared history format.
 
 Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 §§4–13. Programme: [`ATOMICS_IMPLEMENTATION_PLAN.md`](../../doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md) §4 and §6.

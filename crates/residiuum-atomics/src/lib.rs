@@ -32,7 +32,7 @@ pub use evidence::{
 };
 pub use id::{AtomicId, CollectionId, ContentRoot, HeapId, VersionId};
 pub use limits::ResourceLimits;
-pub use oracle::SerialOracle;
+pub use oracle::{OracleCell, OracleHistoryKind, OracleHistoryRecord, SerialOracle};
 pub use outcome::{
     AtomicAbortReason, AtomicMemberReceipt, AtomicOutcome, AtomicReceipt, AtomicRefuseReason,
     AtomicResolutionHandle, AtomicStatus, LogicalStatus, MaterialStatus,
