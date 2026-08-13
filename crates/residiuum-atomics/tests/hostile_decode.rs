@@ -8,7 +8,6 @@ use residiuum_atomics::{decode_canonical_plan, AtomicsError, CborError, MAX_CBOR
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
 use std::time::Instant;
 
 include!("support/spec_dir.rs");
@@ -19,10 +18,6 @@ fn parse_hex(s: &str) -> Vec<u8> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("hex"))
         .collect()
-}
-
-fn evidence_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/atomics-evidence/atm-0-scratch")
 }
 
 #[test]
@@ -50,7 +45,6 @@ fn hostile_corpus_covers_required_families_and_refuses() {
         assert!(families.contains(fam), "missing hostile family {fam}");
     }
 
-    let mut results = Vec::new();
     for v in vectors {
         let name = v["name"].as_str().unwrap();
         let family = v["family"].as_str().unwrap();
@@ -73,28 +67,5 @@ fn hostile_corpus_covers_required_families_and_refuses() {
             }
             other => panic!("{name}: expected Cbor, got {other:?}"),
         }
-        results.push(serde_json::json!({
-            "name": name,
-            "family": family,
-            "reason": want,
-            "refused": true,
-        }));
     }
-
-    let summary = serde_json::json!({
-        "profile": "residiuum-atomics-v1",
-        "max_cbor_depth": MAX_CBOR_DEPTH,
-        "families": required,
-        "vector_count": results.len(),
-        "all_refused": true,
-        "vectors": results,
-    });
-    let dir = evidence_dir();
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(
-        dir.join("hostile-corpus-summary.json"),
-        format!("{}\n", serde_json::to_string_pretty(&summary).unwrap()),
-    )
-    .unwrap();
-    fs::write(dir.join("hostile-corpus.json"), raw).unwrap();
 }
