@@ -79,7 +79,7 @@ BAD:   mpl-store   ──depends──►  agpl-cluster
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │  MIT — protocol, pure algebra, wire format, pure clients    │
-│  residiuum-sda · residiuum-sda-cli · residiuum-format · residiuum-client · residiuum-heap   │
+│  residiuum-sda · residiuum-sda-cli · residiuum-format · residiuum-client · residiuum-heap · residiuum-atomics   │
 └────────────────────────────▲────────────────────────────────┘
                              │ may depend only upward
 ┌────────────────────────────┴────────────────────────────────┐
@@ -103,6 +103,7 @@ BAD:   mpl-store   ──depends──►  agpl-cluster
 | `residiuum-format` | **MIT** | |
 | `residiuum-client` | **MIT** | Wire framing + handshake |
 | `residiuum-heap` | **MIT** | Planned heap identity, certificate, capability, and pure decision kernel |
+| `residiuum-atomics` | **MIT** | Pure Atomic protocol types (ATM-0); no store/SDK/IO |
 | `residiuum-store` | **MPL-2.0** | |
 | `residiuum-examine` | **MPL-2.0** | |
 | `residiuum-sdk` | **MPL-2.0** | Default: embedded + remote; optional `cluster` → AGPL dep |
@@ -155,6 +156,7 @@ the AGPL dependency. Serve path lives only in `residiuum-server`.
 | `residiuum-format` | unchanged | MIT | — |
 | `residiuum-client` | wire framing + handshake | MIT | — |
 | `residiuum-heap` | heap identity, credentials, capability and pure decision kernel | MIT | format |
+| `residiuum-atomics` | Atomic identity, limits, vocabulary, outcomes, formal lifecycle | MIT | — |
 | `residiuum-store` | unchanged | MPL-2.0 | format |
 | `residiuum-sdk` | `Residiuum::open`, connect, collections, filters, indexes; optional cluster | MPL-2.0 | store, client, residiuum-sda; optional cluster |
 | `residiuum-testrig` | unpublished store stress, chaos, and performance rig | MPL-2.0 | store |
@@ -179,7 +181,7 @@ the AGPL dependency. Serve path lives only in `residiuum-server`.
 
 ```text
 MIT                → residiuum-sda, residiuum-sda-cli, residiuum-format, residiuum-client,
-                     residiuum-heap
+                     residiuum-heap, residiuum-atomics
 MPL-2.0            → residiuum-store, residiuum-examine, residiuum-sdk (default features),
                      residiuum-testrig
 AGPL-3.0-or-later  → residiuum-cluster, residiuum-server, residiuum-cli, residiuum-authority

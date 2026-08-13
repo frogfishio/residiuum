@@ -84,6 +84,8 @@ dingodb/
     enr-core/       # ENR1/ENR2 specs; ENR1 runtime lives in residiuum-sda (one compile path)
     residiuum-format/   # frames, CBOR envelopes, seal, scan, §13 corpus (Stage 2a–2d) — MIT
     residiuum-client/   # framed RPC + handshake only — MIT
+    residiuum-heap/     # identity, capability, decide — MIT
+    residiuum-atomics/  # pure Atomic protocol types (ATM-0 start) — MIT
     residiuum-store/    # single-node append store (Stages 3 + 6 + 7 inspect/salvage_to) — MPL-2.0
     residiuum-sdk/      # collection API + remote connect (Stages 4 + 6 + 7); cluster via feature — MPL-2.0
     residiuum-server/   # accept loop, authz, admission, Raft RPC glue, serve_* — AGPL
@@ -98,6 +100,8 @@ Crate ownership:
 |-------|-------|------|
 | 2 | `residiuum-format` | **Present** — frames, deterministic CBOR envelopes, seal, scanner, §13 corpus (2a–2d) |
 | — | `residiuum-client` | **Present** — MIT wire framing + handshake (`residiuum-rpc-v1`) |
+| — | `residiuum-heap` | **Present** — heap identity, capability, pure `decide` |
+| ATM-0 | `residiuum-atomics` | **Present (ATM-0.1)** — pure Atomic types; no store/SDK/IO |
 | 3+6+7 | `residiuum-store` | **Present** — put/get/delete, salvage, open_inspect, salvage_to, backup_to/restore (DEF-050), scrub (DEF-051), migrate (DEF-052), catalogs, chunks, history, compact |
 | 4+6+7+8d–8e | `residiuum-sdk` | **Present** — collections, filters, indexes, history, remote RPC; `cluster` feature for open_cluster |
 | 5 | `residiuum-examine` | **Present** — ExaminationUnit projection, salvage stream, SDA filter/map, bounded pages |

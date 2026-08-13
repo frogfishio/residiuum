@@ -1,0 +1,24 @@
+[package]
+name = "residiuum-atomics"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license = "MIT"
+description = "Residiuum Atomic protocol types: identity, limits, vocabulary, outcomes, and formal lifecycle states."
+readme = "README.md"
+keywords = ["residiuum", "atomics", "protocol"]
+categories = ["data-structures"]
+include = ["Cargo.toml", "README.md", "src/**", "tests/**"]
+
+[dependencies]
+blake3.workspace = true
+getrandom.workspace = true
+thiserror.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn" }
+
+# ATM-0.1 is a start-only package: types and formal states. No store, SDK, format,
+# heap, file, network, or thread runtime. Codec and oracle arrive in later ATM-0 cards.

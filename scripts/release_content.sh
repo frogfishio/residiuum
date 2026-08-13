@@ -18,6 +18,7 @@ MEMBERS=(
   "residiuum-sda-cli|crates/sda-cli"
   "residiuum-format|crates/residiuum-format"
   "residiuum-heap|crates/residiuum-heap"
+  "residiuum-atomics|crates/residiuum-atomics"
   "residiuum-store|crates/residiuum-store"
   "residiuum-client|crates/residiuum-client"
   "residiuum-sdk|crates/residiuum-sdk"
