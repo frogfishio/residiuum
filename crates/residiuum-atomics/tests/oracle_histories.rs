@@ -5,8 +5,6 @@ use residiuum_atomics::{
     AtomicsError, CanonicalKey, CollectionId, CoordinationScope, HeapId, LogicalStatus,
     MutationKind, OracleHistoryKind, PlanMutation, ResourceLimits, SerialOracle,
 };
-use std::fs;
-use std::path::PathBuf;
 
 fn hid() -> HeapId {
     let mut b = [0u8; 16];
@@ -143,37 +141,4 @@ fn history_never_marks_partial_publish() {
             }
         }
     }
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/atomics-evidence/atm-0");
-    fs::create_dir_all(&dir).unwrap();
-    let property = serde_json::json!({
-        "profile": "residiuum-atomics-v1",
-        "properties": {
-            "same_id_same_root_replays": true,
-            "same_id_different_root_conflicts": true,
-            "oracle_never_partially_visible": true,
-            "unknown_profile_refused_before_issue": true
-        }
-    });
-    let model = serde_json::json!({
-        "profile": "residiuum-atomics-v1",
-        "oracle": "serial_in_memory",
-        "history_len": o.history().len(),
-        "no_partial_publish": o.history().iter().all(|h| {
-            h.published == matches!(
-                h.kind,
-                OracleHistoryKind::IssuedCommitted | OracleHistoryKind::Replayed
-            )
-        }),
-        "complete_coverage_status": true
-    });
-    fs::write(
-        dir.join("property-summary.json"),
-        format!("{}\n", serde_json::to_string_pretty(&property).unwrap()),
-    )
-    .unwrap();
-    fs::write(
-        dir.join("model-check-summary.json"),
-        format!("{}\n", serde_json::to_string_pretty(&model).unwrap()),
-    )
-    .unwrap();
 }
