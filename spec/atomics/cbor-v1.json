@@ -1,0 +1,151 @@
+{
+  "profile": "residiuum-atomics-v1",
+  "spec_section": "6,9,13",
+  "normative": "doc/todo/atomics/ATOMICS_SPEC.md",
+  "cbor_profile": "FORMAT_SPEC §4.4 / §5 condition 6",
+  "rules": [
+    "single definite-length map with unsigned-integer keys",
+    "shortest integer encodings",
+    "no indefinite items",
+    "unique keys sorted by encoded key bytes",
+    "valid UTF-8 text",
+    "no tags",
+    "no floats",
+    "no decoder allocates a collection longer than remaining bytes",
+    "unknown map keys are refused",
+    "optional fields are omitted, never encoded as null",
+    "arrays are always present (may be empty) except optional scalars"
+  ],
+  "domain_separators": {
+    "atomic_id": "RESIDIUUM-ATOMIC-ID-V1",
+    "content": "RESIDIUUM-ATOMIC-CONTENT-V1",
+    "prepare": "RESIDIUUM-ATOMIC-PREPARE-V1",
+    "member": "RESIDIUUM-ATOMIC-MEMBER-V1",
+    "decision": "RESIDIUUM-ATOMIC-DECISION-V1",
+    "manifest": "RESIDIUUM-ATOMIC-MANIFEST-V1",
+    "readset": "RESIDIUUM-ATOMIC-READSET-V1",
+    "predicates": "RESIDIUUM-ATOMIC-PREDICATES-V1"
+  },
+  "widths": {
+    "atomic_id": 32,
+    "content_root": 32,
+    "heap_id": 16,
+    "collection_id": 16,
+    "version_id": 16,
+    "hash": 32
+  },
+  "canonical_target_order": [
+    "heap_id",
+    "collection_id",
+    "canonical_key_bytes",
+    "member_kind",
+    "ordinal"
+  ],
+  "duplicate_target": "refuse same (collection_id, canonical_key_bytes) as a mutation target",
+  "profile_codes": {
+    "1": "local_heap_v1"
+  },
+  "scope_codes": {
+    "1": "key",
+    "2": "local_heap",
+    "3": "partition"
+  },
+  "mutation_kinds": {
+    "1": "create",
+    "2": "put",
+    "3": "replace",
+    "4": "delete"
+  },
+  "predicate_kinds": {
+    "1": "assert_absent",
+    "2": "assert_present",
+    "3": "assert_version",
+    "4": "exact_scalar_equality",
+    "5": "bounded_key_range_absence",
+    "6": "bounded_key_range_presence",
+    "7": "active_rule_revision_equality",
+    "8": "collection_lifecycle_state",
+    "9": "heap_authority_revision"
+  },
+  "canonical_key_kinds": {
+    "1": "string",
+    "2": "opaque",
+    "3": "integer",
+    "4": "decimal"
+  },
+  "plan_labels": {
+    "1": { "field": "profile", "type": "uint", "required": true },
+    "2": { "field": "atomic_id", "type": "bstr(32)", "required": true },
+    "3": { "field": "heap_id", "type": "bstr(16)", "required": true },
+    "4": { "field": "scope", "type": "uint", "required": true },
+    "5": { "field": "read_frontier", "type": "bstr(32)", "required": false },
+    "6": { "field": "reads", "type": "array(read_witness)", "required": true },
+    "7": { "field": "predicates", "type": "array(predicate)", "required": true },
+    "8": { "field": "mutations", "type": "array(mutation)", "required": true },
+    "9": { "field": "active_rule_revisions", "type": "array(bstr(32))", "required": true },
+    "10": { "field": "limits", "type": "map(limits_labels)", "required": true }
+  },
+  "read_witness_labels": {
+    "1": { "field": "collection_id", "type": "bstr(16)", "required": true },
+    "2": { "field": "key", "type": "map(canonical_key_labels)", "required": true },
+    "3": { "field": "observed_version", "type": "bstr(16)", "required": false },
+    "4": { "field": "projection_hash", "type": "bstr(32)", "required": true }
+  },
+  "canonical_key_labels": {
+    "1": { "field": "kind", "type": "uint", "required": true },
+    "2": { "field": "payload", "type": "bstr", "required": true },
+    "3": { "field": "scale", "type": "int", "required": false, "rule": "decimal only" }
+  },
+  "mutation_labels": {
+    "1": { "field": "kind", "type": "uint", "required": true },
+    "2": { "field": "collection_id", "type": "bstr(16)", "required": true },
+    "3": { "field": "key", "type": "map(canonical_key_labels)", "required": true },
+    "4": { "field": "encoded_value", "type": "bstr", "required": false, "rule": "absent on delete" },
+    "5": { "field": "if_version", "type": "bstr(16)", "required": false, "rule": "replace and delete" }
+  },
+  "predicate_labels": {
+    "1": { "field": "kind", "type": "uint", "required": true },
+    "2": { "field": "collection_id", "type": "bstr(16)", "required": false },
+    "3": { "field": "key", "type": "map(canonical_key_labels)", "required": false },
+    "4": { "field": "version", "type": "bstr(16)", "required": false },
+    "5": { "field": "encoded", "type": "bstr", "required": false, "rule": "compiled RQL/RRE payload" }
+  },
+  "limits_labels": {
+    "1": { "field": "caller_mutations", "type": "uint", "required": true },
+    "2": { "field": "total_generated_members", "type": "uint", "required": true },
+    "3": { "field": "canonical_plan_bytes", "type": "uint", "required": true },
+    "4": { "field": "total_proposed_value_bytes", "type": "uint", "required": true },
+    "5": { "field": "read_witnesses", "type": "uint", "required": true },
+    "6": { "field": "predicates", "type": "uint", "required": true },
+    "7": { "field": "affected_collections", "type": "uint", "required": true },
+    "8": { "field": "active_rule_revisions", "type": "uint", "required": true },
+    "9": { "field": "construction_deadline_ms", "type": "uint", "required": true },
+    "10": { "field": "emitted_violations", "type": "uint", "required": true }
+  },
+  "hard_ceilings": {
+    "key": {
+      "caller_mutations": 1,
+      "total_generated_members": 32,
+      "canonical_plan_bytes": 262144,
+      "total_proposed_value_bytes": 4194304,
+      "read_witnesses": 64,
+      "predicates": 32,
+      "affected_collections": 1,
+      "active_rule_revisions": 64,
+      "construction_deadline_ms": 2000,
+      "emitted_violations": 1024
+    },
+    "local_heap": {
+      "caller_mutations": 256,
+      "total_generated_members": 4096,
+      "canonical_plan_bytes": 1048576,
+      "total_proposed_value_bytes": 8388608,
+      "read_witnesses": 4096,
+      "predicates": 1024,
+      "affected_collections": 64,
+      "active_rule_revisions": 1024,
+      "construction_deadline_ms": 5000,
+      "emitted_violations": 1024
+    }
+  }
+}

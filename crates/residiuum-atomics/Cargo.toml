@@ -17,8 +17,10 @@ blake3.workspace = true
 getrandom.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [lints.rust]
 unexpected_cfgs = { level = "warn" }
 
-# ATM-0.1 is a start-only package: types and formal states. No store, SDK, format,
-# heap, file, network, or thread runtime. Codec and oracle arrive in later ATM-0 cards.
+# Pure protocol crate. No store, SDK, format, heap, file, network, or thread runtime.
