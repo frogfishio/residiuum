@@ -144,10 +144,10 @@
   },
   "predicate_labels": {
     "1": { "field": "kind", "type": "uint", "required": true },
-    "2": { "field": "collection_id", "type": "bstr(16)", "required": false },
-    "3": { "field": "key", "type": "map(canonical_key_labels)", "required": false },
-    "4": { "field": "version", "type": "bstr(16)", "required": false },
-    "5": { "field": "encoded", "type": "bstr", "required": false, "rule": "compiled RQL/RRE payload" }
+    "2": { "field": "collection_id", "type": "bstr(16)", "required": false, "rule": "required for public asserts" },
+    "3": { "field": "key", "type": "map(canonical_key_labels)", "required": false, "rule": "required for public asserts" },
+    "4": { "field": "version", "type": "bstr(16)", "required": false, "rule": "required for assert_version; forbidden on absent/present" },
+    "5": { "field": "encoded", "type": "bstr", "required": false, "rule": "compiled RQL/RRE payload; forbidden on public asserts" }
   },
   "limits_labels": {
     "1": { "field": "caller_mutations", "type": "uint", "required": true },

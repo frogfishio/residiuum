@@ -90,6 +90,30 @@
       "name": "decimal_key_missing_scale",
       "note": "scale (field 3) is required on decimal keys",
       "reason": "malformed_input"
+    },
+    {
+      "name": "assert_version_missing_version",
+      "note": "assert_version requires version and forbids encoded",
+      "reason": "malformed_input",
+      "stage": "close"
+    },
+    {
+      "name": "assert_absent_with_encoded",
+      "note": "absent/present forbid version and encoded",
+      "reason": "malformed_input",
+      "stage": "close"
+    },
+    {
+      "bytes_hex": "a901010258200900000000000000000000000000000000000000000000000000000000000000035001000000000000000000000000000000040206800781a3010302500200000000000000000000000000000003a2010102446c6f636b0881a4010102500100000000000000000000000000000003a2010102416b04417609800aaa01184002191000031a00080000041a004000000519100006190400071008190400091913880a190400",
+      "name": "assert_version_missing_version_bytes",
+      "note": "assert_version without field 4 is refused before prepare",
+      "reason": "malformed_input"
+    },
+    {
+      "bytes_hex": "a901010258200900000000000000000000000000000000000000000000000000000000000000035001000000000000000000000000000000040206800781a4010102500200000000000000000000000000000003a2010102446c6f636b0541610881a4010102500100000000000000000000000000000003a2010102416b04417609800aaa01184002191000031a00080000041a004000000519100006190400071008190400091913880a190400",
+      "name": "assert_absent_with_encoded_bytes",
+      "note": "assert_absent with encoded payload is refused before prepare",
+      "reason": "malformed_input"
     }
   ]
 }

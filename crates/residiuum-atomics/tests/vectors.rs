@@ -3,7 +3,7 @@
 use residiuum_atomics::{
     decode_canonical_plan, encode_canonical_plan, plan_content_root, AtomicPlan, AtomicPlanParts,
     AtomicProfile, AtomicRefuseReason, AtomicsError, CanonicalKey, CollectionId, CoordinationScope,
-    HeapId, MutationKind, PlanMutation, ResourceLimits,
+    HeapId, MutationKind, PlanMutation, PlanPredicate, PredicateKind, ResourceLimits, VersionId,
 };
 use serde_json::Value;
 use std::fs;
@@ -100,6 +100,18 @@ fn rejected_close_cases_are_documented() {
         closes.iter().any(|v| v["name"] == "reads_without_frontier"),
         "reads_without_frontier close refusal must be documented"
     );
+    assert!(
+        closes
+            .iter()
+            .any(|v| v["name"] == "assert_version_missing_version"),
+        "assert_version_missing_version close refusal must be documented"
+    );
+    assert!(
+        closes
+            .iter()
+            .any(|v| v["name"] == "assert_absent_with_encoded"),
+        "assert_absent_with_encoded close refusal must be documented"
+    );
 
     fn hid() -> HeapId {
         let mut b = [0u8; 16];
@@ -147,4 +159,43 @@ fn rejected_close_cases_are_documented() {
         AtomicPlan::close(bad).unwrap_err(),
         AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
     );
+
+    let mut ver = base();
+    ver.mutations = vec![mk(Some(b"v".to_vec()))];
+    ver.predicates = vec![PlanPredicate {
+        kind: PredicateKind::AssertVersion,
+        collection_id: Some(cid()),
+        key: Some(CanonicalKey::String("k".into())),
+        version: None,
+        encoded: None,
+    }];
+    assert_eq!(
+        AtomicPlan::close(ver).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+    );
+    let mut extra = base();
+    extra.mutations = vec![mk(Some(b"v".to_vec()))];
+    extra.predicates = vec![PlanPredicate {
+        kind: PredicateKind::AssertAbsent,
+        collection_id: Some(cid()),
+        key: Some(CanonicalKey::String("k".into())),
+        version: None,
+        encoded: Some(b"x".to_vec()),
+    }];
+    assert_eq!(
+        AtomicPlan::close(extra).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+    );
+    let mut ok = base();
+    ok.mutations = vec![mk(Some(b"v".to_vec()))];
+    let mut vid = [0u8; 16];
+    vid[0] = 3;
+    ok.predicates = vec![PlanPredicate {
+        kind: PredicateKind::AssertVersion,
+        collection_id: Some(cid()),
+        key: Some(CanonicalKey::String("k".into())),
+        version: Some(VersionId::from_bytes(vid).unwrap()),
+        encoded: None,
+    }];
+    assert!(AtomicPlan::close(ok).is_ok());
 }

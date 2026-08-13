@@ -80,6 +80,7 @@ pub(crate) fn close_plan(mut parts: AtomicPlanParts) -> Result<AtomicPlan, Atomi
     parts.predicates.sort_by_key(|a| pred_order(&heap_id, a));
     parts.active_rule_revisions.sort_unstable();
     validate_mutation_shapes(&parts.mutations)?;
+    validate_predicate_shapes(&parts.predicates)?;
     Ok(AtomicPlan::from_closed(parts))
 }
 
@@ -198,6 +199,32 @@ fn validate_mutation_shapes(mutations: &[PlanMutation]) -> Result<(), AtomicsErr
                     return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn validate_predicate_shapes(predicates: &[PlanPredicate]) -> Result<(), AtomicsError> {
+    for p in predicates {
+        let ok = match p.kind {
+            PredicateKind::AssertAbsent | PredicateKind::AssertPresent => {
+                p.collection_id.is_some()
+                    && p.key.is_some()
+                    && p.version.is_none()
+                    && p.encoded.is_none()
+            }
+            PredicateKind::AssertVersion => {
+                p.collection_id.is_some()
+                    && p.key.is_some()
+                    && p.version.is_some()
+                    && p.encoded.is_none()
+            }
+            _ => true,
+        };
+        if !ok {
+            // Public asserts must be well-formed before prepare; a missing
+            // version is not a runtime precondition conflict.
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
     }
     Ok(())
