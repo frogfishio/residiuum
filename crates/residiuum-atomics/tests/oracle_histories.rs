@@ -125,6 +125,42 @@ fn unknown_profile_is_refused_not_issued() {
 }
 
 #[test]
+fn partition_scope_is_refused_not_issued() {
+    let mut o = SerialOracle::new(hid());
+    let p = AtomicPlan::close(AtomicPlanParts {
+        profile: AtomicProfile::LocalHeapV1,
+        atomic_id: aid(4),
+        heap_id: hid(),
+        scope: CoordinationScope::Partition,
+        read_frontier: None,
+        reads: Vec::new(),
+        predicates: Vec::new(),
+        mutations: vec![PlanMutation {
+            kind: MutationKind::Create,
+            collection_id: cid(),
+            key: CanonicalKey::String("k".into()),
+            encoded_value: Some(b"v".to_vec()),
+            if_version: None,
+        }],
+        active_rule_revisions: Vec::new(),
+        limits: ResourceLimits::hard_partition(),
+    })
+    .unwrap();
+    assert_eq!(
+        o.apply(&p).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::ScopeUnavailable)
+    );
+    assert_eq!(o.status(aid(4)).logical, LogicalStatus::NotFound);
+    assert_eq!(
+        o.history()
+            .iter()
+            .filter(|h| h.kind == OracleHistoryKind::Refused && !h.published)
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn history_never_marks_partial_publish() {
     let mut o = SerialOracle::new(hid());
     o.apply(&plan(1, "a", b"1")).unwrap();

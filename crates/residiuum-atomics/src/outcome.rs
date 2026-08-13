@@ -59,6 +59,8 @@ pub enum AtomicRefuseReason {
     MalformedInput,
     /// Profile is unknown or not executable on this backend.
     UnsupportedProfile,
+    /// Declared scope is not enabled for this profile (`atomic_scope_unavailable`).
+    ScopeUnavailable,
     /// Same `(collection_id, canonical_key)` appeared twice as a mutation target.
     DuplicateTarget,
     /// A collection belongs to another Heap.
@@ -89,6 +91,7 @@ impl AtomicRefuseReason {
         match self {
             Self::MalformedInput => "malformed_input",
             Self::UnsupportedProfile => "unsupported_profile",
+            Self::ScopeUnavailable => "atomic_scope_unavailable",
             Self::DuplicateTarget => "duplicate_target",
             Self::CrossHeapCollection => "cross_heap_collection",
             Self::StaleOrForeignCapability => "stale_or_foreign_capability",

@@ -85,6 +85,19 @@ impl AtomicProfile {
         matches!(self, Self::LocalHeapV1)
     }
 
+    /// Profile/scope matrix for issuance (`ATOMICS_SPEC` §3–4, §21).
+    ///
+    /// `LocalHeapV1` may issue Key and LocalHeap plans. Partition stays disabled
+    /// until a separate profile and qualification gate pass.
+    pub const fn execution_supports_scope(self, scope: CoordinationScope) -> bool {
+        match self {
+            Self::LocalHeapV1 => {
+                matches!(scope, CoordinationScope::Key | CoordinationScope::LocalHeap)
+            }
+            Self::Unknown(_) => false,
+        }
+    }
+
     /// Stable snake_case name. Unknown codes stay numeric.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -535,6 +548,16 @@ mod tests {
     fn unknown_profile_is_not_executable() {
         assert!(AtomicProfile::LocalHeapV1.execution_supported());
         assert!(!AtomicProfile::from_wire_code(99).execution_supported());
+    }
+
+    #[test]
+    fn local_heap_v1_refuses_partition_scope() {
+        let p = AtomicProfile::LocalHeapV1;
+        assert!(p.execution_supports_scope(CoordinationScope::Key));
+        assert!(p.execution_supports_scope(CoordinationScope::LocalHeap));
+        assert!(!p.execution_supports_scope(CoordinationScope::Partition));
+        assert!(!AtomicProfile::from_wire_code(99)
+            .execution_supports_scope(CoordinationScope::LocalHeap));
     }
 
     #[test]

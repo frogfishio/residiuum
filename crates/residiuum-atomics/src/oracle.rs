@@ -133,6 +133,9 @@ impl SerialOracle {
         if !plan.profile().execution_supported() {
             return self.refuse(plan, AtomicRefuseReason::UnsupportedProfile);
         }
+        if !plan.profile().execution_supports_scope(plan.scope()) {
+            return self.refuse(plan, AtomicRefuseReason::ScopeUnavailable);
+        }
         if plan
             .predicates()
             .iter()
@@ -486,5 +489,39 @@ mod tests {
             b"1"
         );
         assert!(!o.history().last().unwrap().published);
+    }
+
+    #[test]
+    fn partition_scope_is_refused_without_status() {
+        let mut o = SerialOracle::new(hid());
+        let plan = AtomicPlan::close(AtomicPlanParts {
+            profile: AtomicProfile::LocalHeapV1,
+            atomic_id: aid(7),
+            heap_id: hid(),
+            scope: CoordinationScope::Partition,
+            read_frontier: None,
+            reads: Vec::new(),
+            predicates: Vec::new(),
+            mutations: vec![PlanMutation {
+                kind: MutationKind::Create,
+                collection_id: cid(1),
+                key: CanonicalKey::String("k".into()),
+                encoded_value: Some(b"v".to_vec()),
+                if_version: None,
+            }],
+            active_rule_revisions: Vec::new(),
+            limits: ResourceLimits::hard_partition(),
+        })
+        .unwrap();
+        assert_eq!(
+            o.apply(&plan).unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::ScopeUnavailable)
+        );
+        assert_eq!(o.status(plan.atomic_id()).logical, LogicalStatus::NotFound);
+        assert!(o.get(cid(1), &CanonicalKey::String("k".into())).is_none());
+        let last = o.history().last().unwrap();
+        assert_eq!(last.kind, OracleHistoryKind::Refused);
+        assert!(!last.published);
+        assert_eq!(last.refuse, Some(AtomicRefuseReason::ScopeUnavailable));
     }
 }
