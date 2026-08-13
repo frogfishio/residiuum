@@ -395,6 +395,16 @@ AtomicMember {
 
 ```
 
+Member field presence is determined by `member_kind` and MUST match the closed
+plan mutation shapes. Encode and decode MUST refuse any other combination:
+
+| `member_kind` | `before_version` | `after_content_hash` |
+|---|---|---|
+| create | omitted | required |
+| put | omitted | required |
+| replace | required | required |
+| delete | required | omitted |
+
 `object_identity` is the pair `(collection_id, canonical_key)`. It is bound
 into the member hash and the ordered member manifest. Recovery MUST be able to
 verify which object a member represents from the member record alone.

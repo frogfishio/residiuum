@@ -186,6 +186,11 @@ pub fn prepare_hash(prepare: &AtomicPrepare) -> Result<[u8; 32], AtomicsError> {
 
 /// Encode a member record to deterministic CBOR.
 pub fn encode_member(member: &AtomicMember) -> Result<Vec<u8>, AtomicsError> {
+    member.validate()?;
+    encode_member_body(member)
+}
+
+fn encode_member_body(member: &AtomicMember) -> Result<Vec<u8>, AtomicsError> {
     let mut entries = vec![
         (
             MEM_ATOMIC_ID,
@@ -221,7 +226,7 @@ pub fn decode_member(bytes: &[u8]) -> Result<AtomicMember, AtomicsError> {
     let kind = MutationKind::from_wire_code(require_u8(&map, MEM_KIND)?).ok_or(
         AtomicsError::Refused(AtomicRefuseReason::UnknownMutationKind),
     )?;
-    Ok(AtomicMember {
+    let member = AtomicMember {
         atomic_id: AtomicId::from_bytes(require_bstr32(&map, MEM_ATOMIC_ID)?)?,
         ordinal: require_u32(&map, MEM_ORDINAL)?,
         object_identity: decode_object_identity(require_value(&map, MEM_OBJECT_IDENTITY)?)?,
@@ -229,7 +234,9 @@ pub fn decode_member(bytes: &[u8]) -> Result<AtomicMember, AtomicsError> {
         before_version: optional_version(&map, MEM_BEFORE_VERSION)?,
         after_content_hash: optional_bstr32(&map, MEM_AFTER_HASH)?,
         event_id: crate::id::VersionId::from_bytes(require_bstr16(&map, MEM_EVENT_ID)?)?,
-    })
+    };
+    member.validate()?;
+    Ok(member)
 }
 
 /// `BLAKE3-256(RESIDIUUM-ATOMIC-MEMBER-V1 || canonical_bytes)`.
@@ -544,6 +551,48 @@ mod tests {
             decode_decision(&bytes).unwrap_err().as_str(),
             "malformed_input"
         );
+    }
+
+    #[test]
+    fn illegal_member_shapes_are_refused_on_encode_and_decode() {
+        let hash = [8u8; 32];
+        let cases = [
+            (MutationKind::Create, None, None),
+            (MutationKind::Create, Some(vid()), Some(hash)),
+            (MutationKind::Create, Some(vid()), None),
+            (MutationKind::Put, None, None),
+            (MutationKind::Put, Some(vid()), Some(hash)),
+            (MutationKind::Put, Some(vid()), None),
+            (MutationKind::Replace, None, Some(hash)),
+            (MutationKind::Replace, None, None),
+            (MutationKind::Replace, Some(vid()), None),
+            (MutationKind::Delete, Some(vid()), Some(hash)),
+            (MutationKind::Delete, None, None),
+            (MutationKind::Delete, None, Some(hash)),
+        ];
+        for (kind, before, after) in cases {
+            let bad = AtomicMember {
+                member_kind: kind,
+                before_version: before,
+                after_content_hash: after,
+                ..member("k")
+            };
+            assert_eq!(
+                encode_member(&bad).unwrap_err().as_str(),
+                "invalid_value",
+                "{kind:?} before={} after={}",
+                before.is_some(),
+                after.is_some()
+            );
+            let bytes = encode_member_body(&bad).unwrap();
+            assert_eq!(
+                decode_member(&bytes).unwrap_err().as_str(),
+                "invalid_value",
+                "decode {kind:?} before={} after={}",
+                before.is_some(),
+                after.is_some()
+            );
+        }
     }
 
     #[test]
