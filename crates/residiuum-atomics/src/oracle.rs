@@ -6,6 +6,7 @@
 
 use crate::canonical::{key_order_bytes, plan_content_root, DOMAIN_ATOMIC_DECISION};
 use crate::error::AtomicsError;
+use crate::evidence::Durability;
 use crate::id::{AtomicId, CollectionId, ContentRoot, HeapId, VersionId};
 use crate::outcome::{
     AtomicAbortReason, AtomicMemberReceipt, AtomicOutcome, AtomicReceipt, AtomicRefuseReason,
@@ -108,20 +109,18 @@ impl SerialOracle {
     /// Status under complete coverage.
     pub fn status(&self, atomic_id: AtomicId) -> AtomicStatus {
         match self.issued.get(&atomic_id) {
-            None => AtomicStatus {
-                logical: LogicalStatus::NotFound,
-                material: MaterialStatus::Complete,
-                content_root: None,
-            },
-            Some((root, Issued::Committed(_))) => AtomicStatus {
+            None => AtomicStatus::not_found(),
+            Some((root, Issued::Committed(receipt))) => AtomicStatus {
                 logical: LogicalStatus::Committed,
                 material: MaterialStatus::Complete,
                 content_root: Some(*root),
+                receipt: Some(receipt.clone()),
             },
             Some((root, Issued::NotCommitted(_))) => AtomicStatus {
                 logical: LogicalStatus::NotCommitted,
                 material: MaterialStatus::Complete,
                 content_root: Some(*root),
+                receipt: None,
             },
         }
     }
@@ -238,6 +237,7 @@ impl SerialOracle {
             heap_id: self.heap_id,
             content_root: root,
             commit_position: position,
+            durability: Durability::Durable,
             members,
             decision_hash: decision_hash(plan.atomic_id(), root, position),
             replayed: false,
@@ -414,9 +414,18 @@ mod tests {
             AtomicOutcome::Committed(r) => {
                 assert!(!r.replayed);
                 assert_eq!(r.commit_position, 1);
+                assert_eq!(r.durability, Durability::Durable);
             }
             other => panic!("{other:?}"),
         }
+        let status = o.status(plan.atomic_id());
+        assert_eq!(status.logical, LogicalStatus::Committed);
+        assert_eq!(
+            status.receipt.as_ref().unwrap().durability,
+            Durability::Durable
+        );
+        assert_eq!(o.status(aid(9)).logical, LogicalStatus::NotFound);
+        assert!(o.status(aid(9)).receipt.is_none());
         assert_eq!(
             o.get(cid(1), &CanonicalKey::String("k".into()))
                 .unwrap()

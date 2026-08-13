@@ -1,5 +1,6 @@
-//! Outcomes, status axes, receipts, and abort reasons (`ATOMICS_SPEC` §10).
+//! Outcomes, status axes, receipts, and abort reasons (`ATOMICS_SPEC` §§10, 15).
 
+use crate::evidence::Durability;
 use crate::id::{AtomicId, CollectionId, ContentRoot, HeapId, VersionId};
 
 /// Durable not-committed reason after the Atomic was issued.
@@ -169,6 +170,9 @@ pub struct AtomicStatus {
     pub material: MaterialStatus,
     /// Content root when known.
     pub content_root: Option<ContentRoot>,
+    /// Committed receipt when committed evidence is complete enough to reproduce it.
+    /// Never present for [`LogicalStatus::NotFound`] or not-committed decisions.
+    pub receipt: Option<AtomicReceipt>,
 }
 
 impl AtomicStatus {
@@ -178,7 +182,35 @@ impl AtomicStatus {
             logical: LogicalStatus::UnknownCommit,
             material: MaterialStatus::CoverageIncomplete,
             content_root: None,
+            receipt: None,
         }
+    }
+
+    /// Complete coverage and no prepare or decision. Not a logical engine decision.
+    pub const fn not_found() -> Self {
+        Self {
+            logical: LogicalStatus::NotFound,
+            material: MaterialStatus::Complete,
+            content_root: None,
+            receipt: None,
+        }
+    }
+
+    /// A committed receipt may be attached only for committed + complete/partial material.
+    pub const fn receipt_permitted(logical: LogicalStatus, material: MaterialStatus) -> bool {
+        matches!(logical, LogicalStatus::Committed)
+            && matches!(material, MaterialStatus::Complete | MaterialStatus::Partial)
+    }
+
+    /// Attach a committed receipt when material availability permits it.
+    pub fn with_committed_receipt(self, receipt: AtomicReceipt) -> Option<Self> {
+        if !Self::receipt_permitted(self.logical, self.material) {
+            return None;
+        }
+        Some(Self {
+            receipt: Some(receipt),
+            ..self
+        })
     }
 }
 
@@ -215,6 +247,8 @@ pub struct AtomicReceipt {
     pub content_root: ContentRoot,
     /// Heap commit position.
     pub commit_position: u64,
+    /// Product acknowledgements are durable (`ATOMICS_SPEC` §15).
+    pub durability: Durability,
     /// Members in canonical target order.
     pub members: Vec<AtomicMemberReceipt>,
     /// Decision evidence hash. Encoding is ATM-0.2.
@@ -278,5 +312,67 @@ mod tests {
         assert_eq!(s.logical, LogicalStatus::UnknownCommit);
         assert_ne!(s.logical, LogicalStatus::NotFound);
         assert_eq!(s.material, MaterialStatus::CoverageIncomplete);
+        assert!(s.receipt.is_none());
+    }
+
+    #[test]
+    fn not_found_is_outside_the_logical_decision_axis() {
+        let s = AtomicStatus::not_found();
+        assert_eq!(s.logical, LogicalStatus::NotFound);
+        assert_ne!(s.logical, LogicalStatus::Committed);
+        assert_ne!(s.logical, LogicalStatus::NotCommitted);
+        assert!(s.receipt.is_none());
+        assert!(!AtomicStatus::receipt_permitted(s.logical, s.material));
+    }
+
+    fn sample_receipt() -> AtomicReceipt {
+        let mut hid = [0u8; 16];
+        hid[0] = 1;
+        let mut aid = [0u8; 32];
+        aid[0] = 1;
+        AtomicReceipt {
+            atomic_id: AtomicId::from_bytes(aid).unwrap(),
+            heap_id: HeapId::from_bytes(hid).unwrap(),
+            content_root: ContentRoot::from_bytes([7u8; 32]).unwrap(),
+            commit_position: 1,
+            durability: Durability::Durable,
+            members: Vec::new(),
+            decision_hash: [8u8; 32],
+            replayed: false,
+        }
+    }
+
+    #[test]
+    fn committed_receipt_is_durable_and_attachable() {
+        let receipt = sample_receipt();
+        assert_eq!(receipt.durability, Durability::Durable);
+        let status = AtomicStatus {
+            logical: LogicalStatus::Committed,
+            material: MaterialStatus::Complete,
+            content_root: Some(receipt.content_root),
+            receipt: None,
+        }
+        .with_committed_receipt(receipt.clone())
+        .expect("complete committed material permits a receipt");
+        assert_eq!(
+            status.receipt.as_ref().unwrap().durability,
+            Durability::Durable
+        );
+    }
+
+    #[test]
+    fn not_committed_and_incomplete_cannot_carry_a_receipt() {
+        let receipt = sample_receipt();
+        assert!(AtomicStatus {
+            logical: LogicalStatus::NotCommitted,
+            material: MaterialStatus::Complete,
+            content_root: Some(receipt.content_root),
+            receipt: None,
+        }
+        .with_committed_receipt(receipt.clone())
+        .is_none());
+        assert!(AtomicStatus::incomplete_coverage()
+            .with_committed_receipt(receipt)
+            .is_none());
     }
 }

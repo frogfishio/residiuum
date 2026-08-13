@@ -52,6 +52,13 @@ pub enum Durability {
 }
 
 impl Durability {
+    /// Stable snake_case name. Product receipts only advertise `durable`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Durable => "durable",
+        }
+    }
+
     /// Wire code (`spec/atomics/cbor-v1.json`).
     pub const fn wire_code(self) -> u8 {
         match self {

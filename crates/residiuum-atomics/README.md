@@ -21,6 +21,8 @@ ATM-0.8 makes plan close order-independent for reads, predicates, mutations, and
 rule revisions, and requires `read_frontier` whenever prior-read witnesses exist.
 ATM-0.9 seals `AtomicProfile::Unknown` so known wire codes cannot be constructed
 as unknown and cannot alias `LocalHeapV1`.
+ATM-0.10 freezes `AtomicReceipt.durability = durable` and returns the committed
+receipt on `AtomicStatus` when committed material permits it. `NotFound` stays off the logical decision axis.
 
 Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 §§4–13. Programme: [`ATOMICS_IMPLEMENTATION_PLAN.md`](../../doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md) §4 and §6.
