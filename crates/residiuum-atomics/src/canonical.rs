@@ -61,9 +61,13 @@ const PLAN_MUTATIONS: u64 = 8;
 const PLAN_RULE_REVISIONS: u64 = 9;
 const PLAN_LIMITS: u64 = 10;
 
-/// Close unordered parts: refuse duplicate mutation targets, then sort.
+/// Close unordered parts: refuse duplicate identities, require a read frontier
+/// when witnesses are present, then sort with a total order.
 pub(crate) fn close_plan(mut parts: AtomicPlanParts) -> Result<AtomicPlan, AtomicsError> {
     refuse_duplicate_targets(&parts.mutations)?;
+    refuse_duplicate_reads(&parts.reads)?;
+    refuse_duplicate_predicates(&parts.predicates)?;
+    require_frontier_with_reads(&parts)?;
     parts
         .mutations
         .sort_by(|a, b| target_order(&parts.heap_id, a).cmp(&target_order(&parts.heap_id, b)));
@@ -154,6 +158,38 @@ fn refuse_duplicate_targets(mutations: &[PlanMutation]) -> Result<(), AtomicsErr
     Ok(())
 }
 
+fn refuse_duplicate_reads(reads: &[ReadWitness]) -> Result<(), AtomicsError> {
+    let mut seen: Vec<(CollectionId, Vec<u8>)> = Vec::new();
+    for r in reads {
+        let key = key_order_bytes(&r.key);
+        if seen.iter().any(|(c, k)| *c == r.collection_id && *k == key) {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        seen.push((r.collection_id, key));
+    }
+    Ok(())
+}
+
+fn refuse_duplicate_predicates(predicates: &[PlanPredicate]) -> Result<(), AtomicsError> {
+    let mut seen: Vec<(u8, Option<CollectionId>, Vec<u8>)> = Vec::new();
+    for p in predicates {
+        let key = p.key.as_ref().map(key_order_bytes).unwrap_or_default();
+        let ident = (p.kind.wire_code(), p.collection_id, key);
+        if seen.iter().any(|s| *s == ident) {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        seen.push(ident);
+    }
+    Ok(())
+}
+
+fn require_frontier_with_reads(parts: &AtomicPlanParts) -> Result<(), AtomicsError> {
+    if !parts.reads.is_empty() && parts.read_frontier.is_none() {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+    }
+    Ok(())
+}
+
 fn validate_mutation_shapes(mutations: &[PlanMutation]) -> Result<(), AtomicsError> {
     for m in mutations {
         match m.kind {
@@ -187,21 +223,55 @@ fn target_order(heap: &HeapId, m: &PlanMutation) -> (Vec<u8>, Vec<u8>, Vec<u8>, 
     )
 }
 
-fn read_order(heap: &HeapId, r: &ReadWitness) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+fn optional_version_order(v: Option<VersionId>) -> Vec<u8> {
+    match v {
+        None => vec![0],
+        Some(id) => {
+            let mut out = vec![1];
+            out.extend_from_slice(id.as_bytes());
+            out
+        }
+    }
+}
+
+fn optional_bytes_order(bytes: Option<&[u8]>) -> Vec<u8> {
+    match bytes {
+        None => vec![0],
+        Some(b) => {
+            let mut out = vec![1];
+            out.extend_from_slice(b);
+            out
+        }
+    }
+}
+
+fn read_order(heap: &HeapId, r: &ReadWitness) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, [u8; 32]) {
     (
         heap.as_bytes().to_vec(),
         r.collection_id.as_bytes().to_vec(),
         key_order_bytes(&r.key),
+        optional_version_order(r.observed_version),
+        r.projection_hash,
     )
 }
 
-fn pred_order(heap: &HeapId, p: &PlanPredicate) -> (Vec<u8>, Vec<u8>, Vec<u8>, u8) {
+fn pred_order(
+    heap: &HeapId,
+    p: &PlanPredicate,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>, u8, Vec<u8>, Vec<u8>) {
     let coll = p
         .collection_id
         .map(|c| c.as_bytes().to_vec())
         .unwrap_or_default();
     let key = p.key.as_ref().map(key_order_bytes).unwrap_or_default();
-    (heap.as_bytes().to_vec(), coll, key, p.kind.wire_code())
+    (
+        heap.as_bytes().to_vec(),
+        coll,
+        key,
+        p.kind.wire_code(),
+        optional_version_order(p.version),
+        optional_bytes_order(p.encoded.as_deref()),
+    )
 }
 
 /// Order/identity bytes for a key: kind tag plus profile payload, not CBOR length prefixes.

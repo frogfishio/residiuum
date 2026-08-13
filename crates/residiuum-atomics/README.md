@@ -17,6 +17,8 @@ ATM-0.6 writes `target/atomics-evidence/atm-0/manifest.json` (semantic/byte free
 ATM-0.7 freezes prepare/member/decision/tombstone codecs, member
 `object_identity`, not-committed abort-reason preservation, and recursive
 canonical map validation ([`spec/atomics/evidence-vectors.json`](../../spec/atomics/evidence-vectors.json)).
+ATM-0.8 makes plan close order-independent for reads, predicates, mutations, and
+rule revisions, and requires `read_frontier` whenever prior-read witnesses exist.
 
 Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 §§4–13. Programme: [`ATOMICS_IMPLEMENTATION_PLAN.md`](../../doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md) §4 and §6.

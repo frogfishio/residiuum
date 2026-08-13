@@ -417,7 +417,9 @@ impl AtomicPlan {
         self.limits
     }
 
-    /// Close unordered parts: refuse duplicate mutation targets, then sort.
+    /// Close unordered parts: refuse duplicate mutation/read/predicate identities,
+    /// require `read_frontier` when prior-read witnesses are present, then sort
+    /// with a total order so builder permutation cannot change canonical bytes.
     pub fn close(parts: AtomicPlanParts) -> Result<Self, AtomicsError> {
         crate::canonical::close_plan(parts)
     }

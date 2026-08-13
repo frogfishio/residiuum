@@ -185,8 +185,16 @@ AtomicPlan {
 ```
 
 `read_frontier` is present when the plan contains a witness produced by a
-prior read; write-only create plans may omit it. Request ID, transport attempt,
-deadline, trace context, bearer capability bytes, and connection identity are
+prior read; write-only create plans may omit it. A plan that contains any
+prior-read witness MUST contain `read_frontier`.
+
+Canonical close is order-independent. Reads, predicates, mutations, and active
+rule revisions are sorted by a total key that includes every semantic field.
+A plan MUST NOT name the same `(collection_id, canonical_key)` twice as a read
+witness, even when observed version or projection hash differs. A plan MUST NOT
+name the same `(predicate_kind, collection_id, canonical_key)` twice.
+Request ID, transport attempt, deadline, trace context, bearer capability bytes,
+and connection identity are
 submission metadata and MUST NOT enter `canonical_plan_bytes`. This permits an
 identical plan to be retried over a new request or renewed connection without
 an identity conflict. The plan still binds immutable Heap/collection identity,

@@ -99,6 +99,16 @@ fn rejected_close_cases_are_documented() {
         closes.iter().any(|v| v["reason"] == "invalid_value"),
         "invalid_value close refusal must be documented"
     );
+    assert!(
+        closes
+            .iter()
+            .any(|v| v["name"] == "duplicate_read_identity"),
+        "duplicate read identity close refusal must be documented"
+    );
+    assert!(
+        closes.iter().any(|v| v["name"] == "reads_without_frontier"),
+        "reads_without_frontier close refusal must be documented"
+    );
 
     fn hid() -> HeapId {
         let mut b = [0u8; 16];

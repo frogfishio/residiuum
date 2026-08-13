@@ -43,6 +43,24 @@
     "ordinal"
   ],
   "duplicate_target": "refuse same (collection_id, canonical_key_bytes) as a mutation target",
+  "canonical_read_order": [
+    "heap_id",
+    "collection_id",
+    "canonical_key_bytes",
+    "observed_version",
+    "projection_hash"
+  ],
+  "canonical_predicate_order": [
+    "heap_id",
+    "collection_id",
+    "canonical_key_bytes",
+    "predicate_kind",
+    "version",
+    "encoded"
+  ],
+  "duplicate_read": "refuse same (collection_id, canonical_key_bytes) as a read witness, even when observed_version or projection_hash differs",
+  "duplicate_predicate": "refuse same (predicate_kind, collection_id, canonical_key_bytes)",
+  "read_frontier_rule": "required when reads is non-empty; write-only plans may omit it",
   "profile_codes": {
     "1": "local_heap_v1"
   },

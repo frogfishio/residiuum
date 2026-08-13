@@ -224,6 +224,18 @@ fn main() {
             "reason": "invalid_value",
             "stage": "close"
         }),
+        serde_json::json!({
+            "name": "duplicate_read_identity",
+            "note": "same (collection_id, canonical key) twice as a read witness",
+            "reason": "malformed_input",
+            "stage": "close"
+        }),
+        serde_json::json!({
+            "name": "reads_without_frontier",
+            "note": "prior-read witnesses require read_frontier",
+            "reason": "malformed_input",
+            "stage": "close"
+        }),
     ];
 
     let proto = serde_json::json!({

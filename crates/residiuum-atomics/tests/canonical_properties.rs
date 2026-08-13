@@ -1,9 +1,10 @@
-//! ATM-0.2 properties: builder order, semantic root, heap/collection substitution.
+//! ATM-0.2 / ATM-0.8 properties: builder order, total read/predicate order, frontier.
 
 use residiuum_atomics::{
     decode_canonical_plan, encode_canonical_plan, plan_content_root, AtomicId, AtomicPlan,
     AtomicPlanParts, AtomicProfile, AtomicRefuseReason, AtomicsError, CanonicalKey, CollectionId,
-    CoordinationScope, HeapId, MutationKind, PlanMutation, ResourceLimits,
+    CoordinationScope, HeapId, MutationKind, PlanMutation, PlanPredicate, PredicateKind,
+    ReadWitness, ResourceLimits, VersionId,
 };
 
 fn hid(n: u8) -> HeapId {
@@ -26,6 +27,12 @@ fn aid(n: u8) -> AtomicId {
 
 fn key(s: &str) -> CanonicalKey {
     CanonicalKey::String(s.to_owned())
+}
+
+fn vid(n: u8) -> VersionId {
+    let mut b = [0u8; 16];
+    b[0] = n;
+    VersionId::from_bytes(b).unwrap()
 }
 
 fn create(coll: u8, k: &str, val: &[u8]) -> PlanMutation {
@@ -148,4 +155,132 @@ fn spec_field_numbers_match_codec() {
     );
     assert_eq!(spec["widths"]["atomic_id"], 32);
     assert_eq!(spec["hard_ceilings"]["local_heap"]["caller_mutations"], 256);
+    assert_eq!(spec["canonical_read_order"][3], "observed_version");
+    assert!(spec["read_frontier_rule"]
+        .as_str()
+        .unwrap()
+        .contains("required"));
+}
+
+fn witness(coll: u8, k: &str, version: Option<u8>, proj: u8) -> ReadWitness {
+    ReadWitness {
+        collection_id: cid(coll),
+        key: key(k),
+        observed_version: version.map(vid),
+        projection_hash: [proj; 32],
+    }
+}
+
+fn pred(kind: PredicateKind, coll: u8, k: &str, version: Option<u8>) -> PlanPredicate {
+    PlanPredicate {
+        kind,
+        collection_id: Some(cid(coll)),
+        key: Some(key(k)),
+        version: version.map(vid),
+        encoded: None,
+    }
+}
+
+fn assert_same_canonical(a: AtomicPlanParts, b: AtomicPlanParts) {
+    let pa = AtomicPlan::close(a).unwrap();
+    let pb = AtomicPlan::close(b).unwrap();
+    assert_eq!(
+        encode_canonical_plan(&pa).unwrap(),
+        encode_canonical_plan(&pb).unwrap()
+    );
+    assert_eq!(
+        plan_content_root(&pa).unwrap(),
+        plan_content_root(&pb).unwrap()
+    );
+}
+
+#[test]
+fn read_witness_builder_order_is_canonical() {
+    let mut a = parts(1, vec![create(1, "k", b"v")]);
+    a.read_frontier = Some([7u8; 32]);
+    a.reads = vec![witness(1, "zeta", None, 1), witness(1, "alpha", Some(3), 2)];
+    let mut b = a.clone();
+    b.reads.reverse();
+    assert_same_canonical(a, b);
+}
+
+#[test]
+fn predicate_builder_order_is_canonical() {
+    let mut a = parts(1, vec![create(1, "k", b"v")]);
+    a.predicates = vec![
+        pred(PredicateKind::AssertPresent, 1, "zeta", None),
+        pred(PredicateKind::AssertAbsent, 1, "alpha", None),
+    ];
+    let mut b = a.clone();
+    b.predicates.reverse();
+    assert_same_canonical(a, b);
+}
+
+#[test]
+fn rule_revision_builder_order_is_canonical() {
+    let mut a = parts(1, vec![create(1, "k", b"v")]);
+    a.active_rule_revisions = vec![[9u8; 32], [1u8; 32]];
+    let mut b = a.clone();
+    b.active_rule_revisions.reverse();
+    assert_same_canonical(a, b);
+}
+
+#[test]
+fn mixed_builder_permutation_same_root() {
+    let mut a = parts(1, vec![create(1, "zeta", b"z"), create(1, "alpha", b"a")]);
+    a.read_frontier = Some([7u8; 32]);
+    a.reads = vec![witness(1, "r2", None, 2), witness(1, "r1", Some(1), 1)];
+    a.predicates = vec![
+        pred(PredicateKind::AssertPresent, 2, "lock", None),
+        pred(PredicateKind::AssertVersion, 1, "k", Some(4)),
+    ];
+    a.active_rule_revisions = vec![[3u8; 32], [2u8; 32]];
+    let mut b = a.clone();
+    b.mutations.reverse();
+    b.reads.reverse();
+    b.predicates.reverse();
+    b.active_rule_revisions.reverse();
+    assert_same_canonical(a, b);
+}
+
+#[test]
+fn duplicate_read_identity_is_refused_even_when_version_differs() {
+    let mut p = parts(1, vec![create(1, "k", b"v")]);
+    p.read_frontier = Some([7u8; 32]);
+    p.reads = vec![
+        witness(1, "same", Some(1), 1),
+        witness(1, "same", Some(2), 9),
+    ];
+    assert_eq!(
+        AtomicPlan::close(p).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+    );
+}
+
+#[test]
+fn duplicate_predicate_identity_is_refused_even_when_version_differs() {
+    let mut p = parts(1, vec![create(1, "k", b"v")]);
+    p.predicates = vec![
+        pred(PredicateKind::AssertVersion, 1, "k", Some(1)),
+        pred(PredicateKind::AssertVersion, 1, "k", Some(2)),
+    ];
+    assert_eq!(
+        AtomicPlan::close(p).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+    );
+}
+
+#[test]
+fn prior_read_without_frontier_is_refused() {
+    let mut p = parts(1, vec![create(1, "k", b"v")]);
+    p.reads = vec![witness(1, "k", None, 1)];
+    assert_eq!(
+        AtomicPlan::close(p).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+    );
+}
+
+#[test]
+fn write_only_plan_may_omit_frontier() {
+    AtomicPlan::close(parts(1, vec![create(1, "k", b"v")])).unwrap();
 }
