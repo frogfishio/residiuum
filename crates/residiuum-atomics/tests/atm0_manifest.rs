@@ -1,5 +1,11 @@
 //! ATM-0.6 ceremonial writer. ATM-0.11 generation lives in `atm0_evidence.rs`.
-#![allow(dead_code, unused_variables, unused_imports, unreachable_code)]
+#![allow(
+    dead_code,
+    unused_variables,
+    unused_imports,
+    unreachable_code,
+    clippy::useless_vec
+)]
 use residiuum_atomics::MAX_CBOR_DEPTH;
 use serde_json::{json, Value};
 use std::fs;

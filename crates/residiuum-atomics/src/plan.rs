@@ -442,29 +442,18 @@ impl AtomicPlan {
         crate::canonical::close_plan(parts)
     }
 
-    pub(crate) fn from_closed(
-        profile: AtomicProfile,
-        atomic_id: AtomicId,
-        heap_id: HeapId,
-        scope: CoordinationScope,
-        read_frontier: Option<[u8; 32]>,
-        reads: Vec<ReadWitness>,
-        predicates: Vec<PlanPredicate>,
-        mutations: Vec<PlanMutation>,
-        active_rule_revisions: Vec<[u8; 32]>,
-        limits: ResourceLimits,
-    ) -> Self {
+    pub(crate) fn from_closed(parts: AtomicPlanParts) -> Self {
         Self {
-            profile,
-            atomic_id,
-            heap_id,
-            scope,
-            read_frontier,
-            reads,
-            predicates,
-            mutations,
-            active_rule_revisions,
-            limits,
+            profile: parts.profile,
+            atomic_id: parts.atomic_id,
+            heap_id: parts.heap_id,
+            scope: parts.scope,
+            read_frontier: parts.read_frontier,
+            reads: parts.reads,
+            predicates: parts.predicates,
+            mutations: parts.mutations,
+            active_rule_revisions: parts.active_rule_revisions,
+            limits: parts.limits,
         }
     }
 }

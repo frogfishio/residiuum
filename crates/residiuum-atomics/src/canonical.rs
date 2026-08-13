@@ -61,6 +61,12 @@ const PLAN_MUTATIONS: u64 = 8;
 const PLAN_RULE_REVISIONS: u64 = 9;
 const PLAN_LIMITS: u64 = 10;
 
+/// Total order key for a read witness (heap, collection, key, version, projection).
+type ReadOrderKey = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, [u8; 32]);
+
+/// Total order key for a predicate (heap, collection, key, kind, version, payload).
+type PredicateOrderKey = (Vec<u8>, Vec<u8>, Vec<u8>, u8, Vec<u8>, Vec<u8>);
+
 /// Close unordered parts: refuse duplicate identities, require a read frontier
 /// when witnesses are present, then sort with a total order.
 pub(crate) fn close_plan(mut parts: AtomicPlanParts) -> Result<AtomicPlan, AtomicsError> {
@@ -68,29 +74,13 @@ pub(crate) fn close_plan(mut parts: AtomicPlanParts) -> Result<AtomicPlan, Atomi
     refuse_duplicate_reads(&parts.reads)?;
     refuse_duplicate_predicates(&parts.predicates)?;
     require_frontier_with_reads(&parts)?;
-    parts
-        .mutations
-        .sort_by(|a, b| target_order(&parts.heap_id, a).cmp(&target_order(&parts.heap_id, b)));
-    parts
-        .reads
-        .sort_by(|a, b| read_order(&parts.heap_id, a).cmp(&read_order(&parts.heap_id, b)));
-    parts
-        .predicates
-        .sort_by(|a, b| pred_order(&parts.heap_id, a).cmp(&pred_order(&parts.heap_id, b)));
+    let heap_id = parts.heap_id;
+    parts.mutations.sort_by_key(|a| target_order(&heap_id, a));
+    parts.reads.sort_by_key(|a| read_order(&heap_id, a));
+    parts.predicates.sort_by_key(|a| pred_order(&heap_id, a));
     parts.active_rule_revisions.sort_unstable();
     validate_mutation_shapes(&parts.mutations)?;
-    Ok(AtomicPlan::from_closed(
-        parts.profile,
-        parts.atomic_id,
-        parts.heap_id,
-        parts.scope,
-        parts.read_frontier,
-        parts.reads,
-        parts.predicates,
-        parts.mutations,
-        parts.active_rule_revisions,
-        parts.limits,
-    ))
+    Ok(AtomicPlan::from_closed(parts))
 }
 
 /// Encode a closed plan to deterministic CBOR.
@@ -175,7 +165,7 @@ fn refuse_duplicate_predicates(predicates: &[PlanPredicate]) -> Result<(), Atomi
     for p in predicates {
         let key = p.key.as_ref().map(key_order_bytes).unwrap_or_default();
         let ident = (p.kind.wire_code(), p.collection_id, key);
-        if seen.iter().any(|s| *s == ident) {
+        if seen.contains(&ident) {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
         seen.push(ident);
@@ -245,7 +235,7 @@ fn optional_bytes_order(bytes: Option<&[u8]>) -> Vec<u8> {
     }
 }
 
-fn read_order(heap: &HeapId, r: &ReadWitness) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, [u8; 32]) {
+fn read_order(heap: &HeapId, r: &ReadWitness) -> ReadOrderKey {
     (
         heap.as_bytes().to_vec(),
         r.collection_id.as_bytes().to_vec(),
@@ -255,10 +245,7 @@ fn read_order(heap: &HeapId, r: &ReadWitness) -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec
     )
 }
 
-fn pred_order(
-    heap: &HeapId,
-    p: &PlanPredicate,
-) -> (Vec<u8>, Vec<u8>, Vec<u8>, u8, Vec<u8>, Vec<u8>) {
+fn pred_order(heap: &HeapId, p: &PlanPredicate) -> PredicateOrderKey {
     let coll = p
         .collection_id
         .map(|c| c.as_bytes().to_vec())
@@ -438,8 +425,8 @@ pub(crate) fn encode_limits(l: ResourceLimits) -> Vec<(u64, Value)> {
 pub(crate) fn decode_key(v: &Value) -> Result<CanonicalKey, AtomicsError> {
     let map = as_map(v)?;
     refuse_unknown_keys(map, &[1, 2, 3])?;
-    let kind = require_u8(&map, 1)?;
-    let payload = require_bytes(&map, 2)?;
+    let kind = require_u8(map, 1)?;
+    let payload = require_bytes(map, 2)?;
     match kind {
         1 => {
             let s = String::from_utf8(payload)
@@ -450,7 +437,7 @@ pub(crate) fn decode_key(v: &Value) -> Result<CanonicalKey, AtomicsError> {
         3 => Ok(CanonicalKey::Integer(payload)),
         4 => Ok(CanonicalKey::Decimal {
             coefficient: payload,
-            scale: decode_int(require_value(&map, 3)?)?,
+            scale: decode_int(require_value(map, 3)?)?,
         }),
         _ => Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue)),
     }
@@ -458,34 +445,34 @@ pub(crate) fn decode_key(v: &Value) -> Result<CanonicalKey, AtomicsError> {
 
 fn decode_read(v: &Value) -> Result<ReadWitness, AtomicsError> {
     let map = as_map(v)?;
-    refuse_unknown_keys(&map, &[1, 2, 3, 4])?;
+    refuse_unknown_keys(map, &[1, 2, 3, 4])?;
     Ok(ReadWitness {
-        collection_id: CollectionId::from_bytes(require_bstr16(&map, 1)?)?,
-        key: decode_key(require_value(&map, 2)?)?,
-        observed_version: optional_version(&map, 3)?,
-        projection_hash: require_bstr32(&map, 4)?,
+        collection_id: CollectionId::from_bytes(require_bstr16(map, 1)?)?,
+        key: decode_key(require_value(map, 2)?)?,
+        observed_version: optional_version(map, 3)?,
+        projection_hash: require_bstr32(map, 4)?,
     })
 }
 
 fn decode_mutation(v: &Value) -> Result<PlanMutation, AtomicsError> {
     let map = as_map(v)?;
-    refuse_unknown_keys(&map, &[1, 2, 3, 4, 5])?;
-    let kind = MutationKind::from_wire_code(require_u8(&map, 1)?).ok_or(AtomicsError::Refused(
+    refuse_unknown_keys(map, &[1, 2, 3, 4, 5])?;
+    let kind = MutationKind::from_wire_code(require_u8(map, 1)?).ok_or(AtomicsError::Refused(
         AtomicRefuseReason::UnknownMutationKind,
     ))?;
     Ok(PlanMutation {
         kind,
-        collection_id: CollectionId::from_bytes(require_bstr16(&map, 2)?)?,
-        key: decode_key(require_value(&map, 3)?)?,
-        encoded_value: optional_bytes(&map, 4)?,
-        if_version: optional_version(&map, 5)?,
+        collection_id: CollectionId::from_bytes(require_bstr16(map, 2)?)?,
+        key: decode_key(require_value(map, 3)?)?,
+        encoded_value: optional_bytes(map, 4)?,
+        if_version: optional_version(map, 5)?,
     })
 }
 
 fn decode_predicate(v: &Value) -> Result<PlanPredicate, AtomicsError> {
     let map = as_map(v)?;
-    refuse_unknown_keys(&map, &[1, 2, 3, 4, 5])?;
-    let kind = PredicateKind::from_wire_code(require_u8(&map, 1)?).ok_or(AtomicsError::Refused(
+    refuse_unknown_keys(map, &[1, 2, 3, 4, 5])?;
+    let kind = PredicateKind::from_wire_code(require_u8(map, 1)?).ok_or(AtomicsError::Refused(
         AtomicRefuseReason::UnsupportedPredicate,
     ))?;
     let key = match map.iter().find(|(k, _)| *k == 3) {
@@ -494,10 +481,10 @@ fn decode_predicate(v: &Value) -> Result<PlanPredicate, AtomicsError> {
     };
     Ok(PlanPredicate {
         kind,
-        collection_id: optional_collection(&map, 2)?,
+        collection_id: optional_collection(map, 2)?,
         key,
-        version: optional_version(&map, 4)?,
-        encoded: optional_bytes(&map, 5)?,
+        version: optional_version(map, 4)?,
+        encoded: optional_bytes(map, 5)?,
     })
 }
 
@@ -548,10 +535,7 @@ pub(crate) fn as_map(v: &Value) -> Result<&[(u64, Value)], AtomicsError> {
     }
 }
 
-pub(crate) fn require_value<'a>(
-    map: &'a [(u64, Value)],
-    key: u64,
-) -> Result<&'a Value, AtomicsError> {
+pub(crate) fn require_value(map: &[(u64, Value)], key: u64) -> Result<&Value, AtomicsError> {
     map.iter()
         .find(|(k, _)| *k == key)
         .map(|(_, v)| v)

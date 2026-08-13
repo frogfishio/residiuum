@@ -126,7 +126,7 @@ fn collect_properties() -> Value {
     let replay = oracle.apply(&plan).unwrap();
     let replay_ok = matches!(
         (&first, &replay),
-        (AtomicOutcome::Committed(a), AtomicOutcome::Committed(b)) if a.replayed == false && b.replayed
+        (AtomicOutcome::Committed(a), AtomicOutcome::Committed(b)) if !a.replayed && b.replayed
     );
 
     let mut other = parts(
@@ -244,18 +244,9 @@ fn build_artifacts() -> (Vec<Artifact>, String) {
     let evidence = fs::read_to_string(spec.join("evidence-vectors.json")).unwrap();
     let cbor_spec = fs::read_to_string(spec.join("cbor-v1.json")).unwrap();
 
-    let property = format!(
-        "{}",
-        serde_json::to_string_pretty(&collect_properties()).unwrap()
-    );
-    let hostile_summary = format!(
-        "{}",
-        serde_json::to_string_pretty(&collect_hostile_summary(&hostile)).unwrap()
-    );
-    let model = format!(
-        "{}",
-        serde_json::to_string_pretty(&collect_model_summary()).unwrap()
-    );
+    let property = serde_json::to_string_pretty(&collect_properties()).unwrap();
+    let hostile_summary = serde_json::to_string_pretty(&collect_hostile_summary(&hostile)).unwrap();
+    let model = serde_json::to_string_pretty(&collect_model_summary()).unwrap();
 
     let artifacts = vec![
         Artifact {
@@ -314,7 +305,7 @@ fn build_artifacts() -> (Vec<Artifact>, String) {
         },
         "files": files
     });
-    let manifest_body = format!("{}", serde_json::to_string_pretty(&manifest).unwrap()) + "\n";
+    let manifest_body = serde_json::to_string_pretty(&manifest).unwrap() + "\n";
     (artifacts, manifest_body)
 }
 
@@ -391,12 +382,9 @@ fn verifies_manifest_hashes_independently() {
             .unwrap();
         assert_eq!(entry["blake3"], blake3_hex(a.body.as_bytes()));
     }
-    let dir = evidence_dir();
-    if dir.join("manifest.json").is_file() {
-        verify_pack(
-            &dir,
-            &artifacts,
-            &fs::read_to_string(dir.join("manifest.json")).unwrap(),
-        );
-    }
+    // Own directory so this check cannot race the generator or leftover files.
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/atomics-evidence/atm-0-verify");
+    write_pack(&dir, &artifacts, &manifest);
+    verify_pack(&dir, &artifacts, &manifest);
 }

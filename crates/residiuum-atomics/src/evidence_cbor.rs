@@ -65,7 +65,7 @@ fn malformed() -> AtomicsError {
     AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
 }
 
-fn require_map<'a>(map: &'a [(u64, Value)], key: u64) -> Result<&'a [(u64, Value)], AtomicsError> {
+fn require_map(map: &[(u64, Value)], key: u64) -> Result<&[(u64, Value)], AtomicsError> {
     as_map(require_value(map, key)?)
 }
 
@@ -267,7 +267,7 @@ pub fn ordered_member_manifest_root(
         seen.push((m.object_identity.collection_id, key));
     }
     let mut items: Vec<&AtomicMember> = members.iter().collect();
-    items.sort_by(|a, b| member_order_key(&heap_id, a).cmp(&member_order_key(&heap_id, b)));
+    items.sort_by_key(|a| member_order_key(&heap_id, a));
     let mut hasher = blake3::Hasher::new();
     hasher.update(DOMAIN_ATOMIC_MANIFEST);
     for m in items {
@@ -442,7 +442,7 @@ mod tests {
         let a = member("alpha");
         let b = member("beta");
         assert_ne!(member_hash(&a).unwrap(), member_hash(&b).unwrap());
-        let ra = ordered_member_manifest_root(hid(), &[a.clone()]).unwrap();
+        let ra = ordered_member_manifest_root(hid(), std::slice::from_ref(&a)).unwrap();
         let rb = ordered_member_manifest_root(hid(), &[b]).unwrap();
         assert_ne!(ra, rb);
     }

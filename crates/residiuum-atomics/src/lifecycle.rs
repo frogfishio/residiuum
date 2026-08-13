@@ -291,7 +291,7 @@ pub fn check_model() -> ModelCheckReport {
         for &ev in CANDIDATES {
             if let Ok(next) = here.apply(ev) {
                 allowed += 1;
-                if !reachable.iter().any(|s| *s == next) {
+                if !reachable.contains(&next) {
                     reachable.push(next);
                 }
             }
