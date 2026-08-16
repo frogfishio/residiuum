@@ -1152,6 +1152,7 @@ dependencies = [
  "blake3",
  "crc32c",
  "proptest",
+ "residiuum-atomics",
  "serde_json",
  "thiserror",
 ]

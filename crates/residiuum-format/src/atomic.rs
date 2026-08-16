@@ -4,18 +4,24 @@
 //! Uses existing frame kinds. Envelope keys 37–40 are the Atomic extension;
 //! keys 1–36 keep format/ownership meanings and are never Atomic identity.
 //! A legacy `batch_id` is not Atomic evidence. This module does not write
-//! store media; the recovery reader scans a byte buffer.
+//! store media; the recovery reader scans a byte buffer and decodes frozen
+//! AtomicPrepare / AtomicMember / AtomicDecision bodies (CR-ATM2-003).
 
 use crate::cbor_envelope::{
-    decode_deterministic_uint_map, encode_deterministic_uint_map,
-    validate_deterministic_cbor_envelope, CborEnvelopeError, CborValue, EMPTY_ENVELOPE,
+    decode_deterministic_uint_map, encode_deterministic_uint_map, CborEnvelopeError, CborValue,
+    EMPTY_ENVELOPE,
 };
 use crate::envelope_keys::{ENV_HEAP_ID, ENV_OWNERSHIP_PROFILE};
 use crate::frame::{encode_frame, DecodedFrame, FrameHeader, FrameParts, FrameVerifyError};
 use crate::kinds::FrameKind;
 use crate::limits::SafetyLimits;
 use crate::ownership::OWNERSHIP_PROFILE_V1;
+use crate::ownership::{parse_ownership_envelope, OwnershipEvidence};
 use crate::scan::{scan_forward, ScanReport};
+use residiuum_atomics::{
+    decode_decision, decode_member, decode_prepare, ordered_member_manifest_root, prepare_hash,
+    AtomicMember, DecisionCode, HeapId,
+};
 use thiserror::Error;
 
 pub use crate::envelope_keys::{
@@ -46,6 +52,8 @@ pub struct AtomicLinkage {
     pub ordinal: Option<u64>,
     /// Heap commit position when a committed decision names this evidence.
     pub commit_position: Option<u64>,
+    /// Heap identity from ownership keys 31/34, when present.
+    pub heap_id: Option<[u8; 16]>,
 }
 
 /// Why examination is not `Valid`.
@@ -61,16 +69,22 @@ pub enum AtomicExamReason {
     RoleMismatch,
     /// Legacy batch / missing Atomic identity — not Atomic evidence.
     NotAtomicEvidence,
-    /// Prepare/commit body is not deterministic CBOR.
+    /// Body is not a frozen AtomicPrepare / AtomicMember / AtomicDecision.
     BodyCorrupt,
-    /// Prepare/commit body is missing.
+    /// Prepare/commit/member body is missing.
     BodyMissing,
+    /// Decoded body disagrees with envelope linkage.
+    BodyMismatch,
+    /// Two valid decisions disagree for the same identity.
+    ConflictingDecision,
+    /// Group is missing a required prepare, member set, or decision.
+    GroupIncomplete,
 }
 
 /// Examination class for one verified frame (`ATOMICS_SPEC` §9).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtomicEvidenceClass {
-    /// Complete, well-typed Atomic linkage for this role.
+    /// Complete linkage and a decoded, matching frozen body for this role.
     Valid(AtomicLinkage),
     /// Atomic identity present but linkage or body is incomplete.
     Partial {
@@ -100,11 +114,48 @@ pub struct ExaminedAtomicFrame {
     pub class: AtomicEvidenceClass,
 }
 
+/// Aggregated examination of one `(heap_id, atomic_id, content_root)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExaminedAtomicGroup {
+    /// Heap from ownership or prepare body.
+    pub heap_id: Option<[u8; 16]>,
+    /// Atomic identity.
+    pub atomic_id: [u8; 32],
+    /// Plan content root.
+    pub content_root: [u8; 32],
+    /// Group class. Never a guessed decision.
+    pub class: AtomicGroupClass,
+}
+
+/// Outcome of aggregating Valid frames for one identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtomicGroupClass {
+    /// One prepare, matching members, one consistent decision.
+    Consistent,
+    /// Identity is present but incomplete.
+    Partial {
+        /// Why the group is incomplete.
+        reason: AtomicExamReason,
+    },
+    /// Conflicting valid decisions.
+    Conflicting {
+        /// Why the group conflicts.
+        reason: AtomicExamReason,
+    },
+    /// Prepare/member/decision hashes or counts disagree.
+    Corrupt {
+        /// Why the group is corrupt.
+        reason: AtomicExamReason,
+    },
+}
+
 /// Recovery-reader report. Independent of any store write path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtomicRecoveryReport {
     /// Examined Atomic-related frames in scan order.
     pub examined: Vec<ExaminedAtomicFrame>,
+    /// Groups aggregated from Valid frames.
+    pub groups: Vec<ExaminedAtomicGroup>,
     /// Underlying salvage scan (holes stay explicit).
     pub scan: ScanReport,
 }
@@ -241,12 +292,21 @@ pub fn examine_atomic_frame(frame: &DecodedFrame) -> Option<AtomicEvidenceClass>
 pub fn read_atomic_evidence(bytes: &[u8], limits: SafetyLimits) -> AtomicRecoveryReport {
     let scan = scan_forward(bytes, limits);
     let mut examined = Vec::new();
+    let mut valid_bodies = Vec::new();
     for (offset, frame) in scan.verified_frames() {
         if let Some(class) = examine_atomic_frame(frame) {
+            if let AtomicEvidenceClass::Valid(link) = &class {
+                valid_bodies.push((link.clone(), frame.body.clone()));
+            }
             examined.push(ExaminedAtomicFrame { offset, class });
         }
     }
-    AtomicRecoveryReport { examined, scan }
+    let groups = aggregate_groups(&valid_bodies);
+    AtomicRecoveryReport {
+        examined,
+        groups,
+        scan,
+    }
 }
 
 fn examine_coordinator(frame: &DecodedFrame, role: AtomicFrameRole) -> AtomicEvidenceClass {
@@ -263,7 +323,10 @@ fn examine_coordinator(frame: &DecodedFrame, role: AtomicFrameRole) -> AtomicEvi
         Ok(fields) if fields.atomic_id.is_none() => AtomicEvidenceClass::Unsupported {
             reason: AtomicExamReason::NotAtomicEvidence,
         },
-        Ok(fields) => classify_linkage(role, fields, coordinator_body(&frame.body)),
+        Ok(fields) => {
+            let body = check_body(role, &fields, &frame.body);
+            classify_linkage(role, fields, body)
+        }
     }
 }
 
@@ -275,15 +338,58 @@ fn examine_member(frame: &DecodedFrame) -> Option<AtomicEvidenceClass> {
         Err(AtomicExamReason::EnvelopeCorrupt) => None,
         Err(reason) => Some(AtomicEvidenceClass::Corrupt { reason }),
         Ok(fields) if fields.atomic_id.is_none() => None,
-        Ok(fields) => Some(classify_linkage(AtomicFrameRole::Member, fields, Ok(()))),
+        Ok(fields) => {
+            let body = check_body(AtomicFrameRole::Member, &fields, &frame.body);
+            Some(classify_linkage(AtomicFrameRole::Member, fields, body))
+        }
     }
 }
 
-fn coordinator_body(body: &[u8]) -> Result<(), AtomicExamReason> {
+fn check_body(role: AtomicFrameRole, fields: &Fields, body: &[u8]) -> Result<(), AtomicExamReason> {
     if body.is_empty() {
         return Err(AtomicExamReason::BodyMissing);
     }
-    validate_deterministic_cbor_envelope(body).map_err(|_| AtomicExamReason::BodyCorrupt)
+    match role {
+        AtomicFrameRole::Prepare => {
+            let prep = decode_prepare(body).map_err(|_| AtomicExamReason::BodyCorrupt)?;
+            if prep.atomic_id.to_bytes() != fields.atomic_id.unwrap_or([0; 32])
+                || prep.content_root.to_bytes() != fields.content_root.unwrap_or([0; 32])
+            {
+                return Err(AtomicExamReason::BodyMismatch);
+            }
+            if let Some(heap) = fields.heap_id {
+                if prep.heap_id.to_bytes() != heap {
+                    return Err(AtomicExamReason::BodyMismatch);
+                }
+            }
+            Ok(())
+        }
+        AtomicFrameRole::Member => {
+            let member = decode_member(body).map_err(|_| AtomicExamReason::BodyCorrupt)?;
+            if member.atomic_id.to_bytes() != fields.atomic_id.unwrap_or([0; 32])
+                || Some(u64::from(member.ordinal)) != fields.ordinal
+            {
+                return Err(AtomicExamReason::BodyMismatch);
+            }
+            Ok(())
+        }
+        AtomicFrameRole::Commit => {
+            let decision = decode_decision(body).map_err(|_| AtomicExamReason::BodyCorrupt)?;
+            if decision.atomic_id.to_bytes() != fields.atomic_id.unwrap_or([0; 32]) {
+                return Err(AtomicExamReason::BodyMismatch);
+            }
+            match decision.decision {
+                DecisionCode::Committed if decision.commit_position != fields.commit_position => {
+                    return Err(AtomicExamReason::BodyMismatch);
+                }
+                DecisionCode::NotCommitted if fields.commit_position.is_some() => {
+                    return Err(AtomicExamReason::BodyMismatch);
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+    }
 }
 
 struct Fields {
@@ -291,17 +397,23 @@ struct Fields {
     content_root: Option<[u8; 32]>,
     ordinal: Option<u64>,
     commit_position: Option<u64>,
+    heap_id: Option<[u8; 16]>,
     field_corrupt: bool,
 }
 
 fn parse_fields(envelope: &[u8]) -> Result<Fields, AtomicExamReason> {
     let map =
         decode_deterministic_uint_map(envelope).map_err(|_| AtomicExamReason::EnvelopeCorrupt)?;
+    let heap_id = match parse_ownership_envelope(envelope) {
+        Ok(OwnershipEvidence::Known { heap_id, .. }) => Some(heap_id),
+        _ => None,
+    };
     let mut fields = Fields {
         atomic_id: None,
         content_root: None,
         ordinal: None,
         commit_position: None,
+        heap_id,
         field_corrupt: false,
     };
     for (k, v) in map {
@@ -363,6 +475,7 @@ fn classify_linkage(
                 content_root,
                 ordinal: None,
                 commit_position: fields.commit_position,
+                heap_id: fields.heap_id,
             }),
             reason: AtomicExamReason::IncompleteLinkage,
         };
@@ -374,6 +487,7 @@ fn classify_linkage(
             content_root,
             ordinal: fields.ordinal,
             commit_position: fields.commit_position,
+            heap_id: fields.heap_id,
         };
         return match reason {
             AtomicExamReason::BodyMissing => AtomicEvidenceClass::Partial {
@@ -389,7 +503,152 @@ fn classify_linkage(
         content_root,
         ordinal: fields.ordinal,
         commit_position: fields.commit_position,
+        heap_id: fields.heap_id,
     })
+}
+
+fn aggregate_groups(valid: &[(AtomicLinkage, Vec<u8>)]) -> Vec<ExaminedAtomicGroup> {
+    let mut keys: Vec<([u8; 32], [u8; 32], Option<[u8; 16]>)> = Vec::new();
+    for (link, _) in valid {
+        let key = (link.atomic_id, link.content_root, link.heap_id);
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys.into_iter()
+        .map(|(atomic_id, content_root, heap_id)| {
+            let frames: Vec<&(AtomicLinkage, Vec<u8>)> = valid
+                .iter()
+                .filter(|(l, _)| {
+                    l.atomic_id == atomic_id
+                        && l.content_root == content_root
+                        && l.heap_id == heap_id
+                })
+                .collect();
+            ExaminedAtomicGroup {
+                heap_id,
+                atomic_id,
+                content_root,
+                class: classify_group(&frames),
+            }
+        })
+        .collect()
+}
+
+fn classify_group(frames: &[&(AtomicLinkage, Vec<u8>)]) -> AtomicGroupClass {
+    let mut prepares = Vec::new();
+    let mut members = Vec::new();
+    let mut decisions = Vec::new();
+    for (link, body) in frames {
+        match link.role {
+            AtomicFrameRole::Prepare => match decode_prepare(body) {
+                Ok(p) => prepares.push(p),
+                Err(_) => {
+                    return AtomicGroupClass::Corrupt {
+                        reason: AtomicExamReason::BodyCorrupt,
+                    };
+                }
+            },
+            AtomicFrameRole::Member => match decode_member(body) {
+                Ok(m) => members.push(m),
+                Err(_) => {
+                    return AtomicGroupClass::Corrupt {
+                        reason: AtomicExamReason::BodyCorrupt,
+                    };
+                }
+            },
+            AtomicFrameRole::Commit => match decode_decision(body) {
+                Ok(d) => decisions.push(d),
+                Err(_) => {
+                    return AtomicGroupClass::Corrupt {
+                        reason: AtomicExamReason::BodyCorrupt,
+                    };
+                }
+            },
+        }
+    }
+    if !same_records(&prepares) {
+        return AtomicGroupClass::Corrupt {
+            reason: AtomicExamReason::BodyMismatch,
+        };
+    }
+    if !same_records(&decisions) {
+        return AtomicGroupClass::Conflicting {
+            reason: AtomicExamReason::ConflictingDecision,
+        };
+    }
+    let members = match dedup_members(members) {
+        Ok(m) => m,
+        Err(class) => return class,
+    };
+    let prepare = prepares.into_iter().next();
+    let decision = decisions.into_iter().next();
+    let Some(prepare) = prepare else {
+        return AtomicGroupClass::Partial {
+            reason: AtomicExamReason::GroupIncomplete,
+        };
+    };
+    let Some(decision) = decision else {
+        return AtomicGroupClass::Partial {
+            reason: AtomicExamReason::GroupIncomplete,
+        };
+    };
+    let Ok(ph) = prepare_hash(&prepare) else {
+        return AtomicGroupClass::Corrupt {
+            reason: AtomicExamReason::BodyCorrupt,
+        };
+    };
+    if ph != decision.prepare_hash {
+        return AtomicGroupClass::Corrupt {
+            reason: AtomicExamReason::BodyMismatch,
+        };
+    }
+    if decision.member_count as usize != members.len() {
+        return AtomicGroupClass::Corrupt {
+            reason: AtomicExamReason::BodyMismatch,
+        };
+    }
+    let heap = match HeapId::from_bytes(prepare.heap_id.to_bytes()) {
+        Ok(h) => h,
+        Err(_) => {
+            return AtomicGroupClass::Corrupt {
+                reason: AtomicExamReason::BodyCorrupt,
+            };
+        }
+    };
+    match ordered_member_manifest_root(heap, &members) {
+        Ok(root)
+            if root == decision.member_root && root == prepare.ordered_member_manifest_root =>
+        {
+            AtomicGroupClass::Consistent
+        }
+        Ok(_) => AtomicGroupClass::Corrupt {
+            reason: AtomicExamReason::BodyMismatch,
+        },
+        Err(_) => AtomicGroupClass::Corrupt {
+            reason: AtomicExamReason::BodyCorrupt,
+        },
+    }
+}
+
+fn same_records<T: PartialEq>(items: &[T]) -> bool {
+    items.windows(2).all(|w| w[0] == w[1])
+}
+
+fn dedup_members(members: Vec<AtomicMember>) -> Result<Vec<AtomicMember>, AtomicGroupClass> {
+    let mut out: Vec<AtomicMember> = Vec::new();
+    for m in members {
+        if let Some(existing) = out.iter().find(|e| e.ordinal == m.ordinal) {
+            if existing != &m {
+                return Err(AtomicGroupClass::Corrupt {
+                    reason: AtomicExamReason::BodyMismatch,
+                });
+            }
+        } else {
+            out.push(m);
+        }
+    }
+    Ok(out)
 }
 
 fn b32(v: &CborValue) -> Option<[u8; 32]> {

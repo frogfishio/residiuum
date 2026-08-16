@@ -7,6 +7,7 @@
 //! byte-buffer recovery reader (no store write path).
 //! CR-ATM2-002: one envelope-key registry; Atomic frames carry heap ownership
 //! keys 31/34 plus Atomic 37–40 so `admit_frame_to_heap` can bind them.
+//! CR-ATM2-003: recovery decodes frozen AtomicPrepare/Member/Decision bodies.
 //! No durable storage IO (Stage 3).
 //!
 //! **Wire freeze:** [`WIRE_MAJOR`] / [`WIRE_MINOR`] are the draft major-1
@@ -51,9 +52,9 @@ pub use csq_corpus::{
 pub use atomic::{
     encode_atomic_commit_envelope, encode_atomic_frame, encode_atomic_member_envelope,
     encode_atomic_prepare_envelope, examine_atomic_frame, read_atomic_evidence,
-    AtomicEnvelopeError, AtomicEvidenceClass, AtomicExamReason, AtomicFrameRole, AtomicLinkage,
-    AtomicRecoveryReport, ExaminedAtomicFrame, ENV_ATOMIC_COMMIT_POSITION, ENV_ATOMIC_CONTENT_ROOT,
-    ENV_ATOMIC_ID, ENV_ATOMIC_ORDINAL,
+    AtomicEnvelopeError, AtomicEvidenceClass, AtomicExamReason, AtomicFrameRole, AtomicGroupClass,
+    AtomicLinkage, AtomicRecoveryReport, ExaminedAtomicFrame, ExaminedAtomicGroup,
+    ENV_ATOMIC_COMMIT_POSITION, ENV_ATOMIC_CONTENT_ROOT, ENV_ATOMIC_ID, ENV_ATOMIC_ORDINAL,
 };
 pub use cbor_envelope::{
     decode_deterministic_uint_map, encode_deterministic_uint_map,

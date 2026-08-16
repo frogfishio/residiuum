@@ -4,7 +4,7 @@ use residiuum_format::{
     admit_frame_to_heap, encode_atomic_commit_envelope, encode_atomic_frame,
     encode_atomic_member_envelope, encode_atomic_prepare_envelope, encode_deterministic_uint_map,
     encode_heap_binding_envelope, parse_ownership_envelope, read_atomic_evidence, scan_forward,
-    ActiveSegment, AdmitDecision, AtomicFrameRole, CborValue, FrameKind, OwnershipEvidence,
+    ActiveSegment, AdmitDecision, CborValue, FrameKind, OwnershipEvidence,
     SafetyLimits, SegmentId, ENV_ATOMIC_CONTENT_ROOT, ENV_ATOMIC_ID, ENV_ATOMIC_ORDINAL,
 };
 
@@ -187,14 +187,9 @@ fn golden_frames_append_scan_and_recover() {
     assert_eq!(scan.holes().count(), 0);
 
     let report = read_atomic_evidence(bytes, SafetyLimits::default());
-    let valid: Vec<_> = report.valid().collect();
-    assert_eq!(valid.len(), 3);
-    assert_eq!(valid[0].role, AtomicFrameRole::Prepare);
-    assert_eq!(valid[1].role, AtomicFrameRole::Member);
-    assert_eq!(valid[2].role, AtomicFrameRole::Commit);
-    assert_eq!(valid[0].atomic_id, id);
-    assert_eq!(valid[1].ordinal, Some(0));
-    assert_eq!(valid[2].commit_position, Some(3));
+    // Dummy `{1:1}` / opaque bodies are never Valid Atomic evidence (CR-ATM2-003).
+    assert_eq!(report.valid().count(), 0);
+    assert_eq!(report.examined.len(), 3);
 }
 
 #[test]
