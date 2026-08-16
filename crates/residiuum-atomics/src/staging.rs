@@ -11,6 +11,7 @@ use crate::evidence::{
     AtomicLifecycle, AtomicMember, DecisionPhase, MemberPhase, PreparePhase, PublicationPhase,
 };
 use crate::id::{AtomicId, CollectionId, ContentRoot, HeapId, VersionId};
+use crate::limits::ChunkLimits;
 use crate::outcome::AtomicRefuseReason;
 use crate::plan::{CanonicalKey, MutationKind};
 use crate::{member_hash, ordered_member_manifest_root};
@@ -214,9 +215,23 @@ pub struct ChunkPlan {
 }
 
 impl ChunkPlan {
-    /// Refuse empty, singleton, or length-mismatched plans.
+    /// Refuse empty, singleton, over-limit, or length-mismatched plans.
+    ///
+    /// `total` is checked against the hard ceiling before any caller should
+    /// allocate a slot vector. A `u32::MAX` total is `LimitExceeded`.
     pub fn validate(&self) -> Result<(), AtomicsError> {
-        if self.total < 2 || self.chunk_hashes.len() as u32 != self.total {
+        self.validate_within(ChunkLimits::hard())
+    }
+
+    /// Same checks under configured limits (must be within the hard ceiling).
+    pub fn validate_within(&self, limits: ChunkLimits) -> Result<(), AtomicsError> {
+        if self.total < 2 {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        if self.total > limits.max_chunks {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded));
+        }
+        if self.chunk_hashes.len() as u32 != self.total {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
         Ok(())
@@ -234,6 +249,8 @@ pub struct StagedMember {
     pub shard: ShardId,
     /// Present when the member was declared chunked. `None` slots are missing.
     pub chunks: Option<Vec<Option<Vec<u8>>>>,
+    /// True when the payload (possibly empty) is fully assembled.
+    pub payload_complete: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -250,6 +267,7 @@ struct StagedAtomic {
 pub struct StagingHeap {
     heap_id: HeapId,
     shard_count: u32,
+    chunk_limits: ChunkLimits,
     coordinator: CoordinatorStream,
     ordinary: BTreeMap<(CollectionId, Vec<u8>), (CanonicalKey, OrdinaryCell)>,
     staged: BTreeMap<AtomicId, StagedAtomic>,
@@ -258,12 +276,25 @@ pub struct StagingHeap {
 impl StagingHeap {
     /// Bind a Heap and its writer-shard count.
     pub fn new(heap_id: HeapId, shard_count: u32) -> Result<Self, AtomicsError> {
+        Self::new_with_chunk_limits(heap_id, shard_count, ChunkLimits::hard())
+    }
+
+    /// Bind a Heap with configured chunk ceilings (must stay within the hard set).
+    pub fn new_with_chunk_limits(
+        heap_id: HeapId,
+        shard_count: u32,
+        chunk_limits: ChunkLimits,
+    ) -> Result<Self, AtomicsError> {
         if shard_count == 0 {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        if !chunk_limits.is_within(ChunkLimits::hard()) {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded));
         }
         Ok(Self {
             heap_id,
             shard_count,
+            chunk_limits,
             coordinator: CoordinatorStream::new(heap_id),
             ordinary: BTreeMap::new(),
             staged: BTreeMap::new(),
@@ -372,11 +403,15 @@ impl StagingHeap {
         if slot.chunk_plans.contains_key(&member.ordinal) {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
+        if payload.len() > self.chunk_limits.max_assembled_bytes as usize {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded));
+        }
         slot.members.push(StagedMember {
             shard: entry.shard,
             member,
             payload,
             chunks: None,
+            payload_complete: true,
         });
         slot.lifecycle.members = MemberPhase::Staged;
         Ok(())
@@ -389,7 +424,7 @@ impl StagingHeap {
         ordinal: u32,
         plan: ChunkPlan,
     ) -> Result<(), AtomicsError> {
-        plan.validate()?;
+        plan.validate_within(self.chunk_limits)?;
         let slot = self
             .staged
             .get_mut(&atomic_id)
@@ -427,6 +462,9 @@ impl StagingHeap {
         member.validate()?;
         if member.after_content_hash.is_none() {
             return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+        }
+        if body.len() > self.chunk_limits.max_chunk_bytes as usize {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded));
         }
         let slot = self
             .staged
@@ -469,17 +507,23 @@ impl StagingHeap {
                 return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget));
             }
             chunks[index as usize] = Some(body);
-            maybe_assemble(staged, &plan)?;
+            maybe_assemble(staged, &plan, self.chunk_limits)?;
         } else {
-            let mut chunks = vec![None; plan.total as usize];
+            let n = usize::try_from(plan.total)
+                .map_err(|_| AtomicsError::Refused(AtomicRefuseReason::LimitExceeded))?;
+            if n > self.chunk_limits.max_chunks as usize {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded));
+            }
+            let mut chunks = vec![None; n];
             chunks[index as usize] = Some(body);
             let mut staged = StagedMember {
                 shard,
                 member,
                 payload: Vec::new(),
                 chunks: Some(chunks),
+                payload_complete: false,
             };
-            maybe_assemble(&mut staged, &plan)?;
+            maybe_assemble(&mut staged, &plan, self.chunk_limits)?;
             slot.members.push(staged);
         }
         slot.lifecycle.members = MemberPhase::Staged;
@@ -587,13 +631,14 @@ fn verify_payload(member: &AtomicMember, payload: &[u8]) -> Result<(), AtomicsEr
 }
 
 fn member_payload_complete(staged: &StagedMember) -> bool {
-    match &staged.chunks {
-        None => true,
-        Some(_) => !staged.payload.is_empty(),
-    }
+    staged.payload_complete
 }
 
-fn maybe_assemble(staged: &mut StagedMember, plan: &ChunkPlan) -> Result<(), AtomicsError> {
+fn maybe_assemble(
+    staged: &mut StagedMember,
+    plan: &ChunkPlan,
+    limits: ChunkLimits,
+) -> Result<(), AtomicsError> {
     let Some(chunks) = staged.chunks.as_ref() else {
         return Ok(());
     };
@@ -605,12 +650,21 @@ fn maybe_assemble(staged: &mut StagedMember, plan: &ChunkPlan) -> Result<(), Ato
     }
     let mut payload = Vec::new();
     for chunk in chunks {
-        payload.extend_from_slice(chunk.as_deref().unwrap_or_default());
+        let part = chunk.as_deref().unwrap_or_default();
+        let next = payload
+            .len()
+            .checked_add(part.len())
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded))?;
+        if next > limits.max_assembled_bytes as usize {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded));
+        }
+        payload.extend_from_slice(part);
     }
     let digest = *blake3::hash(&payload).as_bytes();
     if Some(digest) != staged.member.after_content_hash {
         return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
     }
     staged.payload = payload;
+    staged.payload_complete = true;
     Ok(())
 }

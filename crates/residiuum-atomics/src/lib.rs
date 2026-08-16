@@ -18,6 +18,7 @@
 //! ATM-2.3 adds chunked-value members with a frozen chunk manifest and the
 //! first member-stable boundary (`DurableInvisible`).
 //! CR-ATM2-004 binds each staged append to the frozen member hash and payload.
+//! CR-ATM2-005 bounds chunk admission before allocation and completes empty values.
 //! ATM-2.4 is failpoints (`before_prepare`, `after_prepare`, `after_member_n`)
 //! and prepared-visibility negatives. Crash-before-decision does not publish.
 //! The serial oracle is ATM-0.5. ATM-0.4 is the hostile decoder corpus.
@@ -77,7 +78,7 @@ pub use id::{AtomicId, CollectionId, ContentRoot, HeapId, VersionId};
 pub use lifecycle::{
     check_model, LifecycleError, LifecycleEvent, LifecycleTrace, ModelCheckReport, ModelProofs,
 };
-pub use limits::ResourceLimits;
+pub use limits::{ChunkLimits, ResourceLimits};
 pub use oracle::{OracleCell, OracleHistoryKind, OracleHistoryRecord, SerialOracle};
 pub use outcome::{
     AtomicAbortReason, AtomicMemberReceipt, AtomicOutcome, AtomicReceipt, AtomicRefuseReason,

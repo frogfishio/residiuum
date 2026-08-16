@@ -103,6 +103,38 @@ const fn duration_leq(a: Duration, b: Duration) -> bool {
     a.as_nanos() <= b.as_nanos()
 }
 
+/// Hard and configured ceilings for chunked-member admission (CR-ATM2-005).
+///
+/// These are not plan-CBOR fields. They bound allocation before any
+/// `vec![None; total]` or reassembly buffer is created.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkLimits {
+    /// Maximum chunks in one member's chunk map.
+    pub max_chunks: u32,
+    /// Maximum bytes in one chunk body.
+    pub max_chunk_bytes: u32,
+    /// Maximum reassembled payload bytes for one member.
+    pub max_assembled_bytes: u32,
+}
+
+impl ChunkLimits {
+    /// Protocol hard ceilings. Configured limits must stay within these.
+    pub const fn hard() -> Self {
+        Self {
+            max_chunks: 4096,
+            max_chunk_bytes: 1024 * 1024,
+            max_assembled_bytes: 8 * 1024 * 1024,
+        }
+    }
+
+    /// True when every field is at or below `other`.
+    pub const fn is_within(self, other: Self) -> bool {
+        self.max_chunks <= other.max_chunks
+            && self.max_chunk_bytes <= other.max_chunk_bytes
+            && self.max_assembled_bytes <= other.max_assembled_bytes
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

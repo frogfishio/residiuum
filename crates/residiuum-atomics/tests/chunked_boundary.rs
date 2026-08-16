@@ -1,8 +1,9 @@
 //! ATM-2.3: chunked members, first stable boundary, shard rotation, cohort identity.
 
 use residiuum_atomics::{
-    AtomicId, AtomicMember, CanonicalKey, ChunkPlan, CollectionId, ContentRoot, HeapId,
-    MemberPhase, MutationKind, ObjectIdentity, StagingHeap, VersionId,
+    AtomicId, AtomicMember, AtomicRefuseReason, AtomicsError, CanonicalKey, ChunkLimits, ChunkPlan,
+    CollectionId, ContentRoot, HeapId, MemberPhase, MutationKind, ObjectIdentity, StagingHeap,
+    VersionId,
 };
 
 fn hid(n: u8) -> HeapId {
@@ -142,6 +143,114 @@ fn cohort_neighbour_cannot_install_foreign_identity() {
     heap.append_staged(a, b"A".to_vec()).unwrap();
     assert!(heap.inspect_staged(aid(5)).unwrap().is_empty());
     assert_eq!(heap.inspect_staged(aid(4)).unwrap()[0].payload, b"A");
+}
+
+#[test]
+fn empty_chunked_value_seals() {
+    let mut heap = StagingHeap::new(hid(1), 1).unwrap();
+    let id = aid(7);
+    let empty = [];
+    let member = create_member(id, 0, "empty", h(&empty));
+    heap.begin_prepare(id, root(7), std::slice::from_ref(&member))
+        .unwrap();
+    heap.commit_chunk_manifest(
+        id,
+        0,
+        ChunkPlan {
+            total: 2,
+            chunk_hashes: vec![h(&empty), h(&empty)],
+        },
+    )
+    .unwrap();
+    heap.append_chunk(member.clone(), 0, Vec::new()).unwrap();
+    heap.append_chunk(member, 1, Vec::new()).unwrap();
+    heap.seal_member_boundary(id).unwrap();
+    let staged = &heap.inspect_staged(id).unwrap()[0];
+    assert!(staged.payload.is_empty());
+    assert!(staged.payload_complete);
+    assert_eq!(
+        heap.lifecycle(id).unwrap().members,
+        MemberPhase::DurableInvisible
+    );
+    assert!(heap.get(cid(1), &key("empty")).is_none());
+}
+
+#[test]
+fn hostile_chunk_total_is_refused_without_large_allocation() {
+    assert_eq!(
+        ChunkPlan {
+            total: u32::MAX,
+            chunk_hashes: Vec::new(),
+        }
+        .validate()
+        .unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::LimitExceeded)
+    );
+    let mut heap = StagingHeap::new(hid(1), 1).unwrap();
+    let member = create_member(aid(8), 0, "k", h(b"ab"));
+    heap.begin_prepare(aid(8), root(8), std::slice::from_ref(&member))
+        .unwrap();
+    assert_eq!(
+        heap.commit_chunk_manifest(
+            aid(8),
+            0,
+            ChunkPlan {
+                total: u32::MAX,
+                chunk_hashes: vec![h(b"a"), h(b"b")],
+            },
+        )
+        .unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::LimitExceeded)
+    );
+}
+
+#[test]
+fn one_unit_over_configured_chunk_limit_is_refused() {
+    let limits = ChunkLimits {
+        max_chunks: 2,
+        max_chunk_bytes: 8,
+        max_assembled_bytes: 16,
+    };
+    let mut heap = StagingHeap::new_with_chunk_limits(hid(1), 1, limits).unwrap();
+    let member = create_member(aid(9), 0, "k", h(b"abc"));
+    heap.begin_prepare(aid(9), root(9), std::slice::from_ref(&member))
+        .unwrap();
+    assert_eq!(
+        heap.commit_chunk_manifest(
+            aid(9),
+            0,
+            ChunkPlan {
+                total: 3,
+                chunk_hashes: vec![h(b"a"), h(b"b"), h(b"c")],
+            },
+        )
+        .unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::LimitExceeded)
+    );
+    heap.commit_chunk_manifest(
+        aid(9),
+        0,
+        ChunkPlan {
+            total: 2,
+            chunk_hashes: vec![h(b"ab"), h(b"c")],
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        heap.append_chunk(member, 0, b"too-long-chunk".to_vec())
+            .unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::LimitExceeded)
+    );
+}
+
+#[test]
+fn raising_chunk_limits_above_hard_ceiling_is_refused() {
+    let mut raised = ChunkLimits::hard();
+    raised.max_chunks = ChunkLimits::hard().max_chunks + 1;
+    assert_eq!(
+        StagingHeap::new_with_chunk_limits(hid(1), 1, raised).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::LimitExceeded)
+    );
 }
 
 #[test]
