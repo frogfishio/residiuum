@@ -36,6 +36,9 @@ remote admission. Structural refusals append no evidence.
 ATM-1.3 is the Heap-bound typed builder: collection IDs from one Heap, rights
 union, authority-revision binding, deadline and hard-limit validation, and read
 witnesses. The public SDK façade and `Capabilities::atomics` remain ATM-5.
+ATM-2.2 is the per-Heap coordinator stream, shard placement manifest, and staged
+append lane. Staged members are invisible to ordinary get/scan. Store adapters
+must not publish them to RQL, history, watch, or secondary indexes.
 
 Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 §§4–13. Programme: [`ATOMICS_IMPLEMENTATION_PLAN.md`](../../doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md) §4 and §6.
@@ -55,5 +58,6 @@ Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 | `oracle` | Serial in-memory oracle and shared history format |
 | `validate` | Closed-plan structural validator (profile, scope, Heap, limits) |
 | `builder` | Heap-bound typed builder, rights union, authority binding |
+| `staging` | Coordinator stream, placement manifest, invisible staged append |
 
 License: MIT.

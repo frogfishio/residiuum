@@ -9,6 +9,8 @@
 //! ATM-1.2 is the pure closed-plan validator shared with the serial oracle.
 //! ATM-1.3 is the Heap-bound typed builder: rights union, authority-revision
 //! binding, deadline/limit checks, and read witnesses. No SDK dependency.
+//! ATM-2.2 is the per-Heap coordinator, placement manifest, and staged append
+//! lane. Staged members never enter the ordinary primary map.
 //! The serial oracle is ATM-0.5. ATM-0.4 is the hostile decoder corpus.
 
 #![deny(missing_docs)]
@@ -26,6 +28,7 @@ pub mod limits;
 pub mod oracle;
 pub mod outcome;
 pub mod plan;
+pub mod staging;
 pub mod validate;
 
 pub use builder::{AtomicBuilder, AtomicOptions, BoundCollection, CollectionRights};
@@ -64,6 +67,10 @@ pub use outcome::{
 pub use plan::{
     AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CanonicalKeyKind, CoordinationScope,
     MutationKind, PlanMutation, PlanPredicate, PredicateKind, ReadWitness, UnknownProfile,
+};
+pub use staging::{
+    CoordinatorRecord, CoordinatorSeq, CoordinatorStream, OrdinaryCell, PlacementEntry,
+    PlacementManifest, ShardId, StagedMember, StagingHeap,
 };
 pub use validate::validate_closed_plan;
 
