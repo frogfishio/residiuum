@@ -127,21 +127,11 @@ impl SerialOracle {
 
     /// Apply one closed plan. Serial: no overlapping apply, no partial publish.
     pub fn apply(&mut self, plan: &AtomicPlan) -> Result<AtomicOutcome, AtomicsError> {
-        if plan.heap_id() != self.heap_id {
-            return self.refuse(plan, AtomicRefuseReason::CrossHeapCollection);
-        }
-        if !plan.profile().execution_supported() {
-            return self.refuse(plan, AtomicRefuseReason::UnsupportedProfile);
-        }
-        if !plan.profile().execution_supports_scope(plan.scope()) {
-            return self.refuse(plan, AtomicRefuseReason::ScopeUnavailable);
-        }
-        if plan
-            .predicates()
-            .iter()
-            .any(|p| !p.kind.is_public_builder_assert())
-        {
-            return self.refuse(plan, AtomicRefuseReason::UnsupportedPredicate);
+        if let Err(err) = crate::validate::validate_closed_plan(plan, self.heap_id) {
+            return match err {
+                AtomicsError::Refused(reason) => self.refuse(plan, reason),
+                other => Err(other),
+            };
         }
 
         let root = plan_content_root(plan)?;

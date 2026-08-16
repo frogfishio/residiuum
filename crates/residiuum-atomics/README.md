@@ -31,6 +31,8 @@ derived proofs. One generator writes the ATM-0 evidence pack; a separate test
 recomputes every manifest hash.
 ATM-1.1 adds typed encodings for the closed mutation/predicate vocabulary and
 requested vs worst-case generated-member accounting. The closed-plan validator is ATM-1.2.
+ATM-1.2 is the pure closed-plan validator shared by the serial oracle and future
+remote admission. Structural refusals append no evidence.
 
 Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 §§4–13. Programme: [`ATOMICS_IMPLEMENTATION_PLAN.md`](../../doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md) §4 and §6.
@@ -48,5 +50,6 @@ Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 | `encode` | Typed plan encodings, admitted values, closed-plan byte accounting |
 | `outcome` | Logical/material status, receipts, abort and refuse reasons |
 | `oracle` | Serial in-memory oracle and shared history format |
+| `validate` | Closed-plan structural validator (profile, scope, Heap, limits) |
 
 License: MIT.

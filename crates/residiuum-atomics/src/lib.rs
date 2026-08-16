@@ -6,6 +6,7 @@
 //! canonical target order. ATM-0.7 freezes prepare/member/decision/tombstone
 //! codecs, member object identity, and not-committed abort-reason preservation.
 //! ATM-1.1 adds typed mutation/predicate encodings and closed-plan accounting.
+//! ATM-1.2 is the pure closed-plan validator shared with the serial oracle.
 //! The serial oracle is ATM-0.5. ATM-0.4 is the hostile decoder corpus.
 
 #![deny(missing_docs)]
@@ -22,6 +23,7 @@ pub mod limits;
 pub mod oracle;
 pub mod outcome;
 pub mod plan;
+pub mod validate;
 
 pub use canonical::{
     decode_canonical_plan, encode_canonical_plan, plan_content_root, CANONICAL_TARGET_ORDER,
@@ -59,6 +61,7 @@ pub use plan::{
     AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CanonicalKeyKind, CoordinationScope,
     MutationKind, PlanMutation, PlanPredicate, PredicateKind, ReadWitness, UnknownProfile,
 };
+pub use validate::validate_closed_plan;
 
 #[cfg(test)]
 mod tests {
