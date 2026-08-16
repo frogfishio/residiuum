@@ -1,20 +1,13 @@
 //! Heap ownership envelope keys and agreement checks (`HEAP_SPEC` §34.1–§34.3).
 
 use crate::cbor_envelope::{decode_deterministic_uint_map, CborEnvelopeError, CborValue};
+use crate::envelope_keys::is_atomic_extension_key;
 use thiserror::Error;
 
-/// Envelope key: heap_id.
-pub const ENV_HEAP_ID: u64 = 31;
-/// Envelope key: collection_id.
-pub const ENV_COLLECTION_ID: u64 = 32;
-/// Envelope key: stream_id.
-pub const ENV_STREAM_ID: u64 = 33;
-/// Envelope key: ownership_profile.
-pub const ENV_OWNERSHIP_PROFILE: u64 = 34;
-/// Envelope key: source_heap_id.
-pub const ENV_SOURCE_HEAP_ID: u64 = 35;
-/// Envelope key: source_object_id.
-pub const ENV_SOURCE_OBJECT_ID: u64 = 36;
+pub use crate::envelope_keys::{
+    ENV_COLLECTION_ID, ENV_HEAP_ID, ENV_OWNERSHIP_PROFILE, ENV_SOURCE_HEAP_ID,
+    ENV_SOURCE_OBJECT_ID, ENV_STREAM_ID,
+};
 
 /// `residiuum-heap-v1` ownership profile value.
 pub const OWNERSHIP_PROFILE_V1: u64 = 1;
@@ -81,6 +74,10 @@ pub fn parse_ownership_envelope(bytes: &[u8]) -> Result<OwnershipEvidence, Owner
             },
             ENV_SOURCE_HEAP_ID | ENV_SOURCE_OBJECT_ID => {
                 // Provenance only; not ownership.
+            }
+            other if is_atomic_extension_key(other) => {
+                // Reserved Atomic namespace (FORMAT_SPEC: understood
+                // extensions are ignored by readers that do not consume them).
             }
             other => return Err(OwnershipError::UnknownKey(other)),
         }
@@ -191,7 +188,7 @@ fn expect_b16(v: &CborValue) -> Result<[u8; 16], OwnershipError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cbor_envelope::EMPTY_ENVELOPE;
+    use crate::cbor_envelope::{CborValue, EMPTY_ENVELOPE};
 
     #[test]
     fn empty_envelope_is_unknown() {
@@ -223,5 +220,43 @@ mod tests {
             Err(OwnershipError::Conflict)
         ));
         assert_eq!(agree_ownership(&a, &a).unwrap(), a);
+    }
+
+    #[test]
+    fn atomic_extension_keys_are_ignored() {
+        let heap = [0xAAu8; 16];
+        let env = crate::cbor_envelope::encode_deterministic_uint_map(&[
+            (ENV_HEAP_ID, CborValue::Bytes(heap.to_vec())),
+            (ENV_OWNERSHIP_PROFILE, CborValue::Uint(OWNERSHIP_PROFILE_V1)),
+            (37, CborValue::Bytes(vec![1; 32])),
+            (38, CborValue::Uint(0)),
+            (39, CborValue::Bytes(vec![2; 32])),
+            (40, CborValue::Uint(3)),
+        ])
+        .unwrap();
+        match parse_ownership_envelope(&env).unwrap() {
+            OwnershipEvidence::Known {
+                heap_id, profile, ..
+            } => {
+                assert_eq!(heap_id, heap);
+                assert_eq!(profile, OWNERSHIP_PROFILE_V1);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn truly_unknown_key_still_rejected() {
+        let heap = [0xAAu8; 16];
+        let env = crate::cbor_envelope::encode_deterministic_uint_map(&[
+            (ENV_HEAP_ID, CborValue::Bytes(heap.to_vec())),
+            (ENV_OWNERSHIP_PROFILE, CborValue::Uint(OWNERSHIP_PROFILE_V1)),
+            (99, CborValue::Uint(1)),
+        ])
+        .unwrap();
+        assert!(matches!(
+            parse_ownership_envelope(&env),
+            Err(OwnershipError::UnknownKey(99))
+        ));
     }
 }

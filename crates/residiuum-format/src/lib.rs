@@ -5,6 +5,8 @@
 //! Deterministic CBOR envelope validation (FORMAT_SPEC §5 condition 6).
 //! ATM-2.1: Atomic BatchPrepare/BatchCommit envelopes, member linkage, and a
 //! byte-buffer recovery reader (no store write path).
+//! CR-ATM2-002: one envelope-key registry; Atomic frames carry heap ownership
+//! keys 31/34 plus Atomic 37–40 so `admit_frame_to_heap` can bind them.
 //! No durable storage IO (Stage 3).
 //!
 //! **Wire freeze:** [`WIRE_MAJOR`] / [`WIRE_MINOR`] are the draft major-1
@@ -26,6 +28,7 @@ mod chunks;
 mod compat;
 mod csq_corpus;
 mod descriptors;
+mod envelope_keys;
 mod events;
 mod frame;
 mod integrity;
@@ -66,6 +69,10 @@ pub use compat::{
     wire_support_summary, wire_writer_emits, WireFreezeCriterion, WireFreezeCriterionStatus,
     WireFreezeReadiness, WireSupportEntry, WireSupportStatus, SUPPORTED_READER_MAJORS,
     WIRE_FREEZE_POLICY_ID, WRITER_WIRE_MAJOR, WRITER_WIRE_MINOR,
+};
+pub use envelope_keys::{
+    is_atomic_extension_key, is_ownership_key, ATOMIC_EXTENSION_FIRST, ATOMIC_EXTENSION_LAST,
+    ENV_OPERATION_CONTENT_HASH, ENV_OPERATION_ID,
 };
 pub use events::{group_by_event_id, EventIdOutcome};
 pub use frame::{

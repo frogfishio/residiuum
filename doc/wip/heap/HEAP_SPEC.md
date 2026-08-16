@@ -5432,8 +5432,11 @@ allocated:
 | 36 | `source_object_id` | byte string, 1–64 bytes | import provenance only |
 | 37 | `deployment_id` | 16-byte byte string | deployment evidence only; forbidden in a Heap-owned frame |
 
-Every envelope key unknown to profile v1 rejects the frame; v1 defines no
-non-critical extension mechanism. Writers emit map keys in numeric order. UUID
+Every envelope key unknown to profile v1 rejects the frame, except the reserved
+Atomic namespace 37–40 which ownership parsers MUST ignore (FORMAT_SPEC §4.4 /
+CR-ATM2-002). On Heap-owned frames those keys are Atomic linkage, not
+`deployment_id`. `deployment_id` remains deployment-evidence-only and is
+forbidden on Heap-owned frames. Writers emit map keys in numeric order. UUID
 fields use raw RFC 4122 network-order bytes, never text.
 
 `DeploymentId` is deliberately absent from ordinary data-frame ownership.
@@ -6014,61 +6017,3 @@ not regenerated or overwritten data.
 Legacy subject-v1 data has no cryptographic heap label and is therefore
 `Unknown` until the operator binds the whole source inventory to one
 destination heap. A migration cannot split one legacy collection across heaps.
-Copying between heaps is a later, authorized export/import operation that
-creates new object IDs and immutable provenance; it is never reassignment.
-
-The qualified network server may start only after phase 6 reports:
-
-```text
-source_frames = rewritten_frames + intentionally_quarantined_frames
-unlabelled_active_frames = 0
-cross_heap_segments = 0
-```
-
-Rollback before phase 6 uses the untouched source inventory. After phase 6,
-rollback means restoring the preflight backup into a separate legacy process;
-the qualified server never re-enables mixed raw mode.
-
-## 37. Single-node and cluster execution profiles
-
-### 37.1 Single-node reference profile
-
-The first shippable profile is:
-
-- one server process;
-- one `DeploymentId`;
-- many heap slots;
-- separately protected authority root;
-- TLS 1.3 network listener;
-- one immutable `HeapSecuritySnapshot` loaded through `ArcSwap` per heap;
-- no authorization database query on the request path;
-- no authority lease, because the sole process owns the local authority lock;
-- bounded in-memory blacklist compiled into each snapshot;
-- one heap capability per authenticated connection.
-
-An authority mutation builds and validates the complete next snapshot before
-one atomic publication. In-flight operations retain their old snapshot only
-until their request deadline. Destructive or state-barrier mutations first
-stop new admission, wait the documented drain bound, then publish.
-
-### 37.2 Cluster control plane
-
-Cluster support extends `residiuum-cluster` with a dedicated security-control Raft
-group per deployment. Payload partitions do not query this group for each
-request. Its committed log contains:
-
-```rust
-pub enum SecurityControlEntry {
-    CommitOperationalEvent {
-        heap_id: HeapId,
-        expected: AuthorityVersion,
-        event: AuthorizedOperationalEvent,
-    },
-    CommitMasterAuthorityEvent {
-        heap_id: HeapId,
-        expected: AuthorityVersion,
-        event: ReplicatedMasterAuthorityEvent,
-    },
-    GrantLease {
-        node_id: NodeId,
-        heap_id: HeapId,

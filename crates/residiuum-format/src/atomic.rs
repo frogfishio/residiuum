@@ -10,20 +10,17 @@ use crate::cbor_envelope::{
     decode_deterministic_uint_map, encode_deterministic_uint_map,
     validate_deterministic_cbor_envelope, CborEnvelopeError, CborValue, EMPTY_ENVELOPE,
 };
+use crate::envelope_keys::{ENV_HEAP_ID, ENV_OWNERSHIP_PROFILE};
 use crate::frame::{encode_frame, DecodedFrame, FrameHeader, FrameParts, FrameVerifyError};
 use crate::kinds::FrameKind;
 use crate::limits::SafetyLimits;
+use crate::ownership::OWNERSHIP_PROFILE_V1;
 use crate::scan::{scan_forward, ScanReport};
 use thiserror::Error;
 
-/// Envelope key: `atomic_id` (`bstr` 32).
-pub const ENV_ATOMIC_ID: u64 = 37;
-/// Envelope key: member `ordinal` (uint; `ItemEvent` only).
-pub const ENV_ATOMIC_ORDINAL: u64 = 38;
-/// Envelope key: plan `content_root` (`bstr` 32).
-pub const ENV_ATOMIC_CONTENT_ROOT: u64 = 39;
-/// Envelope key: Heap `commit_position` (nonzero uint).
-pub const ENV_ATOMIC_COMMIT_POSITION: u64 = 40;
+pub use crate::envelope_keys::{
+    ENV_ATOMIC_COMMIT_POSITION, ENV_ATOMIC_CONTENT_ROOT, ENV_ATOMIC_ID, ENV_ATOMIC_ORDINAL,
+};
 
 /// Role of a verified Atomic frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,12 +130,24 @@ pub enum AtomicEnvelopeError {
     ZeroCommitPosition,
 }
 
-/// Encode a `BatchPrepare` Atomic envelope.
+/// Heap ownership pair present on every Atomic envelope.
+fn ownership_entries(heap_id: &[u8; 16]) -> [(u64, CborValue); 2] {
+    [
+        (ENV_HEAP_ID, CborValue::Bytes(heap_id.to_vec())),
+        (ENV_OWNERSHIP_PROFILE, CborValue::Uint(OWNERSHIP_PROFILE_V1)),
+    ]
+}
+
+/// Encode a `BatchPrepare` Atomic envelope (ownership + Atomic linkage).
 pub fn encode_atomic_prepare_envelope(
+    heap_id: &[u8; 16],
     atomic_id: &[u8; 32],
     content_root: &[u8; 32],
 ) -> Result<Vec<u8>, AtomicEnvelopeError> {
+    let [h, p] = ownership_entries(heap_id);
     encode_deterministic_uint_map(&[
+        h,
+        p,
         (ENV_ATOMIC_ID, CborValue::Bytes(atomic_id.to_vec())),
         (
             ENV_ATOMIC_CONTENT_ROOT,
@@ -148,13 +157,17 @@ pub fn encode_atomic_prepare_envelope(
     .map_err(Into::into)
 }
 
-/// Encode a `BatchCommit` Atomic envelope.
+/// Encode a `BatchCommit` Atomic envelope (ownership + Atomic linkage).
 pub fn encode_atomic_commit_envelope(
+    heap_id: &[u8; 16],
     atomic_id: &[u8; 32],
     content_root: &[u8; 32],
     commit_position: Option<u64>,
 ) -> Result<Vec<u8>, AtomicEnvelopeError> {
+    let [h, p] = ownership_entries(heap_id);
     let mut entries = vec![
+        h,
+        p,
         (ENV_ATOMIC_ID, CborValue::Bytes(atomic_id.to_vec())),
         (
             ENV_ATOMIC_CONTENT_ROOT,
@@ -170,14 +183,18 @@ pub fn encode_atomic_commit_envelope(
     encode_deterministic_uint_map(&entries).map_err(Into::into)
 }
 
-/// Encode an `ItemEvent` Atomic member envelope.
+/// Encode an `ItemEvent` Atomic member envelope (ownership + Atomic linkage).
 pub fn encode_atomic_member_envelope(
+    heap_id: &[u8; 16],
     atomic_id: &[u8; 32],
     ordinal: u64,
     content_root: &[u8; 32],
     commit_position: Option<u64>,
 ) -> Result<Vec<u8>, AtomicEnvelopeError> {
+    let [h, p] = ownership_entries(heap_id);
     let mut entries = vec![
+        h,
+        p,
         (ENV_ATOMIC_ID, CborValue::Bytes(atomic_id.to_vec())),
         (ENV_ATOMIC_ORDINAL, CborValue::Uint(ordinal)),
         (

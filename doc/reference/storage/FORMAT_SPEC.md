@@ -178,7 +178,10 @@ The encoded envelope MUST:
 Text values MUST be valid UTF-8. Arbitrary data belongs in byte strings.
 
 Unknown envelope keys MUST be retained by lossless tools and ignored by readers
-that do not understand them.
+that do not understand them. Heap-ownership parsers (profile v1) treat keys
+37–40 as a reserved Atomic extension namespace and MUST ignore them; they MUST
+still reject malformed keys 31–36. Other keys above 40 remain unknown to
+ownership profile v1.
 
 Core envelope keys are:
 
@@ -214,17 +217,36 @@ Core envelope keys are:
 | 28 | `partition_term` | strong partition event |
 | 29 | `partition_position` | ordered partition event |
 | 30 | `commit_evidence` | when portable commit evidence is present |
-| 31 | `operation_id` | idempotent client mutation frames |
-| 32 | `operation_content_hash` | when `operation_id` is present |
+| 31 | `heap_id` | every heap-aware frame (`bstr` 16) |
+| 32 | `collection_id` | collection data and indexes (`bstr` 16) |
+| 33 | `stream_id` | stream data and indexes (`bstr` 16) |
+| 34 | `ownership_profile` | every heap-aware frame (uint `1`) |
+| 35 | `source_heap_id` | import provenance only |
+| 36 | `source_object_id` | import provenance only |
+| 37 | `atomic_id` | Atomic frames (`bstr` 32) |
+| 38 | `ordinal` | Atomic `ItemEvent` members (uint) |
+| 39 | `content_root` | Atomic frames (`bstr` 32) |
+| 40 | `commit_position` | Atomic committed decision (nonzero uint) |
+| 41 | `operation_id` | idempotent client mutation frames (`bstr` 16) |
+| 42 | `operation_content_hash` | when `operation_id` is present (`bstr` 32) |
 
-Keys 31 and 32 form one pair. Writers MUST emit both or neither. The operation
-ID is an opaque 16-byte string and the content hash is a 32-byte canonical
-request digest. They make an accepted mutation outcome reconstructable from
-authoritative media when a derived retry cache is absent or interrupted.
-Before history-loss compaction reclaims frames carrying this evidence, the
-implementation MUST durably materialize their decisions in the retained
-operation ledger. An identity-reassigned clone establishes a new operation-ID
-namespace and MUST NOT replay decisions belonging to the source store ID.
+**Amendment (CR-ATM2-002, proposed):** landed HP-002 already used keys 31–36 for
+Heap ownership. The draft assignment of 31/32 to `operation_id` /
+`operation_content_hash` is relocated to 41/42 so one registry covers FORMAT,
+ownership, and Atomics. Atomic writers MUST emit keys 31 and 34 together with
+37–40 so live-store `admit_frame_to_heap` can bind the frame. Compatibility:
+old ownership readers reject keys 37–40 as unknown; new readers ignore that
+namespace. Store paths that still emit 31/32 as operation identity on
+non-heap-aware item frames are a residual dual-read concern until architect
+acceptance. Keys 41 and 42 form one pair. Writers MUST emit both or neither.
+The operation ID is an opaque 16-byte string and the content hash is a 32-byte
+canonical request digest. They make an accepted mutation outcome
+reconstructable from authoritative media when a derived retry cache is absent
+or interrupted. Before history-loss compaction reclaims frames carrying this
+evidence, the implementation MUST durably materialize their decisions in the
+retained operation ledger. An identity-reassigned clone establishes a new
+operation-ID namespace and MUST NOT replay decisions belonging to the source
+store ID.
 
 The value types and exact event envelopes will be frozen before wire version 1
 is declared stable. A draft reader MUST preserve unknown or not-yet-frozen

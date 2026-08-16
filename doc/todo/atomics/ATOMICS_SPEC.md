@@ -462,10 +462,14 @@ presence of a `batch_id` field or physical `put_many` call MUST NOT be
 interpreted as Atomic evidence.
 
 Format envelope keys (FORMAT_SPEC §4.4 uint map; 1–36 keep existing
-format/ownership meanings and are never Atomic identity):
+format/ownership meanings and are never Atomic identity). Atomic writers MUST
+also emit keys 31 (`heap_id`) and 34 (`ownership_profile` = 1) so the frame
+admits through the live ownership path:
 
 | Key | Field |
 |---:|---|
+| 31 | `heap_id` (`bstr` 16; required on Atomic frames) |
+| 34 | `ownership_profile` (uint `1`; required on Atomic frames) |
 | 37 | `atomic_id` (`bstr` 32) |
 | 38 | `ordinal` (uint; `ItemEvent` only) |
 | 39 | `content_root` (`bstr` 32) |

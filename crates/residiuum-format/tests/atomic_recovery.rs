@@ -13,6 +13,12 @@ fn eid(n: u8) -> [u8; 16] {
     id
 }
 
+fn hid(n: u8) -> [u8; 16] {
+    let mut id = [0u8; 16];
+    id[0] = n;
+    id
+}
+
 fn aid(n: u8) -> [u8; 32] {
     let mut id = [0u8; 32];
     id[0] = n;
@@ -54,21 +60,21 @@ fn prepare_member_commit_roundtrip_is_valid() {
     let cr = root(7);
     let prep = encode_atomic_frame(
         FrameKind::BatchPrepare,
-        &encode_atomic_prepare_envelope(&id, &cr).unwrap(),
+        &encode_atomic_prepare_envelope(&hid(1), &id, &cr).unwrap(),
         &body_map(),
         eid(1),
     )
     .unwrap();
     let member = encode_atomic_frame(
         FrameKind::ItemEvent,
-        &encode_atomic_member_envelope(&id, 0, &cr, Some(3)).unwrap(),
+        &encode_atomic_member_envelope(&hid(1), &id, 0, &cr, Some(3)).unwrap(),
         b"payload",
         eid(2),
     )
     .unwrap();
     let commit = encode_atomic_frame(
         FrameKind::BatchCommit,
-        &encode_atomic_commit_envelope(&id, &cr, Some(3)).unwrap(),
+        &encode_atomic_commit_envelope(&hid(1), &id, &cr, Some(3)).unwrap(),
         &body_map(),
         eid(3),
     )
@@ -120,7 +126,7 @@ fn batch_id_only_envelope_is_not_atomic_evidence() {
 
 #[test]
 fn member_missing_ordinal_is_partial() {
-    let env = encode_atomic_prepare_envelope(&aid(2), &root(1)).unwrap();
+    let env = encode_atomic_prepare_envelope(&hid(1), &aid(2), &root(1)).unwrap();
     let frame = encode_atomic_frame(FrameKind::ItemEvent, &env, b"x", eid(5)).unwrap();
     let report = read_atomic_evidence(&frame, SafetyLimits::default());
     match &report.examined[0].class {
@@ -151,7 +157,7 @@ fn wrong_length_atomic_id_is_corrupt() {
 
 #[test]
 fn prepare_with_ordinal_is_role_mismatch() {
-    let env = encode_atomic_member_envelope(&aid(3), 1, &root(2), None).unwrap();
+    let env = encode_atomic_member_envelope(&hid(1), &aid(3), 1, &root(2), None).unwrap();
     let frame = encode_atomic_frame(FrameKind::BatchPrepare, &env, &body_map(), eid(7)).unwrap();
     let report = read_atomic_evidence(&frame, SafetyLimits::default());
     assert_eq!(
@@ -164,7 +170,7 @@ fn prepare_with_ordinal_is_role_mismatch() {
 
 #[test]
 fn missing_prepare_body_is_partial() {
-    let env = encode_atomic_prepare_envelope(&aid(4), &root(3)).unwrap();
+    let env = encode_atomic_prepare_envelope(&hid(1), &aid(4), &root(3)).unwrap();
     let frame = encode_atomic_frame(FrameKind::BatchPrepare, &env, &[], eid(8)).unwrap();
     let report = read_atomic_evidence(&frame, SafetyLimits::default());
     match &report.examined[0].class {
@@ -190,5 +196,5 @@ fn ordinary_item_event_is_ignored() {
 
 #[test]
 fn zero_commit_position_refuses_encode() {
-    assert!(encode_atomic_commit_envelope(&aid(1), &root(1), Some(0)).is_err());
+    assert!(encode_atomic_commit_envelope(&hid(1), &aid(1), &root(1), Some(0)).is_err());
 }
