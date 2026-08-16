@@ -5,12 +5,14 @@
 //! states. ATM-0.2 adds deterministic CBOR, content-root hashing, and
 //! canonical target order. ATM-0.7 freezes prepare/member/decision/tombstone
 //! codecs, member object identity, and not-committed abort-reason preservation.
+//! ATM-1.1 adds typed mutation/predicate encodings and closed-plan accounting.
 //! The serial oracle is ATM-0.5. ATM-0.4 is the hostile decoder corpus.
 
 #![deny(missing_docs)]
 
 pub mod canonical;
 mod cbor;
+pub mod encode;
 pub mod error;
 pub mod evidence;
 mod evidence_cbor;
@@ -28,6 +30,11 @@ pub use canonical::{
     DOMAIN_ATOMIC_READSET, DOMAIN_ATOMIC_TOMBSTONE,
 };
 pub use cbor::MAX_CBOR_DEPTH;
+pub use encode::{
+    account_closed_plan, encode_assert_absent, encode_assert_present, encode_assert_version,
+    encode_create, encode_delete, encode_put, encode_replace, serialize_canonical_value,
+    CanonicalValue, PlanAccounting,
+};
 pub use error::{AtomicsError, CborError};
 pub use evidence::{
     AtomicDecision, AtomicLifecycle, AtomicMember, AtomicPrepare, DecisionCode, DecisionPhase,
