@@ -39,16 +39,14 @@ fn key(s: &str) -> CanonicalKey {
     CanonicalKey::String(s.to_owned())
 }
 
-fn create_member(id: AtomicId, ordinal: u32, k: &str) -> AtomicMember {
-    let mut hash = [0u8; 32];
-    hash[0] = 9;
+fn create_member(id: AtomicId, ordinal: u32, k: &str, payload: &[u8]) -> AtomicMember {
     AtomicMember {
         atomic_id: id,
         ordinal,
         object_identity: ObjectIdentity::new(cid(1), key(k)),
         member_kind: MutationKind::Create,
         before_version: None,
-        after_content_hash: Some(hash),
+        after_content_hash: Some(*blake3::hash(payload).as_bytes()),
         event_id: vid(1),
     }
 }
@@ -62,7 +60,7 @@ fn assert_no_ordinary_leak(heap: &StagingHeap, k: &str) {
 fn before_prepare_reopen_has_no_prepare_and_no_ordinary_mutation() {
     let mut session = FaultSession::new(StagingHeap::new(hid(1), 1).unwrap());
     session.arm(StagingFailpoint::BeforePrepare);
-    let m = create_member(aid(1), 0, "k");
+    let m = create_member(aid(1), 0, "k", b"x");
     assert_eq!(
         session.begin_prepare(aid(1), root(1), std::slice::from_ref(&m)),
         Err(FaultError::Injected(StagingFailpoint::BeforePrepare))
@@ -77,7 +75,7 @@ fn before_prepare_reopen_has_no_prepare_and_no_ordinary_mutation() {
 fn after_prepare_reopen_keeps_prepare_and_does_not_publish() {
     let mut session = FaultSession::new(StagingHeap::new(hid(1), 1).unwrap());
     session.arm(StagingFailpoint::AfterPrepare);
-    let m = create_member(aid(2), 0, "k");
+    let m = create_member(aid(2), 0, "k", b"x");
     assert_eq!(
         session.begin_prepare(aid(2), root(2), std::slice::from_ref(&m)),
         Err(FaultError::Injected(StagingFailpoint::AfterPrepare))
@@ -95,8 +93,8 @@ fn after_prepare_reopen_keeps_prepare_and_does_not_publish() {
 #[test]
 fn after_member_n_reopen_examines_surviving_member_only() {
     let mut session = FaultSession::new(StagingHeap::new(hid(1), 2).unwrap());
-    let a = create_member(aid(3), 0, "a");
-    let b = create_member(aid(3), 1, "b");
+    let a = create_member(aid(3), 0, "a", b"A");
+    let b = create_member(aid(3), 1, "b", b"B");
     session
         .begin_prepare(aid(3), root(3), &[a.clone(), b.clone()])
         .unwrap();
@@ -117,7 +115,7 @@ fn after_member_n_reopen_examines_surviving_member_only() {
 fn second_heap_cannot_resolve_first_atomic() {
     let mut a = StagingHeap::new(hid(1), 1).unwrap();
     let b = StagingHeap::new(hid(2), 1).unwrap();
-    let m = create_member(aid(4), 0, "k");
+    let m = create_member(aid(4), 0, "k", b"v");
     a.begin_prepare(aid(4), root(4), std::slice::from_ref(&m))
         .unwrap();
     a.append_staged(m, b"v".to_vec()).unwrap();
@@ -130,7 +128,7 @@ fn second_heap_cannot_resolve_first_atomic() {
 #[test]
 fn negative_control_detects_a_leaked_staged_member() {
     let mut heap = StagingHeap::new(hid(1), 1).unwrap();
-    let m = create_member(aid(5), 0, "leak");
+    let m = create_member(aid(5), 0, "leak", b"secret");
     heap.begin_prepare(aid(5), root(5), std::slice::from_ref(&m))
         .unwrap();
     heap.append_staged(m, b"secret".to_vec()).unwrap();

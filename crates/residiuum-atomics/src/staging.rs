@@ -12,7 +12,8 @@ use crate::evidence::{
 };
 use crate::id::{AtomicId, CollectionId, ContentRoot, HeapId, VersionId};
 use crate::outcome::AtomicRefuseReason;
-use crate::plan::CanonicalKey;
+use crate::plan::{CanonicalKey, MutationKind};
+use crate::{member_hash, ordered_member_manifest_root};
 use std::collections::BTreeMap;
 
 /// Writer-shard identity in a placement manifest.
@@ -99,19 +100,15 @@ impl CoordinatorStream {
     }
 }
 
-/// One intended member placement.
+/// One intended member placement, frozen before any staged append.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlacementEntry {
-    /// Manifest ordinal.
-    pub ordinal: u32,
     /// Writer shard that must hold the member.
     pub shard: ShardId,
-    /// Target collection.
-    pub collection_id: CollectionId,
-    /// Target key order bytes.
-    pub key_bytes: Vec<u8>,
-    /// Payload hash committed by the prepare (member `after_content_hash` or zeros on delete).
-    pub payload_hash: [u8; 32],
+    /// Exact member record named by the prepare.
+    pub member: AtomicMember,
+    /// `member_hash(member)` committed by the prepare.
+    pub member_hash: [u8; 32],
 }
 
 /// Member placement across writer shards. Frozen before any staged append.
@@ -120,6 +117,7 @@ pub struct PlacementManifest {
     heap_id: HeapId,
     atomic_id: AtomicId,
     content_root: ContentRoot,
+    member_manifest_root: [u8; 32],
     entries: Vec<PlacementEntry>,
 }
 
@@ -135,25 +133,38 @@ impl PlacementManifest {
         if shard_count == 0 {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
+        let mut seen: Vec<(CollectionId, Vec<u8>, u32)> = Vec::new();
         let mut entries = Vec::with_capacity(members.len());
         for m in members {
             if m.atomic_id != atomic_id {
                 return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
             }
             m.validate()?;
+            let key_bytes = key_order_bytes(&m.object_identity.key);
+            if seen.iter().any(|(c, k, o)| {
+                (*c == m.object_identity.collection_id && *k == key_bytes) || *o == m.ordinal
+            }) {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget));
+            }
+            seen.push((m.object_identity.collection_id, key_bytes, m.ordinal));
             entries.push(PlacementEntry {
-                ordinal: m.ordinal,
                 shard: ShardId(m.ordinal % shard_count),
-                collection_id: m.object_identity.collection_id,
-                key_bytes: key_order_bytes(&m.object_identity.key),
-                payload_hash: m.after_content_hash.unwrap_or([0u8; 32]),
+                member: m.clone(),
+                member_hash: member_hash(m)?,
             });
         }
-        entries.sort_by_key(|e| e.ordinal);
+        entries.sort_by_key(|e| e.member.ordinal);
+        for (i, e) in entries.iter().enumerate() {
+            if e.member.ordinal as usize != i {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+            }
+        }
+        let member_manifest_root = ordered_member_manifest_root(heap_id, members)?;
         Ok(Self {
             heap_id,
             atomic_id,
             content_root,
+            member_manifest_root,
             entries,
         })
     }
@@ -176,6 +187,11 @@ impl PlacementManifest {
     /// Ordered placement entries.
     pub fn entries(&self) -> &[PlacementEntry] {
         &self.entries
+    }
+
+    /// Ordered member-manifest root committed at prepare.
+    pub const fn member_manifest_root(&self) -> [u8; 32] {
+        self.member_manifest_root
     }
 }
 
@@ -332,6 +348,7 @@ impl StagingHeap {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
         member.validate()?;
+        verify_payload(&member, &payload)?;
         let slot = self
             .staged
             .get_mut(&member.atomic_id)
@@ -340,12 +357,9 @@ impl StagingHeap {
             .manifest
             .entries
             .iter()
-            .find(|e| e.ordinal == member.ordinal)
+            .find(|e| e.member.ordinal == member.ordinal)
             .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
-        let key_bytes = key_order_bytes(&member.object_identity.key);
-        if entry.collection_id != member.object_identity.collection_id
-            || entry.key_bytes != key_bytes
-        {
+        if entry.member != member || entry.member_hash != member_hash(&member)? {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
         if slot
@@ -383,7 +397,12 @@ impl StagingHeap {
         if slot.lifecycle.members == MemberPhase::DurableInvisible {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
-        if !slot.manifest.entries.iter().any(|e| e.ordinal == ordinal) {
+        if !slot
+            .manifest
+            .entries
+            .iter()
+            .any(|e| e.member.ordinal == ordinal)
+        {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
         if slot.members.iter().any(|s| s.member.ordinal == ordinal)
@@ -428,14 +447,20 @@ impl StagingHeap {
             .manifest
             .entries
             .iter()
-            .find(|e| e.ordinal == member.ordinal)
+            .find(|e| e.member.ordinal == member.ordinal)
             .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+        if entry.member != member || entry.member_hash != member_hash(&member)? {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
         let shard = entry.shard;
         let existing = slot
             .members
             .iter_mut()
             .find(|s| s.member.ordinal == member.ordinal);
         if let Some(staged) = existing {
+            if staged.member != member {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+            }
             let chunks = staged
                 .chunks
                 .as_mut()
@@ -473,15 +498,25 @@ impl StagingHeap {
         if slot.members.len() != slot.manifest.entries.len() {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
+        let mut sealed = Vec::with_capacity(slot.manifest.entries.len());
         for entry in &slot.manifest.entries {
             let staged = slot
                 .members
                 .iter()
-                .find(|s| s.member.ordinal == entry.ordinal)
+                .find(|s| s.member.ordinal == entry.member.ordinal)
                 .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
-            if !member_payload_complete(staged) {
+            if staged.member != entry.member
+                || member_hash(&staged.member)? != entry.member_hash
+                || !member_payload_complete(staged)
+            {
                 return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
             }
+            verify_payload(&staged.member, &staged.payload)?;
+            sealed.push(staged.member.clone());
+        }
+        let recomputed = ordered_member_manifest_root(slot.manifest.heap_id, &sealed)?;
+        if recomputed != slot.manifest.member_manifest_root {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
         slot.lifecycle.members = MemberPhase::DurableInvisible;
         Ok(())
@@ -532,6 +567,23 @@ fn slot_is_sealed(slot: Option<&StagedAtomic>) -> bool {
 
 fn chunk_hash(body: &[u8]) -> [u8; 32] {
     *blake3::hash(body).as_bytes()
+}
+
+fn verify_payload(member: &AtomicMember, payload: &[u8]) -> Result<(), AtomicsError> {
+    match member.member_kind {
+        MutationKind::Delete => {
+            if !payload.is_empty() || member.after_content_hash.is_some() {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+            }
+        }
+        _ => {
+            let digest = *blake3::hash(payload).as_bytes();
+            if Some(digest) != member.after_content_hash {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn member_payload_complete(staged: &StagedMember) -> bool {

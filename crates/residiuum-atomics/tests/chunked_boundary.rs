@@ -115,7 +115,7 @@ fn bad_chunk_hash_is_refused() {
 fn shard_rotation_does_not_publish_or_reassign_staged() {
     let mut heap = StagingHeap::new(hid(1), 2).unwrap();
     let id = aid(3);
-    let member = create_member(id, 1, "k", h(b"v"));
+    let member = create_member(id, 0, "k", h(b"v"));
     heap.begin_prepare(id, root(3), std::slice::from_ref(&member))
         .unwrap();
     heap.append_staged(member, b"v".to_vec()).unwrap();

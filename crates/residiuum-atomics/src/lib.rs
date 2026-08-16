@@ -17,6 +17,7 @@
 //! lane. Staged members never enter the ordinary primary map.
 //! ATM-2.3 adds chunked-value members with a frozen chunk manifest and the
 //! first member-stable boundary (`DurableInvisible`).
+//! CR-ATM2-004 binds each staged append to the frozen member hash and payload.
 //! ATM-2.4 is failpoints (`before_prepare`, `after_prepare`, `after_member_n`)
 //! and prepared-visibility negatives. Crash-before-decision does not publish.
 //! The serial oracle is ATM-0.5. ATM-0.4 is the hostile decoder corpus.
