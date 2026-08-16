@@ -32,6 +32,9 @@ bash ./scripts/verify-app-baseline-contract.sh --require-frozen
 echo "== crash-and-recovery contract (DEF-104) =="
 bash ./scripts/verify-crash-recovery-contract.sh
 
+echo "== atomics evidence/CI contract (plan §13, quick) =="
+bash ./scripts/verify-atomics.sh quick
+
 # CSQ-0 core-storage registries (VFY-0 namespace)
 bash ./scripts/verify-core-storage-registry.sh
 
