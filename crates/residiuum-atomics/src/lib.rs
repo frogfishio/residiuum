@@ -9,6 +9,8 @@
 //! ATM-1.2 is the pure closed-plan validator shared with the serial oracle.
 //! ATM-1.3 is the Heap-bound typed builder: rights union, authority-revision
 //! binding, deadline/limit checks, and read witnesses. No SDK dependency.
+//! CR-ATM1-001 encodes Heap authority as `HeapAuthorityRevision` and admits
+//! against a trusted grant view; active rule revisions stay RRE hashes.
 //! ATM-2.2 is the per-Heap coordinator, placement manifest, and staged append
 //! lane. Staged members never enter the ordinary primary map.
 //! ATM-2.3 adds chunked-value members with a frozen chunk manifest and the
@@ -36,7 +38,10 @@ pub mod plan;
 pub mod staging;
 pub mod validate;
 
-pub use builder::{AtomicBuilder, AtomicOptions, BoundCollection, CollectionRights};
+pub use builder::{
+    admit_closed_plan, AtomicBuilder, AtomicOptions, BoundCollection, CollectionRights,
+    TrustedAuthorityView,
+};
 pub use canonical::{
     decode_canonical_plan, encode_canonical_plan, plan_content_root, CANONICAL_TARGET_ORDER,
     CBOR_V1_REL, DOMAIN_ATOMIC_CONTENT, DOMAIN_ATOMIC_DECISION, DOMAIN_ATOMIC_ID,
@@ -46,8 +51,8 @@ pub use canonical::{
 pub use cbor::MAX_CBOR_DEPTH;
 pub use encode::{
     account_closed_plan, encode_assert_absent, encode_assert_present, encode_assert_version,
-    encode_create, encode_delete, encode_put, encode_replace, serialize_canonical_value,
-    CanonicalValue, PlanAccounting,
+    encode_create, encode_delete, encode_heap_authority_revision, encode_put, encode_replace,
+    serialize_canonical_value, CanonicalValue, PlanAccounting,
 };
 pub use error::{AtomicsError, CborError};
 pub use evidence::{

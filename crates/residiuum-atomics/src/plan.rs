@@ -205,6 +205,14 @@ impl PredicateKind {
         )
     }
 
+    /// Predicates the LocalHeap v1 closed-plan validator admits.
+    ///
+    /// `HeapAuthorityRevision` is a structural binding, not a compiled RRE
+    /// host closure. Other compiled kinds stay ATM-1.2 unsupported.
+    pub const fn is_closed_plan_predicate(self) -> bool {
+        self.is_public_builder_assert() || matches!(self, Self::HeapAuthorityRevision)
+    }
+
     /// Stable snake_case name.
     pub const fn as_str(self) -> &'static str {
         match self {

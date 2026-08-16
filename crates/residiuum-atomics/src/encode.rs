@@ -148,6 +148,20 @@ pub fn encode_assert_version(
     }
 }
 
+/// Encode heap authority/security revision (`ATOMICS_SPEC` §7).
+///
+/// This is not an active RRE rule revision. The payload is the 32-byte
+/// authority revision hash.
+pub fn encode_heap_authority_revision(revision: [u8; 32]) -> PlanPredicate {
+    PlanPredicate {
+        kind: PredicateKind::HeapAuthorityRevision,
+        collection_id: None,
+        key: None,
+        version: None,
+        encoded: Some(revision.to_vec()),
+    }
+}
+
 /// Requested vs worst-case generated-member accounting for a closed plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanAccounting {

@@ -1,9 +1,10 @@
 //! ATM-1.3: typed builder, rights, authority binding, cross-Heap negatives.
 
 use residiuum_atomics::{
-    serialize_canonical_value, validate_closed_plan, AtomicBuilder, AtomicId, AtomicOptions,
-    AtomicOutcome, AtomicRefuseReason, AtomicsError, BoundCollection, CanonicalKey, CanonicalValue,
-    CollectionId, CollectionRights, CoordinationScope, HeapId, ResourceLimits, SerialOracle,
+    admit_closed_plan, plan_content_root, serialize_canonical_value, validate_closed_plan,
+    AtomicBuilder, AtomicId, AtomicOptions, AtomicOutcome, AtomicRefuseReason, AtomicsError,
+    BoundCollection, CanonicalKey, CanonicalValue, CollectionId, CollectionRights,
+    CoordinationScope, HeapId, PredicateKind, ResourceLimits, SerialOracle, TrustedAuthorityView,
     VersionId,
 };
 use std::time::{Duration, Instant};
@@ -46,8 +47,14 @@ fn rev(n: u8) -> [u8; 32] {
     b
 }
 
+fn view(heap: u8, authority: u8) -> TrustedAuthorityView {
+    TrustedAuthorityView::new(hid(heap), rev(authority))
+}
+
 fn coll(heap: u8, collection: u8, rights: CollectionRights, authority: u8) -> BoundCollection {
-    BoundCollection::bind(hid(heap), cid(collection), rights, rev(authority))
+    let mut trusted = view(heap, authority);
+    trusted.grant(cid(collection), rights);
+    BoundCollection::from_trusted(&trusted, cid(collection)).unwrap()
 }
 
 fn builder(heap: u8, id: u8) -> AtomicBuilder {
@@ -70,7 +77,13 @@ fn build_commits_on_the_bound_heap_oracle() {
     assert!(b.required_rights().contains(CollectionRights::READ));
     let plan = b.build().unwrap();
     assert_eq!(plan.heap_id(), heap);
-    assert_eq!(plan.active_rule_revisions(), &[rev(7)]);
+    assert!(plan.active_rule_revisions().is_empty());
+    let auth = plan
+        .predicates()
+        .iter()
+        .find(|p| p.kind == PredicateKind::HeapAuthorityRevision)
+        .expect("authority predicate");
+    assert_eq!(auth.encoded.as_deref(), Some(rev(7).as_slice()));
     validate_closed_plan(&plan, heap).unwrap();
     let mut oracle = SerialOracle::new(heap);
     assert!(matches!(
@@ -233,4 +246,84 @@ fn replace_and_delete_round_trip_through_oracle() {
     oracle.apply(&next.build().unwrap()).unwrap();
     assert_eq!(oracle.get(cid(1), &key("keep")).unwrap().value, b"1b");
     assert!(oracle.get(cid(1), &key("gone")).is_none());
+}
+
+#[test]
+fn rule_revisions_stay_off_the_authority_predicate() {
+    let state = coll(1, 1, CollectionRights::ordinary(), 7);
+    let mut b = builder(1, 40);
+    b.create(&state, key("k"), val(b"v"))
+        .unwrap()
+        .bind_rule_revision([3u8; 32]);
+    let plan = b.build().unwrap();
+    assert_eq!(plan.active_rule_revisions(), &[[3u8; 32]]);
+    let auth = plan
+        .predicates()
+        .iter()
+        .find(|p| p.kind == PredicateKind::HeapAuthorityRevision)
+        .unwrap();
+    assert_eq!(auth.encoded.as_deref(), Some(rev(7).as_slice()));
+}
+
+#[test]
+fn authority_change_moves_root_not_rule_revisions() {
+    let first = coll(1, 1, CollectionRights::ordinary(), 1);
+    let second = coll(1, 1, CollectionRights::ordinary(), 2);
+    let mut a = builder(1, 41);
+    a.create(&first, key("k"), val(b"v"))
+        .unwrap()
+        .bind_rule_revision([9u8; 32]);
+    let mut b = builder(1, 41);
+    b.create(&second, key("k"), val(b"v"))
+        .unwrap()
+        .bind_rule_revision([9u8; 32]);
+    let pa = a.build().unwrap();
+    let pb = b.build().unwrap();
+    assert_eq!(pa.active_rule_revisions(), pb.active_rule_revisions());
+    assert_ne!(
+        plan_content_root(&pa).unwrap(),
+        plan_content_root(&pb).unwrap()
+    );
+}
+
+#[test]
+fn admit_refuses_stale_authority_without_prepare() {
+    let mut trusted = view(1, 1);
+    trusted.grant(cid(1), CollectionRights::ordinary());
+    let handle = BoundCollection::from_trusted(&trusted, cid(1)).unwrap();
+    let mut b = builder(1, 42);
+    b.create(&handle, key("k"), val(b"v")).unwrap();
+    let plan = b.build().unwrap();
+    admit_closed_plan(&plan, &trusted).unwrap();
+    let mut later = view(1, 2);
+    later.grant(cid(1), CollectionRights::ordinary());
+    assert_eq!(
+        admit_closed_plan(&plan, &later).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::StaleOrForeignCapability)
+    );
+}
+
+#[test]
+fn admit_refuses_revoked_rights() {
+    let mut trusted = view(1, 1);
+    trusted.grant(cid(1), CollectionRights::ordinary());
+    let handle = BoundCollection::from_trusted(&trusted, cid(1)).unwrap();
+    let mut b = builder(1, 43);
+    b.create(&handle, key("k"), val(b"v")).unwrap();
+    let plan = b.build().unwrap();
+    let mut revoked = view(1, 1);
+    revoked.grant(cid(1), CollectionRights::READ);
+    assert_eq!(
+        admit_closed_plan(&plan, &revoked).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::AuthorizationFailure)
+    );
+}
+
+#[test]
+fn ungranted_collection_cannot_be_bound() {
+    let trusted = view(1, 1);
+    assert_eq!(
+        BoundCollection::from_trusted(&trusted, cid(1)).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::AuthorizationFailure)
+    );
 }

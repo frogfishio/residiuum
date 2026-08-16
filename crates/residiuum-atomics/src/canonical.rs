@@ -219,6 +219,12 @@ fn validate_predicate_shapes(predicates: &[PlanPredicate]) -> Result<(), Atomics
                     && p.version.is_some()
                     && p.encoded.is_none()
             }
+            PredicateKind::HeapAuthorityRevision => {
+                p.collection_id.is_none()
+                    && p.key.is_none()
+                    && p.version.is_none()
+                    && p.encoded.as_ref().is_some_and(|e| e.len() == 32)
+            }
             _ => true,
         };
         if !ok {

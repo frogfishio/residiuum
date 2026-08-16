@@ -33,7 +33,7 @@ pub fn validate_closed_plan(plan: &AtomicPlan, bound_heap: HeapId) -> Result<(),
     if plan
         .predicates()
         .iter()
-        .any(|p| !p.kind.is_public_builder_assert())
+        .any(|p| !p.kind.is_closed_plan_predicate())
     {
         return Err(AtomicsError::Refused(
             AtomicRefuseReason::UnsupportedPredicate,

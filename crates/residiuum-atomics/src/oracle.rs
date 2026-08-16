@@ -289,6 +289,10 @@ impl SerialOracle {
     }
 
     fn check_predicate(&self, p: &PlanPredicate) -> Option<AtomicAbortReason> {
+        if p.kind == PredicateKind::HeapAuthorityRevision {
+            // Bound at admission. Not a data precondition.
+            return None;
+        }
         let (coll, key) = match (p.collection_id, p.key.as_ref()) {
             (Some(c), Some(k)) => (c, k),
             _ => return Some(AtomicAbortReason::PreconditionConflict),

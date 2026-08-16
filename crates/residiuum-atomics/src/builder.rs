@@ -9,16 +9,18 @@
 use crate::canonical::key_order_bytes;
 use crate::encode::{
     encode_assert_absent, encode_assert_present, encode_assert_version, encode_create,
-    encode_delete, encode_put, encode_replace, CanonicalValue,
+    encode_delete, encode_heap_authority_revision, encode_put, encode_replace, CanonicalValue,
 };
 use crate::error::AtomicsError;
 use crate::id::{AtomicId, CollectionId, HeapId, VersionId};
 use crate::limits::ResourceLimits;
 use crate::outcome::AtomicRefuseReason;
 use crate::plan::{
-    AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CoordinationScope, ReadWitness,
+    AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CoordinationScope, MutationKind,
+    PlanMutation, PlanPredicate, PredicateKind, ReadWitness,
 };
 use crate::validate::validate_closed_plan;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 /// Ordinary collection rights (`ATOMICS_SPEC` §14).
@@ -60,10 +62,61 @@ impl CollectionRights {
     }
 }
 
+/// Trusted current Heap authority and per-collection grants.
+///
+/// The SDK (or a test harness) builds this from capability state. Application
+/// code cannot mint a [`BoundCollection`] except through this view, so rights
+/// and revision cannot be invented independently of a grant set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrustedAuthorityView {
+    heap_id: HeapId,
+    revision: [u8; 32],
+    grants: BTreeMap<CollectionId, CollectionRights>,
+}
+
+impl TrustedAuthorityView {
+    /// Empty grant set at `revision` on one Heap.
+    pub fn new(heap_id: HeapId, revision: [u8; 32]) -> Self {
+        Self {
+            heap_id,
+            revision,
+            grants: BTreeMap::new(),
+        }
+    }
+
+    /// Record granted ordinary rights for a collection on this Heap.
+    pub fn grant(&mut self, collection_id: CollectionId, rights: CollectionRights) -> &mut Self {
+        let entry = self
+            .grants
+            .entry(collection_id)
+            .or_insert(CollectionRights::empty());
+        *entry = entry.union(rights);
+        self
+    }
+
+    /// Heap this view describes.
+    pub const fn heap_id(&self) -> HeapId {
+        self.heap_id
+    }
+
+    /// Current authority/security revision.
+    pub const fn revision(&self) -> [u8; 32] {
+        self.revision
+    }
+
+    /// Granted rights for a collection, if any.
+    pub fn granted(&self, collection_id: CollectionId) -> CollectionRights {
+        self.grants
+            .get(&collection_id)
+            .copied()
+            .unwrap_or_else(CollectionRights::empty)
+    }
+}
+
 /// Heap-bound collection identity presented to the builder.
 ///
-/// The SDK constructs this from one `HeapClient`. A handle from another Heap
-/// is refused as [`AtomicRefuseReason::CrossHeapCollection`].
+/// Construct only via [`BoundCollection::from_trusted`]. A handle from another
+/// Heap is refused as [`AtomicRefuseReason::CrossHeapCollection`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundCollection {
     heap_id: HeapId,
@@ -73,20 +126,23 @@ pub struct BoundCollection {
 }
 
 impl BoundCollection {
-    /// Bind a collection ID to one Heap, its granted rights, and the authority
-    /// revision observed when the handle was issued.
-    pub fn bind(
-        heap_id: HeapId,
+    /// Project a granted collection out of a trusted authority view.
+    pub fn from_trusted(
+        view: &TrustedAuthorityView,
         collection_id: CollectionId,
-        rights: CollectionRights,
-        authority_revision: [u8; 32],
-    ) -> Self {
-        Self {
-            heap_id,
+    ) -> Result<Self, AtomicsError> {
+        let rights = view.granted(collection_id);
+        if rights == CollectionRights::empty() {
+            return Err(AtomicsError::Refused(
+                AtomicRefuseReason::AuthorizationFailure,
+            ));
+        }
+        Ok(Self {
+            heap_id: view.heap_id,
             collection_id,
             rights,
-            authority_revision,
-        }
+            authority_revision: view.revision,
+        })
     }
 
     /// Heap this handle belongs to.
@@ -183,7 +239,7 @@ pub struct AtomicBuilder {
     reads: Vec<ReadWitness>,
     required_rights: CollectionRights,
     bound_authority: Option<[u8; 32]>,
-    authority_revisions: Vec<[u8; 32]>,
+    rule_revisions: Vec<[u8; 32]>,
 }
 
 impl AtomicBuilder {
@@ -205,7 +261,7 @@ impl AtomicBuilder {
             reads: Vec::new(),
             required_rights: CollectionRights::empty(),
             bound_authority: None,
-            authority_revisions: Vec::new(),
+            rule_revisions: Vec::new(),
         })
     }
 
@@ -339,9 +395,21 @@ impl AtomicBuilder {
         Ok(self)
     }
 
+    /// Bind an active RRE rule revision hash. Not a Heap authority revision.
+    pub fn bind_rule_revision(&mut self, revision: [u8; 32]) -> &mut Self {
+        if !self.rule_revisions.contains(&revision) {
+            self.rule_revisions.push(revision);
+        }
+        self
+    }
+
     /// Close, cost, and structurally validate. Refusals append no evidence.
     pub fn build(self) -> Result<AtomicPlan, AtomicsError> {
         refuse_if_past_deadline(self.options.deadline, self.options.limits, self.started)?;
+        let mut predicates = self.predicates;
+        if let Some(rev) = self.bound_authority {
+            predicates.push(encode_heap_authority_revision(rev));
+        }
         let plan = AtomicPlan::close(AtomicPlanParts {
             profile: AtomicProfile::LocalHeapV1,
             atomic_id: self.options.atomic_id,
@@ -349,9 +417,9 @@ impl AtomicBuilder {
             scope: self.options.scope,
             read_frontier: self.options.read_frontier,
             reads: self.reads,
-            predicates: self.predicates,
+            predicates,
             mutations: self.mutations,
-            active_rule_revisions: self.authority_revisions,
+            active_rule_revisions: self.rule_revisions,
             limits: self.options.limits,
         })?;
         validate_closed_plan(&plan, self.heap_id)?;
@@ -392,15 +460,96 @@ impl AtomicBuilder {
                 return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget));
             }
         }
-        if !self
-            .authority_revisions
-            .contains(&collection.authority_revision)
-        {
-            self.authority_revisions.push(collection.authority_revision);
-        }
         self.required_rights = self.required_rights.union(need);
         Ok(collection.collection_id)
     }
+}
+
+/// Revalidate a closed plan against trusted current authority and grants.
+///
+/// Refuses with no prepare/evidence. Call before durable acceptance.
+pub fn admit_closed_plan(
+    plan: &AtomicPlan,
+    trusted: &TrustedAuthorityView,
+) -> Result<(), AtomicsError> {
+    validate_closed_plan(plan, trusted.heap_id)?;
+    let bound = extract_heap_authority(plan)?;
+    if bound != trusted.revision {
+        return Err(AtomicsError::Refused(
+            AtomicRefuseReason::StaleOrForeignCapability,
+        ));
+    }
+    for mutation in plan.mutations() {
+        require_grant(
+            trusted,
+            mutation.collection_id,
+            right_for_mutation(mutation),
+        )?;
+    }
+    for predicate in plan.predicates() {
+        if let Some((cid, need)) = right_for_predicate(predicate) {
+            require_grant(trusted, cid, need)?;
+        }
+    }
+    for read in plan.reads() {
+        require_grant(trusted, read.collection_id, CollectionRights::READ)?;
+    }
+    Ok(())
+}
+
+fn extract_heap_authority(plan: &AtomicPlan) -> Result<[u8; 32], AtomicsError> {
+    let mut found = None;
+    for p in plan.predicates() {
+        if p.kind != PredicateKind::HeapAuthorityRevision {
+            continue;
+        }
+        let bytes = p
+            .encoded
+            .as_ref()
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+        let rev: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+        if found.is_some() {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        found = Some(rev);
+    }
+    found.ok_or(AtomicsError::Refused(
+        AtomicRefuseReason::StaleOrForeignCapability,
+    ))
+}
+
+fn right_for_mutation(mutation: &PlanMutation) -> CollectionRights {
+    match mutation.kind {
+        MutationKind::Create => CollectionRights::CREATE,
+        MutationKind::Put => CollectionRights::PUT,
+        MutationKind::Replace => CollectionRights::REPLACE,
+        MutationKind::Delete => CollectionRights::DELETE,
+    }
+}
+
+fn right_for_predicate(predicate: &PlanPredicate) -> Option<(CollectionId, CollectionRights)> {
+    if !predicate.kind.is_public_builder_assert() {
+        return None;
+    }
+    predicate
+        .collection_id
+        .map(|cid| (cid, CollectionRights::READ))
+}
+
+fn require_grant(
+    trusted: &TrustedAuthorityView,
+    collection_id: CollectionId,
+    need: CollectionRights,
+) -> Result<(), AtomicsError> {
+    if !trusted.granted(collection_id).contains(need) {
+        return Err(AtomicsError::Refused(
+            AtomicRefuseReason::AuthorizationFailure,
+        ));
+    }
+    Ok(())
 }
 
 fn refuse_if_past_deadline(

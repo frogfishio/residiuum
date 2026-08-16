@@ -36,6 +36,8 @@ remote admission. Structural refusals append no evidence.
 ATM-1.3 is the Heap-bound typed builder: collection IDs from one Heap, rights
 union, authority-revision binding, deadline and hard-limit validation, and read
 witnesses. The public SDK façade and `Capabilities::atomics` remain ATM-5.
+CR-ATM1-001 binds Heap authority as `HeapAuthorityRevision`, not
+`active_rule_revisions`. Admission revalidates against a trusted grant view.
 ATM-2.2 is the per-Heap coordinator stream, shard placement manifest, and staged
 append lane. Staged members are invisible to ordinary get/scan. Store adapters
 must not publish them to RQL, history, watch, or secondary indexes.
