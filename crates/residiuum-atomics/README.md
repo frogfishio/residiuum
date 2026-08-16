@@ -41,6 +41,9 @@ append lane. Staged members are invisible to ordinary get/scan. Store adapters
 must not publish them to RQL, history, watch, or secondary indexes.
 ATM-2.3 commits a complete chunk map before any chunk is installed and seals a
 first stable boundary covering prepare and every member (`DurableInvisible`).
+ATM-2.4 arms `before_prepare`, `after_prepare`, and `after_member_n`. Reopen after
+an injected fault leaves no ordinary-visible mutation. A negative control that
+publishes one staged member is required to stay sensitive.
 
 Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 §§4–13. Programme: [`ATOMICS_IMPLEMENTATION_PLAN.md`](../../doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md) §4 and §6.
@@ -61,5 +64,6 @@ Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 | `validate` | Closed-plan structural validator (profile, scope, Heap, limits) |
 | `builder` | Heap-bound typed builder, rights union, authority binding |
 | `staging` | Coordinator stream, placement manifest, invisible staged append |
+| `failpoints` | `before_prepare` / `after_prepare` / `after_member_n` and reopen |
 
 License: MIT.

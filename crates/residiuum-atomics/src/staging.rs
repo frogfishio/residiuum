@@ -3,7 +3,7 @@
 //! ATM-2.2. Pure in-memory kernel: no file, store, SDK, or index publication.
 //! Staged members never enter the ordinary primary map. RQL, history, watch,
 //! and secondary indexes MUST read only that ordinary map when a store adapter
-//! is wired later. Chunking, failpoints, and crash matrices are later cards.
+//! is wired later. ATM-2.4 failpoints wrap this kernel; they must not publish.
 
 use crate::canonical::key_order_bytes;
 use crate::error::AtomicsError;
@@ -517,6 +517,12 @@ impl StagingHeap {
     /// Coordinator sequence allocated for this prepare.
     pub fn prepare_seq(&self, atomic_id: AtomicId) -> Option<CoordinatorSeq> {
         self.staged.get(&atomic_id).map(|s| s.seq)
+    }
+
+    /// True when this Heap recorded a prepare for `atomic_id`.
+    /// A second Heap MUST return false for the first Heap's Atomic.
+    pub fn can_resolve(&self, atomic_id: AtomicId) -> bool {
+        self.staged.contains_key(&atomic_id)
     }
 }
 

@@ -13,6 +13,8 @@
 //! lane. Staged members never enter the ordinary primary map.
 //! ATM-2.3 adds chunked-value members with a frozen chunk manifest and the
 //! first member-stable boundary (`DurableInvisible`).
+//! ATM-2.4 is failpoints (`before_prepare`, `after_prepare`, `after_member_n`)
+//! and prepared-visibility negatives. Crash-before-decision does not publish.
 //! The serial oracle is ATM-0.5. ATM-0.4 is the hostile decoder corpus.
 
 #![deny(missing_docs)]
@@ -24,6 +26,7 @@ pub mod encode;
 pub mod error;
 pub mod evidence;
 mod evidence_cbor;
+pub mod failpoints;
 pub mod id;
 pub mod lifecycle;
 pub mod limits;
@@ -56,6 +59,7 @@ pub use evidence_cbor::{
     encode_decision, encode_member, encode_prepare, encode_tombstone, member_hash,
     ordered_member_manifest_root, prepare_hash, tombstone_hash,
 };
+pub use failpoints::{FaultError, FaultSession, StagingFailpoint};
 pub use id::{AtomicId, CollectionId, ContentRoot, HeapId, VersionId};
 pub use lifecycle::{
     check_model, LifecycleError, LifecycleEvent, LifecycleTrace, ModelCheckReport, ModelProofs,
