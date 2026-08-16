@@ -33,6 +33,9 @@ ATM-1.1 adds typed encodings for the closed mutation/predicate vocabulary and
 requested vs worst-case generated-member accounting. The closed-plan validator is ATM-1.2.
 ATM-1.2 is the pure closed-plan validator shared by the serial oracle and future
 remote admission. Structural refusals append no evidence.
+ATM-1.3 is the Heap-bound typed builder: collection IDs from one Heap, rights
+union, authority-revision binding, deadline and hard-limit validation, and read
+witnesses. The public SDK façade and `Capabilities::atomics` remain ATM-5.
 
 Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 §§4–13. Programme: [`ATOMICS_IMPLEMENTATION_PLAN.md`](../../doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md) §4 and §6.
@@ -51,5 +54,6 @@ Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 | `outcome` | Logical/material status, receipts, abort and refuse reasons |
 | `oracle` | Serial in-memory oracle and shared history format |
 | `validate` | Closed-plan structural validator (profile, scope, Heap, limits) |
+| `builder` | Heap-bound typed builder, rights union, authority binding |
 
 License: MIT.

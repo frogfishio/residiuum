@@ -7,10 +7,13 @@
 //! codecs, member object identity, and not-committed abort-reason preservation.
 //! ATM-1.1 adds typed mutation/predicate encodings and closed-plan accounting.
 //! ATM-1.2 is the pure closed-plan validator shared with the serial oracle.
+//! ATM-1.3 is the Heap-bound typed builder: rights union, authority-revision
+//! binding, deadline/limit checks, and read witnesses. No SDK dependency.
 //! The serial oracle is ATM-0.5. ATM-0.4 is the hostile decoder corpus.
 
 #![deny(missing_docs)]
 
+pub mod builder;
 pub mod canonical;
 mod cbor;
 pub mod encode;
@@ -25,6 +28,7 @@ pub mod outcome;
 pub mod plan;
 pub mod validate;
 
+pub use builder::{AtomicBuilder, AtomicOptions, BoundCollection, CollectionRights};
 pub use canonical::{
     decode_canonical_plan, encode_canonical_plan, plan_content_root, CANONICAL_TARGET_ORDER,
     CBOR_V1_REL, DOMAIN_ATOMIC_CONTENT, DOMAIN_ATOMIC_DECISION, DOMAIN_ATOMIC_ID,
