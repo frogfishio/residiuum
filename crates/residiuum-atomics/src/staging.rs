@@ -188,6 +188,25 @@ pub struct OrdinaryCell {
     pub value: Vec<u8>,
 }
 
+/// Complete chunk-map commitment for one member, frozen before any chunk is installed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChunkPlan {
+    /// Declared chunk count. Must be ≥ 2.
+    pub total: u32,
+    /// BLAKE3-256 of each chunk body, index order.
+    pub chunk_hashes: Vec<[u8; 32]>,
+}
+
+impl ChunkPlan {
+    /// Refuse empty, singleton, or length-mismatched plans.
+    pub fn validate(&self) -> Result<(), AtomicsError> {
+        if self.total < 2 || self.chunk_hashes.len() as u32 != self.total {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        Ok(())
+    }
+}
+
 /// Staged member plus the shard that holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StagedMember {
@@ -197,6 +216,8 @@ pub struct StagedMember {
     pub payload: Vec<u8>,
     /// Shard named by the placement manifest.
     pub shard: ShardId,
+    /// Present when the member was declared chunked. `None` slots are missing.
+    pub chunks: Option<Vec<Option<Vec<u8>>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -204,6 +225,7 @@ struct StagedAtomic {
     seq: CoordinatorSeq,
     manifest: PlacementManifest,
     members: Vec<StagedMember>,
+    chunk_plans: BTreeMap<u32, ChunkPlan>,
     lifecycle: AtomicLifecycle,
 }
 
@@ -288,6 +310,7 @@ impl StagingHeap {
                 seq,
                 manifest: manifest.clone(),
                 members: Vec::new(),
+                chunk_plans: BTreeMap::new(),
                 lifecycle: AtomicLifecycle {
                     prepare: PreparePhase::Prepared,
                     members: MemberPhase::Absent,
@@ -305,6 +328,9 @@ impl StagingHeap {
         member: AtomicMember,
         payload: Vec<u8>,
     ) -> Result<(), AtomicsError> {
+        if slot_is_sealed(self.staged.get(&member.atomic_id)) {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
         member.validate()?;
         let slot = self
             .staged
@@ -329,12 +355,147 @@ impl StagingHeap {
         {
             return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget));
         }
+        if slot.chunk_plans.contains_key(&member.ordinal) {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
         slot.members.push(StagedMember {
             shard: entry.shard,
             member,
             payload,
+            chunks: None,
         });
         slot.lifecycle.members = MemberPhase::Staged;
+        Ok(())
+    }
+
+    /// Freeze a per-member chunk map before any chunk is installed.
+    pub fn commit_chunk_manifest(
+        &mut self,
+        atomic_id: AtomicId,
+        ordinal: u32,
+        plan: ChunkPlan,
+    ) -> Result<(), AtomicsError> {
+        plan.validate()?;
+        let slot = self
+            .staged
+            .get_mut(&atomic_id)
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+        if slot.lifecycle.members == MemberPhase::DurableInvisible {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        if !slot.manifest.entries.iter().any(|e| e.ordinal == ordinal) {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        if slot.members.iter().any(|s| s.member.ordinal == ordinal)
+            || slot.chunk_plans.contains_key(&ordinal)
+        {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget));
+        }
+        slot.chunk_plans.insert(ordinal, plan);
+        Ok(())
+    }
+
+    /// Install one chunk. Does not update the ordinary primary map.
+    pub fn append_chunk(
+        &mut self,
+        member: AtomicMember,
+        index: u32,
+        body: Vec<u8>,
+    ) -> Result<(), AtomicsError> {
+        if slot_is_sealed(self.staged.get(&member.atomic_id)) {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        member.validate()?;
+        if member.after_content_hash.is_none() {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+        }
+        let slot = self
+            .staged
+            .get_mut(&member.atomic_id)
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+        let plan = slot
+            .chunk_plans
+            .get(&member.ordinal)
+            .cloned()
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+        if index >= plan.total {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        if chunk_hash(&body) != plan.chunk_hashes[index as usize] {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+        }
+        let entry = slot
+            .manifest
+            .entries
+            .iter()
+            .find(|e| e.ordinal == member.ordinal)
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+        let shard = entry.shard;
+        let existing = slot
+            .members
+            .iter_mut()
+            .find(|s| s.member.ordinal == member.ordinal);
+        if let Some(staged) = existing {
+            let chunks = staged
+                .chunks
+                .as_mut()
+                .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+            if chunks[index as usize].is_some() {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget));
+            }
+            chunks[index as usize] = Some(body);
+            maybe_assemble(staged, &plan)?;
+        } else {
+            let mut chunks = vec![None; plan.total as usize];
+            chunks[index as usize] = Some(body);
+            let mut staged = StagedMember {
+                shard,
+                member,
+                payload: Vec::new(),
+                chunks: Some(chunks),
+            };
+            maybe_assemble(&mut staged, &plan)?;
+            slot.members.push(staged);
+        }
+        slot.lifecycle.members = MemberPhase::Staged;
+        Ok(())
+    }
+
+    /// First stable boundary: prepare plus every named member is complete and still invisible.
+    pub fn seal_member_boundary(&mut self, atomic_id: AtomicId) -> Result<(), AtomicsError> {
+        let slot = self
+            .staged
+            .get_mut(&atomic_id)
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+        if slot.lifecycle.prepare != PreparePhase::Prepared {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        if slot.members.len() != slot.manifest.entries.len() {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        for entry in &slot.manifest.entries {
+            let staged = slot
+                .members
+                .iter()
+                .find(|s| s.member.ordinal == entry.ordinal)
+                .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+            if !member_payload_complete(staged) {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+            }
+        }
+        slot.lifecycle.members = MemberPhase::DurableInvisible;
+        Ok(())
+    }
+
+    /// Change writer-shard count for *future* prepares only.
+    ///
+    /// Existing placement entries keep their shard. Rotation MUST NOT publish
+    /// or orphan staged members.
+    pub fn rotate_writer_shards(&mut self, new_count: u32) -> Result<(), AtomicsError> {
+        if new_count == 0 {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        self.shard_count = new_count;
         Ok(())
     }
 
@@ -357,4 +518,41 @@ impl StagingHeap {
     pub fn prepare_seq(&self, atomic_id: AtomicId) -> Option<CoordinatorSeq> {
         self.staged.get(&atomic_id).map(|s| s.seq)
     }
+}
+
+fn slot_is_sealed(slot: Option<&StagedAtomic>) -> bool {
+    slot.is_some_and(|s| s.lifecycle.members == MemberPhase::DurableInvisible)
+}
+
+fn chunk_hash(body: &[u8]) -> [u8; 32] {
+    *blake3::hash(body).as_bytes()
+}
+
+fn member_payload_complete(staged: &StagedMember) -> bool {
+    match &staged.chunks {
+        None => true,
+        Some(_) => !staged.payload.is_empty(),
+    }
+}
+
+fn maybe_assemble(staged: &mut StagedMember, plan: &ChunkPlan) -> Result<(), AtomicsError> {
+    let Some(chunks) = staged.chunks.as_ref() else {
+        return Ok(());
+    };
+    if chunks.iter().any(|c| c.is_none()) {
+        return Ok(());
+    }
+    if chunks.len() as u32 != plan.total {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+    }
+    let mut payload = Vec::new();
+    for chunk in chunks {
+        payload.extend_from_slice(chunk.as_deref().unwrap_or_default());
+    }
+    let digest = *blake3::hash(&payload).as_bytes();
+    if Some(digest) != staged.member.after_content_hash {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+    }
+    staged.payload = payload;
+    Ok(())
 }

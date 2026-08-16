@@ -11,6 +11,8 @@
 //! binding, deadline/limit checks, and read witnesses. No SDK dependency.
 //! ATM-2.2 is the per-Heap coordinator, placement manifest, and staged append
 //! lane. Staged members never enter the ordinary primary map.
+//! ATM-2.3 adds chunked-value members with a frozen chunk manifest and the
+//! first member-stable boundary (`DurableInvisible`).
 //! The serial oracle is ATM-0.5. ATM-0.4 is the hostile decoder corpus.
 
 #![deny(missing_docs)]
@@ -69,7 +71,7 @@ pub use plan::{
     MutationKind, PlanMutation, PlanPredicate, PredicateKind, ReadWitness, UnknownProfile,
 };
 pub use staging::{
-    CoordinatorRecord, CoordinatorSeq, CoordinatorStream, OrdinaryCell, PlacementEntry,
+    ChunkPlan, CoordinatorRecord, CoordinatorSeq, CoordinatorStream, OrdinaryCell, PlacementEntry,
     PlacementManifest, ShardId, StagedMember, StagingHeap,
 };
 pub use validate::validate_closed_plan;

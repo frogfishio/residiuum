@@ -39,6 +39,8 @@ witnesses. The public SDK façade and `Capabilities::atomics` remain ATM-5.
 ATM-2.2 is the per-Heap coordinator stream, shard placement manifest, and staged
 append lane. Staged members are invisible to ordinary get/scan. Store adapters
 must not publish them to RQL, history, watch, or secondary indexes.
+ATM-2.3 commits a complete chunk map before any chunk is installed and seals a
+first stable boundary covering prepare and every member (`DurableInvisible`).
 
 Normative: [`ATOMICS_SPEC.md`](../../doc/todo/atomics/ATOMICS_SPEC.md)
 §§4–13. Programme: [`ATOMICS_IMPLEMENTATION_PLAN.md`](../../doc/todo/atomics/ATOMICS_IMPLEMENTATION_PLAN.md) §4 and §6.
