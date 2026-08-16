@@ -37,6 +37,8 @@ breaking on-disk change requires a major bump and dual-read support.
 
 Implemented: frames, segment seal, scanners, the FORMAT_SPEC §13 destructive
 corpus, and deterministic CBOR envelope validation.
+ATM-2.1 adds Atomic `BatchPrepare` / `BatchCommit` envelopes, `ItemEvent`
+linkage keys 37–40, and a byte-buffer recovery reader (no store write path).
 
 ## Quick example
 
@@ -66,6 +68,7 @@ assert!(report.verified_count() >= 3); // descriptor, item, summary
 | Scanner | `scan_forward` / `scan_reverse` → `ScanReport` (verified islands + holes) |
 | Events | `group_by_event_id` → unique / replicas / conflicting |
 | Chunks | `reassemble_chunks` → complete / partial / unavailable / conflicting |
+| Atomics | `read_atomic_evidence` → valid / partial / corrupt / unsupported |
 | Meta | Fixed descriptor/summary/chunk body layouts; `WIRE_PROFILE_LABEL` |
 
 Envelopes must be a single definite-length CBOR map with unsigned integer keys,

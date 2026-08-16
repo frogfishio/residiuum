@@ -3,6 +3,8 @@
 //! Stage 2: frame codec, active segment + seal, forward/reverse salvage
 //! scanning, event-id conflict analysis, and chunk reassembly helpers.
 //! Deterministic CBOR envelope validation (FORMAT_SPEC §5 condition 6).
+//! ATM-2.1: Atomic BatchPrepare/BatchCommit envelopes, member linkage, and a
+//! byte-buffer recovery reader (no store write path).
 //! No durable storage IO (Stage 3).
 //!
 //! **Wire freeze:** [`WIRE_MAJOR`] / [`WIRE_MINOR`] are the draft major-1
@@ -18,6 +20,7 @@
 pub const WIRE_PROFILE_LABEL: &str = "1.0-draft";
 
 mod admit;
+mod atomic;
 mod cbor_envelope;
 mod chunks;
 mod compat;
@@ -42,6 +45,13 @@ pub use csq_corpus::{
     HOLE_REGION_CAP, INSERTION_ALPHABET, SURVIVOR_BODY,
 };
 
+pub use atomic::{
+    encode_atomic_commit_envelope, encode_atomic_frame, encode_atomic_member_envelope,
+    encode_atomic_prepare_envelope, examine_atomic_frame, read_atomic_evidence,
+    AtomicEnvelopeError, AtomicEvidenceClass, AtomicExamReason, AtomicFrameRole, AtomicLinkage,
+    AtomicRecoveryReport, ExaminedAtomicFrame, ENV_ATOMIC_COMMIT_POSITION, ENV_ATOMIC_CONTENT_ROOT,
+    ENV_ATOMIC_ID, ENV_ATOMIC_ORDINAL,
+};
 pub use cbor_envelope::{
     decode_deterministic_uint_map, encode_deterministic_uint_map,
     validate_deterministic_cbor_envelope, CborEnvelopeError, CborValue, EMPTY_ENVELOPE,

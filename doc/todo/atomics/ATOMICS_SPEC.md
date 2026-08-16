@@ -461,6 +461,16 @@ Heap commit position under the frozen Atomic envelope extension. The legacy
 presence of a `batch_id` field or physical `put_many` call MUST NOT be
 interpreted as Atomic evidence.
 
+Format envelope keys (FORMAT_SPEC §4.4 uint map; 1–36 keep existing
+format/ownership meanings and are never Atomic identity):
+
+| Key | Field |
+|---:|---|
+| 37 | `atomic_id` (`bstr` 32) |
+| 38 | `ordinal` (uint; `ItemEvent` only) |
+| 39 | `content_root` (`bstr` 32) |
+| 40 | `commit_position` (nonzero uint; omitted until a committed decision names the member) |
+
 The decision is stored in a designated per-Heap coordinator stream; member
 events may reside on any writer shard. The prepare manifest commits to every
 member's target, operation, payload hash, and intended shard before any member
