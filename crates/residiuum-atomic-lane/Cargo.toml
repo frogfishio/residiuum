@@ -1,0 +1,25 @@
+[package]
+name = "residiuum-atomic-lane"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license = "MIT"
+description = "Durable per-Heap Atomic coordinator and staged-member lane (CR-ATM2-001). Peer crate; not store/sdk/perf."
+readme = "README.md"
+keywords = ["residiuum", "atomics", "staging"]
+categories = ["database-implementations"]
+include = ["Cargo.toml", "README.md", "src/**", "tests/**"]
+
+[dependencies]
+residiuum-atomics.workspace = true
+residiuum-format.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+blake3.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn" }
