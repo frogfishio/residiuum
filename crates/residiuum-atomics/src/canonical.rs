@@ -81,6 +81,7 @@ pub(crate) fn close_plan(mut parts: AtomicPlanParts) -> Result<AtomicPlan, Atomi
     parts.active_rule_revisions.sort_unstable();
     validate_mutation_shapes(&parts.mutations)?;
     validate_predicate_shapes(&parts.predicates)?;
+    validate_plan_keys(&parts)?;
     Ok(AtomicPlan::from_closed(parts))
 }
 
@@ -236,6 +237,21 @@ fn validate_predicate_shapes(predicates: &[PlanPredicate]) -> Result<(), Atomics
     Ok(())
 }
 
+fn validate_plan_keys(parts: &AtomicPlanParts) -> Result<(), AtomicsError> {
+    for m in &parts.mutations {
+        crate::encoding::validate_canonical_key(&m.key)?;
+    }
+    for r in &parts.reads {
+        crate::encoding::validate_canonical_key(&r.key)?;
+    }
+    for p in &parts.predicates {
+        if let Some(key) = &p.key {
+            crate::encoding::validate_canonical_key(key)?;
+        }
+    }
+    Ok(())
+}
+
 fn target_order(heap: &HeapId, m: &PlanMutation) -> (Vec<u8>, Vec<u8>, Vec<u8>, u8) {
     let key = key_order_bytes(&m.key);
     (
@@ -368,6 +384,7 @@ fn plan_entries(plan: &AtomicPlan) -> Result<Vec<(u64, Value)>, AtomicsError> {
 }
 
 pub(crate) fn encode_key_map(key: &CanonicalKey) -> Result<Vec<(u64, Value)>, AtomicsError> {
+    crate::encoding::validate_canonical_key(key)?;
     let mut entries = vec![
         (1, Value::Uint(u64::from(key.kind().wire_code()))),
         (
@@ -474,12 +491,12 @@ pub(crate) fn decode_key(v: &Value) -> Result<CanonicalKey, AtomicsError> {
         }
         3 => {
             refuse_scale_on_non_decimal(has_scale)?;
-            Ok(CanonicalKey::Integer(payload))
+            CanonicalKey::integer_bytes(&payload)
         }
-        4 => Ok(CanonicalKey::Decimal {
-            coefficient: payload,
-            scale: decode_int(require_value(map, 3)?)?,
-        }),
+        4 => {
+            let key = CanonicalKey::decimal_bytes(&payload, decode_int(require_value(map, 3)?)?)?;
+            Ok(key)
+        }
         _ => Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue)),
     }
 }

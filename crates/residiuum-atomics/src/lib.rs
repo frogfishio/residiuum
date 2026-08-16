@@ -11,6 +11,8 @@
 //! binding, deadline/limit checks, and read witnesses. No SDK dependency.
 //! CR-ATM1-001 encodes Heap authority as `HeapAuthorityRevision` and admits
 //! against a trusted grant view; active rule revisions stay RRE hashes.
+//! CR-ATM1-002 binds a frozen key/value encoding profile to the trusted
+//! collection handle and refuses noncanonical integer/decimal encodings.
 //! ATM-2.2 is the per-Heap coordinator, placement manifest, and staged append
 //! lane. Staged members never enter the ordinary primary map.
 //! ATM-2.3 adds chunked-value members with a frozen chunk manifest and the
@@ -25,6 +27,7 @@ pub mod builder;
 pub mod canonical;
 mod cbor;
 pub mod encode;
+pub mod encoding;
 pub mod error;
 pub mod evidence;
 mod evidence_cbor;
@@ -53,6 +56,10 @@ pub use encode::{
     account_closed_plan, encode_assert_absent, encode_assert_present, encode_assert_version,
     encode_create, encode_delete, encode_heap_authority_revision, encode_put, encode_replace,
     serialize_canonical_value, CanonicalValue, PlanAccounting,
+};
+pub use encoding::{
+    encode_decimal_value, encode_signed_integer, validate_canonical_key, verify_decimal_value,
+    verify_signed_integer, EncodingProfile, ValueEncoding,
 };
 pub use error::{AtomicsError, CborError};
 pub use evidence::{

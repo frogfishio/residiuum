@@ -2,10 +2,10 @@
 
 use residiuum_atomics::{
     encode_assert_absent, encode_assert_present, encode_create, encode_delete, encode_put,
-    encode_replace, serialize_canonical_value, validate_closed_plan, AtomicAbortReason, AtomicId,
-    AtomicOutcome, AtomicPlan, AtomicPlanParts, AtomicProfile, AtomicRefuseReason, AtomicsError,
-    CanonicalKey, CanonicalValue, CollectionId, CoordinationScope, HeapId, LogicalStatus,
-    PlanMutation, PlanPredicate, PredicateKind, ResourceLimits, SerialOracle,
+    encode_replace, validate_closed_plan, AtomicAbortReason, AtomicId, AtomicOutcome, AtomicPlan,
+    AtomicPlanParts, AtomicProfile, AtomicRefuseReason, AtomicsError, CanonicalKey, CanonicalValue,
+    CollectionId, CoordinationScope, HeapId, LogicalStatus, PlanMutation, PlanPredicate,
+    PredicateKind, ResourceLimits, SerialOracle,
 };
 
 fn hid(n: u8) -> HeapId {
@@ -35,7 +35,7 @@ fn key(s: &str) -> CanonicalKey {
 }
 
 fn val(bytes: &[u8]) -> CanonicalValue {
-    serialize_canonical_value(bytes)
+    CanonicalValue::from_bytes(bytes)
 }
 
 fn defaults() -> ResourceLimits {

@@ -4,8 +4,8 @@ use residiuum_atomics::{
     admit_closed_plan, plan_content_root, serialize_canonical_value, validate_closed_plan,
     AtomicBuilder, AtomicId, AtomicOptions, AtomicOutcome, AtomicRefuseReason, AtomicsError,
     BoundCollection, CanonicalKey, CanonicalValue, CollectionId, CollectionRights,
-    CoordinationScope, HeapId, PredicateKind, ResourceLimits, SerialOracle, TrustedAuthorityView,
-    VersionId,
+    CoordinationScope, EncodingProfile, HeapId, PredicateKind, ResourceLimits, SerialOracle,
+    TrustedAuthorityView, ValueEncoding, VersionId,
 };
 use std::time::{Duration, Instant};
 
@@ -38,7 +38,7 @@ fn key(s: &str) -> CanonicalKey {
 }
 
 fn val(bytes: &[u8]) -> CanonicalValue {
-    serialize_canonical_value(bytes)
+    CanonicalValue::from_bytes(bytes)
 }
 
 fn rev(n: u8) -> [u8; 32] {
@@ -326,4 +326,203 @@ fn ungranted_collection_cannot_be_bound() {
         BoundCollection::from_trusted(&trusted, cid(1)).unwrap_err(),
         AtomicsError::Refused(AtomicRefuseReason::AuthorizationFailure)
     );
+}
+
+fn coll_encoding(
+    heap: u8,
+    collection: u8,
+    rights: CollectionRights,
+    authority: u8,
+    encoding: EncodingProfile,
+) -> BoundCollection {
+    let mut trusted = view(heap, authority);
+    trusted.grant_with_encoding(cid(collection), rights, encoding);
+    BoundCollection::from_trusted(&trusted, cid(collection)).unwrap()
+}
+
+#[test]
+fn equivalent_integer_input_shares_bytes_and_root() {
+    let state = coll_encoding(
+        1,
+        1,
+        CollectionRights::ordinary(),
+        1,
+        EncodingProfile::INTEGER,
+    );
+    let mut a = builder(1, 50);
+    a.create(
+        &state,
+        CanonicalKey::integer(128),
+        CanonicalValue::from_integer(128),
+    )
+    .unwrap();
+    let mut b = builder(1, 50);
+    b.create(
+        &state,
+        CanonicalKey::integer_bytes(&[0x00, 0x80]).unwrap(),
+        serialize_canonical_value(ValueEncoding::Integer, &[0x00, 0x80]).unwrap(),
+    )
+    .unwrap();
+    let pa = a.build().unwrap();
+    let pb = b.build().unwrap();
+    assert_eq!(pa.mutations()[0].key, CanonicalKey::integer(128));
+    assert_eq!(
+        pa.mutations()[0].encoded_value.as_deref(),
+        Some(&[0x00, 0x80][..])
+    );
+    assert_eq!(
+        plan_content_root(&pa).unwrap(),
+        plan_content_root(&pb).unwrap()
+    );
+}
+
+#[test]
+fn equivalent_decimal_input_shares_bytes_and_root() {
+    let state = coll_encoding(
+        1,
+        1,
+        CollectionRights::ordinary(),
+        1,
+        EncodingProfile::DECIMAL,
+    );
+    let mut a = builder(1, 51);
+    a.create(
+        &state,
+        CanonicalKey::decimal(10, 1),
+        CanonicalValue::from_decimal(10, 1).unwrap(),
+    )
+    .unwrap();
+    let mut b = builder(1, 51);
+    b.create(
+        &state,
+        CanonicalKey::decimal_bytes(&[0x0a], 1).unwrap(),
+        CanonicalValue::from_decimal(10, 1).unwrap(),
+    )
+    .unwrap();
+    let pa = a.build().unwrap();
+    let pb = b.build().unwrap();
+    assert_eq!(
+        plan_content_root(&pa).unwrap(),
+        plan_content_root(&pb).unwrap()
+    );
+}
+
+#[test]
+fn noncanonical_integer_key_refuses_before_prepare() {
+    let state = coll_encoding(
+        1,
+        1,
+        CollectionRights::ordinary(),
+        1,
+        EncodingProfile::INTEGER,
+    );
+    assert_eq!(
+        CanonicalKey::integer_bytes(&[0x00, 0x01]).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
+    );
+    let mut b = builder(1, 52);
+    assert_eq!(
+        b.create(
+            &state,
+            CanonicalKey::Integer(vec![0x00, 0x01]),
+            CanonicalValue::from_integer(1),
+        )
+        .unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
+    );
+}
+
+#[test]
+fn noncanonical_decimal_coefficient_refuses_before_prepare() {
+    let state = coll_encoding(
+        1,
+        1,
+        CollectionRights::ordinary(),
+        1,
+        EncodingProfile::DECIMAL,
+    );
+    let mut b = builder(1, 53);
+    assert_eq!(
+        b.create(
+            &state,
+            CanonicalKey::Decimal {
+                coefficient: vec![0x00, 0x01],
+                scale: 0,
+            },
+            CanonicalValue::from_decimal(1, 0).unwrap(),
+        )
+        .unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
+    );
+}
+
+#[test]
+fn wrong_schema_key_refuses_before_prepare() {
+    let strings = coll(1, 1, CollectionRights::ordinary(), 1);
+    let mut b = builder(1, 54);
+    assert_eq!(
+        b.create(&strings, CanonicalKey::integer(1), val(b"v"))
+            .unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
+    );
+}
+
+#[test]
+fn wrong_schema_value_refuses_before_prepare() {
+    let ints = coll_encoding(
+        1,
+        1,
+        CollectionRights::ordinary(),
+        1,
+        EncodingProfile::INTEGER,
+    );
+    let mut b = builder(1, 55);
+    assert_eq!(
+        b.create(
+            &ints,
+            CanonicalKey::integer(1),
+            CanonicalValue::from_bytes(&[0x00, 0x01]),
+        )
+        .unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
+    );
+    assert_eq!(
+        serialize_canonical_value(ValueEncoding::Integer, &[0x00, 0x01]).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
+    );
+
+    let decimals = coll_encoding(
+        1,
+        2,
+        CollectionRights::ordinary(),
+        1,
+        EncodingProfile::DECIMAL,
+    );
+    let mut d = builder(1, 56);
+    assert_eq!(
+        d.create(
+            &decimals,
+            CanonicalKey::decimal(1, 0),
+            CanonicalValue::from_bytes(b"hello"),
+        )
+        .unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
+    );
+}
+
+#[test]
+fn handle_carries_frozen_encoding_profile() {
+    let handle = coll_encoding(
+        1,
+        1,
+        CollectionRights::ordinary(),
+        1,
+        EncodingProfile::INTEGER,
+    );
+    assert_eq!(handle.encoding(), EncodingProfile::INTEGER);
+    assert_eq!(
+        handle.encoding().key_kind(),
+        residiuum_atomics::CanonicalKeyKind::Integer
+    );
+    assert_eq!(handle.encoding().value_encoding(), ValueEncoding::Integer);
 }

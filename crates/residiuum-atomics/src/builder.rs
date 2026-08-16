@@ -11,6 +11,7 @@ use crate::encode::{
     encode_assert_absent, encode_assert_present, encode_assert_version, encode_create,
     encode_delete, encode_heap_authority_revision, encode_put, encode_replace, CanonicalValue,
 };
+use crate::encoding::EncodingProfile;
 use crate::error::AtomicsError;
 use crate::id::{AtomicId, CollectionId, HeapId, VersionId};
 use crate::limits::ResourceLimits;
@@ -62,6 +63,12 @@ impl CollectionRights {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CollectionGrant {
+    rights: CollectionRights,
+    encoding: EncodingProfile,
+}
+
 /// Trusted current Heap authority and per-collection grants.
 ///
 /// The SDK (or a test harness) builds this from capability state. Application
@@ -71,7 +78,7 @@ impl CollectionRights {
 pub struct TrustedAuthorityView {
     heap_id: HeapId,
     revision: [u8; 32],
-    grants: BTreeMap<CollectionId, CollectionRights>,
+    grants: BTreeMap<CollectionId, CollectionGrant>,
 }
 
 impl TrustedAuthorityView {
@@ -84,13 +91,29 @@ impl TrustedAuthorityView {
         }
     }
 
-    /// Record granted ordinary rights for a collection on this Heap.
+    /// Record granted ordinary rights. Encoding defaults to string keys / byte values.
     pub fn grant(&mut self, collection_id: CollectionId, rights: CollectionRights) -> &mut Self {
-        let entry = self
+        let encoding = self
             .grants
-            .entry(collection_id)
-            .or_insert(CollectionRights::empty());
-        *entry = entry.union(rights);
+            .get(&collection_id)
+            .map(|g| g.encoding)
+            .unwrap_or(EncodingProfile::STRING_BYTES);
+        self.grant_with_encoding(collection_id, rights, encoding)
+    }
+
+    /// Record granted rights together with the collection's frozen encoding profile.
+    pub fn grant_with_encoding(
+        &mut self,
+        collection_id: CollectionId,
+        rights: CollectionRights,
+        encoding: EncodingProfile,
+    ) -> &mut Self {
+        let entry = self.grants.entry(collection_id).or_insert(CollectionGrant {
+            rights: CollectionRights::empty(),
+            encoding,
+        });
+        entry.rights = entry.rights.union(rights);
+        entry.encoding = encoding;
         self
     }
 
@@ -108,8 +131,13 @@ impl TrustedAuthorityView {
     pub fn granted(&self, collection_id: CollectionId) -> CollectionRights {
         self.grants
             .get(&collection_id)
-            .copied()
+            .map(|g| g.rights)
             .unwrap_or_else(CollectionRights::empty)
+    }
+
+    /// Frozen encoding profile for a granted collection.
+    pub fn encoding(&self, collection_id: CollectionId) -> Option<EncodingProfile> {
+        self.grants.get(&collection_id).map(|g| g.encoding)
     }
 }
 
@@ -123,6 +151,7 @@ pub struct BoundCollection {
     collection_id: CollectionId,
     rights: CollectionRights,
     authority_revision: [u8; 32],
+    encoding: EncodingProfile,
 }
 
 impl BoundCollection {
@@ -131,8 +160,13 @@ impl BoundCollection {
         view: &TrustedAuthorityView,
         collection_id: CollectionId,
     ) -> Result<Self, AtomicsError> {
-        let rights = view.granted(collection_id);
-        if rights == CollectionRights::empty() {
+        let grant = view
+            .grants
+            .get(&collection_id)
+            .ok_or(AtomicsError::Refused(
+                AtomicRefuseReason::AuthorizationFailure,
+            ))?;
+        if grant.rights == CollectionRights::empty() {
             return Err(AtomicsError::Refused(
                 AtomicRefuseReason::AuthorizationFailure,
             ));
@@ -140,8 +174,9 @@ impl BoundCollection {
         Ok(Self {
             heap_id: view.heap_id,
             collection_id,
-            rights,
+            rights: grant.rights,
             authority_revision: view.revision,
+            encoding: grant.encoding,
         })
     }
 
@@ -163,6 +198,11 @@ impl BoundCollection {
     /// Authority revision frozen into the handle.
     pub const fn authority_revision(&self) -> [u8; 32] {
         self.authority_revision
+    }
+
+    /// Frozen key/value encoding profile.
+    pub const fn encoding(&self) -> EncodingProfile {
+        self.encoding
     }
 }
 
@@ -282,7 +322,13 @@ impl AtomicBuilder {
         key: CanonicalKey,
         value: CanonicalValue,
     ) -> Result<&mut Self, AtomicsError> {
-        let id = self.admit(collection, CollectionRights::CREATE, Some(&key))?;
+        let id = self.admit(
+            collection,
+            CollectionRights::CREATE,
+            &key,
+            Some(&value),
+            true,
+        )?;
         self.mutations.push(encode_create(id, key, value));
         Ok(self)
     }
@@ -294,7 +340,7 @@ impl AtomicBuilder {
         key: CanonicalKey,
         value: CanonicalValue,
     ) -> Result<&mut Self, AtomicsError> {
-        let id = self.admit(collection, CollectionRights::PUT, Some(&key))?;
+        let id = self.admit(collection, CollectionRights::PUT, &key, Some(&value), true)?;
         self.mutations.push(encode_put(id, key, value));
         Ok(self)
     }
@@ -307,7 +353,13 @@ impl AtomicBuilder {
         if_version: VersionId,
         value: CanonicalValue,
     ) -> Result<&mut Self, AtomicsError> {
-        let id = self.admit(collection, CollectionRights::REPLACE, Some(&key))?;
+        let id = self.admit(
+            collection,
+            CollectionRights::REPLACE,
+            &key,
+            Some(&value),
+            true,
+        )?;
         self.mutations
             .push(encode_replace(id, key, if_version, value));
         Ok(self)
@@ -320,7 +372,7 @@ impl AtomicBuilder {
         key: CanonicalKey,
         if_version: VersionId,
     ) -> Result<&mut Self, AtomicsError> {
-        let id = self.admit(collection, CollectionRights::DELETE, Some(&key))?;
+        let id = self.admit(collection, CollectionRights::DELETE, &key, None, true)?;
         self.mutations.push(encode_delete(id, key, if_version));
         Ok(self)
     }
@@ -331,7 +383,7 @@ impl AtomicBuilder {
         collection: &BoundCollection,
         key: CanonicalKey,
     ) -> Result<&mut Self, AtomicsError> {
-        let id = self.admit(collection, CollectionRights::READ, None)?;
+        let id = self.admit(collection, CollectionRights::READ, &key, None, false)?;
         self.predicates.push(encode_assert_absent(id, key));
         Ok(self)
     }
@@ -342,7 +394,7 @@ impl AtomicBuilder {
         collection: &BoundCollection,
         key: CanonicalKey,
     ) -> Result<&mut Self, AtomicsError> {
-        let id = self.admit(collection, CollectionRights::READ, None)?;
+        let id = self.admit(collection, CollectionRights::READ, &key, None, false)?;
         self.predicates.push(encode_assert_present(id, key));
         Ok(self)
     }
@@ -354,7 +406,7 @@ impl AtomicBuilder {
         key: CanonicalKey,
         version: VersionId,
     ) -> Result<&mut Self, AtomicsError> {
-        let id = self.admit(collection, CollectionRights::READ, None)?;
+        let id = self.admit(collection, CollectionRights::READ, &key, None, false)?;
         self.predicates
             .push(encode_assert_version(id, key, version));
         Ok(self)
@@ -368,7 +420,7 @@ impl AtomicBuilder {
         version: VersionId,
         projection_hash: [u8; 32],
     ) -> Result<&mut Self, AtomicsError> {
-        let id = self.admit(collection, CollectionRights::READ, None)?;
+        let id = self.admit(collection, CollectionRights::READ, &key, None, false)?;
         self.reads.push(ReadWitness {
             collection_id: id,
             key,
@@ -385,7 +437,7 @@ impl AtomicBuilder {
         key: CanonicalKey,
         projection_hash: [u8; 32],
     ) -> Result<&mut Self, AtomicsError> {
-        let id = self.admit(collection, CollectionRights::READ, None)?;
+        let id = self.admit(collection, CollectionRights::READ, &key, None, false)?;
         self.reads.push(ReadWitness {
             collection_id: id,
             key,
@@ -430,7 +482,9 @@ impl AtomicBuilder {
         &mut self,
         collection: &BoundCollection,
         need: CollectionRights,
-        mutation_key: Option<&CanonicalKey>,
+        key: &CanonicalKey,
+        value: Option<&CanonicalValue>,
+        as_mutation: bool,
     ) -> Result<CollectionId, AtomicsError> {
         refuse_if_past_deadline(self.options.deadline, self.options.limits, self.started)?;
         if collection.heap_id != self.heap_id {
@@ -443,6 +497,10 @@ impl AtomicBuilder {
                 AtomicRefuseReason::AuthorizationFailure,
             ));
         }
+        collection.encoding.admit_key(key)?;
+        if let Some(value) = value {
+            collection.encoding.admit_value_bytes(value.as_bytes())?;
+        }
         match self.bound_authority {
             None => self.bound_authority = Some(collection.authority_revision),
             Some(rev) if rev != collection.authority_revision => {
@@ -452,7 +510,7 @@ impl AtomicBuilder {
             }
             Some(_) => {}
         }
-        if let Some(key) = mutation_key {
+        if as_mutation {
             let kb = key_order_bytes(key);
             if self.mutations.iter().any(|m| {
                 m.collection_id == collection.collection_id && key_order_bytes(&m.key) == kb
@@ -485,14 +543,24 @@ pub fn admit_closed_plan(
             mutation.collection_id,
             right_for_mutation(mutation),
         )?;
+        require_encoding(
+            trusted,
+            mutation.collection_id,
+            &mutation.key,
+            mutation.encoded_value.as_deref(),
+        )?;
     }
     for predicate in plan.predicates() {
         if let Some((cid, need)) = right_for_predicate(predicate) {
             require_grant(trusted, cid, need)?;
+            if let Some(key) = &predicate.key {
+                require_encoding(trusted, cid, key, None)?;
+            }
         }
     }
     for read in plan.reads() {
         require_grant(trusted, read.collection_id, CollectionRights::READ)?;
+        require_encoding(trusted, read.collection_id, &read.key, None)?;
     }
     Ok(())
 }
@@ -548,6 +616,24 @@ fn require_grant(
         return Err(AtomicsError::Refused(
             AtomicRefuseReason::AuthorizationFailure,
         ));
+    }
+    Ok(())
+}
+
+fn require_encoding(
+    trusted: &TrustedAuthorityView,
+    collection_id: CollectionId,
+    key: &CanonicalKey,
+    value: Option<&[u8]>,
+) -> Result<(), AtomicsError> {
+    let encoding = trusted
+        .encoding(collection_id)
+        .ok_or(AtomicsError::Refused(
+            AtomicRefuseReason::AuthorizationFailure,
+        ))?;
+    encoding.admit_key(key)?;
+    if let Some(bytes) = value {
+        encoding.admit_value_bytes(bytes)?;
     }
     Ok(())
 }

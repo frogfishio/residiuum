@@ -13,20 +13,45 @@ use crate::AtomicsError;
 
 /// Collection-encoded value frozen before plan admission.
 ///
-/// The collection encoding contract lives outside this crate. This type is the
-/// only value form the encodings accept, so a closed plan cannot hold a host
-/// object.
+/// Construction is fallible under a [`ValueEncoding`]. A closed plan cannot
+/// hold a host object.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct CanonicalValue {
     bytes: Vec<u8>,
 }
 
 impl CanonicalValue {
-    /// Serialize collection-encoded payload bytes into the admitted form.
-    pub fn serialize(payload: &[u8]) -> Self {
+    /// Verify already-encoded payload bytes under `encoding`.
+    pub fn serialize(
+        encoding: crate::encoding::ValueEncoding,
+        payload: &[u8],
+    ) -> Result<Self, AtomicsError> {
+        crate::encoding::EncodingProfile::new(crate::plan::CanonicalKeyKind::String, encoding)
+            .admit_value_bytes(payload)?;
+        Ok(Self {
+            bytes: payload.to_vec(),
+        })
+    }
+
+    /// Opaque bytes. Valid only under [`crate::encoding::ValueEncoding::Bytes`].
+    pub fn from_bytes(payload: &[u8]) -> Self {
         Self {
             bytes: payload.to_vec(),
         }
+    }
+
+    /// Canonical signed integer value.
+    pub fn from_integer(n: i128) -> Self {
+        Self {
+            bytes: crate::encoding::encode_signed_integer(n),
+        }
+    }
+
+    /// Canonical exact-decimal value (coefficient + scale).
+    pub fn from_decimal(coefficient: i128, scale: i64) -> Result<Self, AtomicsError> {
+        Ok(Self {
+            bytes: crate::encoding::encode_decimal_value(coefficient, scale)?,
+        })
     }
 
     /// Admitted bytes that will become `encoded_value`.
@@ -45,9 +70,12 @@ impl CanonicalValue {
     }
 }
 
-/// Serialize a collection-encoded payload before admission.
-pub fn serialize_canonical_value(payload: &[u8]) -> CanonicalValue {
-    CanonicalValue::serialize(payload)
+/// Verify a collection-encoded payload before admission.
+pub fn serialize_canonical_value(
+    encoding: crate::encoding::ValueEncoding,
+    payload: &[u8],
+) -> Result<CanonicalValue, AtomicsError> {
+    CanonicalValue::serialize(encoding, payload)
 }
 
 /// Encode create-if-absent (`ATOMICS_SPEC` §6).
@@ -266,21 +294,38 @@ mod tests {
 
     #[test]
     fn serialize_canonical_value_is_admitted_bytes() {
-        let v = serialize_canonical_value(b"hello");
+        let v = serialize_canonical_value(crate::encoding::ValueEncoding::Bytes, b"hello").unwrap();
         assert_eq!(v.as_bytes(), b"hello");
         assert_eq!(v.len(), 5);
         assert!(!v.is_empty());
-        assert!(serialize_canonical_value(b"").is_empty());
+        assert!(
+            serialize_canonical_value(crate::encoding::ValueEncoding::Bytes, b"")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn serialize_rejects_noncanonical_integer() {
+        assert_eq!(
+            serialize_canonical_value(crate::encoding::ValueEncoding::Integer, &[0x00, 0x01])
+                .unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
+        );
+        let v =
+            serialize_canonical_value(crate::encoding::ValueEncoding::Integer, &[0x01]).unwrap();
+        assert_eq!(v.as_bytes(), &[0x01]);
+        assert_eq!(CanonicalValue::from_integer(1).as_bytes(), &[0x01]);
     }
 
     #[test]
     fn encode_create_and_put_are_value_bearing() {
-        let c = encode_create(cid(1), key("a"), CanonicalValue::serialize(b"one"));
+        let c = encode_create(cid(1), key("a"), CanonicalValue::from_bytes(b"one"));
         assert_eq!(c.kind, MutationKind::Create);
         assert_eq!(c.encoded_value.as_deref(), Some(b"one".as_slice()));
         assert_eq!(c.if_version, None);
 
-        let p = encode_put(cid(1), key("b"), CanonicalValue::serialize(b"two"));
+        let p = encode_put(cid(1), key("b"), CanonicalValue::from_bytes(b"two"));
         assert_eq!(p.kind, MutationKind::Put);
         assert_eq!(p.if_version, None);
         assert_eq!(p.encoded_value.as_deref(), Some(b"two".as_slice()));
@@ -292,7 +337,7 @@ mod tests {
             cid(2),
             key("c"),
             vid(7),
-            CanonicalValue::serialize(b"three"),
+            CanonicalValue::from_bytes(b"three"),
         );
         assert_eq!(r.kind, MutationKind::Replace);
         assert_eq!(r.if_version, Some(vid(7)));
@@ -323,7 +368,7 @@ mod tests {
     fn accounting_counts_mutations_not_assertions() {
         let plan = close(
             vec![
-                encode_create(cid(1), key("a"), CanonicalValue::serialize(b"aa")),
+                encode_create(cid(1), key("a"), CanonicalValue::from_bytes(b"aa")),
                 encode_delete(cid(1), key("b"), vid(1)),
             ],
             vec![encode_assert_absent(cid(1), key("c"))],

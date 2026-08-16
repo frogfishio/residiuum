@@ -314,6 +314,44 @@ impl CanonicalKey {
             Self::Decimal { .. } => CanonicalKeyKind::Decimal,
         }
     }
+
+    /// UTF-8 string key.
+    pub fn string(s: impl Into<String>) -> Self {
+        Self::String(s.into())
+    }
+
+    /// Opaque byte-string key.
+    pub fn opaque(bytes: impl Into<Vec<u8>>) -> Self {
+        Self::Opaque(bytes.into())
+    }
+
+    /// Canonicalize a mathematical integer.
+    pub fn integer(n: i128) -> Self {
+        Self::Integer(crate::encoding::encode_signed_integer(n))
+    }
+
+    /// Admit already-encoded integer bytes after a canonicality check.
+    pub fn integer_bytes(bytes: &[u8]) -> Result<Self, AtomicsError> {
+        crate::encoding::verify_signed_integer(bytes)?;
+        Ok(Self::Integer(bytes.to_vec()))
+    }
+
+    /// Canonicalize an exact decimal (coefficient + scale).
+    pub fn decimal(coefficient: i128, scale: i64) -> Self {
+        Self::Decimal {
+            coefficient: crate::encoding::encode_signed_integer(coefficient),
+            scale,
+        }
+    }
+
+    /// Admit already-encoded decimal coefficient bytes after a canonicality check.
+    pub fn decimal_bytes(coefficient: &[u8], scale: i64) -> Result<Self, AtomicsError> {
+        crate::encoding::verify_signed_integer(coefficient)?;
+        Ok(Self::Decimal {
+            coefficient: coefficient.to_vec(),
+            scale,
+        })
+    }
 }
 
 /// Read witness recorded for a prior observation (`ATOMICS_SPEC` §7).
