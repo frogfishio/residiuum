@@ -3,8 +3,9 @@
 use crate::error::LaneError;
 use residiuum_atomics::{
     decode_member, decode_prepare, encode_member, encode_prepare, AtomicId, AtomicMember,
-    AtomicPrepare, CanonicalKey, CollectionId, ContentRoot, CoordinationScope, CoordinatorSeq,
-    HeapId, OrdinaryCell, PlacementManifest, ResourceLimits, StagingFailpoint, StagingHeap,
+    AtomicPrepare, AtomicRefuseReason, AtomicsError, CanonicalKey, CollectionId, ContentRoot,
+    CoordinationScope, CoordinatorSeq, HeapId, OrdinaryCell, PlacementManifest, ResourceLimits,
+    StagingFailpoint, StagingHeap,
 };
 use residiuum_format::{
     encode_atomic_frame, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
@@ -112,7 +113,11 @@ impl DurableLane {
         &self.heap
     }
 
-    /// Persist intent + prepare, then apply the kernel. Honour prepare failpoints.
+    /// Validate, then persist intent + prepare, then apply the kernel.
+    ///
+    /// CR-R2-001: kernel reservation happens before any durable path is
+    /// created or replaced. A refused prepare leaves the directory image
+    /// unchanged. Same ID / same root / same members is a no-write replay.
     pub fn begin_prepare(
         &mut self,
         atomic_id: AtomicId,
@@ -122,13 +127,19 @@ impl DurableLane {
         if self.armed == Some(StagingFailpoint::BeforePrepare) {
             return Err(LaneError::Injected(StagingFailpoint::BeforePrepare));
         }
-        let manifest = PlacementManifest::assign(
-            self.heap.heap_id(),
-            atomic_id,
-            content_root,
-            shard_count_from_layout(&self.root)?,
-            members,
-        )?;
+        if let Some(existing) = self.heap.placement(atomic_id) {
+            if existing.content_root() == content_root && members_match(existing, members) {
+                let seq = self
+                    .heap
+                    .prepare_seq(atomic_id)
+                    .ok_or(LaneError::Corrupt("prepared without sequence"))?;
+                return Ok((seq, existing.clone()));
+            }
+            return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
+        }
+        let manifest = self
+            .heap
+            .check_begin_prepare(atomic_id, content_root, members)?;
         persist_intent(&self.root, atomic_id, members)?;
         persist_prepare(&self.root, self.heap.heap_id(), &manifest)?;
         let out = self.heap.begin_prepare(atomic_id, content_root, members)?;
@@ -138,23 +149,28 @@ impl DurableLane {
         Ok(out)
     }
 
-    /// Persist payload + member frame, then apply the kernel.
+    /// Validate, then persist payload + member frame, then apply the kernel.
+    ///
+    /// CR-R2-001: payload and member frames are written only after the kernel
+    /// accepts the exact member. Existing payload files are never overwritten
+    /// with different bytes.
     pub fn append_staged(
         &mut self,
         member: AtomicMember,
         payload: Vec<u8>,
     ) -> Result<(), LaneError> {
         let ordinal = member.ordinal;
-        let shard = self
+        if let Some(staged) = self
             .heap
-            .placement(member.atomic_id)
-            .and_then(|m| {
-                m.entries()
-                    .iter()
-                    .find(|e| e.member.ordinal == ordinal)
-                    .map(|e| e.shard.as_u32())
-            })
-            .ok_or(LaneError::Corrupt("append without prepare"))?;
+            .inspect_staged(member.atomic_id)
+            .and_then(|ms| ms.iter().find(|s| s.member.ordinal == ordinal))
+        {
+            if staged.member == member && staged.payload == payload {
+                return Ok(());
+            }
+            return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget).into());
+        }
+        let shard = self.heap.check_append_staged(&member, &payload)?;
         let content_root = self
             .heap
             .placement(member.atomic_id)
@@ -165,7 +181,7 @@ impl DurableLane {
         persist_member_frame(
             &self.root,
             self.heap.heap_id(),
-            shard,
+            shard.as_u32(),
             &member,
             content_root,
         )?;
@@ -211,7 +227,7 @@ fn persist_intent(
         buf.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
         buf.extend_from_slice(&encoded);
     }
-    write_atomic(&intent_path(root, atomic_id), &buf)
+    write_exclusive(&intent_path(root, atomic_id), &buf)
 }
 
 fn persist_prepare(
@@ -254,7 +270,7 @@ fn persist_payload(
     ordinal: u32,
     payload: &[u8],
 ) -> Result<(), LaneError> {
-    write_atomic(&payload_path(root, atomic_id, ordinal), payload)
+    write_exclusive(&payload_path(root, atomic_id, ordinal), payload)
 }
 
 fn persist_member_frame(
@@ -439,6 +455,30 @@ fn parse_hex32(s: &str) -> Option<[u8; 32]> {
         out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(out)
+}
+
+fn members_match(manifest: &PlacementManifest, members: &[AtomicMember]) -> bool {
+    let entries = manifest.entries();
+    if entries.len() != members.len() {
+        return false;
+    }
+    entries.iter().all(|e| {
+        members
+            .iter()
+            .any(|m| m.ordinal == e.member.ordinal && *m == e.member)
+    })
+}
+
+/// Create `path` or accept an identical existing file. Never replace bytes.
+fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), LaneError> {
+    if path.exists() {
+        let existing = fs::read(path)?;
+        if existing == bytes {
+            return Ok(());
+        }
+        return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
+    }
+    write_atomic(path, bytes)
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), LaneError> {

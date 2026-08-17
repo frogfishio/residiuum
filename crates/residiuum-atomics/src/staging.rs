@@ -336,6 +336,28 @@ impl StagingHeap {
             .insert((collection, key_order_bytes(&key)), (key, cell));
     }
 
+    /// Validate a prepare without allocating a coordinator record or writing.
+    ///
+    /// CR-R2-001: reservation is separate from mutation so a lane can refuse
+    /// before touching durable media.
+    pub fn check_begin_prepare(
+        &self,
+        atomic_id: AtomicId,
+        content_root: ContentRoot,
+        members: &[AtomicMember],
+    ) -> Result<PlacementManifest, AtomicsError> {
+        if self.staged.contains_key(&atomic_id) {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict));
+        }
+        PlacementManifest::assign(
+            self.heap_id,
+            atomic_id,
+            content_root,
+            self.shard_count,
+            members,
+        )
+    }
+
     /// Append prepare to the coordinator and freeze placement. No ordinary update.
     pub fn begin_prepare(
         &mut self,
@@ -343,13 +365,7 @@ impl StagingHeap {
         content_root: ContentRoot,
         members: &[AtomicMember],
     ) -> Result<(CoordinatorSeq, PlacementManifest), AtomicsError> {
-        let manifest = PlacementManifest::assign(
-            self.heap_id,
-            atomic_id,
-            content_root,
-            self.shard_count,
-            members,
-        )?;
+        let manifest = self.check_begin_prepare(atomic_id, content_root, members)?;
         let seq = self.coordinator.allocate(atomic_id, content_root)?;
         self.staged.insert(
             atomic_id,
@@ -369,20 +385,20 @@ impl StagingHeap {
         Ok((seq, manifest))
     }
 
-    /// Append a staged member. Does not update the ordinary primary map.
-    pub fn append_staged(
-        &mut self,
-        member: AtomicMember,
-        payload: Vec<u8>,
-    ) -> Result<(), AtomicsError> {
+    /// Validate a staged append without installing it.
+    pub fn check_append_staged(
+        &self,
+        member: &AtomicMember,
+        payload: &[u8],
+    ) -> Result<ShardId, AtomicsError> {
         if slot_is_sealed(self.staged.get(&member.atomic_id)) {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
         member.validate()?;
-        verify_payload(&member, &payload)?;
+        verify_payload(member, payload)?;
         let slot = self
             .staged
-            .get_mut(&member.atomic_id)
+            .get(&member.atomic_id)
             .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
         let entry = slot
             .manifest
@@ -390,7 +406,7 @@ impl StagingHeap {
             .iter()
             .find(|e| e.member.ordinal == member.ordinal)
             .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
-        if entry.member != member || entry.member_hash != member_hash(&member)? {
+        if entry.member != *member || entry.member_hash != member_hash(member)? {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
         if slot
@@ -406,8 +422,22 @@ impl StagingHeap {
         if payload.len() > self.chunk_limits.max_assembled_bytes as usize {
             return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded));
         }
+        Ok(entry.shard)
+    }
+
+    /// Append a staged member. Does not update the ordinary primary map.
+    pub fn append_staged(
+        &mut self,
+        member: AtomicMember,
+        payload: Vec<u8>,
+    ) -> Result<(), AtomicsError> {
+        let shard = self.check_append_staged(&member, &payload)?;
+        let slot = self
+            .staged
+            .get_mut(&member.atomic_id)
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
         slot.members.push(StagedMember {
-            shard: entry.shard,
+            shard,
             member,
             payload,
             chunks: None,
