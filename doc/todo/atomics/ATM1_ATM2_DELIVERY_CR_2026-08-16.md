@@ -4,6 +4,312 @@ Date: 2026-08-16
 Review baseline: `9eeae8c` plus the uncommitted ATM-2.4 failpoint delivery  
 Normative authority: `ATOMICS_SPEC.md` and `ATOMICS_IMPLEMENTATION_PLAN.md`
 
+## Re-review addendum — 2026-08-18
+
+Review baseline: clean `08f3483` (`origin/main`)
+Reviewed fixes: `e53f0e8..08f3483`
+
+### Updated decision
+
+**ATM-1: changes still required.** The encoding-profile work closes
+CR-ATM1-002, and authority revision is now represented separately from active
+rule revisions. However, the alleged trusted authority source is a fully public,
+caller-constructible Rust value. An application can still invent a Heap,
+revision, collection grant, rights, and encoding profile and then use that value
+to manufacture a `BoundCollection` or pass admission. CR-ATM1-001 is therefore
+only partially closed.
+
+**ATM-2: not accepted.** The delivery is substantially better than the first
+submission: Atomic bodies are decoded, the in-memory manifest binds exact
+members and payloads, chunk limits exist, and a file-backed peer lane now
+exercises reopen. It is still a prototype rather than an authoritative storage
+implementation, and the prototype contains write-order and recovery-binding
+defects that can turn refused or altered input into durable Atomic evidence.
+
+`Capabilities::atomics` correctly remains `false`. ATM-3 publication must not
+consume this lane as an accepted durability contract yet.
+
+### Gate results
+
+Passed:
+
+- `scripts/verify-atomics.sh full`;
+- all targets for `residiuum-atomics`, `residiuum-format`, and
+  `residiuum-atomic-lane`;
+- whitespace/error-marker check; and
+- clean-tree check before this review document was edited.
+
+Failed:
+
+- Clippy with warnings denied: `residiuum-atomics/src/encoding.rs` has a
+  needless explicit lifetime in `field`;
+- workspace formatting check: committed trailing/line-layout differences in
+  `residiuum-format/src/atomic.rs` and `tests/atomic_admit.rs`; and
+- the generated `runs/full.json` does not match the SHA-256 that the file
+  records for itself.
+
+Passing the project verifier does not override the substantive RED findings
+below because several of the failing behaviours are outside its current test
+oracle.
+
+### Original CR disposition
+
+| CR | Re-review status | Disposition |
+| --- | --- | --- |
+| CR-ATM1-001 | **PARTIAL / RED** | Authority/rule semantics are separated and stale/revoked tests exist, but the trusted authority view remains forgeable through the public API. |
+| CR-ATM1-002 | **CLOSED** | Encoding profiles, canonical integer/decimal checks, invalid UTF-8/value refusal, and negative tests now exist. |
+| CR-ATM2-001 | **PARTIAL / RED** | A durable peer lane exists, but it is not authoritative store staging and its validate/persist order is unsafe. |
+| CR-ATM2-002 | **PARTIAL / RED** | Atomic ownership admission is composable, but the global key migration is not complete or accepted; live store still emits operation identity at 31/32. |
+| CR-ATM2-003 | **PARTIAL / RED** | Typed bodies are decoded and cross-checked, but malformed ownership and same-ID/different-root conflicts are misclassified. |
+| CR-ATM2-004 | **CLOSED IN MODEL** | Exact member, member hash, payload hash, ordinals, and manifest root are bound in `StagingHeap`; durable replay binding remains open under CR-R2-002. |
+| CR-ATM2-005 | **CLOSED IN MODEL** | Chunk allocation and empty-value defects are fixed in `StagingHeap`; durable file parsing remains unbounded under CR-R2-003. |
+| CR-ATM2-006 | **PARTIAL / AMBER** | Verifier and handoff exist, but their acceptance and hash accounting are not reliable enough for package evidence. |
+
+### CR-R2-001 — RED — The durable lane persists before validation
+
+Evidence:
+
+- `DurableLane::begin_prepare` writes/replaces the intent file and appends the
+  prepare frame before calling `StagingHeap::begin_prepare`.
+- Therefore a duplicate Atomic ID, conflicting content root, invalid member
+  set, or other kernel refusal can occur only after authoritative-looking bytes
+  have already been synced.
+- `DurableLane::append_staged` similarly writes/replaces the payload and
+  appends/syncs the member frame before `StagingHeap::append_staged` validates
+  exact member equality, duplicate ordinal, and payload hash.
+- A duplicate or malformed append can consequently return an error while
+  leaving a new payload and member frame on disk. The payload filename is only
+  `(atomic_id, ordinal)`, so the rejected call can overwrite the prior payload.
+
+Impact:
+
+Structural refusal is required to produce no evidence. The current ordering
+does the reverse: it makes validation failure a post-persistence event. This
+also permits a rejected retry to damage previously valid staged state.
+
+Required fix:
+
+1. Split validation/reservation from mutation in the kernel/lane contract.
+2. Validate the complete prepare or member, including duplicate-ID and
+   duplicate-ordinal state, before touching a durable path.
+3. Make durable creation non-overwriting for an existing Atomic identity unless
+   byte-for-byte idempotence has been established.
+4. If a failure can occur after the first write, introduce an explicit abort or
+   repair protocol whose evidence is authoritative; do not silently leave a
+   refused prepare/member behind.
+5. Add injected failures and semantic-refusal tests that compare the complete
+   directory image before and after the refused operation.
+
+Acceptance proof:
+
+- Every prepare/member mutation mutant returns refusal with an identical
+  pre/post directory image.
+- Same ID/same root is either proven idempotent or explicitly refused without
+  new bytes; same ID/different root is permanently conflicting and never
+  overwrites the original intent or payload.
+
+### CR-R2-002 — RED — Reopen does not authenticate intent, members, or seal evidence
+
+Evidence:
+
+- `replay_prepares` decodes `AtomicPrepare`, then loads `intent/<atomic_id>` and
+  calls `begin_prepare`; it never recomputes the intent's ordered member root or
+  compares it with `AtomicPrepare.ordered_member_manifest_root`.
+- The durable prepare is not compiled from an `AtomicPlan`. `persist_prepare`
+  fills `frontier`, read-set root, predicate-set root, and active-rule root with
+  fixed placeholder byte arrays.
+- `replay_members` does not explicitly require the examined envelope Heap,
+  Atomic ID, content root, and ordinal to agree with the decoded member and the
+  recovered prepare before reading the payload. Some mismatches are caught by
+  the model later, but the durable recovery boundary itself is not closed.
+- `sealed/<atomic_id>` contains only `boundary\n`. Reopen trusts the filename
+  and presence, without a content root, manifest root, checksum, version, or
+  validation of the marker contents.
+- Crash tests cover directory-image reopen after whole synced operations, not
+  torn writes or every byte/phase of intent, prepare, payload, member, and seal
+  publication.
+
+Impact:
+
+Replacing or corrupting an intent can redefine the member cohort recovered for
+an otherwise valid prepare. A stray or damaged seal filename can promote that
+cohort to the first stable boundary. The placeholder roots also mean the
+persisted prepare is not evidence for the actual closed plan.
+
+Required fix:
+
+1. Persist the canonical `AtomicPrepare` derived from the accepted closed plan;
+   remove all placeholder roots.
+2. On reopen, recompute and compare the ordered member manifest, count, Heap,
+   Atomic ID, content root, ordinals, exact member records, payload hashes, and
+   shard placement before reconstructing the lane.
+3. Make the stable-boundary record a versioned, checksummed record bound to the
+   Heap, Atomic ID, content root, and manifest root, or derive the boundary from
+   equally strong retained evidence.
+4. Classify malformed, partial, unsupported, and conflicting evidence without
+   silently skipping it or promoting it.
+5. Test byte truncation/corruption/replacement at every durable file and append
+   phase, followed by actual reopen.
+
+Acceptance proof:
+
+- Mutating any intent member or the seal contents cannot reconstruct a sealed
+  prepare.
+- Recovery of accepted material produces the exact original plan/prepare and
+  member manifest; recovery never invents placeholder state.
+
+### CR-R2-003 — RED — Durable recovery accepts unbounded metadata and intent lengths
+
+Evidence:
+
+- `read_intent` trusts a media-supplied `u32` member count for
+  `Vec::with_capacity` and trusts each `u32` member length without applying hard
+  resource limits.
+- It does not reject trailing bytes after the declared members.
+- `parse_shard_count` accepts any `u32`; create/open/replay then create or scan
+  paths in a loop up to that value.
+
+Impact:
+
+A small corrupt or hostile store image can cause excessive allocation, file
+creation, or path scanning during open. This restores the unbounded-input class
+that CR-ATM2-005 closed only in the in-memory chunk API.
+
+Required fix:
+
+Apply frozen hard limits before allocation or iteration, use checked arithmetic,
+require exact input consumption, and add hostile `u32::MAX`, one-unit-over,
+trailing-byte, and truncated-field reopen fixtures.
+
+### CR-R2-004 — RED — Trusted authority remains publicly forgeable
+
+Evidence:
+
+- `TrustedAuthorityView` is publicly re-exported.
+- Its public `new`, `grant`, and `grant_with_encoding` methods accept arbitrary
+  Heap IDs, authority revisions, rights, and encoding profiles.
+- `BoundCollection::from_trusted` and `admit_closed_plan` accept that same
+  caller-created value.
+- This contradicts the type documentation that application code cannot mint a
+  bound collection except through trusted capability state.
+
+Impact:
+
+The type shape prevents accidentally mixing a grant and a handle, but it does
+not establish a trust boundary. Any dependent application can fabricate the
+authority that both compilation and admission trust.
+
+Required fix:
+
+Construction of authority state must be crate-private/SDK-internal or require
+an unforgeable authority token supplied by the actual capability subsystem.
+Keep a clearly marked test-only constructor behind `cfg(test)` or a dedicated
+non-production feature. Test the public consumer surface with a compile-fail
+case proving it cannot mint or elevate trusted grants.
+
+### CR-R2-005 — RED — Examination can split conflicts into valid groups
+
+Evidence:
+
+- `parse_fields` maps every ownership parse result other than `Known` to
+  `heap_id = None`; malformed or missing mandatory ownership can therefore
+  reach `AtomicEvidenceClass::Valid`.
+- `aggregate_groups` keys groups by `(atomic_id, content_root, heap_id)`. Two
+  records with the same Heap/Atomic ID but different content roots are placed
+  into separate groups, so `classify_group` never sees the conflict.
+
+Impact:
+
+The examiner can report two individually plausible groups instead of the
+protocol's permanent same-ID/different-content conflict, and can label an
+unowned Atomic frame valid. That is unsafe for damage reporting and future
+recovery decisions.
+
+Required fix:
+
+Require valid mandatory ownership on every Atomic frame. Detect conflicts first
+by `(heap_id, atomic_id)`, then validate the single allowed content root and
+role evidence within that identity. Add mutants for missing/malformed ownership
+and same ID with different roots across prepare, member, and decision frames.
+
+### CR-R2-006 — RED — The envelope namespace remains contradictory in live store code
+
+Evidence:
+
+- `FORMAT_SPEC.md` assigns keys 31/32 to Heap/collection ownership and proposes
+  operation identity at 41/42.
+- `residiuum-store/src/envelope.rs` still documents, encodes, and decodes
+  operation ID/content hash at 31/32.
+- The amendment is explicitly labelled proposed and architect-unaccepted in
+  the handoff.
+
+Impact:
+
+The same durable key bytes still have two meanings in the repository. Atomic
+format acceptance would freeze a namespace that the current store contradicts.
+
+Required fix:
+
+Approve one migration policy, move the store writer to the accepted keys, and
+implement explicit legacy read discrimination. Golden bytes and reopen tests
+must cover old ordinary frames, new ordinary frames, and Heap-owned Atomic
+frames without ambiguous interpretation.
+
+### CR-R2-007 — AMBER — Evidence manifests can certify stale or self-inconsistent results
+
+Evidence:
+
+- `merge_pack` carries forward prior families and verifier profiles without
+  requiring their commit, dirty state, toolchain, suite version, or artifact
+  hashes to match the current run, while replacing the package's top-level
+  metadata with the current values.
+- Every clean profile, including partial `quick`, is labelled
+  `accepted_candidate`; required family coverage is not enforced before that
+  label is written.
+- The run manifest is written, hashed, has that hash appended to itself, and is
+  written again. The recorded hash for `runs/full.json` therefore cannot equal
+  the final file. This was reproduced at `08f3483`.
+- The verifier checks for negative controls by source-code name, not by proving
+  each control actually failed under a deliberately broken implementation.
+
+Impact:
+
+A clean partial run can inherit results from another commit and present them as
+one accepted candidate. The manifest's self-integrity claim is false by
+construction.
+
+Required fix:
+
+1. Make every run immutable and commit-scoped.
+2. Build an acceptance package only from runs whose commit, dirty state,
+   toolchain/suite identity, and required artifact hashes agree.
+3. Distinguish `diagnostic`, `partial`, and `acceptance_candidate`; require the
+   complete acceptance family matrix for the last state.
+4. Remove the self-hash or hash a detached/canonical payload and store the hash
+   outside that payload.
+5. Execute negative controls or mutants and record their expected failing
+   outcome; do not use symbol-name presence as evidence.
+
+### CR-R2-008 — AMBER — Mechanical quality gates are not clean
+
+Fix the Clippy lifetime warning and run `cargo fmt --all`. Acceptance evidence
+must include Clippy with warnings denied, formatting, and whitespace gates, not
+only the scoped test profiles.
+
+### Re-review acceptance order
+
+1. Fix CR-R2-001 first; no further durability proof is meaningful while a
+   refused operation can write or overwrite evidence.
+2. Close CR-R2-002 and CR-R2-003, then run the full corrupt/torn/reopen matrix.
+3. Freeze and migrate the envelope namespace under CR-R2-006.
+4. Close the authority boundary under CR-R2-004; then ATM-1 can be accepted.
+5. Close examination and evidence-accounting under CR-R2-005/007/008.
+6. Integrate the accepted lane with the authoritative store and prove prepared
+   invisibility through point, scan, RQL, history, watch, and index surfaces.
+
+The current delivery should continue to be described as **ATM-1 nearly
+complete; ATM-2 durable prototype under review**, not ATM-1/ATM-2 accepted.
+
 ## Decision
 
 **ATM-1: changes required before acceptance.** The canonical plan, accounting,
