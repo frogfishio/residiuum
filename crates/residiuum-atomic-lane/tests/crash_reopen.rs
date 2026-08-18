@@ -1,57 +1,11 @@
 //! CR-ATM2-001: directory-image crash prefixes and first stable boundary.
 
+#[path = "harness.rs"]
+mod harness;
+
+use harness::*;
 use residiuum_atomic_lane::{DurableLane, LaneError};
-use residiuum_atomics::{
-    AtomicId, AtomicMember, CanonicalKey, CollectionId, ContentRoot, HeapId, MemberPhase,
-    MutationKind, ObjectIdentity, OrdinaryCell, PreparePhase, StagingFailpoint, StagingHeap,
-    VersionId,
-};
-
-fn hid(n: u8) -> HeapId {
-    let mut b = [0u8; 16];
-    b[0] = n;
-    HeapId::from_bytes(b).unwrap()
-}
-
-fn cid(n: u8) -> CollectionId {
-    let mut b = [0u8; 16];
-    b[0] = n;
-    CollectionId::from_bytes(b).unwrap()
-}
-
-fn aid(n: u8) -> AtomicId {
-    let mut b = [0u8; 32];
-    b[0] = n;
-    AtomicId::from_bytes(b).unwrap()
-}
-
-fn root(n: u8) -> ContentRoot {
-    let mut b = [0u8; 32];
-    b[0] = n;
-    ContentRoot::from_bytes(b).unwrap()
-}
-
-fn vid(n: u8) -> VersionId {
-    let mut b = [0u8; 16];
-    b[0] = n;
-    VersionId::from_bytes(b).unwrap()
-}
-
-fn key(s: &str) -> CanonicalKey {
-    CanonicalKey::String(s.to_owned())
-}
-
-fn create_member(id: AtomicId, ordinal: u32, k: &str, payload: &[u8]) -> AtomicMember {
-    AtomicMember {
-        atomic_id: id,
-        ordinal,
-        object_identity: ObjectIdentity::new(cid(1), key(k)),
-        member_kind: MutationKind::Create,
-        before_version: None,
-        after_content_hash: Some(*blake3::hash(payload).as_bytes()),
-        event_id: vid(ordinal as u8 + 1),
-    }
-}
+use residiuum_atomics::{MemberPhase, OrdinaryCell, PreparePhase, StagingFailpoint, StagingHeap};
 
 fn assert_no_ordinary_leak(heap: &StagingHeap, k: &str) {
     assert!(heap.get(cid(1), &key(k)).is_none());
@@ -64,8 +18,9 @@ fn before_prepare_reopen_has_no_prepare_and_no_ordinary_mutation() {
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
     lane.arm(StagingFailpoint::BeforePrepare);
     let m = create_member(aid(1), 0, "k", b"x");
+    let plan = plan_for(hid(1), std::slice::from_ref(&m), &[b"x"]);
     assert!(matches!(
-        lane.begin_prepare(aid(1), root(1), std::slice::from_ref(&m)),
+        lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&m)),
         Err(LaneError::Injected(StagingFailpoint::BeforePrepare))
     ));
     let lane = lane.reopen().unwrap();
@@ -77,6 +32,7 @@ fn before_prepare_reopen_has_no_prepare_and_no_ordinary_mutation() {
         .join("intent")
         .join(format!("{}", aid(1)))
         .exists());
+    assert!(!dir.path().join("plan").join(format!("{}", aid(1))).exists());
 }
 
 #[test]
@@ -85,8 +41,9 @@ fn after_prepare_reopen_keeps_prepare_and_does_not_publish() {
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
     lane.arm(StagingFailpoint::AfterPrepare);
     let m = create_member(aid(2), 0, "k", b"x");
+    let plan = plan_for(hid(1), std::slice::from_ref(&m), &[b"x"]);
     assert!(matches!(
-        lane.begin_prepare(aid(2), root(2), std::slice::from_ref(&m)),
+        lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&m)),
         Err(LaneError::Injected(StagingFailpoint::AfterPrepare))
     ));
     let lane = lane.reopen().unwrap();
@@ -106,7 +63,8 @@ fn after_member_n_reopen_examines_surviving_member_only() {
     let mut lane = DurableLane::create(dir.path(), hid(1), 2).unwrap();
     let a = create_member(aid(3), 0, "a", b"A");
     let b = create_member(aid(3), 1, "b", b"B");
-    lane.begin_prepare(aid(3), root(3), &[a.clone(), b.clone()])
+    let plan = plan_for(hid(1), &[a.clone(), b.clone()], &[b"A", b"B"]);
+    lane.begin_prepare(&plan, FRONTIER, &[a.clone(), b.clone()])
         .unwrap();
     lane.arm(StagingFailpoint::AfterMember(0));
     assert!(matches!(
@@ -127,7 +85,8 @@ fn seal_reopen_is_durable_invisible_and_lists_boundary_files() {
     let mut lane = DurableLane::create(dir.path(), hid(1), 2).unwrap();
     let a = create_member(aid(4), 0, "a", b"A");
     let b = create_member(aid(4), 1, "b", b"B");
-    lane.begin_prepare(aid(4), root(4), &[a.clone(), b.clone()])
+    let plan = plan_for(hid(1), &[a.clone(), b.clone()], &[b"A", b"B"]);
+    lane.begin_prepare(&plan, FRONTIER, &[a.clone(), b.clone()])
         .unwrap();
     lane.append_staged(a, b"A".to_vec()).unwrap();
     lane.append_staged(b, b"B".to_vec()).unwrap();
@@ -156,7 +115,8 @@ fn second_heap_cannot_resolve_first_atomic() {
     let mut a = DurableLane::create(a_dir.path(), hid(1), 1).unwrap();
     let b = DurableLane::create(b_dir.path(), hid(2), 1).unwrap();
     let m = create_member(aid(5), 0, "k", b"v");
-    a.begin_prepare(aid(5), root(5), std::slice::from_ref(&m))
+    let plan = plan_for(hid(1), std::slice::from_ref(&m), &[b"v"]);
+    a.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&m))
         .unwrap();
     a.append_staged(m, b"v".to_vec()).unwrap();
     assert!(a.heap().can_resolve(aid(5)));
@@ -170,7 +130,8 @@ fn negative_control_detects_a_leaked_staged_member() {
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
     let m = create_member(aid(6), 0, "leak", b"secret");
-    lane.begin_prepare(aid(6), root(6), std::slice::from_ref(&m))
+    let plan = plan_for(hid(1), std::slice::from_ref(&m), &[b"secret"]);
+    lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&m))
         .unwrap();
     lane.append_staged(m, b"secret".to_vec()).unwrap();
     assert_no_ordinary_leak(lane.heap(), "leak");

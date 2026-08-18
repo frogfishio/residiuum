@@ -20,6 +20,12 @@ pub(crate) enum Value {
     Map(Map),
 }
 
+pub(crate) fn encode_value(v: &Value) -> Result<Vec<u8>, AtomicsError> {
+    let mut out = Vec::new();
+    write_value(&mut out, v)?;
+    Ok(out)
+}
+
 pub(crate) fn encode_map(entries: &[(u64, Value)]) -> Result<Vec<u8>, AtomicsError> {
     let mut sorted = entries.to_vec();
     sorted.sort_by_key(|(k, _)| *k);

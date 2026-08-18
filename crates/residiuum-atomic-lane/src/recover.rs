@@ -4,9 +4,9 @@ use crate::error::LaneError;
 use crate::limits::{max_encoded_member_bytes, max_intent_members, max_payload_bytes};
 use crate::seal::{decode_seal, SealRecord};
 use residiuum_atomics::{
-    decode_member, decode_prepare, member_hash, ordered_member_manifest_root, AtomicId,
-    AtomicMember, AtomicPrepare, AtomicRefuseReason, AtomicsError, ContentRoot, CoordinationScope,
-    HeapId, ResourceLimits, StagingHeap, DOMAIN_ATOMIC_PREDICATES, DOMAIN_ATOMIC_READSET,
+    decode_canonical_plan, decode_member, decode_prepare, member_hash,
+    ordered_member_manifest_root, prepare_from_closed_plan, AtomicId, AtomicMember, AtomicPlan,
+    AtomicRefuseReason, AtomicsError, HeapId, StagingHeap,
 };
 use residiuum_format::{
     examine_atomic_frame, scan_forward, AtomicEvidenceClass, AtomicFrameRole, DecodedFrame,
@@ -15,27 +15,29 @@ use residiuum_format::{
 use std::fs;
 use std::path::Path;
 
-const DOMAIN_RULES: &[u8] = b"RESIDIUUM-ATOMIC-RULES-V1";
-const DOMAIN_FRONTIER: &[u8] = b"RESIDIUUM-ATOMIC-LANE-FRONTIER-V1";
+/// Sidecar magic for a closed plan plus the bound serialization frontier.
+pub const PLAN_SIDECAR_MAGIC: &[u8] = b"ATMPLAN1";
 
-pub fn build_lane_prepare(
-    heap_id: HeapId,
-    manifest_root: [u8; 32],
-    atomic_id: AtomicId,
-    content_root: ContentRoot,
-) -> AtomicPrepare {
-    AtomicPrepare {
-        atomic_id,
-        heap_id,
-        scope: CoordinationScope::LocalHeap,
-        content_root,
-        frontier: lane_frontier(heap_id, content_root, manifest_root),
-        ordered_member_manifest_root: manifest_root,
-        read_set_root: empty_root(DOMAIN_ATOMIC_READSET),
-        predicate_set_root: empty_root(DOMAIN_ATOMIC_PREDICATES),
-        active_rule_revision_root: empty_root(DOMAIN_RULES),
-        limits: ResourceLimits::hard_local_heap(),
+/// Encode the exclusive plan sidecar: magic, frontier, canonical plan bytes.
+pub fn encode_plan_sidecar(plan: &AtomicPlan, frontier: [u8; 32]) -> Result<Vec<u8>, LaneError> {
+    let plan_bytes = residiuum_atomics::encode_canonical_plan(plan)?;
+    let mut buf = Vec::with_capacity(PLAN_SIDECAR_MAGIC.len() + 32 + plan_bytes.len());
+    buf.extend_from_slice(PLAN_SIDECAR_MAGIC);
+    buf.extend_from_slice(&frontier);
+    buf.extend_from_slice(&plan_bytes);
+    Ok(buf)
+}
+
+/// Decode a plan sidecar written by [`encode_plan_sidecar`].
+pub fn decode_plan_sidecar(bytes: &[u8]) -> Result<(AtomicPlan, [u8; 32]), LaneError> {
+    let header = PLAN_SIDECAR_MAGIC.len() + 32;
+    if bytes.len() < header || !bytes.starts_with(PLAN_SIDECAR_MAGIC) {
+        return Err(LaneError::Corrupt("plan sidecar"));
     }
+    let mut frontier = [0u8; 32];
+    frontier.copy_from_slice(&bytes[PLAN_SIDECAR_MAGIC.len()..header]);
+    let plan = decode_canonical_plan(&bytes[header..])?;
+    Ok((plan, frontier))
 }
 
 pub fn replay_prepares(
@@ -67,10 +69,13 @@ pub fn replay_prepares(
         if recomputed != prepare.ordered_member_manifest_root {
             return Err(LaneError::Corrupt("intent manifest root"));
         }
-        let expected =
-            build_lane_prepare(heap_id, recomputed, prepare.atomic_id, prepare.content_root);
+        let (plan, frontier) = read_plan(root, prepare.atomic_id)?;
+        if frontier != prepare.frontier {
+            return Err(LaneError::Corrupt("plan frontier mismatch"));
+        }
+        let expected = prepare_from_closed_plan(&plan, frontier, &members)?;
         if prepare != expected {
-            return Err(LaneError::Corrupt("prepare not derived from members"));
+            return Err(LaneError::Corrupt("prepare not derived from plan"));
         }
         if heap.can_resolve(prepare.atomic_id) {
             let existing = heap
@@ -249,17 +254,9 @@ fn refuse_midstream_damage(report: &ScanReport) -> Result<(), LaneError> {
     Ok(())
 }
 
-fn empty_root(domain: &[u8]) -> [u8; 32] {
-    *blake3::hash(domain).as_bytes()
-}
-
-fn lane_frontier(heap_id: HeapId, content_root: ContentRoot, manifest_root: [u8; 32]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(DOMAIN_FRONTIER);
-    hasher.update(heap_id.as_bytes());
-    hasher.update(content_root.as_bytes());
-    hasher.update(&manifest_root);
-    *hasher.finalize().as_bytes()
+fn read_plan(root: &Path, atomic_id: AtomicId) -> Result<(AtomicPlan, [u8; 32]), LaneError> {
+    let bytes = fs::read(plan_path(root, atomic_id))?;
+    decode_plan_sidecar(&bytes)
 }
 
 fn read_intent(root: &Path, atomic_id: AtomicId) -> Result<Vec<AtomicMember>, LaneError> {
@@ -314,6 +311,10 @@ fn coordinator_path(root: &Path) -> std::path::PathBuf {
 
 fn shard_path(root: &Path, shard: u32) -> std::path::PathBuf {
     root.join(format!("shard-{shard:08x}.log"))
+}
+
+fn plan_path(root: &Path, atomic_id: AtomicId) -> std::path::PathBuf {
+    root.join("plan").join(format!("{atomic_id}"))
 }
 
 fn intent_path(root: &Path, atomic_id: AtomicId) -> std::path::PathBuf {

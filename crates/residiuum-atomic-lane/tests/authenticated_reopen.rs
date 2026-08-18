@@ -1,64 +1,20 @@
 //! CR-R2-002: reopen binds intent, members, and seal to the persisted prepare.
 
+#[path = "harness.rs"]
+mod harness;
+
+use harness::*;
 use residiuum_atomic_lane::{DurableLane, LaneError};
-use residiuum_atomics::{
-    decode_prepare, AtomicId, AtomicMember, CanonicalKey, CollectionId, ContentRoot, HeapId,
-    MemberPhase, MutationKind, ObjectIdentity, VersionId,
-};
+use residiuum_atomics::{decode_prepare, prepare_from_closed_plan, MemberPhase};
 use residiuum_format::{examine_atomic_frame, scan_forward, AtomicEvidenceClass, AtomicFrameRole};
 use std::fs;
-
-fn hid(n: u8) -> HeapId {
-    let mut b = [0u8; 16];
-    b[0] = n;
-    HeapId::from_bytes(b).unwrap()
-}
-
-fn cid(n: u8) -> CollectionId {
-    let mut b = [0u8; 16];
-    b[0] = n;
-    CollectionId::from_bytes(b).unwrap()
-}
-
-fn aid(n: u8) -> AtomicId {
-    let mut b = [0u8; 32];
-    b[0] = n;
-    AtomicId::from_bytes(b).unwrap()
-}
-
-fn root(n: u8) -> ContentRoot {
-    let mut b = [0u8; 32];
-    b[0] = n;
-    ContentRoot::from_bytes(b).unwrap()
-}
-
-fn vid(n: u8) -> VersionId {
-    let mut b = [0u8; 16];
-    b[0] = n;
-    VersionId::from_bytes(b).unwrap()
-}
-
-fn key(s: &str) -> CanonicalKey {
-    CanonicalKey::String(s.to_owned())
-}
-
-fn create_member(id: AtomicId, ordinal: u32, k: &str, payload: &[u8]) -> AtomicMember {
-    AtomicMember {
-        atomic_id: id,
-        ordinal,
-        object_identity: ObjectIdentity::new(cid(1), key(k)),
-        member_kind: MutationKind::Create,
-        before_version: None,
-        after_content_hash: Some(*blake3::hash(payload).as_bytes()),
-        event_id: vid(ordinal as u8 + 1),
-    }
-}
 
 fn sealed_lane() -> (tempfile::TempDir, DurableLane) {
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
     let m = create_member(aid(1), 0, "k", b"v");
-    lane.begin_prepare(aid(1), root(1), std::slice::from_ref(&m))
+    let plan = plan_for(hid(1), std::slice::from_ref(&m), &[b"v"]);
+    lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&m))
         .unwrap();
     lane.append_staged(m, b"v".to_vec()).unwrap();
     lane.seal_member_boundary(aid(1)).unwrap();
@@ -89,6 +45,11 @@ fn flip(path: &std::path::Path) {
 fn sealed_reopen_recovers_derived_prepare_not_placeholders() {
     let (dir, lane) = sealed_lane();
     let prepare = first_prepare(dir.path());
+    let member = create_member(aid(1), 0, "k", b"v");
+    let plan = plan_for(hid(1), std::slice::from_ref(&member), &[b"v"]);
+    let expected =
+        prepare_from_closed_plan(&plan, FRONTIER, std::slice::from_ref(&member)).unwrap();
+    assert_eq!(prepare, expected);
     assert_ne!(prepare.frontier, [1u8; 32]);
     assert_ne!(prepare.read_set_root, [2u8; 32]);
     assert_ne!(prepare.predicate_set_root, [3u8; 32]);
@@ -166,7 +127,8 @@ fn trailing_torn_coordinator_frame_does_not_invent_prepare() {
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
     let m = create_member(aid(2), 0, "k", b"v");
-    lane.begin_prepare(aid(2), root(2), std::slice::from_ref(&m))
+    let plan = plan_for(hid(1), std::slice::from_ref(&m), &[b"v"]);
+    lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&m))
         .unwrap();
     drop(lane);
     let log = dir.path().join("coordinator.log");

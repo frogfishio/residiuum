@@ -1,63 +1,19 @@
 //! CR-R2-003: hostile metadata lengths refuse before allocation or path scans.
 
+#[path = "harness.rs"]
+mod harness;
+
+use harness::*;
 use residiuum_atomic_lane::{DurableLane, LaneError};
-use residiuum_atomics::{
-    AtomicId, AtomicMember, AtomicRefuseReason, AtomicsError, CanonicalKey, CollectionId,
-    ContentRoot, HeapId, MutationKind, ObjectIdentity, VersionId,
-};
+use residiuum_atomics::{AtomicRefuseReason, AtomicsError};
 use std::fs;
-
-fn hid(n: u8) -> HeapId {
-    let mut b = [0u8; 16];
-    b[0] = n;
-    HeapId::from_bytes(b).unwrap()
-}
-
-fn cid(n: u8) -> CollectionId {
-    let mut b = [0u8; 16];
-    b[0] = n;
-    CollectionId::from_bytes(b).unwrap()
-}
-
-fn aid(n: u8) -> AtomicId {
-    let mut b = [0u8; 32];
-    b[0] = n;
-    AtomicId::from_bytes(b).unwrap()
-}
-
-fn root(n: u8) -> ContentRoot {
-    let mut b = [0u8; 32];
-    b[0] = n;
-    ContentRoot::from_bytes(b).unwrap()
-}
-
-fn vid(n: u8) -> VersionId {
-    let mut b = [0u8; 16];
-    b[0] = n;
-    VersionId::from_bytes(b).unwrap()
-}
-
-fn key(s: &str) -> CanonicalKey {
-    CanonicalKey::String(s.to_owned())
-}
-
-fn create_member(id: AtomicId, ordinal: u32, k: &str, payload: &[u8]) -> AtomicMember {
-    AtomicMember {
-        atomic_id: id,
-        ordinal,
-        object_identity: ObjectIdentity::new(cid(1), key(k)),
-        member_kind: MutationKind::Create,
-        before_version: None,
-        after_content_hash: Some(*blake3::hash(payload).as_bytes()),
-        event_id: vid(ordinal as u8 + 1),
-    }
-}
 
 fn prepared_dir() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
     let m = create_member(aid(1), 0, "k", b"v");
-    lane.begin_prepare(aid(1), root(1), std::slice::from_ref(&m))
+    let plan = plan_for(hid(1), std::slice::from_ref(&m), &[b"v"]);
+    lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&m))
         .unwrap();
     drop(lane);
     dir

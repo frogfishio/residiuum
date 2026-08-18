@@ -2,12 +2,14 @@
 
 use crate::error::LaneError;
 use crate::limits::{max_encoded_member_bytes, max_intent_members, max_payload_bytes, MAX_SHARDS};
-use crate::recover::{build_lane_prepare, replay_members, replay_prepares, replay_seals, seal_for};
+use crate::recover::{
+    encode_plan_sidecar, replay_members, replay_prepares, replay_seals, seal_for,
+};
 use crate::seal::encode_seal;
 use residiuum_atomics::{
-    encode_member, encode_prepare, AtomicId, AtomicMember, AtomicRefuseReason, AtomicsError,
-    CanonicalKey, CollectionId, ContentRoot, CoordinatorSeq, HeapId, OrdinaryCell,
-    PlacementManifest, StagingFailpoint, StagingHeap,
+    encode_member, encode_prepare, prepare_from_closed_plan, AtomicId, AtomicMember, AtomicPlan,
+    AtomicRefuseReason, AtomicsError, CanonicalKey, CollectionId, CoordinatorSeq, HeapId,
+    OrdinaryCell, PlacementManifest, StagingFailpoint, StagingHeap,
 };
 use residiuum_format::{
     encode_atomic_frame, encode_atomic_member_envelope, encode_atomic_prepare_envelope, FrameKind,
@@ -22,6 +24,7 @@ use std::path::{Path, PathBuf};
 /// - `heap.id`, `meta`
 /// - `coordinator.log` — `BatchPrepare` frames (`sync_all` after each append)
 /// - `shard-XXXXXXXX.log` — `ItemEvent` member frames
+/// - `plan/<atomic>` — closed plan + bound frontier (`ATMPLAN1`)
 /// - `intent/<atomic>` — frozen members, written and synced *before* prepare
 /// - `payload/<atomic>-<ord>` — value bytes, synced *before* the member frame
 /// - `sealed/<atomic>` — versioned checksummed boundary (Heap, Atomic ID,
@@ -52,6 +55,7 @@ impl DurableLane {
             &root.join("meta"),
             format!("shard_count={shard_count}\n").as_bytes(),
         )?;
+        fs::create_dir_all(root.join("plan"))?;
         fs::create_dir_all(root.join("intent"))?;
         fs::create_dir_all(root.join("payload"))?;
         fs::create_dir_all(root.join("sealed"))?;
@@ -60,6 +64,7 @@ impl DurableLane {
             File::create(shard_path(&root, shard))?;
         }
         sync_dir(&root)?;
+        sync_dir(&root.join("plan"))?;
         sync_dir(&root.join("intent"))?;
         sync_dir(&root.join("payload"))?;
         sync_dir(&root.join("sealed"))?;
@@ -115,22 +120,32 @@ impl DurableLane {
         &self.heap
     }
 
-    /// Validate, then persist intent + prepare, then apply the kernel.
+    /// Validate a closed plan, then persist plan + intent + prepare, then apply.
     ///
-    /// CR-R2-001: kernel reservation happens before any durable path is
-    /// created or replaced. A refused prepare leaves the directory image
-    /// unchanged. Same ID / same root / same members is a no-write replay.
+    /// CR-ATMR3-001: the durable prepare is `prepare_from_closed_plan`. Independent
+    /// Atomic IDs, content roots, and member slices are not accepted. CR-R2-001:
+    /// kernel reservation happens before any durable path is created or replaced.
     pub fn begin_prepare(
         &mut self,
-        atomic_id: AtomicId,
-        content_root: ContentRoot,
+        plan: &AtomicPlan,
+        frontier: [u8; 32],
         members: &[AtomicMember],
     ) -> Result<(CoordinatorSeq, PlacementManifest), LaneError> {
         if self.armed == Some(StagingFailpoint::BeforePrepare) {
             return Err(LaneError::Injected(StagingFailpoint::BeforePrepare));
         }
+        if plan.heap_id() != self.heap.heap_id() {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::CrossHeapCollection).into());
+        }
+        let prepare = prepare_from_closed_plan(plan, frontier, members)?;
+        let atomic_id = prepare.atomic_id;
+        let content_root = prepare.content_root;
+        let sidecar = encode_plan_sidecar(plan, frontier)?;
         if let Some(existing) = self.heap.placement(atomic_id) {
-            if existing.content_root() == content_root && members_match(existing, members) {
+            if existing.content_root() == content_root
+                && members_match(existing, members)
+                && same_sidecar(&self.root, atomic_id, &sidecar)
+            {
                 let seq = self
                     .heap
                     .prepare_seq(atomic_id)
@@ -139,11 +154,11 @@ impl DurableLane {
             }
             return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
         }
-        let manifest = self
-            .heap
+        self.heap
             .check_begin_prepare(atomic_id, content_root, members)?;
+        persist_plan(&self.root, atomic_id, &sidecar)?;
         persist_intent(&self.root, atomic_id, members)?;
-        persist_prepare(&self.root, &manifest)?;
+        persist_prepare(&self.root, &prepare)?;
         let out = self.heap.begin_prepare(atomic_id, content_root, members)?;
         if self.armed == Some(StagingFailpoint::AfterPrepare) {
             return Err(LaneError::Injected(StagingFailpoint::AfterPrepare));
@@ -218,6 +233,16 @@ impl DurableLane {
     }
 }
 
+fn persist_plan(root: &Path, atomic_id: AtomicId, sidecar: &[u8]) -> Result<(), LaneError> {
+    write_exclusive(&plan_path(root, atomic_id), sidecar)
+}
+
+fn same_sidecar(root: &Path, atomic_id: AtomicId, sidecar: &[u8]) -> bool {
+    fs::read(plan_path(root, atomic_id))
+        .ok()
+        .is_some_and(|existing| existing == sidecar)
+}
+
 fn persist_intent(
     root: &Path,
     atomic_id: AtomicId,
@@ -239,25 +264,22 @@ fn persist_intent(
     write_exclusive(&intent_path(root, atomic_id), &buf)
 }
 
-fn persist_prepare(root: &Path, manifest: &PlacementManifest) -> Result<(), LaneError> {
-    let prepare = build_lane_prepare(
-        manifest.heap_id(),
-        manifest.member_manifest_root(),
-        manifest.atomic_id(),
-        manifest.content_root(),
-    );
+fn persist_prepare(
+    root: &Path,
+    prepare: &residiuum_atomics::AtomicPrepare,
+) -> Result<(), LaneError> {
     let envelope = encode_atomic_prepare_envelope(
         prepare.heap_id.as_bytes(),
-        manifest.atomic_id().as_bytes(),
-        manifest.content_root().as_bytes(),
+        prepare.atomic_id.as_bytes(),
+        prepare.content_root.as_bytes(),
     )
     .map_err(|e| LaneError::Format(e.to_string()))?;
-    let body = encode_prepare(&prepare)?;
+    let body = encode_prepare(prepare)?;
     let frame = encode_atomic_frame(
         FrameKind::BatchPrepare,
         &envelope,
         &body,
-        prepare_event_id(manifest.atomic_id()),
+        prepare_event_id(prepare.atomic_id),
     )
     .map_err(|e| LaneError::Format(e.to_string()))?;
     append_synced(&coordinator_path(root), &frame)
@@ -331,6 +353,10 @@ fn coordinator_path(root: &Path) -> PathBuf {
 
 fn shard_path(root: &Path, shard: u32) -> PathBuf {
     root.join(format!("shard-{shard:08x}.log"))
+}
+
+fn plan_path(root: &Path, atomic_id: AtomicId) -> PathBuf {
+    root.join("plan").join(format!("{atomic_id}"))
 }
 
 fn intent_path(root: &Path, atomic_id: AtomicId) -> PathBuf {

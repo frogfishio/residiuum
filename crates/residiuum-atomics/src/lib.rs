@@ -40,6 +40,7 @@ pub mod limits;
 pub mod oracle;
 pub mod outcome;
 pub mod plan;
+pub mod prepare;
 pub mod staging;
 pub mod validate;
 
@@ -51,7 +52,7 @@ pub use canonical::{
     decode_canonical_plan, encode_canonical_plan, plan_content_root, CANONICAL_TARGET_ORDER,
     CBOR_V1_REL, DOMAIN_ATOMIC_CONTENT, DOMAIN_ATOMIC_DECISION, DOMAIN_ATOMIC_ID,
     DOMAIN_ATOMIC_MANIFEST, DOMAIN_ATOMIC_MEMBER, DOMAIN_ATOMIC_PREDICATES, DOMAIN_ATOMIC_PREPARE,
-    DOMAIN_ATOMIC_READSET, DOMAIN_ATOMIC_TOMBSTONE,
+    DOMAIN_ATOMIC_READSET, DOMAIN_ATOMIC_RULES, DOMAIN_ATOMIC_TOMBSTONE,
 };
 pub use cbor::MAX_CBOR_DEPTH;
 pub use encode::{
@@ -87,6 +88,10 @@ pub use outcome::{
 pub use plan::{
     AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CanonicalKeyKind, CoordinationScope,
     MutationKind, PlanMutation, PlanPredicate, PredicateKind, ReadWitness, UnknownProfile,
+};
+pub use prepare::{
+    members_match_prepare, plan_predicate_set_root, plan_read_set_root, plan_rule_revision_root,
+    prepare_from_closed_plan, prepare_identity,
 };
 pub use staging::{
     ChunkPlan, CoordinatorRecord, CoordinatorSeq, CoordinatorStream, OrdinaryCell, PlacementEntry,

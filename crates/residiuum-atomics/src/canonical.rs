@@ -41,6 +41,9 @@ pub const DOMAIN_ATOMIC_READSET: &[u8] = b"RESIDIUUM-ATOMIC-READSET-V1";
 /// Predicate-set root (`ATOMICS_SPEC` §9).
 pub const DOMAIN_ATOMIC_PREDICATES: &[u8] = b"RESIDIUUM-ATOMIC-PREDICATES-V1";
 
+/// Active rule-revision root (`ATOMICS_SPEC` §9).
+pub const DOMAIN_ATOMIC_RULES: &[u8] = b"RESIDIUUM-ATOMIC-RULES-V1";
+
 /// Canonical member order components. Encoding of these bytes is ATM-0.2.
 ///
 /// Order is `(heap_id, collection_id, canonical_key_bytes, member_kind, ordinal)`.
@@ -410,7 +413,7 @@ fn encode_int(n: i64) -> Value {
     }
 }
 
-fn encode_read(r: &ReadWitness) -> Result<Value, AtomicsError> {
+pub(crate) fn encode_read(r: &ReadWitness) -> Result<Value, AtomicsError> {
     let mut e = vec![
         (1, Value::Bytes(r.collection_id.to_bytes().to_vec())),
         (2, Value::Map(encode_key_map(&r.key)?)),
@@ -437,7 +440,7 @@ fn encode_mutation(m: &PlanMutation) -> Result<Value, AtomicsError> {
     Ok(Value::Map(e))
 }
 
-fn encode_predicate(p: &PlanPredicate) -> Result<Value, AtomicsError> {
+pub(crate) fn encode_predicate(p: &PlanPredicate) -> Result<Value, AtomicsError> {
     let mut e = vec![(1, Value::Uint(u64::from(p.kind.wire_code())))];
     if let Some(c) = p.collection_id {
         e.push((2, Value::Bytes(c.to_bytes().to_vec())));
@@ -736,6 +739,7 @@ mod tests {
             DOMAIN_ATOMIC_MANIFEST,
             DOMAIN_ATOMIC_READSET,
             DOMAIN_ATOMIC_PREDICATES,
+            DOMAIN_ATOMIC_RULES,
         ];
         for (i, a) in all.iter().enumerate() {
             assert!(a.starts_with(b"RESIDIUUM-ATOMIC-"));
