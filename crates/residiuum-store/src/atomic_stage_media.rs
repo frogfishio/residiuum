@@ -8,7 +8,8 @@
 use crate::error::StoreError;
 use crate::layout::StorePaths;
 use residiuum_atomics::{
-    decode_member, decode_prepare, AtomicId, AtomicMember, AtomicPrepare, ContentRoot,
+    decode_member, decode_prepare, encode_prepare, AtomicId, AtomicMember, AtomicPrepare,
+    ContentRoot,
 };
 use residiuum_format::{
     examine_atomic_frame, scan_forward, AtomicEvidenceClass, AtomicFrameRole, FrameKind,
@@ -20,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 const PAYLOAD_MAGIC: &[u8] = b"ATPAY1";
 const SEAL_MAGIC: &[u8] = b"ATSEAL1";
+const PREPARE_MAGIC: &[u8] = b"ATPREP1";
 
 /// Staging facts recovered from store media only.
 #[derive(Debug, Default)]
@@ -55,6 +57,14 @@ pub(crate) fn encode_stage_payload(atomic_id: AtomicId, ordinal: u32, payload: &
     out
 }
 
+pub(crate) fn encode_stage_prepare(prepare: &AtomicPrepare) -> Result<Vec<u8>, StoreError> {
+    let encoded = encode_prepare(prepare).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+    let mut out = Vec::with_capacity(PREPARE_MAGIC.len() + encoded.len());
+    out.extend_from_slice(PREPARE_MAGIC);
+    out.extend_from_slice(&encoded);
+    Ok(out)
+}
+
 pub(crate) fn encode_stage_seal(atomic_id: AtomicId, content_root: ContentRoot) -> Vec<u8> {
     let mut out = Vec::with_capacity(SEAL_MAGIC.len() + 64);
     out.extend_from_slice(SEAL_MAGIC);
@@ -68,6 +78,16 @@ pub(crate) fn payload_event_id(atomic_id: AtomicId, ordinal: u32) -> [u8; 16] {
     hasher.update(b"residiuum.atomic-stage.payload");
     hasher.update(atomic_id.as_bytes());
     hasher.update(&ordinal.to_be_bytes());
+    let hash = hasher.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash.as_bytes()[..16]);
+    id
+}
+
+pub(crate) fn prepare_event_id(atomic_id: AtomicId) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"residiuum.atomic-stage.prepare");
+    hasher.update(atomic_id.as_bytes());
     let hash = hasher.finalize();
     let mut id = [0u8; 16];
     id.copy_from_slice(&hash.as_bytes()[..16]);
@@ -96,6 +116,9 @@ pub(crate) fn scan_stage_catalog(paths: &StorePaths) -> Result<StageCatalog, Sto
                 }
                 if let Some(id) = decode_stage_seal(&frame.body) {
                     catalog.seals.insert(id);
+                }
+                if let Some(prepare) = decode_stage_prepare(&frame.body) {
+                    catalog.prepares.insert(prepare.atomic_id, prepare);
                 }
                 continue;
             }
@@ -137,6 +160,13 @@ fn decode_stage_payload(body: &[u8]) -> Option<(AtomicId, u32, Vec<u8>)> {
     let ord_at = PAYLOAD_MAGIC.len() + 32;
     let ordinal = u32::from_be_bytes(body[ord_at..ord_at + 4].try_into().ok()?);
     Some((id, ordinal, body[header..].to_vec()))
+}
+
+fn decode_stage_prepare(body: &[u8]) -> Option<AtomicPrepare> {
+    if !body.starts_with(PREPARE_MAGIC) {
+        return None;
+    }
+    decode_prepare(&body[PREPARE_MAGIC.len()..]).ok()
 }
 
 fn decode_stage_seal(body: &[u8]) -> Option<AtomicId> {

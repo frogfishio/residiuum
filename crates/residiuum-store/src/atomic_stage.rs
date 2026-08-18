@@ -5,8 +5,8 @@
 //! opened, created, or consulted. Ordinary `get` / scan / history stay empty.
 
 use crate::atomic_stage_media::{
-    encode_stage_payload, encode_stage_seal, payload_event_id, scan_stage_catalog, seal_event_id,
-    StageCatalog,
+    encode_stage_payload, encode_stage_prepare, encode_stage_seal, payload_event_id,
+    prepare_event_id, scan_stage_catalog, seal_event_id, StageCatalog,
 };
 use crate::error::StoreError;
 use crate::store::Store;
@@ -213,6 +213,15 @@ impl StoreAtomicStage<'_> {
             &envelope,
             &body,
             event_id,
+        )?;
+        // Open rebuild keeps ItemEvent/PayloadChunk only. Persist the prepare
+        // again as a store-stage chunk so reopen does not lose authority.
+        let stage_body = encode_stage_prepare(prepare)?;
+        self.store.append_unindexed_atomic_frame(
+            FrameKind::PayloadChunk,
+            EMPTY_ENVELOPE,
+            &stage_body,
+            prepare_event_id(prepare.atomic_id),
         )
     }
 
