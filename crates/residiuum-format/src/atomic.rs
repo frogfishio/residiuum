@@ -20,7 +20,7 @@ use crate::ownership::{parse_ownership_envelope, OwnershipEvidence};
 use crate::scan::{scan_forward, ScanReport};
 use residiuum_atomics::{
     decode_decision, decode_member, decode_prepare, ordered_member_manifest_root, prepare_hash,
-    AtomicMember, DecisionCode, HeapId,
+    AtomicDecision, AtomicMember, AtomicPrepare, DecisionCode, Durability, HeapId,
 };
 use thiserror::Error;
 
@@ -134,8 +134,14 @@ pub struct ExaminedAtomicGroup {
 /// Outcome of aggregating Valid frames for one identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AtomicGroupClass {
-    /// One prepare, matching members, one consistent decision.
+    /// One prepare, matching committed members, one committed decision.
     Consistent,
+    /// Durable not-committed decision. Staged leftovers are reclaimable, not committed.
+    NotCommitted {
+        /// True when member frames exist beside the abort and must not be treated
+        /// as committed data.
+        reclaimable_members: bool,
+    },
     /// Identity is present but incomplete.
     Partial {
         /// Why the group is incomplete.
@@ -631,6 +637,17 @@ fn classify_group(frames: &[&(AtomicLinkage, Vec<u8>)]) -> AtomicGroupClass {
             reason: AtomicExamReason::BodyMismatch,
         };
     }
+    match decision.decision {
+        DecisionCode::Committed => classify_committed_group(prepare, decision, &members),
+        DecisionCode::NotCommitted => classify_not_committed_group(prepare, decision, &members),
+    }
+}
+
+fn classify_committed_group(
+    prepare: AtomicPrepare,
+    decision: AtomicDecision,
+    members: &[AtomicMember],
+) -> AtomicGroupClass {
     if decision.member_count as usize != members.len() {
         return AtomicGroupClass::Corrupt {
             reason: AtomicExamReason::BodyMismatch,
@@ -644,7 +661,7 @@ fn classify_group(frames: &[&(AtomicLinkage, Vec<u8>)]) -> AtomicGroupClass {
             };
         }
     };
-    match ordered_member_manifest_root(heap, &members) {
+    match ordered_member_manifest_root(heap, members) {
         Ok(root)
             if root == decision.member_root && root == prepare.ordered_member_manifest_root =>
         {
@@ -656,6 +673,30 @@ fn classify_group(frames: &[&(AtomicLinkage, Vec<u8>)]) -> AtomicGroupClass {
         Err(_) => AtomicGroupClass::Corrupt {
             reason: AtomicExamReason::BodyCorrupt,
         },
+    }
+}
+
+/// CR-ATMR3-002: not-committed is a normal terminal outcome.
+///
+/// The decision names the intended manifest and zero committed members. Observed
+/// staged frames are reclaimable leftovers, not a body mismatch against that
+/// intended root.
+fn classify_not_committed_group(
+    prepare: AtomicPrepare,
+    decision: AtomicDecision,
+    members: &[AtomicMember],
+) -> AtomicGroupClass {
+    if decision.validate().is_err()
+        || decision.durability != Durability::Durable
+        || decision.member_count != 0
+        || decision.member_root != prepare.ordered_member_manifest_root
+    {
+        return AtomicGroupClass::Corrupt {
+            reason: AtomicExamReason::BodyMismatch,
+        };
+    }
+    AtomicGroupClass::NotCommitted {
+        reclaimable_members: !members.is_empty(),
     }
 }
 
