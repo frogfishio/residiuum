@@ -31,4 +31,14 @@ pub enum LaneError {
         /// Scan hole classification.
         reason: &'static str,
     },
+    /// A diagnostic recovery ceiling was hit. Coverage is incomplete, not empty.
+    #[error("lane recovery incomplete: {what} ({observed} > {limit})")]
+    Incomplete {
+        /// Which ceiling was exceeded.
+        what: &'static str,
+        /// Observed quantity.
+        observed: u64,
+        /// Configured ceiling.
+        limit: u64,
+    },
 }

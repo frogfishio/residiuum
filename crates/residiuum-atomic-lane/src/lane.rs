@@ -1,9 +1,11 @@
 //! File-backed coordinator / member lane.
 
 use crate::error::LaneError;
+use crate::limits::RecoveryLimits;
 use crate::limits::{max_encoded_member_bytes, max_intent_members, max_payload_bytes, MAX_SHARDS};
 use crate::recover::{
-    encode_plan_sidecar, log_ack_path, replay_members, replay_prepares, replay_seals, seal_for,
+    encode_plan_sidecar, log_ack_path, persist_recovery_checkpoint, recover_heap, seal_for,
+    RecoveryBudget, RecoveryStats,
 };
 use crate::seal::encode_seal;
 use residiuum_atomics::{
@@ -31,10 +33,12 @@ use std::path::{Path, PathBuf};
 /// - `payload/<atomic>-<ord>` — value bytes, synced *before* the member frame
 /// - `sealed/<atomic>` — versioned checksummed boundary (Heap, Atomic ID,
 ///   content root, manifest root, member count)
+/// - `checkpoint` — identity summaries + acknowledged log tails
 pub struct DurableLane {
     root: PathBuf,
     heap: StagingHeap,
     armed: Option<StagingFailpoint>,
+    stats: RecoveryStats,
 }
 
 impl DurableLane {
@@ -72,10 +76,12 @@ impl DurableLane {
         sync_dir(&root.join("intent"))?;
         sync_dir(&root.join("payload"))?;
         sync_dir(&root.join("sealed"))?;
+        persist_recovery_checkpoint(&root, &heap, shard_count)?;
         Ok(Self {
             root,
             heap,
             armed: None,
+            stats: RecoveryStats::default(),
         })
     }
 
@@ -87,13 +93,14 @@ impl DurableLane {
         let heap_id = HeapId::from_bytes(id_bytes)?;
         let shard_count = parse_shard_count(&fs::read_to_string(root.join("meta"))?)?;
         let mut heap = StagingHeap::new(heap_id, shard_count)?;
-        replay_prepares(&root, heap_id, &mut heap)?;
-        replay_members(&root, shard_count, &mut heap)?;
-        replay_seals(&root, &mut heap)?;
+        let mut budget = RecoveryBudget::new(RecoveryLimits::prototype());
+        recover_heap(&root, heap_id, shard_count, &mut heap, &mut budget)?;
+        persist_recovery_checkpoint(&root, &heap, shard_count)?;
         Ok(Self {
             root,
             heap,
             armed: None,
+            stats: budget.stats,
         })
     }
 
@@ -122,6 +129,11 @@ impl DurableLane {
     /// Borrow the reconstructed / live kernel.
     pub const fn heap(&self) -> &StagingHeap {
         &self.heap
+    }
+
+    /// Bytes/frames/identities observed by the last `open`.
+    pub const fn recovery_stats(&self) -> &RecoveryStats {
+        &self.stats
     }
 
     /// Validate a closed plan, then persist plan + intent + prepare, then apply.
@@ -164,6 +176,7 @@ impl DurableLane {
         persist_intent(&self.root, atomic_id, members)?;
         persist_prepare(&self.root, &prepare)?;
         let out = self.heap.begin_prepare(atomic_id, content_root, members)?;
+        self.write_checkpoint()?;
         if self.armed == Some(StagingFailpoint::AfterPrepare) {
             return Err(LaneError::Injected(StagingFailpoint::AfterPrepare));
         }
@@ -207,6 +220,7 @@ impl DurableLane {
             content_root,
         )?;
         self.heap.append_staged(member, payload)?;
+        self.write_checkpoint()?;
         if self.armed == Some(StagingFailpoint::AfterMember(ordinal)) {
             return Err(LaneError::Injected(StagingFailpoint::AfterMember(ordinal)));
         }
@@ -223,7 +237,13 @@ impl DurableLane {
         }
         let record = seal_for(&self.heap, atomic_id)?;
         write_atomic(&sealed_path(&self.root, atomic_id), &encode_seal(&record))?;
+        self.write_checkpoint()?;
         Ok(())
+    }
+
+    fn write_checkpoint(&self) -> Result<(), LaneError> {
+        let shard_count = shard_count_from_layout(&self.root)?;
+        persist_recovery_checkpoint(&self.root, &self.heap, shard_count)
     }
 
     /// Negative-control hook. Never called by prepare / append / seal.

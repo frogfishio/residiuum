@@ -8,6 +8,7 @@
 
 #![deny(missing_docs)]
 
+mod checkpoint;
 mod error;
 mod lane;
 mod limits;
@@ -16,6 +17,8 @@ mod seal;
 
 pub use error::LaneError;
 pub use lane::DurableLane;
+pub use limits::RecoveryLimits;
+pub use recover::RecoveryStats;
 
 #[cfg(test)]
 mod tests {

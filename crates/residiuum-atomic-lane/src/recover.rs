@@ -1,7 +1,10 @@
 //! Authenticated reopen of coordinator, intent, members, and seals (CR-R2-002).
 
+use crate::checkpoint::{load_checkpoint, placement_matches, store_checkpoint, RecoveryCheckpoint};
 use crate::error::LaneError;
-use crate::limits::{max_encoded_member_bytes, max_intent_members, max_payload_bytes};
+use crate::limits::{
+    max_encoded_member_bytes, max_intent_members, max_payload_bytes, RecoveryLimits,
+};
 use crate::seal::{decode_seal, SealRecord};
 use residiuum_atomics::{
     decode_canonical_plan, decode_member, decode_prepare, member_hash,
@@ -12,8 +15,118 @@ use residiuum_format::{
     examine_atomic_frame, scan_forward, AtomicEvidenceClass, AtomicFrameRole, DecodedFrame,
     HoleReason, SafetyLimits, ScanRegion, ScanReport,
 };
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::Path;
+
+/// Observed reopen accounting (CR-ATMR3-004). Independent of total media size.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RecoveryStats {
+    /// Bytes actually read from logs.
+    pub bytes_scanned: u64,
+    /// Verified frames consumed.
+    pub frames_verified: u32,
+    /// Atomics installed in the live kernel.
+    pub atomics: u32,
+    /// Members installed in the live kernel.
+    pub members: u32,
+    /// Directory entries visited.
+    pub dirents: u32,
+    /// True when a valid checkpoint supplied the prefix.
+    pub used_checkpoint: bool,
+}
+
+/// Running recovery ceilings.
+pub struct RecoveryBudget {
+    /// Configured ceilings.
+    pub limits: RecoveryLimits,
+    /// Observed counters.
+    pub stats: RecoveryStats,
+}
+
+impl RecoveryBudget {
+    /// Start a reopen with prototype ceilings.
+    pub fn new(limits: RecoveryLimits) -> Self {
+        Self {
+            limits,
+            stats: RecoveryStats::default(),
+        }
+    }
+
+    fn charge_bytes(&mut self, n: u64) -> Result<(), LaneError> {
+        let next = self.stats.bytes_scanned.saturating_add(n);
+        if next > self.limits.max_log_bytes {
+            return Err(LaneError::Incomplete {
+                what: "log bytes",
+                observed: next,
+                limit: self.limits.max_log_bytes,
+            });
+        }
+        self.stats.bytes_scanned = next;
+        Ok(())
+    }
+
+    fn charge_frame(&mut self) -> Result<(), LaneError> {
+        let next = self.stats.frames_verified.saturating_add(1);
+        if next
+            > self
+                .limits
+                .max_members
+                .saturating_add(self.limits.max_atomics)
+        {
+            return Err(LaneError::Incomplete {
+                what: "frames",
+                observed: u64::from(next),
+                limit: u64::from(
+                    self.limits
+                        .max_members
+                        .saturating_add(self.limits.max_atomics),
+                ),
+            });
+        }
+        self.stats.frames_verified = next;
+        Ok(())
+    }
+
+    fn charge_atomic(&mut self) -> Result<(), LaneError> {
+        let next = self.stats.atomics.saturating_add(1);
+        if next > self.limits.max_atomics {
+            return Err(LaneError::Incomplete {
+                what: "atomics",
+                observed: u64::from(next),
+                limit: u64::from(self.limits.max_atomics),
+            });
+        }
+        self.stats.atomics = next;
+        Ok(())
+    }
+
+    fn charge_member(&mut self) -> Result<(), LaneError> {
+        let next = self.stats.members.saturating_add(1);
+        if next > self.limits.max_members {
+            return Err(LaneError::Incomplete {
+                what: "members",
+                observed: u64::from(next),
+                limit: u64::from(self.limits.max_members),
+            });
+        }
+        self.stats.members = next;
+        Ok(())
+    }
+
+    fn charge_dirent(&mut self) -> Result<(), LaneError> {
+        let next = self.stats.dirents.saturating_add(1);
+        if next > self.limits.max_dirents {
+            return Err(LaneError::Incomplete {
+                what: "directory entries",
+                observed: u64::from(next),
+                limit: u64::from(self.limits.max_dirents),
+            });
+        }
+        self.stats.dirents = next;
+        Ok(())
+    }
+}
 
 /// Sidecar magic for a closed plan plus the bound serialization frontier.
 pub const PLAN_SIDECAR_MAGIC: &[u8] = b"ATMPLAN1";
@@ -44,14 +157,21 @@ pub fn replay_prepares(
     root: &Path,
     heap_id: HeapId,
     heap: &mut StagingHeap,
+    from_offset: u64,
+    budget: &mut RecoveryBudget,
 ) -> Result<(), LaneError> {
     let path = coordinator_path(root);
     if !path.exists() {
         return Err(LaneError::Corrupt("coordinator.log missing"));
     }
-    let bytes = fs::read(&path)?;
+    let (bytes, base) = read_log_tail(&path, from_offset, budget)?;
     let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
-    refuse_coverage_damage(&report, read_log_ack(&path)?)?;
+    refuse_coverage_damage(
+        &report,
+        read_log_ack(&path)?,
+        base,
+        base + bytes.len() as u64,
+    )?;
     for (_, frame) in report.verified_frames() {
         let link = require_valid(frame, AtomicFrameRole::Prepare, "coordinator")?;
         let prepare = decode_prepare(&frame.body)?;
@@ -88,6 +208,8 @@ pub fn replay_prepares(
             }
             continue;
         }
+        budget.charge_frame()?;
+        budget.charge_atomic()?;
         heap.begin_prepare(prepare.atomic_id, prepare.content_root, &members)?;
     }
     Ok(())
@@ -97,16 +219,23 @@ pub fn replay_members(
     root: &Path,
     shard_count: u32,
     heap: &mut StagingHeap,
+    shard_offsets: &[u64],
+    budget: &mut RecoveryBudget,
 ) -> Result<(), LaneError> {
-    let mut staged = Vec::new();
     for shard in 0..shard_count {
         let path = shard_path(root, shard);
         if !path.exists() {
             continue;
         }
-        let bytes = fs::read(&path)?;
+        let from = shard_offsets.get(shard as usize).copied().unwrap_or(0);
+        let (bytes, base) = read_log_tail(&path, from, budget)?;
         let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
-        refuse_coverage_damage(&report, read_log_ack(&path)?)?;
+        refuse_coverage_damage(
+            &report,
+            read_log_ack(&path)?,
+            base,
+            base + bytes.len() as u64,
+        )?;
         for (_, frame) in report.verified_frames() {
             let link = require_valid(frame, AtomicFrameRole::Member, "member")?;
             let member = decode_member(&frame.body)?;
@@ -134,24 +263,27 @@ pub fn replay_members(
             if entry.shard.as_u32() != shard {
                 return Err(LaneError::Corrupt("member shard mismatch"));
             }
+            budget.charge_frame()?;
+            budget.charge_member()?;
             let payload = read_payload(root, member.atomic_id, member.ordinal)?;
-            staged.push((member, payload));
+            heap.append_staged(member, payload)?;
         }
-    }
-    staged.sort_by_key(|(m, _)| (m.atomic_id.to_bytes(), m.ordinal));
-    for (member, payload) in staged {
-        heap.append_staged(member, payload)?;
     }
     Ok(())
 }
 
-pub fn replay_seals(root: &Path, heap: &mut StagingHeap) -> Result<(), LaneError> {
+pub fn replay_seals(
+    root: &Path,
+    heap: &mut StagingHeap,
+    budget: &mut RecoveryBudget,
+) -> Result<(), LaneError> {
     let dir = root.join("sealed");
     if !dir.exists() {
         return Ok(());
     }
     let mut records = Vec::new();
     for entry in fs::read_dir(dir)? {
+        budget.charge_dirent()?;
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             continue;
@@ -255,10 +387,15 @@ pub fn read_log_ack(log_path: &Path) -> Result<u64, LaneError> {
 
 /// Holes inside the acknowledged prefix are damage, even when no later frame
 /// verifies. Bytes at or after `ack_len` are an unacked torn tail.
-fn refuse_coverage_damage(report: &ScanReport, ack_len: u64) -> Result<(), LaneError> {
-    if report.source_len < ack_len {
+fn refuse_coverage_damage(
+    report: &ScanReport,
+    ack_len: u64,
+    base: u64,
+    file_end: u64,
+) -> Result<(), LaneError> {
+    if file_end < ack_len {
         return Err(LaneError::Coverage {
-            start: report.source_len,
+            start: file_end,
             end: ack_len,
             reason: "acknowledged prefix truncated",
         });
@@ -268,23 +405,176 @@ fn refuse_coverage_damage(report: &ScanReport, ack_len: u64) -> Result<(), LaneE
         .iter()
         .rev()
         .find_map(|r| match r {
-            ScanRegion::VerifiedFrame { range, .. } => Some(range.end),
+            ScanRegion::VerifiedFrame { range, .. } => Some(base + range.end),
             _ => None,
         })
-        .unwrap_or(0);
+        .unwrap_or(base);
     let covered_end = ack_len.max(last_verified_end);
     for region in &report.regions {
         if let ScanRegion::Hole { range, reason } = region {
-            if range.start < covered_end {
+            if base + range.start < covered_end {
                 return Err(LaneError::Coverage {
-                    start: range.start,
-                    end: range.end,
+                    start: base + range.start,
+                    end: base + range.end,
                     reason: hole_reason_label(reason),
                 });
             }
         }
     }
     Ok(())
+}
+
+fn verify_log_coverage(path: &Path, budget: &mut RecoveryBudget) -> Result<(), LaneError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let (bytes, base) = read_log_tail(path, 0, budget)?;
+    let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
+    refuse_coverage_damage(
+        &report,
+        read_log_ack(path)?,
+        base,
+        base + bytes.len() as u64,
+    )
+}
+
+/// Read `[from, min(len, from+remaining_budget)]` without allocating `file.len()`.
+fn read_log_tail(
+    path: &Path,
+    from: u64,
+    budget: &mut RecoveryBudget,
+) -> Result<(Vec<u8>, u64), LaneError> {
+    let mut file = File::open(path)?;
+    let file_len = file.metadata()?.len();
+    if from > file_len {
+        return Err(LaneError::Corrupt("log tail offset"));
+    }
+    let remaining = file_len - from;
+    if remaining
+        > budget
+            .limits
+            .max_log_bytes
+            .saturating_sub(budget.stats.bytes_scanned)
+    {
+        return Err(LaneError::Incomplete {
+            what: "log bytes",
+            observed: remaining.saturating_add(budget.stats.bytes_scanned),
+            limit: budget.limits.max_log_bytes,
+        });
+    }
+    if from > 0 {
+        use std::io::Seek;
+        file.seek(std::io::SeekFrom::Start(from))?;
+    }
+    let mut buf = Vec::new();
+    buf.try_reserve(remaining as usize)
+        .map_err(|_| LaneError::Incomplete {
+            what: "log bytes",
+            observed: remaining,
+            limit: budget.limits.max_log_bytes,
+        })?;
+    file.read_to_end(&mut buf)?;
+    budget.charge_bytes(buf.len() as u64)?;
+    Ok((buf, from))
+}
+
+/// Reconstruct prefix identities from a checkpoint without scanning prefix logs.
+pub fn apply_checkpoint(
+    root: &Path,
+    heap: &mut StagingHeap,
+    ck: &RecoveryCheckpoint,
+    budget: &mut RecoveryBudget,
+) -> Result<(), LaneError> {
+    for item in &ck.atomics {
+        budget.charge_atomic()?;
+        let members = read_intent(root, item.atomic_id)?;
+        if members.len() as u32 != item.member_count {
+            return Err(LaneError::Corrupt("checkpoint member count"));
+        }
+        let (plan, frontier) = read_plan(root, item.atomic_id)?;
+        let derived = prepare_from_closed_plan(&plan, frontier, &members)?;
+        if derived.content_root != item.content_root
+            || derived.ordered_member_manifest_root != item.manifest_root
+            || derived.atomic_id != item.atomic_id
+        {
+            return Err(LaneError::Corrupt("checkpoint plan mismatch"));
+        }
+        heap.begin_prepare(item.atomic_id, item.content_root, &members)?;
+        {
+            let placement = heap
+                .placement(item.atomic_id)
+                .ok_or(LaneError::Corrupt("checkpoint placement"))?;
+            if !placement_matches(item, placement) {
+                return Err(LaneError::Corrupt("checkpoint placement mismatch"));
+            }
+        }
+        for member in members {
+            let path = payload_path(root, member.atomic_id, member.ordinal);
+            if !path.exists() {
+                continue;
+            }
+            budget.charge_member()?;
+            let payload = read_payload(root, member.atomic_id, member.ordinal)?;
+            heap.append_staged(member, payload)?;
+        }
+        if item.sealed {
+            heap.seal_member_boundary(item.atomic_id)?;
+        }
+    }
+    Ok(())
+}
+
+/// Open helper: checkpoint prefix plus bounded tails, or bounded full scan.
+pub fn recover_heap(
+    root: &Path,
+    heap_id: HeapId,
+    shard_count: u32,
+    heap: &mut StagingHeap,
+    budget: &mut RecoveryBudget,
+) -> Result<(), LaneError> {
+    match load_checkpoint(root, budget.limits) {
+        Ok(Some(ck)) if ck.shard_offsets.len() as u32 == shard_count => {
+            match apply_checkpoint(root, heap, &ck, budget) {
+                Ok(()) => {
+                    verify_log_coverage(&coordinator_path(root), budget)?;
+                    for shard in 0..shard_count {
+                        verify_log_coverage(&shard_path(root, shard), budget)?;
+                    }
+                    budget.stats.used_checkpoint = true;
+                    replay_prepares(root, heap_id, heap, ck.coordinator_offset, budget)?;
+                    replay_members(root, shard_count, heap, &ck.shard_offsets, budget)?;
+                    replay_seals(root, heap, budget)?;
+                    return Ok(());
+                }
+                Err(LaneError::Corrupt(_)) | Err(LaneError::Kernel(_)) => {
+                    *heap = StagingHeap::new(heap_id, shard_count)?;
+                    budget.stats = RecoveryStats::default();
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(Some(_)) | Ok(None) | Err(LaneError::Corrupt(_)) => {}
+        Err(e) => return Err(e),
+    }
+    replay_prepares(root, heap_id, heap, 0, budget)?;
+    replay_members(root, shard_count, heap, &[], budget)?;
+    replay_seals(root, heap, budget)?;
+    Ok(())
+}
+
+/// Persist a checkpoint of the reconstructed kernel and ack frontiers.
+pub fn persist_recovery_checkpoint(
+    root: &Path,
+    heap: &StagingHeap,
+    shard_count: u32,
+) -> Result<(), LaneError> {
+    let coordinator_offset = read_log_ack(&coordinator_path(root))?;
+    let mut shard_offsets = Vec::with_capacity(shard_count as usize);
+    for shard in 0..shard_count {
+        shard_offsets.push(read_log_ack(&shard_path(root, shard))?);
+    }
+    let ck = RecoveryCheckpoint::from_heap(heap, coordinator_offset, shard_offsets);
+    store_checkpoint(root, &ck)
 }
 
 fn hole_reason_label(reason: &HoleReason) -> &'static str {

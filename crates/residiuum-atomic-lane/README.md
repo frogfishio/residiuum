@@ -21,6 +21,7 @@ reference model. `Capabilities::atomics` stays false.
 | `intent/<atomic_id>` | length-prefixed frozen `AtomicMember` records |
 | `payload/<atomic_id>-<ordinal>` | staged value bytes |
 | `sealed/<atomic_id>` | versioned checksummed boundary (`R2SEAL1`) bound to Heap, Atomic ID, content root, manifest root, member count |
+| `checkpoint` | identity summaries plus acknowledged log tails for bounded reopen |
 
 ## Sync / first stable boundary
 
