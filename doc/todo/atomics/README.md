@@ -11,9 +11,10 @@ Execution authority:
 
 Current acceptance review:
 
-- [ATM1_ATM2_DEEP_REVIEW_CR_ATMR3_2026-08-18.md](./ATM1_ATM2_DEEP_REVIEW_CR_ATMR3_2026-08-18.md)
-  — ATM-1 technically acceptable pending regenerated handoff; ATM-2 not
-  accepted; active changes use only the `CR-ATMR3-*` namespace.
+- [ATM1_ATM2_DEEP_REVIEW_CR_ATMR4_2026-08-18.md](./ATM1_ATM2_DEEP_REVIEW_CR_ATMR4_2026-08-18.md)
+  — ATM-1 core remains sound but its plan/prepare seam and package gate require
+  changes; ATM-2 is not accepted; active changes use only the `CR-ATMR4-*`
+  namespace.
 
 Compatibility note:
 [TRANSACTIONS.md](./TRANSACTIONS.md) explains how transaction terminology may
