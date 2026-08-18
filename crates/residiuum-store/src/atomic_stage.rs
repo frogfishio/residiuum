@@ -10,7 +10,7 @@ use crate::store::Store;
 use residiuum_atomic_lane::DurableLane;
 use residiuum_atomics::{
     encode_member, encode_prepare, prepare_from_closed_plan, AtomicId, AtomicMember, AtomicPlan,
-    CoordinatorSeq, HeapId, PlacementManifest,
+    ChunkPlan, CoordinatorSeq, HeapId, PlacementManifest,
 };
 use residiuum_format::{encode_atomic_member_envelope, encode_atomic_prepare_envelope, FrameKind};
 use std::path::PathBuf;
@@ -112,6 +112,72 @@ impl StoreAtomicStage<'_> {
             &body,
             event_id,
         )?;
+        Ok(())
+    }
+
+    /// Persist the frozen chunk map on the peer lane.
+    pub fn commit_chunk_manifest(
+        &mut self,
+        atomic_id: AtomicId,
+        ordinal: u32,
+        plan: ChunkPlan,
+    ) -> Result<(), StoreError> {
+        self.lane
+            .commit_chunk_manifest(atomic_id, ordinal, plan)
+            .map_err(|e| StoreError::AtomicStage(e.to_string()))
+    }
+
+    /// Persist one chunk body. Appends an unindexed member frame only when the
+    /// assembled payload first becomes complete.
+    pub fn append_chunk(
+        &mut self,
+        member: AtomicMember,
+        index: u32,
+        body: Vec<u8>,
+    ) -> Result<(), StoreError> {
+        let content_root = self
+            .lane
+            .heap()
+            .placement(member.atomic_id)
+            .ok_or_else(|| StoreError::AtomicStage("append without prepare".into()))?
+            .content_root()
+            .to_bytes();
+        let heap = self.lane.heap().heap_id();
+        let envelope = encode_atomic_member_envelope(
+            heap.as_bytes(),
+            member.atomic_id.as_bytes(),
+            u64::from(member.ordinal),
+            &content_root,
+            None,
+        )
+        .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let encoded = encode_member(&member).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let event_id = member.event_id.to_bytes();
+        let atomic_id = member.atomic_id;
+        let ordinal = member.ordinal;
+        let was_complete = self
+            .lane
+            .heap()
+            .inspect_staged(atomic_id)
+            .and_then(|ms| ms.iter().find(|s| s.member.ordinal == ordinal))
+            .is_some_and(|s| s.payload_complete);
+        self.lane
+            .append_chunk(member, index, body)
+            .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let now_complete = self
+            .lane
+            .heap()
+            .inspect_staged(atomic_id)
+            .and_then(|ms| ms.iter().find(|s| s.member.ordinal == ordinal))
+            .is_some_and(|s| s.payload_complete);
+        if !was_complete && now_complete {
+            self.store.append_unindexed_atomic_frame(
+                FrameKind::ItemEvent,
+                &envelope,
+                &encoded,
+                event_id,
+            )?;
+        }
         Ok(())
     }
 

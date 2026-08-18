@@ -19,6 +19,13 @@ pub enum StagingFailpoint {
     AfterPrepare,
     /// Trip after staged member `n` has been appended.
     AfterMember(u32),
+    /// Trip after chunk `index` of `ordinal` has been persisted.
+    AfterChunk {
+        /// Member ordinal whose chunk map this body belongs to.
+        ordinal: u32,
+        /// Chunk index inside that map.
+        index: u32,
+    },
 }
 
 /// Result of a failpoint-armed operation.

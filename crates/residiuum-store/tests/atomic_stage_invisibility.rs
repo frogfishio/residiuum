@@ -2,7 +2,7 @@
 
 use residiuum_atomics::{
     AtomicId, AtomicMember, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CollectionId,
-    CoordinationScope, HeapId, MutationKind, ObjectIdentity, PlanMutation, ResourceLimits,
+    ChunkPlan, CoordinationScope, HeapId, MutationKind, ObjectIdentity, PlanMutation, ResourceLimits,
     VersionId,
 };
 use residiuum_format::{read_atomic_evidence, AtomicEvidenceClass, AtomicFrameRole, SafetyLimits};
@@ -202,4 +202,44 @@ fn reopen_keeps_staged_invisible() {
     assert_eq!(store.get("k").unwrap(), None);
     let scan = store.scan_live_logical().unwrap();
     assert!(scan.entries.is_empty());
+}
+
+#[test]
+fn chunked_stage_survives_reopen_and_stays_invisible() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let p0 = b"se";
+    let p1 = b"cret";
+    {
+        let mut store = Store::create(&path).unwrap();
+        let heap_id = HeapId::from_bytes(store.store_id()).unwrap();
+        let m = member();
+        let p = plan(heap_id, std::slice::from_ref(&m), b"secret");
+        {
+            let mut stage = store.atomic_stage().unwrap();
+            stage
+                .begin_prepare(&p, FRONTIER, std::slice::from_ref(&m))
+                .unwrap();
+            stage
+                .commit_chunk_manifest(
+                    aid(),
+                    0,
+                    ChunkPlan {
+                        total: 2,
+                        chunk_hashes: vec![
+                            *blake3::hash(p0).as_bytes(),
+                            *blake3::hash(p1).as_bytes(),
+                        ],
+                    },
+                )
+                .unwrap();
+            stage.append_chunk(m.clone(), 0, p0.to_vec()).unwrap();
+            stage.append_chunk(m, 1, p1.to_vec()).unwrap();
+            stage.seal_member_boundary(aid()).unwrap();
+        }
+        assert_eq!(store.get("k").unwrap(), None);
+    }
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.get("k").unwrap(), None);
+    assert!(store.scan_live_logical().unwrap().entries.is_empty());
 }

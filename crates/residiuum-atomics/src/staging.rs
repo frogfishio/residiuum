@@ -447,17 +447,17 @@ impl StagingHeap {
         Ok(())
     }
 
-    /// Freeze a per-member chunk map before any chunk is installed.
-    pub fn commit_chunk_manifest(
-        &mut self,
+    /// Validate a chunk-map commit without installing it.
+    pub fn check_commit_chunk_manifest(
+        &self,
         atomic_id: AtomicId,
         ordinal: u32,
-        plan: ChunkPlan,
+        plan: &ChunkPlan,
     ) -> Result<(), AtomicsError> {
         plan.validate_within(self.chunk_limits)?;
         let slot = self
             .staged
-            .get_mut(&atomic_id)
+            .get(&atomic_id)
             .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
         if slot.lifecycle.members == MemberPhase::DurableInvisible {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
@@ -475,7 +475,90 @@ impl StagingHeap {
         {
             return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget));
         }
+        Ok(())
+    }
+
+    /// Freeze a per-member chunk map before any chunk is installed.
+    pub fn commit_chunk_manifest(
+        &mut self,
+        atomic_id: AtomicId,
+        ordinal: u32,
+        plan: ChunkPlan,
+    ) -> Result<(), AtomicsError> {
+        self.check_commit_chunk_manifest(atomic_id, ordinal, &plan)?;
+        let slot = self
+            .staged
+            .get_mut(&atomic_id)
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
         slot.chunk_plans.insert(ordinal, plan);
+        Ok(())
+    }
+
+    /// Validate one chunk install without mutating the kernel.
+    pub fn check_append_chunk(
+        &self,
+        member: &AtomicMember,
+        index: u32,
+        body: &[u8],
+    ) -> Result<(), AtomicsError> {
+        if slot_is_sealed(self.staged.get(&member.atomic_id)) {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        member.validate()?;
+        if member.after_content_hash.is_none() {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+        }
+        if body.len() > self.chunk_limits.max_chunk_bytes as usize {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded));
+        }
+        let slot = self
+            .staged
+            .get(&member.atomic_id)
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+        let plan = slot
+            .chunk_plans
+            .get(&member.ordinal)
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+        if index >= plan.total {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        if chunk_hash(body) != plan.chunk_hashes[index as usize] {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+        }
+        let entry = slot
+            .manifest
+            .entries
+            .iter()
+            .find(|e| e.member.ordinal == member.ordinal)
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+        if entry.member != *member || entry.member_hash != member_hash(member)? {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        if let Some(staged) = slot
+            .members
+            .iter()
+            .find(|s| s.member.ordinal == member.ordinal)
+        {
+            if staged.member != *member {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+            }
+            let chunks = staged
+                .chunks
+                .as_ref()
+                .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+            if chunks
+                .get(index as usize)
+                .is_some_and(Option::is_some)
+            {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget));
+            }
+        } else {
+            let n = usize::try_from(plan.total)
+                .map_err(|_| AtomicsError::Refused(AtomicRefuseReason::LimitExceeded))?;
+            if n > self.chunk_limits.max_chunks as usize {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded));
+            }
+        }
         Ok(())
     }
 
@@ -486,6 +569,7 @@ impl StagingHeap {
         index: u32,
         body: Vec<u8>,
     ) -> Result<(), AtomicsError> {
+        self.check_append_chunk(&member, index, &body)?;
         if slot_is_sealed(self.staged.get(&member.atomic_id)) {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
@@ -606,6 +690,13 @@ impl StagingHeap {
         }
         self.shard_count = new_count;
         Ok(())
+    }
+
+    /// Examination-only committed chunk map, if any.
+    pub fn chunk_plan(&self, atomic_id: AtomicId, ordinal: u32) -> Option<&ChunkPlan> {
+        self.staged
+            .get(&atomic_id)
+            .and_then(|s| s.chunk_plans.get(&ordinal))
     }
 
     /// Examination-only staged lane. Not an ordinary read.

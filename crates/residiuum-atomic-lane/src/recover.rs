@@ -9,7 +9,7 @@ use crate::seal::{decode_seal, SealRecord};
 use residiuum_atomics::{
     decode_canonical_plan, decode_member, decode_prepare, member_hash,
     ordered_member_manifest_root, prepare_from_closed_plan, AtomicId, AtomicMember, AtomicPlan,
-    AtomicRefuseReason, AtomicsError, HeapId, StagingHeap,
+    AtomicRefuseReason, AtomicsError, ChunkPlan, HeapId, MemberPhase, StagingHeap,
 };
 use residiuum_format::{
     examine_atomic_frame, scan_forward, AtomicEvidenceClass, AtomicFrameRole, DecodedFrame,
@@ -264,9 +264,92 @@ pub fn replay_members(
                 return Err(LaneError::Corrupt("member shard mismatch"));
             }
             budget.charge_frame()?;
+            if chunk_manifest_path(root, member.atomic_id, member.ordinal).exists() {
+                continue;
+            }
             budget.charge_member()?;
             let payload = read_payload(root, member.atomic_id, member.ordinal)?;
             heap.append_staged(member, payload)?;
+        }
+    }
+    Ok(())
+}
+
+/// Reconstruct committed chunk maps and any present chunk bodies.
+pub fn replay_chunks(
+    root: &Path,
+    heap: &mut StagingHeap,
+    budget: &mut RecoveryBudget,
+) -> Result<(), LaneError> {
+    let dir = root.join("chunk-manifest");
+    if !dir.exists() {
+        return Ok(());
+    }
+    let mut manifests = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        budget.charge_dirent()?;
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(LaneError::Corrupt("chunk-manifest filename"));
+        };
+        if name.ends_with(".tmp") {
+            continue;
+        }
+        let Some((atomic_id, ordinal)) = parse_chunk_manifest_name(name) else {
+            return Err(LaneError::Corrupt("chunk-manifest filename"));
+        };
+        let plan = decode_chunk_manifest(&fs::read(entry.path())?)?;
+        manifests.push((atomic_id, ordinal, plan));
+    }
+    manifests.sort_by_key(|(id, ord, _)| (id.to_bytes(), *ord));
+    for (atomic_id, ordinal, plan) in manifests {
+        if heap
+            .lifecycle(atomic_id)
+            .is_some_and(|lc| lc.members == MemberPhase::DurableInvisible)
+        {
+            continue;
+        }
+        if let Some(existing) = heap.chunk_plan(atomic_id, ordinal) {
+            if existing != &plan {
+                return Err(LaneError::Corrupt("chunk-manifest conflict"));
+            }
+        } else {
+            heap.commit_chunk_manifest(atomic_id, ordinal, plan.clone())?;
+        }
+        let member = heap
+            .placement(atomic_id)
+            .and_then(|p| {
+                p.entries()
+                    .iter()
+                    .find(|e| e.member.ordinal == ordinal)
+                    .map(|e| e.member.clone())
+            })
+            .ok_or(LaneError::Corrupt("chunk-manifest without member"))?;
+        for index in 0..plan.total {
+            let path = chunk_body_path(root, atomic_id, ordinal, index);
+            if !path.exists() {
+                continue;
+            }
+            let body = fs::read(&path)?;
+            if let Some(staged) = heap
+                .inspect_staged(atomic_id)
+                .and_then(|ms| ms.iter().find(|s| s.member.ordinal == ordinal))
+            {
+                if let Some(chunks) = &staged.chunks {
+                    if let Some(Some(existing)) = chunks.get(index as usize) {
+                        if existing == &body {
+                            continue;
+                        }
+                        return Err(LaneError::Corrupt("chunk body conflict"));
+                    }
+                }
+            }
+            budget.charge_member()?;
+            heap.append_chunk(member.clone(), index, body)?;
         }
     }
     Ok(())
@@ -509,6 +592,9 @@ pub fn apply_checkpoint(
             }
         }
         for member in members {
+            if chunk_manifest_path(root, member.atomic_id, member.ordinal).exists() {
+                continue;
+            }
             let path = payload_path(root, member.atomic_id, member.ordinal);
             if !path.exists() {
                 continue;
@@ -517,6 +603,9 @@ pub fn apply_checkpoint(
             let payload = read_payload(root, member.atomic_id, member.ordinal)?;
             heap.append_staged(member, payload)?;
         }
+    }
+    replay_chunks(root, heap, budget)?;
+    for item in &ck.atomics {
         if item.sealed {
             heap.seal_member_boundary(item.atomic_id)?;
         }
@@ -543,6 +632,7 @@ pub fn recover_heap(
                     budget.stats.used_checkpoint = true;
                     replay_prepares(root, heap_id, heap, ck.coordinator_offset, budget)?;
                     replay_members(root, shard_count, heap, &ck.shard_offsets, budget)?;
+                    replay_chunks(root, heap, budget)?;
                     replay_seals(root, heap, budget)?;
                     return Ok(());
                 }
@@ -558,6 +648,7 @@ pub fn recover_heap(
     }
     replay_prepares(root, heap_id, heap, 0, budget)?;
     replay_members(root, shard_count, heap, &[], budget)?;
+    replay_chunks(root, heap, budget)?;
     replay_seals(root, heap, budget)?;
     Ok(())
 }
@@ -654,6 +745,53 @@ fn intent_path(root: &Path, atomic_id: AtomicId) -> std::path::PathBuf {
 
 fn payload_path(root: &Path, atomic_id: AtomicId, ordinal: u32) -> std::path::PathBuf {
     root.join("payload").join(format!("{atomic_id}-{ordinal}"))
+}
+
+fn chunk_manifest_path(root: &Path, atomic_id: AtomicId, ordinal: u32) -> std::path::PathBuf {
+    root.join("chunk-manifest")
+        .join(format!("{atomic_id}-{ordinal}"))
+}
+
+fn chunk_body_path(root: &Path, atomic_id: AtomicId, ordinal: u32, index: u32) -> std::path::PathBuf {
+    root.join("chunk")
+        .join(format!("{atomic_id}-{ordinal}-{index}"))
+}
+
+fn parse_chunk_manifest_name(name: &str) -> Option<(AtomicId, u32)> {
+    let (hex, ord) = name.rsplit_once('-')?;
+    let id_bytes = parse_hex32(hex)?;
+    let atomic_id = AtomicId::from_bytes(id_bytes).ok()?;
+    let ordinal = ord.parse().ok()?;
+    Some((atomic_id, ordinal))
+}
+
+fn decode_chunk_manifest(bytes: &[u8]) -> Result<ChunkPlan, LaneError> {
+    if bytes.len() < 4 {
+        return Err(LaneError::Corrupt("chunk-manifest truncated"));
+    }
+    let total = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
+    let expected = 4usize
+        .checked_add(32usize.checked_mul(total as usize).ok_or(LaneError::Corrupt(
+            "chunk-manifest overflow",
+        ))?)
+        .ok_or(LaneError::Corrupt("chunk-manifest overflow"))?;
+    if bytes.len() != expected {
+        return Err(LaneError::Corrupt("chunk-manifest length"));
+    }
+    let mut chunk_hashes = Vec::with_capacity(total as usize);
+    let mut off = 4usize;
+    for _ in 0..total {
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&bytes[off..off + 32]);
+        chunk_hashes.push(hash);
+        off += 32;
+    }
+    let plan = ChunkPlan {
+        total,
+        chunk_hashes,
+    };
+    plan.validate()?;
+    Ok(plan)
 }
 
 fn parse_hex32(s: &str) -> Option<[u8; 32]> {

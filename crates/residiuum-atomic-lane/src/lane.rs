@@ -11,8 +11,8 @@ use crate::seal::encode_seal;
 use crate::writer::LaneWriterGuard;
 use residiuum_atomics::{
     encode_member, encode_prepare, prepare_from_closed_plan, AtomicId, AtomicMember, AtomicPlan,
-    AtomicRefuseReason, AtomicsError, CanonicalKey, CollectionId, CoordinatorSeq, HeapId,
-    OrdinaryCell, PlacementManifest, StagingFailpoint, StagingHeap,
+    AtomicRefuseReason, AtomicsError, CanonicalKey, ChunkPlan, CollectionId, CoordinatorSeq,
+    HeapId, OrdinaryCell, PlacementManifest, StagingFailpoint, StagingHeap,
 };
 use residiuum_format::{
     encode_atomic_frame, encode_atomic_member_envelope, encode_atomic_prepare_envelope, FrameKind,
@@ -36,6 +36,8 @@ use std::path::{Path, PathBuf};
 ///   content root, manifest root, member count)
 /// - `checkpoint` — identity summaries + acknowledged log tails
 /// - `writer.lock` — exclusive physical writer (CR-ATMR3-007)
+/// - `chunk-manifest/<atomic>-<ord>` — frozen chunk map (total + hashes)
+/// - `chunk/<atomic>-<ord>-<index>` — one chunk body
 pub struct DurableLane {
     root: PathBuf,
     heap: StagingHeap,
@@ -68,6 +70,8 @@ impl DurableLane {
         fs::create_dir_all(root.join("plan"))?;
         fs::create_dir_all(root.join("intent"))?;
         fs::create_dir_all(root.join("payload"))?;
+        fs::create_dir_all(root.join("chunk-manifest"))?;
+        fs::create_dir_all(root.join("chunk"))?;
         fs::create_dir_all(root.join("sealed"))?;
         File::create(coordinator_path(&root))?;
         persist_log_ack(&coordinator_path(&root))?;
@@ -79,6 +83,8 @@ impl DurableLane {
         sync_dir(&root.join("plan"))?;
         sync_dir(&root.join("intent"))?;
         sync_dir(&root.join("payload"))?;
+        sync_dir(&root.join("chunk-manifest"))?;
+        sync_dir(&root.join("chunk"))?;
         sync_dir(&root.join("sealed"))?;
         persist_recovery_checkpoint(&root, &heap, shard_count)?;
         Ok(Self {
@@ -239,6 +245,84 @@ impl DurableLane {
         Ok(())
     }
 
+    /// Persist the frozen chunk map, then install it in the kernel.
+    pub fn commit_chunk_manifest(
+        &mut self,
+        atomic_id: AtomicId,
+        ordinal: u32,
+        plan: ChunkPlan,
+    ) -> Result<(), LaneError> {
+        if let Some(existing) = self.heap.chunk_plan(atomic_id, ordinal) {
+            if existing == &plan {
+                return Ok(());
+            }
+            return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget).into());
+        }
+        self.heap
+            .check_commit_chunk_manifest(atomic_id, ordinal, &plan)?;
+        persist_chunk_manifest(&self.root, atomic_id, ordinal, &plan)?;
+        self.heap
+            .commit_chunk_manifest(atomic_id, ordinal, plan)?;
+        self.write_checkpoint()?;
+        Ok(())
+    }
+
+    /// Persist one chunk body, then apply the kernel. Assembled payload is
+    /// written only when every chunk is present.
+    pub fn append_chunk(
+        &mut self,
+        member: AtomicMember,
+        index: u32,
+        body: Vec<u8>,
+    ) -> Result<(), LaneError> {
+        if let Some(staged) = self
+            .heap
+            .inspect_staged(member.atomic_id)
+            .and_then(|ms| ms.iter().find(|s| s.member.ordinal == member.ordinal))
+        {
+            if let Some(chunks) = &staged.chunks {
+                if let Some(Some(existing)) = chunks.get(index as usize) {
+                    if existing == &body && staged.member == member {
+                        return Ok(());
+                    }
+                    return Err(
+                        AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget).into(),
+                    );
+                }
+            }
+        }
+        self.heap.check_append_chunk(&member, index, &body)?;
+        persist_chunk_body(&self.root, member.atomic_id, member.ordinal, index, &body)?;
+        self.heap.append_chunk(member.clone(), index, body)?;
+        if let Some(staged) = self
+            .heap
+            .inspect_staged(member.atomic_id)
+            .and_then(|ms| ms.iter().find(|s| s.member.ordinal == member.ordinal))
+        {
+            if staged.payload_complete {
+                persist_payload(
+                    &self.root,
+                    member.atomic_id,
+                    member.ordinal,
+                    &staged.payload,
+                )?;
+            }
+        }
+        self.write_checkpoint()?;
+        if self.armed
+            == Some(StagingFailpoint::AfterChunk {
+                ordinal: member.ordinal,
+                index,
+            })
+        {
+            return Err(LaneError::Injected(StagingFailpoint::AfterChunk {
+                ordinal: member.ordinal,
+                index,
+            }));
+        }
+        Ok(())
+    }
+
     /// First stable boundary: kernel seal, then `sync_all` logs + `sealed/<id>`.
     pub fn seal_member_boundary(&mut self, atomic_id: AtomicId) -> Result<(), LaneError> {
         self.heap.seal_member_boundary(atomic_id)?;
@@ -321,6 +405,30 @@ fn persist_prepare(
     append_synced(&coordinator_path(root), &frame)
 }
 
+fn persist_chunk_manifest(
+    root: &Path,
+    atomic_id: AtomicId,
+    ordinal: u32,
+    plan: &ChunkPlan,
+) -> Result<(), LaneError> {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&plan.total.to_be_bytes());
+    for hash in &plan.chunk_hashes {
+        buf.extend_from_slice(hash);
+    }
+    write_exclusive(&chunk_manifest_path(root, atomic_id, ordinal), &buf)
+}
+
+fn persist_chunk_body(
+    root: &Path,
+    atomic_id: AtomicId,
+    ordinal: u32,
+    index: u32,
+    body: &[u8],
+) -> Result<(), LaneError> {
+    write_exclusive(&chunk_body_path(root, atomic_id, ordinal, index), body)
+}
+
 fn persist_payload(
     root: &Path,
     atomic_id: AtomicId,
@@ -401,6 +509,16 @@ fn intent_path(root: &Path, atomic_id: AtomicId) -> PathBuf {
 
 fn payload_path(root: &Path, atomic_id: AtomicId, ordinal: u32) -> PathBuf {
     root.join("payload").join(format!("{atomic_id}-{ordinal}"))
+}
+
+fn chunk_manifest_path(root: &Path, atomic_id: AtomicId, ordinal: u32) -> PathBuf {
+    root.join("chunk-manifest")
+        .join(format!("{atomic_id}-{ordinal}"))
+}
+
+fn chunk_body_path(root: &Path, atomic_id: AtomicId, ordinal: u32, index: u32) -> PathBuf {
+    root.join("chunk")
+        .join(format!("{atomic_id}-{ordinal}-{index}"))
 }
 
 fn sealed_path(root: &Path, atomic_id: AtomicId) -> PathBuf {
