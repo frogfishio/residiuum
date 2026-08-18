@@ -664,7 +664,8 @@ fn verify_checkpoint_prefixes(root: &Path, ck: &RecoveryCheckpoint) -> Result<()
     Ok(())
 }
 
-/// Open helper: checkpoint prefix plus bounded tails, or bounded full scan.
+/// Open helper: authenticated checkpoint prefix plus bounded tails, or a
+/// full scan when no v2 checkpoint exists (CR-ATMR4-003).
 pub fn recover_heap(
     root: &Path,
     heap_id: HeapId,
@@ -894,4 +895,47 @@ fn parse_hex32(s: &str) -> Option<[u8; 32]> {
         out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::checkpoint::{prefix_digest, store_checkpoint, RecoveryCheckpoint};
+
+    #[test]
+    fn covered_prefix_larger_than_budget_opens_from_tails() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let coord = coordinator_path(root);
+        let shard = shard_path(root, 0);
+        std::fs::write(&coord, []).unwrap();
+        std::fs::write(&shard, []).unwrap();
+        let covered = RecoveryLimits::prototype().max_log_bytes.saturating_mul(2);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&coord)
+            .unwrap()
+            .set_len(covered)
+            .unwrap();
+        std::fs::write(log_ack_path(&coord), covered.to_be_bytes()).unwrap();
+        std::fs::write(log_ack_path(&shard), 0u64.to_be_bytes()).unwrap();
+        let coord_hash = prefix_digest(&coord, covered).unwrap();
+        let shard_hash = prefix_digest(&shard, 0).unwrap();
+        let mut hid = [0u8; 16];
+        hid[0] = 1;
+        let heap_id = HeapId::from_bytes(hid).unwrap();
+        let heap = StagingHeap::new(heap_id, 1).unwrap();
+        let ck =
+            RecoveryCheckpoint::from_heap(&heap, covered, vec![0], coord_hash, vec![shard_hash]);
+        store_checkpoint(root, &ck).unwrap();
+        let mut heap = StagingHeap::new(heap_id, 1).unwrap();
+        let mut budget = RecoveryBudget::new(RecoveryLimits::prototype());
+        recover_heap(root, heap_id, 1, &mut heap, &mut budget).unwrap();
+        assert!(budget.stats.used_checkpoint);
+        assert!(
+            budget.stats.bytes_scanned < 64 * 1024,
+            "historical prefix must not be charged: {}",
+            budget.stats.bytes_scanned
+        );
+    }
 }
