@@ -230,15 +230,19 @@ Core envelope keys are:
 | 41 | `operation_id` | idempotent client mutation frames (`bstr` 16) |
 | 42 | `operation_content_hash` | when `operation_id` is present (`bstr` 32) |
 
-**Amendment (CR-ATM2-002, proposed):** landed HP-002 already used keys 31–36 for
-Heap ownership. The draft assignment of 31/32 to `operation_id` /
+**Amendment (CR-ATM2-002 / CR-R2-006):** landed HP-002 already used keys 31–36
+for Heap ownership. The draft assignment of 31/32 to `operation_id` /
 `operation_content_hash` is relocated to 41/42 so one registry covers FORMAT,
 ownership, and Atomics. Atomic writers MUST emit keys 31 and 34 together with
 37–40 so live-store `admit_frame_to_heap` can bind the frame. Compatibility:
 old ownership readers reject keys 37–40 as unknown; new readers ignore that
-namespace. Store paths that still emit 31/32 as operation identity on
-non-heap-aware item frames are a residual dual-read concern until architect
-acceptance. Keys 41 and 42 form one pair. Writers MUST emit both or neither.
+namespace. Store item writers emit 41/42 only. Store item readers accept a
+legacy 31/32 pair when key 32 is `bstr(32)` (operation content hash). A
+`bstr(16)` at key 32 is collection ownership and MUST NOT be read as operation
+identity. When 41/42 are present they win over a legacy 31/32 pair. Architect
+acceptance of this amendment is still required before treating the namespace
+as a published freeze. Keys 41 and 42 form one pair. Writers MUST emit both or
+neither.
 The operation ID is an opaque 16-byte string and the content hash is a 32-byte
 canonical request digest. They make an accepted mutation outcome
 reconstructable from authoritative media when a derived retry cache is absent

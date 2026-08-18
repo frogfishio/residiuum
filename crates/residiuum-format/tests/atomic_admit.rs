@@ -4,8 +4,8 @@ use residiuum_format::{
     admit_frame_to_heap, encode_atomic_commit_envelope, encode_atomic_frame,
     encode_atomic_member_envelope, encode_atomic_prepare_envelope, encode_deterministic_uint_map,
     encode_heap_binding_envelope, parse_ownership_envelope, read_atomic_evidence, scan_forward,
-    ActiveSegment, AdmitDecision, CborValue, FrameKind, OwnershipEvidence,
-    SafetyLimits, SegmentId, ENV_ATOMIC_CONTENT_ROOT, ENV_ATOMIC_ID, ENV_ATOMIC_ORDINAL,
+    ActiveSegment, AdmitDecision, CborValue, FrameKind, OwnershipEvidence, SafetyLimits, SegmentId,
+    ENV_ATOMIC_CONTENT_ROOT, ENV_ATOMIC_ID, ENV_ATOMIC_ORDINAL,
 };
 
 fn hid(n: u8) -> [u8; 16] {

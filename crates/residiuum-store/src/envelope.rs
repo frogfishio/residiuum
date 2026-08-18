@@ -11,10 +11,19 @@
 //! | 4 | `segment_id` | bstr(16) |
 //! | 5 | `created_ns` | uint |
 //! | 6 | `subject_id` | bstr |
-//! | 31 | `operation_id` | bstr(16), optional |
-//! | 32 | `operation_content_hash` | bstr(32), optional |
+//! | 31–36 | HEAP ownership (`heap_id` / `collection_id` / …) |
+//! | 37–40 | reserved Atomic extension (ignored here) |
+//! | 41 | `operation_id` | bstr(16), optional |
+//! | 42 | `operation_content_hash` | bstr(32), optional |
+//!
+//! Writers emit 41/42 only. Readers still accept a legacy pair at 31/32 when
+//! key 32 is `bstr(32)` (collection ownership is `bstr(16)`). A 16-byte key 32
+//! is ownership and never operation identity.
 
-use residiuum_format::{decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue};
+use residiuum_format::{
+    decode_deterministic_uint_map, encode_deterministic_uint_map, CborValue,
+    ENV_OPERATION_CONTENT_HASH, ENV_OPERATION_ID,
+};
 
 /// Maximum subject length in this draft (also bounds envelopes).
 pub const MAX_SUBJECT_LEN: usize = 4096;
@@ -99,8 +108,11 @@ pub fn encode_item_envelope(env: &ItemEnvelope) -> Result<Vec<u8>, &'static str>
     ];
     if let (Some(operation_id), Some(content_hash)) = (env.operation_id, env.operation_content_hash)
     {
-        entries.push((31u64, CborValue::Bytes(operation_id.to_vec())));
-        entries.push((32u64, CborValue::Bytes(content_hash.to_vec())));
+        entries.push((ENV_OPERATION_ID, CborValue::Bytes(operation_id.to_vec())));
+        entries.push((
+            ENV_OPERATION_CONTENT_HASH,
+            CborValue::Bytes(content_hash.to_vec()),
+        ));
     }
     encode_deterministic_uint_map(&entries).map_err(|_| "cbor encode failed")
 }
@@ -115,8 +127,10 @@ pub fn decode_item_envelope(bytes: &[u8]) -> Option<ItemEnvelope> {
     let mut segment_id = None;
     let mut created_ns = None;
     let mut subject = None;
-    let mut operation_id = None;
-    let mut operation_content_hash = None;
+    let mut raw_31: Option<Vec<u8>> = None;
+    let mut raw_32: Option<Vec<u8>> = None;
+    let mut raw_41: Option<Vec<u8>> = None;
+    let mut raw_42: Option<Vec<u8>> = None;
     for (k, v) in map {
         match k {
             1 => {
@@ -165,21 +179,32 @@ pub fn decode_item_envelope(bytes: &[u8]) -> Option<ItemEnvelope> {
                 let CborValue::Bytes(b) = v else {
                     return None;
                 };
-                operation_id = Some(bstr16(&b)?);
+                raw_31 = Some(b);
             }
             32 => {
                 let CborValue::Bytes(b) = v else {
                     return None;
                 };
-                operation_content_hash = Some(b.as_slice().try_into().ok()?);
+                raw_32 = Some(b);
             }
-            // Unknown keys retained by lossless tools; readers may ignore.
+            k if k == ENV_OPERATION_ID => {
+                let CborValue::Bytes(b) = v else {
+                    return None;
+                };
+                raw_41 = Some(b);
+            }
+            k if k == ENV_OPERATION_CONTENT_HASH => {
+                let CborValue::Bytes(b) = v else {
+                    return None;
+                };
+                raw_42 = Some(b);
+            }
+            // Ownership 33–36, Atomic 37–40, and other unknowns are ignored.
             _ => {}
         }
     }
-    if operation_id.is_some() != operation_content_hash.is_some() {
-        return None;
-    }
+    let (operation_id, operation_content_hash) =
+        classify_operation_identity(raw_31, raw_32, raw_41, raw_42)?;
     Some(ItemEnvelope {
         store_id: store_id?,
         segment_id: segment_id?,
@@ -192,10 +217,36 @@ pub fn decode_item_envelope(bytes: &[u8]) -> Option<ItemEnvelope> {
     })
 }
 
+/// Current pair is 41/42. Legacy 31/32 is operation identity only when key 32
+/// is a 32-byte hash. A 16-byte key 32 is collection ownership.
+fn classify_operation_identity(
+    raw_31: Option<Vec<u8>>,
+    raw_32: Option<Vec<u8>>,
+    raw_41: Option<Vec<u8>>,
+    raw_42: Option<Vec<u8>>,
+) -> Option<(Option<[u8; 16]>, Option<[u8; 32]>)> {
+    if raw_41.is_some() || raw_42.is_some() {
+        let id = bstr16(raw_41.as_deref()?)?;
+        let hash: [u8; 32] = raw_42.as_deref()?.try_into().ok()?;
+        return Some((Some(id), Some(hash)));
+    }
+    if let (Some(id_bytes), Some(hash_bytes)) = (raw_31, raw_32) {
+        if hash_bytes.len() == 32 {
+            let id = bstr16(&id_bytes)?;
+            let hash: [u8; 32] = hash_bytes.as_slice().try_into().ok()?;
+            return Some((Some(id), Some(hash)));
+        }
+    }
+    Some((None, None))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use residiuum_format::validate_deterministic_cbor_envelope;
+    use residiuum_format::{
+        decode_deterministic_uint_map, encode_deterministic_uint_map,
+        validate_deterministic_cbor_envelope, CborValue,
+    };
 
     #[test]
     fn roundtrip() {
@@ -241,6 +292,100 @@ mod tests {
         // map{1: bstr(16 zeros)} only — missing required keys.
         let mut bytes = vec![0xa1, 0x01, 0x50];
         bytes.extend_from_slice(&[0u8; 16]);
+        assert!(decode_item_envelope(&bytes).is_none());
+    }
+
+    fn core() -> ItemEnvelope {
+        ItemEnvelope {
+            store_id: [1u8; 16],
+            segment_id: [2u8; 16],
+            item_id: [3u8; 16],
+            event_kind: EventKind::Put,
+            created_ns: 99,
+            subject: b"user-42".to_vec(),
+            operation_id: None,
+            operation_content_hash: None,
+        }
+    }
+
+    fn core_entries() -> Vec<(u64, CborValue)> {
+        vec![
+            (1, CborValue::Bytes([3u8; 16].to_vec())),
+            (2, CborValue::Uint(1)),
+            (3, CborValue::Bytes([1u8; 16].to_vec())),
+            (4, CborValue::Bytes([2u8; 16].to_vec())),
+            (5, CborValue::Uint(99)),
+            (6, CborValue::Bytes(b"user-42".to_vec())),
+        ]
+    }
+
+    #[test]
+    fn writer_emits_41_42_not_31_32() {
+        let mut env = core();
+        env.operation_id = Some([4; 16]);
+        env.operation_content_hash = Some([5; 32]);
+        let bytes = encode_item_envelope(&env).unwrap();
+        let map = decode_deterministic_uint_map(&bytes).unwrap();
+        let keys: Vec<u64> = map.into_iter().map(|(k, _)| k).collect();
+        assert!(keys.contains(&ENV_OPERATION_ID));
+        assert!(keys.contains(&ENV_OPERATION_CONTENT_HASH));
+        assert!(!keys.contains(&31));
+        assert!(!keys.contains(&32));
+    }
+
+    #[test]
+    fn decodes_legacy_31_32_operation_pair() {
+        let mut entries = core_entries();
+        entries.push((31, CborValue::Bytes([4u8; 16].to_vec())));
+        entries.push((32, CborValue::Bytes([5u8; 32].to_vec())));
+        let bytes = encode_deterministic_uint_map(&entries).unwrap();
+        let decoded = decode_item_envelope(&bytes).unwrap();
+        assert_eq!(decoded.operation_id, Some([4; 16]));
+        assert_eq!(decoded.operation_content_hash, Some([5; 32]));
+    }
+
+    #[test]
+    fn ownership_31_32_are_not_operation_identity() {
+        let mut entries = core_entries();
+        entries.push((31, CborValue::Bytes([9u8; 16].to_vec())));
+        entries.push((32, CborValue::Bytes([8u8; 16].to_vec())));
+        entries.push((34, CborValue::Uint(1)));
+        let bytes = encode_deterministic_uint_map(&entries).unwrap();
+        let decoded = decode_item_envelope(&bytes).unwrap();
+        assert_eq!(decoded.operation_id, None);
+        assert_eq!(decoded.operation_content_hash, None);
+    }
+
+    #[test]
+    fn heap_owned_atomic_keys_are_ignored() {
+        let mut entries = core_entries();
+        entries.push((31, CborValue::Bytes([9u8; 16].to_vec())));
+        entries.push((34, CborValue::Uint(1)));
+        entries.push((37, CborValue::Bytes([7u8; 32].to_vec())));
+        entries.push((39, CborValue::Bytes([6u8; 32].to_vec())));
+        let bytes = encode_deterministic_uint_map(&entries).unwrap();
+        let decoded = decode_item_envelope(&bytes).unwrap();
+        assert_eq!(decoded.operation_id, None);
+    }
+
+    #[test]
+    fn current_41_42_wins_over_legacy_31_32() {
+        let mut entries = core_entries();
+        entries.push((31, CborValue::Bytes([1u8; 16].to_vec())));
+        entries.push((32, CborValue::Bytes([2u8; 32].to_vec())));
+        entries.push((41, CborValue::Bytes([4u8; 16].to_vec())));
+        entries.push((42, CborValue::Bytes([5u8; 32].to_vec())));
+        let bytes = encode_deterministic_uint_map(&entries).unwrap();
+        let decoded = decode_item_envelope(&bytes).unwrap();
+        assert_eq!(decoded.operation_id, Some([4; 16]));
+        assert_eq!(decoded.operation_content_hash, Some([5; 32]));
+    }
+
+    #[test]
+    fn incomplete_41_42_pair_is_rejected() {
+        let mut entries = core_entries();
+        entries.push((41, CborValue::Bytes([4u8; 16].to_vec())));
+        let bytes = encode_deterministic_uint_map(&entries).unwrap();
         assert!(decode_item_envelope(&bytes).is_none());
     }
 }

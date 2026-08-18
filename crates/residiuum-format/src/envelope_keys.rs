@@ -3,8 +3,8 @@
 //! One uint-key map is shared by FORMAT_SPEC §4.4, HEAP ownership (HP-002),
 //! and the Atomic extension. Keys 1–30 keep FORMAT_SPEC core meanings.
 //! Keys 31–36 are HEAP ownership. Keys 37–40 are the reserved Atomic
-//! namespace. Client `operation_id` / `operation_content_hash` are proposed
-//! at 41 / 42 and are not emitted by Atomic or ownership helpers.
+//! namespace. Client `operation_id` / `operation_content_hash` live at 41 / 42
+//! (CR-R2-006). Atomic and ownership helpers do not emit them.
 
 /// Envelope key: `heap_id` (bstr 16). Every heap-aware frame.
 pub const ENV_HEAP_ID: u64 = 31;
@@ -28,9 +28,9 @@ pub const ENV_ATOMIC_CONTENT_ROOT: u64 = 39;
 /// Envelope key: Heap `commit_position` (nonzero uint).
 pub const ENV_ATOMIC_COMMIT_POSITION: u64 = 40;
 
-/// Proposed: client `operation_id` (`bstr` 16). Not emitted here.
+/// Client `operation_id` (`bstr` 16). Store writers emit this pair, not 31/32.
 pub const ENV_OPERATION_ID: u64 = 41;
-/// Proposed: `operation_content_hash` (`bstr` 32). Not emitted here.
+/// `operation_content_hash` (`bstr` 32). Emitted with [`ENV_OPERATION_ID`].
 pub const ENV_OPERATION_CONTENT_HASH: u64 = 42;
 
 /// First key of the reserved Atomic extension namespace.
