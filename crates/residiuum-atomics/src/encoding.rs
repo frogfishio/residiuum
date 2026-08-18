@@ -184,7 +184,7 @@ pub fn verify_decimal_value(bytes: &[u8]) -> Result<(Vec<u8>, i64), AtomicsError
     Ok((coefficient, scale))
 }
 
-fn field<'a>(map: &'a [(u64, Value)], key: u64) -> Option<&'a Value> {
+fn field(map: &[(u64, Value)], key: u64) -> Option<&Value> {
     map.iter().find(|(k, _)| *k == key).map(|(_, v)| v)
 }
 

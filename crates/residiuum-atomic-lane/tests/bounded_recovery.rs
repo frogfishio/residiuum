@@ -91,7 +91,11 @@ fn corrupt(err: LaneError) {
 #[test]
 fn create_refuses_u32_max_shard_count() {
     let dir = tempfile::tempdir().unwrap();
-    limit(expect_err(DurableLane::create(dir.path(), hid(1), u32::MAX)));
+    limit(expect_err(DurableLane::create(
+        dir.path(),
+        hid(1),
+        u32::MAX,
+    )));
 }
 
 #[test]

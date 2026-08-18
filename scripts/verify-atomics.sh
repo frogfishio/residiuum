@@ -149,6 +149,11 @@ case "$PROFILE" in
       cargo test -p residiuum-atomics --offline --all-targets
     run_cmd ATM-CRS "residiuum-atomic-lane --all-targets" \
       cargo test -p residiuum-atomic-lane --offline --all-targets
+    run_cmd ATM-ENC "cargo fmt --check atomics/format/lane" \
+      cargo fmt -p residiuum-atomics -p residiuum-format -p residiuum-atomic-lane -- --check
+    run_cmd ATM-ENC "clippy -D warnings --no-deps atomics/format/lane" \
+      cargo clippy -p residiuum-atomics -p residiuum-format -p residiuum-atomic-lane \
+      --offline --all-targets --no-deps -- -D warnings
     ;;
 esac
 

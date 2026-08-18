@@ -520,9 +520,6 @@ fn handle_carries_frozen_encoding_profile() {
         EncodingProfile::INTEGER,
     );
     assert_eq!(handle.encoding(), EncodingProfile::INTEGER);
-    assert_eq!(
-        handle.encoding().key_kind(),
-        CanonicalKeyKind::Integer
-    );
+    assert_eq!(handle.encoding().key_kind(), CanonicalKeyKind::Integer);
     assert_eq!(handle.encoding().value_encoding(), ValueEncoding::Integer);
 }
