@@ -34,6 +34,7 @@ pub mod adaptive_write;
 
 mod atomic_file;
 mod atomic_stage;
+mod atomic_stage_media;
 mod backup;
 mod boundary_probe;
 mod catalog;

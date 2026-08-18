@@ -285,7 +285,7 @@ pub enum StoreError {
     #[error("store writer lock held: {0}")]
     WriterLockHeld(Box<crate::writer_lock::WriterLockObservation>),
 
-    /// Store-owned Atomic staging refused or the peer lane failed (CR-ATMR3-006).
+    /// Store-owned Atomic staging refused (CR-ATMR4-005).
     #[error("atomic stage: {0}")]
     AtomicStage(String),
 

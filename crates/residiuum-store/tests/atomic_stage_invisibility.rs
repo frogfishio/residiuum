@@ -1,9 +1,9 @@
 //! CR-ATMR3-006: staged Atomic material is invisible on store read surfaces.
 
 use residiuum_atomics::{
-    AtomicId, AtomicMember, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CollectionId,
-    ChunkPlan, CoordinationScope, HeapId, MutationKind, ObjectIdentity, PlanMutation, ResourceLimits,
-    VersionId,
+    AtomicId, AtomicMember, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, ChunkPlan,
+    CollectionId, CoordinationScope, HeapId, MemberPhase, MutationKind, ObjectIdentity,
+    PlanMutation, ResourceLimits, VersionId,
 };
 use residiuum_format::{read_atomic_evidence, AtomicEvidenceClass, AtomicFrameRole, SafetyLimits};
 use residiuum_store::{list_secondary_index_paths, DurabilityMode, Store, StoreError};
@@ -242,4 +242,92 @@ fn chunked_stage_survives_reopen_and_stays_invisible() {
     let store = Store::open(&path).unwrap();
     assert_eq!(store.get("k").unwrap(), None);
     assert!(store.scan_live_logical().unwrap().entries.is_empty());
+}
+
+#[test]
+fn peer_lane_is_not_created_or_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap_id = HeapId::from_bytes(store.store_id()).unwrap();
+    let m = member();
+    let p = plan(heap_id, std::slice::from_ref(&m), b"secret");
+    let lane;
+    {
+        let mut stage = store.atomic_stage().unwrap();
+        lane = stage.lane_root();
+        stage
+            .begin_prepare(&p, FRONTIER, std::slice::from_ref(&m))
+            .unwrap();
+        stage.append_staged(m, b"secret".to_vec()).unwrap();
+        stage.seal_member_boundary(aid()).unwrap();
+        assert!(!lane.exists(), "store stage must not create a peer lane");
+        assert_eq!(
+            stage.kernel().lifecycle(aid()).unwrap().members,
+            MemberPhase::DurableInvisible
+        );
+    }
+    fs::create_dir_all(&lane).unwrap();
+    fs::write(lane.join("junk"), b"not-authority").unwrap();
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.get("k").unwrap(), None);
+    fs::remove_dir_all(&lane).unwrap();
+    {
+        let stage = store.atomic_stage().unwrap();
+        assert!(stage.kernel().can_resolve(aid()));
+        assert_eq!(
+            stage.kernel().lifecycle(aid()).unwrap().members,
+            MemberPhase::DurableInvisible
+        );
+    }
+}
+
+#[test]
+fn same_id_retry_and_final_chunk_close_store_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap_id = HeapId::from_bytes(store.store_id()).unwrap();
+    let m = member();
+    let p = plan(heap_id, std::slice::from_ref(&m), b"secret");
+    let p0 = b"se";
+    let p1 = b"cret";
+    {
+        let mut stage = store.atomic_stage().unwrap();
+        let first = stage
+            .begin_prepare(&p, FRONTIER, std::slice::from_ref(&m))
+            .unwrap();
+        let again = stage
+            .begin_prepare(&p, FRONTIER, std::slice::from_ref(&m))
+            .unwrap();
+        assert_eq!(first.0, again.0);
+        stage
+            .commit_chunk_manifest(
+                aid(),
+                0,
+                ChunkPlan {
+                    total: 2,
+                    chunk_hashes: vec![*blake3::hash(p0).as_bytes(), *blake3::hash(p1).as_bytes()],
+                },
+            )
+            .unwrap();
+        stage.append_chunk(m.clone(), 0, p0.to_vec()).unwrap();
+        stage.append_chunk(m.clone(), 1, p1.to_vec()).unwrap();
+        stage.append_chunk(m, 1, p1.to_vec()).unwrap();
+        stage.seal_member_boundary(aid()).unwrap();
+        stage.seal_member_boundary(aid()).unwrap();
+    }
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    let stage = store.atomic_stage().unwrap();
+    assert!(stage.kernel().can_resolve(aid()));
+    assert_eq!(
+        stage.kernel().inspect_staged(aid()).unwrap()[0].payload,
+        b"secret"
+    );
+    assert_eq!(
+        stage.kernel().lifecycle(aid()).unwrap().members,
+        MemberPhase::DurableInvisible
+    );
 }

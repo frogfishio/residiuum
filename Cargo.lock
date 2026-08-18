@@ -1305,7 +1305,6 @@ dependencies = [
  "getrandom 0.3.4",
  "hex",
  "hmac",
- "residiuum-atomic-lane",
  "residiuum-atomics",
  "residiuum-format",
  "residiuum-heap",
