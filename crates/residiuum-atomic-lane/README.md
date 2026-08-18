@@ -14,7 +14,9 @@ reference model. `Capabilities::atomics` stays false.
 | `heap.id` | 16-byte Heap identity |
 | `meta` | `shard_count=` |
 | `coordinator.log` | concatenated `BatchPrepare` frames |
+| `coordinator.ack` | acknowledged coordinator length after the last `sync_all` |
 | `shard-XXXXXXXX.log` | concatenated `ItemEvent` member frames |
+| `shard-XXXXXXXX.ack` | acknowledged shard-log length after the last `sync_all` |
 | `plan/<atomic_id>` | closed plan + bound frontier (`ATMPLAN1`); prepare is derived from this |
 | `intent/<atomic_id>` | length-prefixed frozen `AtomicMember` records |
 | `payload/<atomic_id>-<ordinal>` | staged value bytes |
@@ -32,10 +34,13 @@ creates `sealed/<atomic_id>` and `sync_all`s that file and its directory. That
 marker plus the preceding log syncs is the first durable-invisible boundary.
 
 Reopen authenticates the plan sidecar, recomputes the prepare from that plan,
-and refuses if the coordinator frame is not byte-identical. It also checks
-intent members against the prepare's ordered manifest root, envelope linkage
-against decoded bodies, payload hashes, shard placement, and the checksummed
-seal. Placeholder / synthetic prepare roots are refused.
+and refuses if the coordinator frame is not byte-identical. Scan holes inside
+the acknowledged log prefix are coverage damage, even when no later frame
+verifies. A torn tail past the last `.ack` is ignored and does not invent a
+prepare. It also checks intent members against the prepare's ordered manifest
+root, envelope linkage against decoded bodies, payload hashes, shard
+placement, and the checksummed seal. Placeholder / synthetic prepare roots are
+refused.
 Ordinary `get` / `scan` never observe staged members. RQL, history, watch, and
 secondary indexes are not implemented here.
 

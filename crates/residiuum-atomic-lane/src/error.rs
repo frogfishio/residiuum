@@ -21,4 +21,14 @@ pub enum LaneError {
     /// On-disk image is missing a required sidecar or identity.
     #[error("corrupt lane: {0}")]
     Corrupt(&'static str),
+    /// Acknowledged log coverage is damaged (not a torn unacked tail).
+    #[error("lane coverage {start}..{end}: {reason}")]
+    Coverage {
+        /// Hole start offset.
+        start: u64,
+        /// Hole end offset.
+        end: u64,
+        /// Scan hole classification.
+        reason: &'static str,
+    },
 }

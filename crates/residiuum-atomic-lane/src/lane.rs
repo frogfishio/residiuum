@@ -3,7 +3,7 @@
 use crate::error::LaneError;
 use crate::limits::{max_encoded_member_bytes, max_intent_members, max_payload_bytes, MAX_SHARDS};
 use crate::recover::{
-    encode_plan_sidecar, replay_members, replay_prepares, replay_seals, seal_for,
+    encode_plan_sidecar, log_ack_path, replay_members, replay_prepares, replay_seals, seal_for,
 };
 use crate::seal::encode_seal;
 use residiuum_atomics::{
@@ -23,7 +23,9 @@ use std::path::{Path, PathBuf};
 /// Layout under `root`:
 /// - `heap.id`, `meta`
 /// - `coordinator.log` — `BatchPrepare` frames (`sync_all` after each append)
+/// - `coordinator.ack` — acknowledged coordinator length
 /// - `shard-XXXXXXXX.log` — `ItemEvent` member frames
+/// - `shard-XXXXXXXX.ack` — acknowledged shard-log length
 /// - `plan/<atomic>` — closed plan + bound frontier (`ATMPLAN1`)
 /// - `intent/<atomic>` — frozen members, written and synced *before* prepare
 /// - `payload/<atomic>-<ord>` — value bytes, synced *before* the member frame
@@ -60,8 +62,10 @@ impl DurableLane {
         fs::create_dir_all(root.join("payload"))?;
         fs::create_dir_all(root.join("sealed"))?;
         File::create(coordinator_path(&root))?;
+        persist_log_ack(&coordinator_path(&root))?;
         for shard in 0..shard_count {
             File::create(shard_path(&root, shard))?;
+            persist_log_ack(&shard_path(&root, shard))?;
         }
         sync_dir(&root)?;
         sync_dir(&root.join("plan"))?;
@@ -425,7 +429,12 @@ fn append_synced(path: &Path, bytes: &[u8]) -> Result<(), LaneError> {
     if let Some(parent) = path.parent() {
         sync_dir(parent)?;
     }
-    Ok(())
+    persist_log_ack(path)
+}
+
+fn persist_log_ack(log_path: &Path) -> Result<(), LaneError> {
+    let len = fs::metadata(log_path)?.len();
+    write_atomic(&log_ack_path(log_path), &len.to_be_bytes())
 }
 
 fn sync_path(path: &Path) -> Result<(), LaneError> {

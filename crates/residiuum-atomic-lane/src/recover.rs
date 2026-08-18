@@ -10,7 +10,7 @@ use residiuum_atomics::{
 };
 use residiuum_format::{
     examine_atomic_frame, scan_forward, AtomicEvidenceClass, AtomicFrameRole, DecodedFrame,
-    SafetyLimits, ScanRegion, ScanReport,
+    HoleReason, SafetyLimits, ScanRegion, ScanReport,
 };
 use std::fs;
 use std::path::Path;
@@ -49,9 +49,9 @@ pub fn replay_prepares(
     if !path.exists() {
         return Err(LaneError::Corrupt("coordinator.log missing"));
     }
-    let bytes = fs::read(path)?;
+    let bytes = fs::read(&path)?;
     let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
-    refuse_midstream_damage(&report)?;
+    refuse_coverage_damage(&report, read_log_ack(&path)?)?;
     for (_, frame) in report.verified_frames() {
         let link = require_valid(frame, AtomicFrameRole::Prepare, "coordinator")?;
         let prepare = decode_prepare(&frame.body)?;
@@ -104,9 +104,9 @@ pub fn replay_members(
         if !path.exists() {
             continue;
         }
-        let bytes = fs::read(path)?;
+        let bytes = fs::read(&path)?;
         let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
-        refuse_midstream_damage(&report)?;
+        refuse_coverage_damage(&report, read_log_ack(&path)?)?;
         for (_, frame) in report.verified_frames() {
             let link = require_valid(frame, AtomicFrameRole::Member, "member")?;
             let member = decode_member(&frame.body)?;
@@ -234,8 +234,36 @@ fn require_valid(
     }
 }
 
-fn refuse_midstream_damage(report: &ScanReport) -> Result<(), LaneError> {
-    let last_frame_end = report
+/// Path of the exclusive acknowledged-length sidecar for a log.
+pub fn log_ack_path(log_path: &Path) -> std::path::PathBuf {
+    log_path.with_extension("ack")
+}
+
+/// Read the last synced log length. Missing ack means nothing is acknowledged.
+pub fn read_log_ack(log_path: &Path) -> Result<u64, LaneError> {
+    let path = log_ack_path(log_path);
+    if !path.exists() {
+        return Ok(0);
+    }
+    let bytes = fs::read(path)?;
+    let arr: [u8; 8] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| LaneError::Corrupt("ack length"))?;
+    Ok(u64::from_be_bytes(arr))
+}
+
+/// Holes inside the acknowledged prefix are damage, even when no later frame
+/// verifies. Bytes at or after `ack_len` are an unacked torn tail.
+fn refuse_coverage_damage(report: &ScanReport, ack_len: u64) -> Result<(), LaneError> {
+    if report.source_len < ack_len {
+        return Err(LaneError::Coverage {
+            start: report.source_len,
+            end: ack_len,
+            reason: "acknowledged prefix truncated",
+        });
+    }
+    let last_verified_end = report
         .regions
         .iter()
         .rev()
@@ -244,14 +272,27 @@ fn refuse_midstream_damage(report: &ScanReport) -> Result<(), LaneError> {
             _ => None,
         })
         .unwrap_or(0);
+    let covered_end = ack_len.max(last_verified_end);
     for region in &report.regions {
-        if let ScanRegion::Hole { range, .. } = region {
-            if range.start < last_frame_end {
-                return Err(LaneError::Corrupt("mid-stream hole"));
+        if let ScanRegion::Hole { range, reason } = region {
+            if range.start < covered_end {
+                return Err(LaneError::Coverage {
+                    start: range.start,
+                    end: range.end,
+                    reason: hole_reason_label(reason),
+                });
             }
         }
     }
     Ok(())
+}
+
+fn hole_reason_label(reason: &HoleReason) -> &'static str {
+    match reason {
+        HoleReason::UnclassifiedGarbage => "unclassified garbage in coverage",
+        HoleReason::CorruptCandidate { .. } => "corrupt candidate in coverage",
+        HoleReason::DamagedCandidate { .. } => "damaged candidate in coverage",
+    }
 }
 
 fn read_plan(root: &Path, atomic_id: AtomicId) -> Result<(AtomicPlan, [u8; 32]), LaneError> {

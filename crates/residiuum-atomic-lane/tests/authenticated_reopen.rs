@@ -134,9 +134,11 @@ fn trailing_torn_coordinator_frame_does_not_invent_prepare() {
     let log = dir.path().join("coordinator.log");
     let bytes = fs::read(&log).unwrap();
     fs::write(&log, &bytes[..bytes.len().saturating_sub(1)]).unwrap();
-    let lane = DurableLane::open(dir.path()).unwrap();
     assert!(
-        !lane.heap().can_resolve(aid(2)),
-        "torn last prepare must not recover"
+        matches!(
+            DurableLane::open(dir.path()),
+            Err(LaneError::Coverage { .. } | LaneError::Corrupt(_))
+        ),
+        "truncating an acknowledged prepare is coverage damage, not absence"
     );
 }
