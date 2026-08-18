@@ -285,6 +285,10 @@ pub enum StoreError {
     #[error("store writer lock held: {0}")]
     WriterLockHeld(Box<crate::writer_lock::WriterLockObservation>),
 
+    /// Store-owned Atomic staging refused or the peer lane failed (CR-ATMR3-006).
+    #[error("atomic stage: {0}")]
+    AtomicStage(String),
+
     /// Scan/get coverage is incomplete; ordinary complete results are refused (DEF-012).
     #[error("coverage incomplete: {0}")]
     CoverageIncomplete(String),

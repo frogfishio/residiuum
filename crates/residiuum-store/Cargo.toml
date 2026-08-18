@@ -29,6 +29,8 @@ aws-kms = ["dep:ureq", "dep:hmac", "dep:sha2", "dep:hex"]
 [dependencies]
 residiuum-format.workspace = true
 residiuum-heap.workspace = true
+residiuum-atomics.workspace = true
+residiuum-atomic-lane.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
 getrandom.workspace = true
@@ -328,4 +330,8 @@ required-features = ["legacy-raw-store"]
 
 [[test]]
 name = "derived_catalog_checkpoint"
+required-features = ["legacy-raw-store"]
+
+[[test]]
+name = "atomic_stage_invisibility"
 required-features = ["legacy-raw-store"]

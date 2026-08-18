@@ -2494,6 +2494,35 @@ impl Store {
         self.writer_lock.is_some()
     }
 
+    /// Append an Atomic frame to the active segment without touching primary,
+    /// history, or secondary indexes (CR-ATMR3-006).
+    pub(crate) fn append_unindexed_atomic_frame(
+        &mut self,
+        kind: residiuum_format::FrameKind,
+        envelope: &[u8],
+        body: &[u8],
+        event_id: [u8; 16],
+    ) -> Result<(), StoreError> {
+        if self.writer_lock.is_none() {
+            return Err(StoreError::AtomicStage(
+                "unindexed atomic append requires the writer lock".into(),
+            ));
+        }
+        let mut writer = self
+            .take_active(0)
+            .ok_or_else(|| StoreError::AtomicStage("no active segment".into()))?;
+        let append = writer.segment.append(kind, envelope, body, event_id);
+        if append.is_err() {
+            self.set_active(0, Some(writer));
+            append?;
+            return Ok(());
+        }
+        let flush = self.flush_active_file(&mut writer, DurabilityMode::Durable, 0);
+        self.set_active(0, Some(writer));
+        flush?;
+        Ok(())
+    }
+
     /// Put opaque bytes under `subject` (OVERVIEW put event).
     ///
     /// Bodies larger than the chunk threshold are stored as chunked payloads
