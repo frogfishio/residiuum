@@ -5,7 +5,7 @@ use residiuum_format::{
     encode_atomic_member_envelope, encode_atomic_prepare_envelope, encode_deterministic_uint_map,
     encode_frame, read_atomic_evidence, AtomicEvidenceClass, AtomicExamReason, AtomicFrameRole,
     AtomicGroupClass, CborValue, FrameHeader, FrameKind, FrameParts, SafetyLimits, EMPTY_ENVELOPE,
-    WIRE_MAJOR, WIRE_MINOR,
+    ENV_ATOMIC_CONTENT_ROOT, ENV_ATOMIC_ID, WIRE_MAJOR, WIRE_MINOR,
 };
 
 fn eid(n: u8) -> [u8; 16] {
@@ -380,6 +380,97 @@ fn cross_linked_member_is_body_mismatch() {
         report.examined[0].class,
         AtomicEvidenceClass::Corrupt {
             reason: AtomicExamReason::BodyMismatch
+        }
+    );
+}
+
+#[test]
+fn atomic_frame_without_ownership_is_not_valid() {
+    let env = encode_deterministic_uint_map(&[
+        (ENV_ATOMIC_ID, CborValue::Bytes(vec_aid().to_vec())),
+        (
+            ENV_ATOMIC_CONTENT_ROOT,
+            CborValue::Bytes(vec_root().to_vec()),
+        ),
+    ])
+    .unwrap();
+    let frame = encode_atomic_frame(
+        FrameKind::BatchPrepare,
+        &env,
+        &vector_body("prepare_local_heap"),
+        eid(20),
+    )
+    .unwrap();
+    let report = read_atomic_evidence(&frame, SafetyLimits::default());
+    assert_eq!(
+        report.examined[0].class,
+        AtomicEvidenceClass::Corrupt {
+            reason: AtomicExamReason::MissingOwnership
+        }
+    );
+    assert_eq!(report.valid().count(), 0);
+    assert!(report.groups.is_empty());
+}
+
+#[test]
+fn malformed_ownership_is_field_corrupt() {
+    let env = encode_deterministic_uint_map(&[
+        (31, CborValue::Uint(1)),
+        (34, CborValue::Uint(1)),
+        (ENV_ATOMIC_ID, CborValue::Bytes(vec_aid().to_vec())),
+        (
+            ENV_ATOMIC_CONTENT_ROOT,
+            CborValue::Bytes(vec_root().to_vec()),
+        ),
+    ])
+    .unwrap();
+    let frame = encode_atomic_frame(
+        FrameKind::BatchPrepare,
+        &env,
+        &vector_body("prepare_local_heap"),
+        eid(21),
+    )
+    .unwrap();
+    let report = read_atomic_evidence(&frame, SafetyLimits::default());
+    assert_eq!(
+        report.examined[0].class,
+        AtomicEvidenceClass::Corrupt {
+            reason: AtomicExamReason::FieldCorrupt
+        }
+    );
+}
+
+#[test]
+fn same_id_different_roots_are_one_conflict() {
+    let heap = vec_heap();
+    let id = vec_aid();
+    let body = vector_body("member_create_with_object_identity");
+    let a = encode_atomic_frame(
+        FrameKind::ItemEvent,
+        &encode_atomic_member_envelope(&heap, &id, 0, &root(1), None).unwrap(),
+        &body,
+        eid(22),
+    )
+    .unwrap();
+    let b = encode_atomic_frame(
+        FrameKind::ItemEvent,
+        &encode_atomic_member_envelope(&heap, &id, 0, &root(2), None).unwrap(),
+        &body,
+        eid(23),
+    )
+    .unwrap();
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&a);
+    bytes.extend_from_slice(&b);
+    let report = read_atomic_evidence(&bytes, SafetyLimits::default());
+    assert_eq!(report.valid().count(), 2);
+    assert_eq!(report.groups.len(), 1);
+    assert_eq!(report.groups[0].heap_id, Some(heap));
+    assert_eq!(report.groups[0].atomic_id, id);
+    assert_eq!(
+        report.groups[0].class,
+        AtomicGroupClass::Conflicting {
+            reason: AtomicExamReason::ConflictingContentRoot
         }
     );
 }

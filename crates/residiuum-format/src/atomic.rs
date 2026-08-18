@@ -77,6 +77,10 @@ pub enum AtomicExamReason {
     BodyMismatch,
     /// Two valid decisions disagree for the same identity.
     ConflictingDecision,
+    /// Same Heap/Atomic ID names more than one content root.
+    ConflictingContentRoot,
+    /// Atomic identity is present but Heap ownership keys 31/34 are missing.
+    MissingOwnership,
     /// Group is missing a required prepare, member set, or decision.
     GroupIncomplete,
 }
@@ -114,14 +118,14 @@ pub struct ExaminedAtomicFrame {
     pub class: AtomicEvidenceClass,
 }
 
-/// Aggregated examination of one `(heap_id, atomic_id, content_root)`.
+/// Aggregated examination of one `(heap_id, atomic_id)` identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExaminedAtomicGroup {
-    /// Heap from ownership or prepare body.
+    /// Heap from ownership (required on Valid frames).
     pub heap_id: Option<[u8; 16]>,
     /// Atomic identity.
     pub atomic_id: [u8; 32],
-    /// Plan content root.
+    /// First observed plan content root (not unique when roots conflict).
     pub content_root: [u8; 32],
     /// Group class. Never a guessed decision.
     pub class: AtomicGroupClass,
@@ -406,7 +410,13 @@ fn parse_fields(envelope: &[u8]) -> Result<Fields, AtomicExamReason> {
         decode_deterministic_uint_map(envelope).map_err(|_| AtomicExamReason::EnvelopeCorrupt)?;
     let heap_id = match parse_ownership_envelope(envelope) {
         Ok(OwnershipEvidence::Known { heap_id, .. }) => Some(heap_id),
-        _ => None,
+        Ok(OwnershipEvidence::Unknown) => None,
+        Err(crate::ownership::OwnershipError::Envelope(_)) => {
+            return Err(AtomicExamReason::EnvelopeCorrupt);
+        }
+        Err(_) => {
+            return Err(AtomicExamReason::FieldCorrupt);
+        }
     };
     let mut fields = Fields {
         atomic_id: None,
@@ -454,6 +464,11 @@ fn classify_linkage(
             reason: AtomicExamReason::NotAtomicEvidence,
         };
     };
+    let Some(heap_id) = fields.heap_id else {
+        return AtomicEvidenceClass::Corrupt {
+            reason: AtomicExamReason::MissingOwnership,
+        };
+    };
     if matches!(role, AtomicFrameRole::Prepare | AtomicFrameRole::Commit)
         && fields.ordinal.is_some()
     {
@@ -475,7 +490,7 @@ fn classify_linkage(
                 content_root,
                 ordinal: None,
                 commit_position: fields.commit_position,
-                heap_id: fields.heap_id,
+                heap_id: Some(heap_id),
             }),
             reason: AtomicExamReason::IncompleteLinkage,
         };
@@ -487,7 +502,7 @@ fn classify_linkage(
             content_root,
             ordinal: fields.ordinal,
             commit_position: fields.commit_position,
-            heap_id: fields.heap_id,
+            heap_id: Some(heap_id),
         };
         return match reason {
             AtomicExamReason::BodyMissing => AtomicEvidenceClass::Partial {
@@ -503,33 +518,46 @@ fn classify_linkage(
         content_root,
         ordinal: fields.ordinal,
         commit_position: fields.commit_position,
-        heap_id: fields.heap_id,
+        heap_id: Some(heap_id),
     })
 }
 
 fn aggregate_groups(valid: &[(AtomicLinkage, Vec<u8>)]) -> Vec<ExaminedAtomicGroup> {
-    let mut keys: Vec<([u8; 32], [u8; 32], Option<[u8; 16]>)> = Vec::new();
+    let mut keys: Vec<([u8; 16], [u8; 32])> = Vec::new();
     for (link, _) in valid {
-        let key = (link.atomic_id, link.content_root, link.heap_id);
+        let Some(heap_id) = link.heap_id else {
+            continue;
+        };
+        let key = (heap_id, link.atomic_id);
         if !keys.contains(&key) {
             keys.push(key);
         }
     }
     keys.into_iter()
-        .map(|(atomic_id, content_root, heap_id)| {
+        .map(|(heap_id, atomic_id)| {
             let frames: Vec<&(AtomicLinkage, Vec<u8>)> = valid
                 .iter()
-                .filter(|(l, _)| {
-                    l.atomic_id == atomic_id
-                        && l.content_root == content_root
-                        && l.heap_id == heap_id
-                })
+                .filter(|(l, _)| l.atomic_id == atomic_id && l.heap_id == Some(heap_id))
                 .collect();
+            let mut roots: Vec<[u8; 32]> = Vec::new();
+            for (link, _) in &frames {
+                if !roots.contains(&link.content_root) {
+                    roots.push(link.content_root);
+                }
+            }
+            let content_root = roots.first().copied().unwrap_or([0; 32]);
+            let class = if roots.len() > 1 {
+                AtomicGroupClass::Conflicting {
+                    reason: AtomicExamReason::ConflictingContentRoot,
+                }
+            } else {
+                classify_group(&frames)
+            };
             ExaminedAtomicGroup {
-                heap_id,
+                heap_id: Some(heap_id),
                 atomic_id,
                 content_root,
-                class: classify_group(&frames),
+                class,
             }
         })
         .collect()
