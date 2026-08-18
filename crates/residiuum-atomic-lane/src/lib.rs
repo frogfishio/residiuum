@@ -10,6 +10,8 @@
 
 mod error;
 mod lane;
+mod recover;
+mod seal;
 
 pub use error::LaneError;
 pub use lane::DurableLane;

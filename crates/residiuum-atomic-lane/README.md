@@ -17,7 +17,7 @@ reference model. `Capabilities::atomics` stays false.
 | `shard-XXXXXXXX.log` | concatenated `ItemEvent` member frames |
 | `intent/<atomic_id>` | length-prefixed frozen `AtomicMember` records |
 | `payload/<atomic_id>-<ordinal>` | staged value bytes |
-| `sealed/<atomic_id>` | first member-stable boundary marker |
+| `sealed/<atomic_id>` | versioned checksummed boundary (`R2SEAL1`) bound to Heap, Atomic ID, content root, manifest root, member count |
 
 ## Sync / first stable boundary
 
@@ -29,10 +29,11 @@ Write order: intent file + `sync_all` → prepare frame append + `sync_all`
 creates `sealed/<atomic_id>` and `sync_all`s that file and its directory. That
 marker plus the preceding log syncs is the first durable-invisible boundary.
 
-Reopen scans the logs with `residiuum-format` (`scan_forward` +
-`examine_atomic_frame`) and reconstructs `StagingHeap`. Ordinary `get` / `scan`
-never observe staged members. RQL, history, watch, and secondary indexes are
-not implemented here.
+Reopen authenticates intent members against the prepare's ordered manifest
+root, envelope linkage against decoded bodies, payload hashes, shard
+placement, and the checksummed seal. Placeholder prepare roots are refused.
+Ordinary `get` / `scan` never observe staged members. RQL, history, watch, and
+secondary indexes are not implemented here.
 
 Crash prefixes (`before_prepare`, `after_prepare`, `after_member_n`) are
 directory-image reopens, not in-memory clones.

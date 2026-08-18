@@ -1,16 +1,15 @@
 //! File-backed coordinator / member lane.
 
 use crate::error::LaneError;
+use crate::recover::{build_lane_prepare, replay_members, replay_prepares, replay_seals, seal_for};
+use crate::seal::encode_seal;
 use residiuum_atomics::{
-    decode_member, decode_prepare, encode_member, encode_prepare, AtomicId, AtomicMember,
-    AtomicPrepare, AtomicRefuseReason, AtomicsError, CanonicalKey, CollectionId, ContentRoot,
-    CoordinationScope, CoordinatorSeq, HeapId, OrdinaryCell, PlacementManifest, ResourceLimits,
-    StagingFailpoint, StagingHeap,
+    encode_member, encode_prepare, AtomicId, AtomicMember, AtomicRefuseReason, AtomicsError,
+    CanonicalKey, CollectionId, ContentRoot, CoordinatorSeq, HeapId, OrdinaryCell,
+    PlacementManifest, StagingFailpoint, StagingHeap,
 };
 use residiuum_format::{
-    encode_atomic_frame, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
-    examine_atomic_frame, scan_forward, AtomicEvidenceClass, AtomicFrameRole, FrameKind,
-    SafetyLimits,
+    encode_atomic_frame, encode_atomic_member_envelope, encode_atomic_prepare_envelope, FrameKind,
 };
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -24,7 +23,8 @@ use std::path::{Path, PathBuf};
 /// - `shard-XXXXXXXX.log` — `ItemEvent` member frames
 /// - `intent/<atomic>` — frozen members, written and synced *before* prepare
 /// - `payload/<atomic>-<ord>` — value bytes, synced *before* the member frame
-/// - `sealed/<atomic>` — first stable boundary after log `sync_all`
+/// - `sealed/<atomic>` — versioned checksummed boundary (Heap, Atomic ID,
+///   content root, manifest root, member count)
 pub struct DurableLane {
     root: PathBuf,
     heap: StagingHeap,
@@ -141,7 +141,7 @@ impl DurableLane {
             .heap
             .check_begin_prepare(atomic_id, content_root, members)?;
         persist_intent(&self.root, atomic_id, members)?;
-        persist_prepare(&self.root, self.heap.heap_id(), &manifest)?;
+        persist_prepare(&self.root, &manifest)?;
         let out = self.heap.begin_prepare(atomic_id, content_root, members)?;
         if self.armed == Some(StagingFailpoint::AfterPrepare) {
             return Err(LaneError::Injected(StagingFailpoint::AfterPrepare));
@@ -200,7 +200,8 @@ impl DurableLane {
         for shard in 0..shard_count {
             sync_path(&shard_path(&self.root, shard))?;
         }
-        write_atomic(&sealed_path(&self.root, atomic_id), b"boundary\n")?;
+        let record = seal_for(&self.heap, atomic_id)?;
+        write_atomic(&sealed_path(&self.root, atomic_id), &encode_seal(&record))?;
         Ok(())
     }
 
@@ -230,25 +231,15 @@ fn persist_intent(
     write_exclusive(&intent_path(root, atomic_id), &buf)
 }
 
-fn persist_prepare(
-    root: &Path,
-    heap_id: HeapId,
-    manifest: &PlacementManifest,
-) -> Result<(), LaneError> {
-    let prepare = AtomicPrepare {
-        atomic_id: manifest.atomic_id(),
-        heap_id,
-        scope: CoordinationScope::LocalHeap,
-        content_root: manifest.content_root(),
-        frontier: [1u8; 32],
-        ordered_member_manifest_root: manifest.member_manifest_root(),
-        read_set_root: [2u8; 32],
-        predicate_set_root: [3u8; 32],
-        active_rule_revision_root: [4u8; 32],
-        limits: ResourceLimits::hard_local_heap(),
-    };
+fn persist_prepare(root: &Path, manifest: &PlacementManifest) -> Result<(), LaneError> {
+    let prepare = build_lane_prepare(
+        manifest.heap_id(),
+        manifest.member_manifest_root(),
+        manifest.atomic_id(),
+        manifest.content_root(),
+    );
     let envelope = encode_atomic_prepare_envelope(
-        heap_id.as_bytes(),
+        prepare.heap_id.as_bytes(),
         manifest.atomic_id().as_bytes(),
         manifest.content_root().as_bytes(),
     )
@@ -299,111 +290,6 @@ fn persist_member_frame(
     append_synced(&shard_path(root, shard), &frame)
 }
 
-fn replay_prepares(root: &Path, heap_id: HeapId, heap: &mut StagingHeap) -> Result<(), LaneError> {
-    let path = coordinator_path(root);
-    if !path.exists() {
-        return Err(LaneError::Corrupt("coordinator.log missing"));
-    }
-    let bytes = fs::read(path)?;
-    let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
-    for (_, frame) in report.verified_frames() {
-        let Some(AtomicEvidenceClass::Valid(link)) = examine_atomic_frame(frame) else {
-            continue;
-        };
-        if link.role != AtomicFrameRole::Prepare {
-            continue;
-        }
-        let prepare = decode_prepare(&frame.body)?;
-        if prepare.heap_id != heap_id {
-            return Err(LaneError::Corrupt("prepare heap mismatch"));
-        }
-        let members = read_intent(root, prepare.atomic_id)?;
-        heap.begin_prepare(prepare.atomic_id, prepare.content_root, &members)?;
-    }
-    Ok(())
-}
-
-fn replay_members(root: &Path, shard_count: u32, heap: &mut StagingHeap) -> Result<(), LaneError> {
-    let mut staged = Vec::new();
-    for shard in 0..shard_count {
-        let path = shard_path(root, shard);
-        if !path.exists() {
-            continue;
-        }
-        let bytes = fs::read(path)?;
-        let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
-        for (_, frame) in report.verified_frames() {
-            let Some(AtomicEvidenceClass::Valid(link)) = examine_atomic_frame(frame) else {
-                continue;
-            };
-            if link.role != AtomicFrameRole::Member {
-                continue;
-            }
-            let member = decode_member(&frame.body)?;
-            let payload = fs::read(payload_path(root, member.atomic_id, member.ordinal))?;
-            staged.push((member, payload));
-        }
-    }
-    staged.sort_by_key(|(m, _)| (m.atomic_id.to_bytes(), m.ordinal));
-    for (member, payload) in staged {
-        heap.append_staged(member, payload)?;
-    }
-    Ok(())
-}
-
-fn replay_seals(root: &Path, heap: &mut StagingHeap) -> Result<(), LaneError> {
-    let dir = root.join("sealed");
-    if !dir.exists() {
-        return Ok(());
-    }
-    let mut ids = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if name.ends_with(".tmp") {
-            continue;
-        }
-        let Some(bytes) = parse_hex32(name) else {
-            continue;
-        };
-        ids.push(AtomicId::from_bytes(bytes)?);
-    }
-    ids.sort_by_key(|id| id.to_bytes());
-    for id in ids {
-        heap.seal_member_boundary(id)?;
-    }
-    Ok(())
-}
-
-fn read_intent(root: &Path, atomic_id: AtomicId) -> Result<Vec<AtomicMember>, LaneError> {
-    let bytes = fs::read(intent_path(root, atomic_id))?;
-    if bytes.len() < 4 {
-        return Err(LaneError::Corrupt("intent truncated"));
-    }
-    let count = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
-    let mut off = 4usize;
-    let mut out = Vec::with_capacity(count);
-    for _ in 0..count {
-        if off + 4 > bytes.len() {
-            return Err(LaneError::Corrupt("intent truncated"));
-        }
-        let n = u32::from_be_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        if off + n > bytes.len() {
-            return Err(LaneError::Corrupt("intent truncated"));
-        }
-        out.push(decode_member(&bytes[off..off + n])?);
-        off += n;
-    }
-    Ok(out)
-}
-
 fn parse_shard_count(meta: &str) -> Result<u32, LaneError> {
     for line in meta.lines() {
         if let Some(rest) = line.strip_prefix("shard_count=") {
@@ -444,17 +330,6 @@ fn prepare_event_id(atomic_id: AtomicId) -> [u8; 16] {
     let mut id = [0u8; 16];
     id.copy_from_slice(&atomic_id.as_bytes()[..16]);
     id
-}
-
-fn parse_hex32(s: &str) -> Option<[u8; 32]> {
-    if s.len() != 64 {
-        return None;
-    }
-    let mut out = [0u8; 32];
-    for i in 0..32 {
-        out[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
-    }
-    Some(out)
 }
 
 fn members_match(manifest: &PlacementManifest, members: &[AtomicMember]) -> bool {
