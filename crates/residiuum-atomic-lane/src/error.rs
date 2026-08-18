@@ -1,5 +1,6 @@
 //! Lane errors.
 
+use crate::io_fail::{IoPhase, IoSite};
 use residiuum_atomics::{AtomicsError, StagingFailpoint};
 use std::io;
 
@@ -9,6 +10,14 @@ pub enum LaneError {
     /// Armed failpoint fired after the prefix writes were synced.
     #[error("injected failpoint {0:?}")]
     Injected(StagingFailpoint),
+    /// Armed I/O-phase kill after that phase completed (CR-ATMR3-008).
+    #[error("injected I/O kill {site:?} {phase:?}")]
+    InjectedIo {
+        /// File role that completed the phase.
+        site: IoSite,
+        /// Phase that had just completed.
+        phase: IoPhase,
+    },
     /// In-memory kernel refused the operation.
     #[error(transparent)]
     Kernel(#[from] AtomicsError),

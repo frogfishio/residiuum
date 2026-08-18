@@ -267,8 +267,17 @@ pub fn replay_members(
             if chunk_manifest_path(root, member.atomic_id, member.ordinal).exists() {
                 continue;
             }
-            budget.charge_member()?;
             let payload = read_payload(root, member.atomic_id, member.ordinal)?;
+            if let Some(staged) = heap
+                .inspect_staged(member.atomic_id)
+                .and_then(|ms| ms.iter().find(|s| s.member.ordinal == member.ordinal))
+            {
+                if staged.member == member && staged.payload == payload {
+                    continue;
+                }
+                return Err(LaneError::Corrupt("conflicting member replay"));
+            }
+            budget.charge_member()?;
             heap.append_staged(member, payload)?;
         }
     }

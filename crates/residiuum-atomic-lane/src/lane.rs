@@ -2,9 +2,11 @@
 
 use crate::error::LaneError;
 use crate::limits::RecoveryLimits;
+use crate::io_fail::{self, IoPhase, IoPoint, IoSite};
+use crate::persist::{self, persist_log_ack, sync_dir, sync_path};
 use crate::limits::{max_encoded_member_bytes, max_intent_members, max_payload_bytes, MAX_SHARDS};
 use crate::recover::{
-    encode_plan_sidecar, log_ack_path, persist_recovery_checkpoint, recover_heap, seal_for,
+    encode_plan_sidecar, persist_recovery_checkpoint, recover_heap, seal_for,
     RecoveryBudget, RecoveryStats,
 };
 use crate::seal::encode_seal;
@@ -17,8 +19,8 @@ use residiuum_atomics::{
 use residiuum_format::{
     encode_atomic_frame, encode_atomic_member_envelope, encode_atomic_prepare_envelope, FrameKind,
 };
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::{self, File};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Durable per-Heap staging lane.
@@ -62,10 +64,11 @@ impl DurableLane {
         }
         check_shard_count(shard_count)?;
         let heap = StagingHeap::new(heap_id, shard_count)?;
-        write_atomic(&id_path, heap_id.as_bytes())?;
-        write_atomic(
+        persist::write_atomic(&id_path, heap_id.as_bytes(), IoSite::Identity)?;
+        persist::write_atomic(
             &root.join("meta"),
             format!("shard_count={shard_count}\n").as_bytes(),
+            IoSite::Identity,
         )?;
         fs::create_dir_all(root.join("plan"))?;
         fs::create_dir_all(root.join("intent"))?;
@@ -119,6 +122,7 @@ impl DurableLane {
 
     /// Drop this process image and reopen the same directory.
     pub fn reopen(self) -> Result<Self, LaneError> {
+        io_fail::reset_process();
         let root = self.root.clone();
         drop(self);
         Self::open(root)
@@ -331,8 +335,14 @@ impl DurableLane {
         for shard in 0..shard_count {
             sync_path(&shard_path(&self.root, shard))?;
         }
+        io_fail::hit(IoPoint::new(IoSite::Seal, IoPhase::AfterLogSync))
+            .map_err(|e| persist_injected(e))?;
         let record = seal_for(&self.heap, atomic_id)?;
-        write_atomic(&sealed_path(&self.root, atomic_id), &encode_seal(&record))?;
+        persist::write_atomic(
+            &sealed_path(&self.root, atomic_id),
+            &encode_seal(&record),
+            IoSite::Seal,
+        )?;
         self.write_checkpoint()?;
         Ok(())
     }
@@ -354,7 +364,7 @@ impl DurableLane {
 }
 
 fn persist_plan(root: &Path, atomic_id: AtomicId, sidecar: &[u8]) -> Result<(), LaneError> {
-    write_exclusive(&plan_path(root, atomic_id), sidecar)
+    persist::write_exclusive(&plan_path(root, atomic_id), sidecar, IoSite::Plan)
 }
 
 fn same_sidecar(root: &Path, atomic_id: AtomicId, sidecar: &[u8]) -> bool {
@@ -381,7 +391,7 @@ fn persist_intent(
         buf.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
         buf.extend_from_slice(&encoded);
     }
-    write_exclusive(&intent_path(root, atomic_id), &buf)
+    persist::write_exclusive(&intent_path(root, atomic_id), &buf, IoSite::Intent)
 }
 
 fn persist_prepare(
@@ -402,7 +412,7 @@ fn persist_prepare(
         prepare_event_id(prepare.atomic_id),
     )
     .map_err(|e| LaneError::Format(e.to_string()))?;
-    append_synced(&coordinator_path(root), &frame)
+    persist::append_synced(&coordinator_path(root), &frame, IoSite::Coordinator)
 }
 
 fn persist_chunk_manifest(
@@ -416,7 +426,11 @@ fn persist_chunk_manifest(
     for hash in &plan.chunk_hashes {
         buf.extend_from_slice(hash);
     }
-    write_exclusive(&chunk_manifest_path(root, atomic_id, ordinal), &buf)
+    persist::write_exclusive(
+        &chunk_manifest_path(root, atomic_id, ordinal),
+        &buf,
+        IoSite::ChunkManifest,
+    )
 }
 
 fn persist_chunk_body(
@@ -426,7 +440,11 @@ fn persist_chunk_body(
     index: u32,
     body: &[u8],
 ) -> Result<(), LaneError> {
-    write_exclusive(&chunk_body_path(root, atomic_id, ordinal, index), body)
+    persist::write_exclusive(
+        &chunk_body_path(root, atomic_id, ordinal, index),
+        body,
+        IoSite::Chunk,
+    )
 }
 
 fn persist_payload(
@@ -438,7 +456,7 @@ fn persist_payload(
     if payload.len() as u32 > max_payload_bytes() {
         return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
     }
-    write_exclusive(&payload_path(root, atomic_id, ordinal), payload)
+    persist::write_exclusive(&payload_path(root, atomic_id, ordinal), payload, IoSite::Payload)
 }
 
 fn persist_member_frame(
@@ -464,7 +482,7 @@ fn persist_member_frame(
         member.event_id.to_bytes(),
     )
     .map_err(|e| LaneError::Format(e.to_string()))?;
-    append_synced(&shard_path(root, shard), &frame)
+    persist::append_synced(&shard_path(root, shard), &frame, IoSite::Shard)
 }
 
 fn parse_shard_count(meta: &str) -> Result<u32, LaneError> {
@@ -543,70 +561,12 @@ fn members_match(manifest: &PlacementManifest, members: &[AtomicMember]) -> bool
     })
 }
 
-/// Create `path` with `O_EXCL` or accept identical existing bytes. Never replace.
-fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), LaneError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+fn persist_injected(err: crate::io_fail::IoInjected) -> LaneError {
+    match err {
+        crate::io_fail::IoInjected::Kill(point) => LaneError::InjectedIo {
+            site: point.site,
+            phase: point.phase,
+        },
+        crate::io_fail::IoInjected::Io(e) => LaneError::Io(e),
     }
-    match OpenOptions::new().write(true).create_new(true).open(path) {
-        Ok(mut file) => {
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            if let Some(parent) = path.parent() {
-                sync_dir(parent)?;
-            }
-            Ok(())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = fs::read(path)?;
-            if existing == bytes {
-                Ok(())
-            } else {
-                Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into())
-            }
-        }
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), LaneError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension("tmp");
-    {
-        let mut file = File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    fs::rename(&tmp, path)?;
-    if let Some(parent) = path.parent() {
-        sync_dir(parent)?;
-    }
-    Ok(())
-}
-
-fn append_synced(path: &Path, bytes: &[u8]) -> Result<(), LaneError> {
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    if let Some(parent) = path.parent() {
-        sync_dir(parent)?;
-    }
-    persist_log_ack(path)
-}
-
-fn persist_log_ack(log_path: &Path) -> Result<(), LaneError> {
-    let len = fs::metadata(log_path)?.len();
-    write_atomic(&log_ack_path(log_path), &len.to_be_bytes())
-}
-
-fn sync_path(path: &Path) -> Result<(), LaneError> {
-    File::open(path)?.sync_all()?;
-    Ok(())
-}
-
-fn sync_dir(path: &Path) -> Result<(), LaneError> {
-    File::open(path)?.sync_all()?;
-    Ok(())
 }

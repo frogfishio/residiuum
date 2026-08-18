@@ -1,10 +1,11 @@
 //! Durable recovery checkpoint: log tails plus identity summaries (CR-ATMR3-004).
 
 use crate::error::LaneError;
+use crate::io_fail::IoSite;
+use crate::persist;
 use crate::limits::RecoveryLimits;
 use residiuum_atomics::{AtomicId, ContentRoot, MemberPhase, PlacementManifest, StagingHeap};
-use std::fs::{self, File};
-use std::io::Write;
+use std::fs;
 use std::path::Path;
 
 const MAGIC: &[u8] = b"R2CKP1";
@@ -175,18 +176,7 @@ pub fn load_checkpoint(
 /// Persist `checkpoint` atomically.
 pub fn store_checkpoint(root: &Path, ck: &RecoveryCheckpoint) -> Result<(), LaneError> {
     let bytes = encode_checkpoint(ck);
-    let path = checkpoint_path(root);
-    let tmp = path.with_extension("tmp");
-    {
-        let mut file = File::create(&tmp)?;
-        file.write_all(&bytes)?;
-        file.sync_all()?;
-    }
-    fs::rename(&tmp, &path)?;
-    if let Some(parent) = path.parent() {
-        File::open(parent)?.sync_all()?;
-    }
-    Ok(())
+    persist::write_atomic(&checkpoint_path(root), &bytes, IoSite::Checkpoint)
 }
 
 pub fn checkpoint_path(root: &Path) -> std::path::PathBuf {
