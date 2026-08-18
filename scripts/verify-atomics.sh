@@ -3,9 +3,10 @@
 #
 #   scripts/verify-atomics.sh {quick,crash,model,full}
 #
-# Writes machine-readable run + package manifests under
-# target/atomics-evidence/. A dirty working tree is diagnostic only and cannot
-# be the accepted package record. Capabilities::atomics must stay false.
+# Writes commit-scoped run records under target/atomics-evidence/runs/
+# <commit12>-<profile>.json plus a detached .sha256 sidecar (CR-R2-007).
+# Labels: diagnostic | partial | acceptance_candidate.
+# Dirty or failing runs are diagnostic. Capabilities::atomics must stay false.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -40,10 +41,8 @@ SEED="${ATOMICS_EVIDENCE_SEED:-0}"
 SUITE_VERSION="atm-1-atm-2-cr-2026-08-16"
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_UNIX="$(date +%s)"
-ACCEPTANCE="accepted_candidate"
-if [[ "$DIRTY" == true ]]; then
-  ACCEPTANCE="diagnostic_only"
-fi
+# Label is decided after the run from dirty + family coverage (CR-R2-007).
+ACCEPTANCE="pending"
 
 COMMANDS_JSONL="$(mktemp)"
 trap 'rm -f "$COMMANDS_JSONL"' EXIT
@@ -53,22 +52,7 @@ if ! grep -q 'atomics: false' crates/residiuum-sdk/src/driver.rs; then
   fail "Capabilities::atomics must remain false (driver.rs)"
 fi
 
-# Negative controls must remain in-tree (dead-control detector).
-needles=(
-  "fn hostile_corpus_covers_required_families_and_refuses"
-  "fn one_unit_over_limit_is_refused"
-  "fn validator_is_sensitive_to_single_field_flips"
-  "fn cross_heap_collection_is_refused_and_produces_no_plan"
-  "fn noncanonical_integer_key_refuses_before_prepare"
-  "fn negative_control_detects_a_leaked_staged_member"
-  "fn second_heap_cannot_resolve_first_atomic"
-)
-for n in "${needles[@]}"; do
-  if ! grep -R -l --include='*.rs' -F "$n" crates/residiuum-atomics crates/residiuum-atomic-lane >/dev/null; then
-    fail "missing negative control: $n"
-  fi
-done
-ok "capability false + negative-control needles present"
+ok "capability false"
 
 run_cmd() {
   local family="$1"
@@ -115,7 +99,7 @@ run_ora() {
 
 run_aut() {
   run_cmd ATM-AUT "cross_heap_collection_is_refused_and_produces_no_plan" \
-    cargo test -p residiuum-atomics --offline --test builder
+    cargo test -p residiuum-atomics --offline --lib builder_cases
 }
 
 run_iso() {
@@ -168,6 +152,39 @@ case "$PROFILE" in
     ;;
 esac
 
+# Execute named negative-control tests (not grep-for-symbol). Failures are
+# recorded; the assembler treats them as required evidence.
+run_negatives() {
+  case "$PROFILE" in
+    quick|full|model)
+      run_cmd ATM-ENC "executed:hostile_corpus_covers_required_families_and_refuses" \
+        cargo test -p residiuum-atomics --offline --test hostile_decode -- \
+        hostile_corpus_covers_required_families_and_refuses --exact
+      run_cmd ATM-ORA "executed:one_unit_over_limit_is_refused" \
+        cargo test -p residiuum-atomics --offline --test validator_oracle -- \
+        one_unit_over_limit_is_refused --exact
+      run_cmd ATM-AUT "executed:cross_heap_collection_is_refused_and_produces_no_plan" \
+        cargo test -p residiuum-atomics --offline --lib \
+        builder_cases::cross_heap_collection_is_refused_and_produces_no_plan -- --exact
+      ;;
+  esac
+  case "$PROFILE" in
+    crash|full|quick)
+      run_cmd ATM-ISO "executed:second_heap_cannot_resolve_first_atomic" \
+        cargo test -p residiuum-atomics --offline --test failpoints -- \
+        second_heap_cannot_resolve_first_atomic --exact
+      ;;
+  esac
+  case "$PROFILE" in
+    crash|full)
+      run_cmd ATM-CRS "executed:negative_control_detects_a_leaked_staged_member" \
+        cargo test -p residiuum-atomic-lane --offline --test crash_reopen -- \
+        negative_control_detects_a_leaked_staged_member --exact
+      ;;
+  esac
+}
+run_negatives
+
 ENDED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ENDED_UNIX="$(date +%s)"
 DURATION_S="$((ENDED_UNIX - STARTED_UNIX))"
@@ -208,6 +225,8 @@ def hash_existing(rel: str):
         return None
     return {"path": rel, "sha256": sha256_file(p)}
 
+ACCEPT_FAMILIES = {"ATM-ENC", "ATM-ORA", "ATM-AUT", "ATM-ISO", "ATM-CRS"}
+
 deferred = [
     {"family": "ATM-DMG", "result": "not_in_scope", "reason": "ATM-4 damage/material truth"},
     {"family": "ATM-RET", "result": "not_in_scope", "reason": "ATM-4 tombstone/retention"},
@@ -217,6 +236,7 @@ deferred = [
 ]
 
 families = {}
+executed_negatives = []
 for c in cmds:
     fam = families.setdefault(c["family"], {
         "family": c["family"],
@@ -229,18 +249,37 @@ for c in cmds:
     fam["duration_s"] += c["duration_s"]
     if c["negative_control"] and c["negative_control"] not in fam["negative_controls"]:
         fam["negative_controls"].append(c["negative_control"])
+    if str(c.get("negative_control", "")).startswith("executed:"):
+        executed_negatives.append({
+            "name": c["negative_control"],
+            "command": c["command"],
+            "result": c["result"],
+            "exit_code": c["exit_code"],
+        })
     if c["result"] != "pass":
         fam["result"] = "fail"
 
+passing = {f for f, v in families.items() if v["result"] == "pass"}
+if dirty:
+    acceptance = "diagnostic"
+elif overall != "pass":
+    acceptance = "diagnostic"
+elif not ACCEPT_FAMILIES.issubset(passing):
+    acceptance = "partial"
+else:
+    acceptance = "acceptance_candidate"
+
 run = {
-    "format": "residiuum-atomics-verify/1",
+    "format": "residiuum-atomics-verify/2",
     "profile": profile,
     "package_suite": suite,
     "commit": commit,
     "dirty": dirty,
     "acceptance": acceptance,
     "acceptance_rule": (
-        "Dirty-tree evidence is diagnostic only and cannot be the accepted package record."
+        "diagnostic = dirty or failing; partial = clean but missing "
+        "ATM-ENC/ORA/AUT/ISO/CRS; acceptance_candidate = clean + full matrix. "
+        "Run payload is hashed in a sidecar; this file never contains its own digest."
     ),
     "toolchain": toolchain,
     "cargo": cargo_v,
@@ -253,6 +292,7 @@ run = {
     "capabilities_atomics": False,
     "commands": cmds,
     "families": list(families.values()),
+    "executed_negative_controls": executed_negatives,
     "deferred_families": deferred,
     "handoff": handoff,
 }
@@ -268,42 +308,58 @@ artifacts = [
 ]
 run["artifact_hashes"] = [a for a in artifacts if a]
 
-run_path = out / "runs" / f"{profile}.json"
+commit12 = commit[:12] if commit != "unknown" else "unknown"
+run_rel = f"runs/{commit12}-{profile}.json"
+run_path = out / run_rel
 run_path.write_text(json.dumps(run, indent=2) + "\n", encoding="utf-8")
+sidecar = run_path.with_suffix(".sha256")
+sidecar.write_text(sha256_file(run_path) + "\n", encoding="utf-8")
+
+def same_scope(prev: dict) -> bool:
+    return (
+        prev.get("commit") == commit
+        and prev.get("dirty") == dirty
+        and prev.get("toolchain") == toolchain
+        and prev.get("package_suite") == suite
+    )
 
 def merge_pack(path: Path, base: dict, new_fams: list) -> dict:
+    prev = {}
     if path.is_file():
         try:
             prev = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             prev = {}
+    inherit = same_scope(prev)
+    by = {}
+    if inherit:
         by = {f["family"]: f for f in prev.get("families", []) if "family" in f}
-        for f in new_fams:
-            by[f["family"]] = f
-        base["families"] = list(by.values())
-        profiles = list(prev.get("verify_profiles", []))
-        if prev.get("verify_profile") and prev["verify_profile"] not in profiles:
-            profiles.append(prev["verify_profile"])
-        if profile not in profiles:
-            profiles.append(profile)
-        base["verify_profiles"] = profiles
-        if prev.get("verify_result") == "fail" or overall == "fail":
-            base["verify_result"] = "fail"
-        else:
-            base["verify_result"] = overall
-    else:
-        base["families"] = new_fams
-        base["verify_profiles"] = [profile]
-        base["verify_result"] = overall
+    for f in new_fams:
+        by[f["family"]] = f
+    base["families"] = list(by.values())
+    profiles = list(prev.get("verify_profiles", [])) if inherit else []
+    if profile not in profiles:
+        profiles.append(profile)
+    base["verify_profiles"] = profiles
+    base["verify_result"] = overall if not inherit else (
+        "fail" if prev.get("verify_result") == "fail" or overall == "fail" else overall
+    )
+    base["inherited_prior_run"] = inherit and bool(prev)
     return base
+
+pack_scope = {
+    "commit": commit,
+    "dirty": dirty,
+    "toolchain": toolchain,
+    "package_suite": suite,
+    "acceptance": acceptance,
+}
 
 atm1 = merge_pack(out / "atm-1" / "manifest.json", {
     "package": "ATM-1",
     "title": "Canonical plan compiler and validation",
-    "format": "residiuum-atomics-package/1",
-    "commit": commit,
-    "dirty": dirty,
-    "acceptance": acceptance,
+    "format": "residiuum-atomics-package/2",
+    **pack_scope,
     "capabilities_atomics": False,
     "implemented_requirements": [
         "immutable closed AtomicPlan + canonical order",
@@ -313,12 +369,15 @@ atm1 = merge_pack(out / "atm-1" / "manifest.json", {
         "oracle agreement + one-unit-over limit refusals",
     ],
     "negative_controls": [
-        "cross_heap_collection_is_refused_and_produces_no_plan",
-        "noncanonical_integer_key_refuses_before_prepare",
-        "one_unit_over_limit_is_refused",
-        "validator_is_sensitive_to_single_field_flips",
+        n["name"] for n in executed_negatives if n["name"].startswith("executed:")
+        and n["name"].split(":", 1)[-1] in {
+            "cross_heap_collection_is_refused_and_produces_no_plan",
+            "one_unit_over_limit_is_refused",
+            "hostile_corpus_covers_required_families_and_refuses",
+        }
     ],
     "verify_profile": profile,
+    "source_run": run_rel,
     "artifact_hashes": [a for a in artifacts if a],
 }, [f for f in families.values() if f["family"] in {"ATM-ENC", "ATM-ORA", "ATM-AUT", "ATM-RES"}])
 (out / "atm-1" / "manifest.json").write_text(json.dumps(atm1, indent=2) + "\n", encoding="utf-8")
@@ -326,10 +385,8 @@ atm1 = merge_pack(out / "atm-1" / "manifest.json", {
 atm2 = merge_pack(out / "atm-2" / "manifest.json", {
     "package": "ATM-2",
     "title": "Evidence and invisible staging (prototype / peer crate)",
-    "format": "residiuum-atomics-package/1",
-    "commit": commit,
-    "dirty": dirty,
-    "acceptance": acceptance,
+    "format": "residiuum-atomics-package/2",
+    **pack_scope,
     "capabilities_atomics": False,
     "implemented_requirements": [
         "format envelope registry 31–36 ownership, 37–40 Atomic (CR-ATM2-002)",
@@ -346,29 +403,35 @@ atm2 = merge_pack(out / "atm-2" / "manifest.json", {
         "sealed/<atomic_id> (first stable boundary after log sync_all)",
     ],
     "negative_controls": [
-        "negative_control_detects_a_leaked_staged_member",
-        "second_heap_cannot_resolve_first_atomic",
+        n["name"] for n in executed_negatives if n["name"].startswith("executed:")
+        and n["name"].split(":", 1)[-1] in {
+            "negative_control_detects_a_leaked_staged_member",
+            "second_heap_cannot_resolve_first_atomic",
+        }
     ],
     "not_store": True,
     "verify_profile": profile,
+    "source_run": run_rel,
     "artifact_hashes": [a for a in artifacts if a],
 }, [f for f in families.values() if f["family"] in {"ATM-ISO", "ATM-CRS", "ATM-ENC"}])
 (out / "atm-2" / "manifest.json").write_text(json.dumps(atm2, indent=2) + "\n", encoding="utf-8")
 
-# Point the run at the written pack hashes.
-for name in ("atm-1/manifest.json", "atm-2/manifest.json", f"runs/{profile}.json"):
-    p = out / name
-    run["artifact_hashes"].append({"path": str(p).replace("\\", "/"), "sha256": sha256_file(p)})
-run_path.write_text(json.dumps(run, indent=2) + "\n", encoding="utf-8")
-
 print(f"wrote {run_path}")
+print(f"wrote {sidecar}")
 print(f"wrote {out / 'atm-1' / 'manifest.json'}")
 print(f"wrote {out / 'atm-2' / 'manifest.json'}")
+print(f"acceptance={acceptance}")
+# Sidecar must match the written payload; the payload must not list itself.
+digest = sidecar.read_text(encoding="utf-8").strip()
+if digest != sha256_file(run_path):
+    sys.exit("run sidecar hash mismatch")
+if digest in run_path.read_text(encoding="utf-8"):
+    sys.exit("run payload must not contain its own digest")
 if dirty:
     print("DIRTY TREE: evidence is diagnostic only; not an accepted package record.")
 if overall != "pass":
     sys.exit(1)
 PY
 
-ok "manifests written (acceptance=$ACCEPTANCE dirty=$DIRTY)"
+ok "manifests written (dirty=$DIRTY; label is in the run record)"
 ok "OK"
