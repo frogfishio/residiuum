@@ -14,6 +14,7 @@ mod lane;
 mod limits;
 mod recover;
 mod seal;
+mod writer;
 
 pub use error::LaneError;
 pub use lane::DurableLane;

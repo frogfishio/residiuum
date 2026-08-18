@@ -8,6 +8,7 @@ use crate::recover::{
     RecoveryBudget, RecoveryStats,
 };
 use crate::seal::encode_seal;
+use crate::writer::LaneWriterGuard;
 use residiuum_atomics::{
     encode_member, encode_prepare, prepare_from_closed_plan, AtomicId, AtomicMember, AtomicPlan,
     AtomicRefuseReason, AtomicsError, CanonicalKey, CollectionId, CoordinatorSeq, HeapId,
@@ -34,11 +35,13 @@ use std::path::{Path, PathBuf};
 /// - `sealed/<atomic>` — versioned checksummed boundary (Heap, Atomic ID,
 ///   content root, manifest root, member count)
 /// - `checkpoint` — identity summaries + acknowledged log tails
+/// - `writer.lock` — exclusive physical writer (CR-ATMR3-007)
 pub struct DurableLane {
     root: PathBuf,
     heap: StagingHeap,
     armed: Option<StagingFailpoint>,
     stats: RecoveryStats,
+    _writer: LaneWriterGuard,
 }
 
 impl DurableLane {
@@ -50,6 +53,7 @@ impl DurableLane {
     ) -> Result<Self, LaneError> {
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
+        let writer = LaneWriterGuard::acquire(&root)?;
         let id_path = root.join("heap.id");
         if id_path.exists() {
             return Err(LaneError::Corrupt("heap.id already exists"));
@@ -82,12 +86,14 @@ impl DurableLane {
             heap,
             armed: None,
             stats: RecoveryStats::default(),
+            _writer: writer,
         })
     }
 
     /// Reconstruct a lane from a directory image.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, LaneError> {
         let root = root.as_ref().to_path_buf();
+        let writer = LaneWriterGuard::acquire(&root)?;
         let mut id_bytes = [0u8; 16];
         File::open(root.join("heap.id"))?.read_exact(&mut id_bytes)?;
         let heap_id = HeapId::from_bytes(id_bytes)?;
@@ -101,6 +107,7 @@ impl DurableLane {
             heap,
             armed: None,
             stats: budget.stats,
+            _writer: writer,
         })
     }
 
@@ -134,6 +141,11 @@ impl DurableLane {
     /// Bytes/frames/identities observed by the last `open`.
     pub const fn recovery_stats(&self) -> &RecoveryStats {
         &self.stats
+    }
+
+    /// True while this instance holds the exclusive writer lock.
+    pub const fn holds_writer_lock(&self) -> bool {
+        true
     }
 
     /// Validate a closed plan, then persist plan + intent + prepare, then apply.
@@ -413,16 +425,30 @@ fn members_match(manifest: &PlacementManifest, members: &[AtomicMember]) -> bool
     })
 }
 
-/// Create `path` or accept an identical existing file. Never replace bytes.
+/// Create `path` with `O_EXCL` or accept identical existing bytes. Never replace.
 fn write_exclusive(path: &Path, bytes: &[u8]) -> Result<(), LaneError> {
-    if path.exists() {
-        let existing = fs::read(path)?;
-        if existing == bytes {
-            return Ok(());
-        }
-        return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
     }
-    write_atomic(path, bytes)
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            if let Some(parent) = path.parent() {
+                sync_dir(parent)?;
+            }
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read(path)?;
+            if existing == bytes {
+                Ok(())
+            } else {
+                Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into())
+            }
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), LaneError> {

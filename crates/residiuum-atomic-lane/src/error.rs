@@ -41,4 +41,7 @@ pub enum LaneError {
         /// Configured ceiling.
         limit: u64,
     },
+    /// Another process or in-process instance already holds this directory.
+    #[error("lane writer lock held")]
+    WriterHeld,
 }

@@ -22,6 +22,7 @@ reference model. `Capabilities::atomics` stays false.
 | `payload/<atomic_id>-<ordinal>` | staged value bytes |
 | `sealed/<atomic_id>` | versioned checksummed boundary (`R2SEAL1`) bound to Heap, Atomic ID, content root, manifest root, member count |
 | `checkpoint` | identity summaries plus acknowledged log tails for bounded reopen |
+| `writer.lock` | exclusive physical writer (`flock` + in-process table) |
 
 ## Sync / first stable boundary
 
