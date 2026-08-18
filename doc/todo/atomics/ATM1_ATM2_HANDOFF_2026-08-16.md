@@ -1,5 +1,8 @@
 # ATM-1 / ATM-2 package handoff
 
+**Superseded by `ATM1_ATM2_HANDOFF_2026-08-18.md`.** Store writers emit
+operation identity at 41/42, not 31/32. Do not use this file as the live handoff.
+
 Date: 2026-08-16  
 Source: `ATOMICS_IMPLEMENTATION_PLAN.md` §§13–14; CR-ATM2-006  
 Capability: `Capabilities::atomics` remains **false**.

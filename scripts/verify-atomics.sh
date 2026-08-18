@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # Atomics plan §13 — evidence/CI contract.
 #
+# Invoke (either form; file is executable, bash always works):
+#   bash scripts/verify-atomics.sh {quick,crash,model,full}
 #   scripts/verify-atomics.sh {quick,crash,model,full}
 #
 # Writes commit-scoped run records under target/atomics-evidence/runs/
 # <commit12>-<profile>.json plus a detached .sha256 sidecar (CR-R2-007).
-# Labels: diagnostic | partial | acceptance_candidate.
+# Labels are package-specific (CR-ATMR3-009):
+#   ATM-1 may become acceptance_candidate on a clean full matrix.
+#   ATM-2 stays partial while not_store=true or a mandatory deliverable is absent.
+# Run-level label is the worse of the two packages (never upgrades ATM-2).
 # Dirty or failing runs are diagnostic. Capabilities::atomics must stay false.
 set -euo pipefail
 
@@ -38,7 +43,7 @@ TOOLCHAIN="$(rustc --version 2>/dev/null || echo rustc-missing)"
 CARGO_V="$(cargo --version 2>/dev/null || echo cargo-missing)"
 PLATFORM="$(uname -srm)"
 SEED="${ATOMICS_EVIDENCE_SEED:-0}"
-SUITE_VERSION="atm-1-atm-2-cr-2026-08-16"
+SUITE_VERSION="atm-1-atm-2-atmr3-2026-08-18"
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_UNIX="$(date +%s)"
 # Label is decided after the run from dirty + family coverage (CR-R2-007).
@@ -133,6 +138,14 @@ case "$PROFILE" in
   crash)
     run_crs
     run_iso
+    run_cmd ATM-CRS "durable_chunks" \
+      cargo test -p residiuum-atomic-lane --offline --test durable_chunks
+    run_cmd ATM-CRS "honest_damage" \
+      cargo test -p residiuum-atomic-lane --offline --test honest_damage
+    run_cmd ATM-CRS "exclusive_writer" \
+      cargo test -p residiuum-atomic-lane --offline --test exclusive_writer
+    run_cmd ATM-CRS "io_prefix_matrix" \
+      cargo test -p residiuum-atomic-lane --offline --test io_prefix_matrix
     ;;
   model)
     run_model_kernel
@@ -145,6 +158,13 @@ case "$PROFILE" in
     run_iso
     run_fmt
     run_crs
+    run_cmd ATM-ENC "residiuum-format --all-targets" \
+      cargo test -p residiuum-format --offline --all-targets
+    run_cmd ATM-CRS "store envelope key migration (41/42)" \
+      cargo test -p residiuum-store --offline --lib legacy_31_32
+    run_cmd ATM-CRS "store atomic_stage_invisibility" \
+      cargo test -p residiuum-store --offline --test atomic_stage_invisibility \
+      --features legacy-raw-store
     run_cmd ATM-RES "raised_limits_are_refused" \
       cargo test -p residiuum-atomics --offline --all-targets
     run_cmd ATM-CRS "residiuum-atomic-lane --all-targets" \
@@ -194,7 +214,7 @@ ENDED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ENDED_UNIX="$(date +%s)"
 DURATION_S="$((ENDED_UNIX - STARTED_UNIX))"
 
-HANDOFF="doc/todo/atomics/ATM1_ATM2_HANDOFF_2026-08-16.md"
+HANDOFF="doc/todo/atomics/ATM1_ATM2_HANDOFF_2026-08-18.md"
 [[ -f "$HANDOFF" ]] || fail "missing package handoff $HANDOFF"
 
 python3 - "$COMMANDS_JSONL" "$OUT_ROOT" "$PROFILE" "$COMMIT" "$DIRTY" \
@@ -230,7 +250,47 @@ def hash_existing(rel: str):
         return None
     return {"path": rel, "sha256": sha256_file(p)}
 
-ACCEPT_FAMILIES = {"ATM-ENC", "ATM-ORA", "ATM-AUT", "ATM-ISO", "ATM-CRS"}
+ATM1_FAMILIES = {"ATM-ENC", "ATM-ORA", "ATM-AUT"}
+ATM1_FULL_FAMILIES = ATM1_FAMILIES | {"ATM-RES"}
+ATM2_FAMILIES = {"ATM-ISO", "ATM-CRS"}
+
+def decide_acceptance(*, dirty, failed, required_families, passing, blockers):
+    if dirty or failed:
+        return "diagnostic"
+    if blockers:
+        return "partial"
+    if not required_families.issubset(passing):
+        return "partial"
+    return "acceptance_candidate"
+
+def worse(a, b):
+    rank = {"diagnostic": 0, "partial": 1, "acceptance_candidate": 2}
+    return a if rank[a] <= rank[b] else b
+
+def cmd_passed(cmds, needle):
+    return any(needle in c.get("command", "") and c.get("result") == "pass" for c in cmds)
+
+atm1_required = ATM1_FULL_FAMILIES if profile == "full" else ATM1_FAMILIES
+atm1_blockers = []
+if profile == "full" and not cmd_passed(cmds, "residiuum-format --offline --all-targets"):
+    atm1_blockers.append("missing residiuum-format --all-targets")
+
+atm2_blockers = [
+    "not_store=true; peer lane is prototype/mechanics, not an accepted store contract",
+]
+if profile == "full":
+    if not (cmd_passed(cmds, "durable_chunks") or cmd_passed(cmds, "residiuum-atomic-lane --offline --all-targets")):
+        atm2_blockers.append("missing durable chunk tests")
+    if not (cmd_passed(cmds, "honest_damage") or cmd_passed(cmds, "residiuum-atomic-lane --offline --all-targets")):
+        atm2_blockers.append("missing honest damage tests")
+    if not (cmd_passed(cmds, "exclusive_writer") or cmd_passed(cmds, "residiuum-atomic-lane --offline --all-targets")):
+        atm2_blockers.append("missing writer-lock tests")
+    if not (cmd_passed(cmds, "io_prefix_matrix") or cmd_passed(cmds, "residiuum-atomic-lane --offline --all-targets")):
+        atm2_blockers.append("missing I/O-phase prefix matrix")
+    if not cmd_passed(cmds, "atomic_stage_invisibility"):
+        atm2_blockers.append("missing store get/scan/history visibility")
+    if not cmd_passed(cmds, "legacy_31_32"):
+        atm2_blockers.append("missing store envelope key migration")
 
 deferred = [
     {"family": "ATM-DMG", "result": "not_in_scope", "reason": "ATM-4 damage/material truth"},
@@ -265,14 +325,30 @@ for c in cmds:
         fam["result"] = "fail"
 
 passing = {f for f, v in families.items() if v["result"] == "pass"}
-if dirty:
-    acceptance = "diagnostic"
-elif overall != "pass":
-    acceptance = "diagnostic"
-elif not ACCEPT_FAMILIES.issubset(passing):
-    acceptance = "partial"
-else:
-    acceptance = "acceptance_candidate"
+failed = overall != "pass"
+atm1_failed = any(
+    c["result"] != "pass" and c["family"] in atm1_required for c in cmds
+)
+atm2_failed = any(
+    c["result"] != "pass" and c["family"] in ATM2_FAMILIES for c in cmds
+)
+atm1_acceptance = decide_acceptance(
+    dirty=dirty,
+    failed=failed or atm1_failed,
+    required_families=atm1_required,
+    passing=passing,
+    blockers=atm1_blockers,
+)
+atm2_acceptance = decide_acceptance(
+    dirty=dirty,
+    failed=failed or atm2_failed,
+    required_families=ATM2_FAMILIES if profile in {"crash", "full", "quick"} else set(),
+    passing=passing,
+    blockers=atm2_blockers,
+)
+if atm2_acceptance == "acceptance_candidate":
+    sys.exit("ATM-2 must not be acceptance_candidate while not_store=true")
+acceptance = worse(atm1_acceptance, atm2_acceptance)
 
 run = {
     "format": "residiuum-atomics-verify/2",
@@ -282,10 +358,18 @@ run = {
     "dirty": dirty,
     "acceptance": acceptance,
     "acceptance_rule": (
-        "diagnostic = dirty or failing; partial = clean but missing "
-        "ATM-ENC/ORA/AUT/ISO/CRS; acceptance_candidate = clean + full matrix. "
+        "Package-specific (CR-ATMR3-009). diagnostic = dirty or failing; "
+        "ATM-1 acceptance_candidate = clean full ENC/ORA/AUT/RES + format all-targets; "
+        "ATM-2 stays partial while not_store=true or a mandatory deliverable is absent; "
+        "run-level label is the worse of the two packages. "
         "Run payload is hashed in a sidecar; this file never contains its own digest."
     ),
+    "package_acceptance": {
+        "ATM-1": atm1_acceptance,
+        "ATM-2": atm2_acceptance,
+    },
+    "atm1_blockers": atm1_blockers,
+    "atm2_blockers": atm2_blockers,
     "toolchain": toolchain,
     "cargo": cargo_v,
     "platform": platform,
@@ -357,7 +441,6 @@ pack_scope = {
     "dirty": dirty,
     "toolchain": toolchain,
     "package_suite": suite,
-    "acceptance": acceptance,
 }
 
 atm1 = merge_pack(out / "atm-1" / "manifest.json", {
@@ -365,6 +448,8 @@ atm1 = merge_pack(out / "atm-1" / "manifest.json", {
     "title": "Canonical plan compiler and validation",
     "format": "residiuum-atomics-package/2",
     **pack_scope,
+    "acceptance": atm1_acceptance,
+    "acceptance_blockers": atm1_blockers,
     "capabilities_atomics": False,
     "implemented_requirements": [
         "immutable closed AtomicPlan + canonical order",
@@ -392,6 +477,8 @@ atm2 = merge_pack(out / "atm-2" / "manifest.json", {
     "title": "Evidence and invisible staging (prototype / peer crate)",
     "format": "residiuum-atomics-package/2",
     **pack_scope,
+    "acceptance": atm2_acceptance,
+    "acceptance_blockers": atm2_blockers,
     "capabilities_atomics": False,
     "implemented_requirements": [
         "format envelope registry 31–36 ownership, 37–40 Atomic (CR-ATM2-002)",
@@ -399,6 +486,7 @@ atm2 = merge_pack(out / "atm-2" / "manifest.json", {
         "in-memory StagingHeap binds member_hash + payload (CR-ATM2-004/005)",
         "residiuum-atomic-lane file-backed prepare/member + fsync reopen (CR-ATM2-001)",
         "crash prefixes before_prepare / after_prepare / after_member_n",
+        "plan-derived prepare, honest damage, exclusive writer, durable chunks, I/O-phase matrix (CR-ATMR3)",
     ],
     "authoritative_files": [
         "coordinator.log (BatchPrepare frames, sync_all after append)",
