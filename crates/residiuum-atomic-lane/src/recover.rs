@@ -1,11 +1,12 @@
 //! Authenticated reopen of coordinator, intent, members, and seals (CR-R2-002).
 
 use crate::error::LaneError;
+use crate::limits::{max_encoded_member_bytes, max_intent_members, max_payload_bytes};
 use crate::seal::{decode_seal, SealRecord};
 use residiuum_atomics::{
     decode_member, decode_prepare, member_hash, ordered_member_manifest_root, AtomicId,
-    AtomicMember, AtomicPrepare, ContentRoot, CoordinationScope, HeapId, ResourceLimits,
-    StagingHeap, DOMAIN_ATOMIC_PREDICATES, DOMAIN_ATOMIC_READSET,
+    AtomicMember, AtomicPrepare, AtomicRefuseReason, AtomicsError, ContentRoot, CoordinationScope,
+    HeapId, ResourceLimits, StagingHeap, DOMAIN_ATOMIC_PREDICATES, DOMAIN_ATOMIC_READSET,
 };
 use residiuum_format::{
     examine_atomic_frame, scan_forward, AtomicEvidenceClass, AtomicFrameRole, DecodedFrame,
@@ -128,7 +129,7 @@ pub fn replay_members(
             if entry.shard.as_u32() != shard {
                 return Err(LaneError::Corrupt("member shard mismatch"));
             }
-            let payload = fs::read(payload_path(root, member.atomic_id, member.ordinal))?;
+            let payload = read_payload(root, member.atomic_id, member.ordinal)?;
             staged.push((member, payload));
         }
     }
@@ -266,25 +267,45 @@ fn read_intent(root: &Path, atomic_id: AtomicId) -> Result<Vec<AtomicMember>, La
     if bytes.len() < 4 {
         return Err(LaneError::Corrupt("intent truncated"));
     }
-    let count = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
+    let count = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
+    if count > max_intent_members() {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
+    }
     let mut off = 4usize;
-    let mut out = Vec::with_capacity(count);
+    let mut out = Vec::new();
     for _ in 0..count {
-        if off + 4 > bytes.len() {
+        let header_end = off
+            .checked_add(4)
+            .ok_or(LaneError::Corrupt("intent overflow"))?;
+        if header_end > bytes.len() {
             return Err(LaneError::Corrupt("intent truncated"));
         }
-        let n = u32::from_be_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
-        off += 4;
-        if off + n > bytes.len() {
+        let n = u32::from_be_bytes(bytes[off..header_end].try_into().unwrap());
+        if n == 0 || n > max_encoded_member_bytes() {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
+        }
+        let body_end = header_end
+            .checked_add(n as usize)
+            .ok_or(LaneError::Corrupt("intent overflow"))?;
+        if body_end > bytes.len() {
             return Err(LaneError::Corrupt("intent truncated"));
         }
-        out.push(decode_member(&bytes[off..off + n])?);
-        off += n;
+        out.push(decode_member(&bytes[header_end..body_end])?);
+        off = body_end;
     }
     if off != bytes.len() {
         return Err(LaneError::Corrupt("intent trailing bytes"));
     }
     Ok(out)
+}
+
+fn read_payload(root: &Path, atomic_id: AtomicId, ordinal: u32) -> Result<Vec<u8>, LaneError> {
+    let path = payload_path(root, atomic_id, ordinal);
+    let len = fs::metadata(&path)?.len();
+    if len > u64::from(max_payload_bytes()) {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
+    }
+    Ok(fs::read(path)?)
 }
 
 fn coordinator_path(root: &Path) -> std::path::PathBuf {

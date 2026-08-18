@@ -10,6 +10,7 @@
 
 mod error;
 mod lane;
+mod limits;
 mod recover;
 mod seal;
 

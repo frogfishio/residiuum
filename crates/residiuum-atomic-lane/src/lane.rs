@@ -1,6 +1,7 @@
 //! File-backed coordinator / member lane.
 
 use crate::error::LaneError;
+use crate::limits::{max_encoded_member_bytes, max_intent_members, max_payload_bytes, MAX_SHARDS};
 use crate::recover::{build_lane_prepare, replay_members, replay_prepares, replay_seals, seal_for};
 use crate::seal::encode_seal;
 use residiuum_atomics::{
@@ -44,6 +45,7 @@ impl DurableLane {
         if id_path.exists() {
             return Err(LaneError::Corrupt("heap.id already exists"));
         }
+        check_shard_count(shard_count)?;
         let heap = StagingHeap::new(heap_id, shard_count)?;
         write_atomic(&id_path, heap_id.as_bytes())?;
         write_atomic(
@@ -221,10 +223,16 @@ fn persist_intent(
     atomic_id: AtomicId,
     members: &[AtomicMember],
 ) -> Result<(), LaneError> {
+    if members.len() as u32 > max_intent_members() {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
+    }
     let mut buf = Vec::new();
     buf.extend_from_slice(&(members.len() as u32).to_be_bytes());
     for member in members {
         let encoded = encode_member(member)?;
+        if encoded.len() as u32 > max_encoded_member_bytes() {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
+        }
         buf.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
         buf.extend_from_slice(&encoded);
     }
@@ -261,6 +269,9 @@ fn persist_payload(
     ordinal: u32,
     payload: &[u8],
 ) -> Result<(), LaneError> {
+    if payload.len() as u32 > max_payload_bytes() {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
+    }
     write_exclusive(&payload_path(root, atomic_id, ordinal), payload)
 }
 
@@ -293,13 +304,21 @@ fn persist_member_frame(
 fn parse_shard_count(meta: &str) -> Result<u32, LaneError> {
     for line in meta.lines() {
         if let Some(rest) = line.strip_prefix("shard_count=") {
-            return rest
+            let n: u32 = rest
                 .trim()
                 .parse()
-                .map_err(|_| LaneError::Corrupt("meta shard_count"));
+                .map_err(|_| LaneError::Corrupt("meta shard_count"))?;
+            return check_shard_count(n);
         }
     }
     Err(LaneError::Corrupt("meta missing shard_count"))
+}
+
+fn check_shard_count(n: u32) -> Result<u32, LaneError> {
+    if n == 0 || n > MAX_SHARDS {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
+    }
+    Ok(n)
 }
 
 fn shard_count_from_layout(root: &Path) -> Result<u32, LaneError> {
