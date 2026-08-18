@@ -156,6 +156,43 @@ fn different_frontier_or_plan_field_is_conflict_and_writes_nothing() {
 }
 
 #[test]
+fn leftover_member_refuses_before_persist() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
+    let member = create_member(aid(5), 0, "k", b"v");
+    let extra = create_member(aid(5), 1, "hist", b"hist");
+    let plan = plan_for(hid(1), std::slice::from_ref(&member), &[b"v"]);
+    let before = snapshot(dir.path());
+    assert_eq!(
+        refused(
+            lane.begin_prepare(&plan, FRONTIER, &[member, extra])
+                .unwrap_err()
+        ),
+        AtomicRefuseReason::MalformedInput
+    );
+    assert_eq!(snapshot(dir.path()), before);
+    assert!(!dir.path().join("plan").join(format!("{}", aid(5))).exists());
+}
+
+#[test]
+fn reordered_exact_members_reopen_with_identical_roots() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
+    let a = create_member(aid(6), 0, "a", b"va");
+    let b = create_member(aid(6), 1, "b", b"vb");
+    let plan = plan_for(hid(1), &[a.clone(), b.clone()], &[b"va", b"vb"]);
+    lane.begin_prepare(&plan, FRONTIER, &[b.clone(), a.clone()])
+        .unwrap();
+    let expected = prepare_from_closed_plan(&plan, FRONTIER, &[a.clone(), b.clone()]).unwrap();
+    let also = prepare_from_closed_plan(&plan, FRONTIER, &[b, a]).unwrap();
+    assert_eq!(expected, also);
+    assert_eq!(first_prepare(dir.path()), expected);
+    let lane = lane.reopen().unwrap();
+    assert!(lane.heap().can_resolve(aid(6)));
+    assert_eq!(first_prepare(dir.path()), expected);
+}
+
+#[test]
 fn member_that_does_not_match_plan_refuses_before_persist() {
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();

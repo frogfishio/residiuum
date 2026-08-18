@@ -1,8 +1,9 @@
 //! Convert an admitted/closed plan into the exact prepare evidence (CR-ATMR3-001).
 //!
 //! The durable lane must persist this record, not a synthetic frontier or empty
-//! semantic roots. Generated extras may join the closed member manifest; they
-//! cannot replace a missing plan mutation.
+//! semantic roots. The member slice must be exactly the closed plan mutations.
+//! Leftover members are refused until generated consequences have a typed
+//! closed-plan representation (CR-ATMR4-001).
 
 use crate::canonical::{
     encode_predicate, encode_read, key_order_bytes, plan_content_root, DOMAIN_ATOMIC_PREDICATES,
@@ -11,19 +12,20 @@ use crate::canonical::{
 use crate::cbor::{self, Value};
 use crate::error::AtomicsError;
 use crate::evidence::{AtomicMember, AtomicPrepare};
-use crate::id::AtomicId;
+use crate::id::{AtomicId, CollectionId};
 use crate::outcome::AtomicRefuseReason;
 use crate::plan::AtomicPlan;
 use crate::validate::validate_closed_plan;
 use crate::{member_hash, ordered_member_manifest_root};
 
 /// Derive [`AtomicPrepare`] from a closed plan, the bound serialization
-/// frontier, and the closed generated members.
+/// frontier, and the exact closed members.
 ///
 /// Recomputes `plan_content_root`. Read, predicate, and rule-revision roots
 /// come from the plan's canonical data. `limits` and `scope` are the plan's.
-/// Members that implement plan mutations must match kind, version, and value
-/// hash. Additional generated members are included in the ordered manifest.
+/// Members must match plan mutations one-to-one by identity, kind, version,
+/// and value hash. Extra, missing, or duplicate members are refused. Reordering
+/// the exact set is accepted; the manifest root is canonical.
 pub fn prepare_from_closed_plan(
     plan: &AtomicPlan,
     frontier: [u8; 32],
@@ -83,12 +85,20 @@ fn hash_encoded(
 }
 
 fn bind_members_to_plan(plan: &AtomicPlan, members: &[AtomicMember]) -> Result<(), AtomicsError> {
+    let mut seen: Vec<(CollectionId, Vec<u8>)> = Vec::new();
     for member in members {
         if member.atomic_id != plan.atomic_id() {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
         member.validate()?;
         let _ = member_hash(member)?;
+        let key = key_order_bytes(&member.object_identity.key);
+        if seen.iter().any(|(collection, seen_key)| {
+            *collection == member.object_identity.collection_id && *seen_key == key
+        }) {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget));
+        }
+        seen.push((member.object_identity.collection_id, key));
     }
     let mut unused: Vec<&AtomicMember> = members.iter().collect();
     for mutation in plan.mutations() {
@@ -110,7 +120,9 @@ fn bind_members_to_plan(plan: &AtomicPlan, members: &[AtomicMember]) -> Result<(
             _ => return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue)),
         }
     }
-    let _ = unused;
+    if !unused.is_empty() {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+    }
     Ok(())
 }
 
@@ -188,14 +200,28 @@ mod tests {
     }
 
     fn create_member(id: AtomicId, value: &[u8]) -> AtomicMember {
+        member_on(id, 0, "k", value)
+    }
+
+    fn member_on(id: AtomicId, ordinal: u32, key: &str, value: &[u8]) -> AtomicMember {
         AtomicMember {
             atomic_id: id,
-            ordinal: 0,
-            object_identity: ObjectIdentity::new(cid(), CanonicalKey::String("k".into())),
+            ordinal,
+            object_identity: ObjectIdentity::new(cid(), CanonicalKey::String(key.into())),
             member_kind: MutationKind::Create,
             before_version: None,
             after_content_hash: Some(*blake3::hash(value).as_bytes()),
-            event_id: vid(1),
+            event_id: vid(ordinal as u8 + 1),
+        }
+    }
+
+    fn mutation(key: &str, value: &[u8]) -> PlanMutation {
+        PlanMutation {
+            kind: MutationKind::Create,
+            collection_id: cid(),
+            key: CanonicalKey::String(key.into()),
+            encoded_value: Some(value.to_vec()),
+            if_version: None,
         }
     }
 
@@ -320,36 +346,68 @@ mod tests {
     }
 
     #[test]
-    fn generated_extra_member_enters_the_same_manifest() {
+    fn leftover_member_is_refused() {
         let id = aid(4);
+        let plan = close(id, vec![mutation("k", b"v")], vec![], vec![], vec![], None);
+        let primary = create_member(id, b"v");
+        let extra = member_on(id, 1, "hist", b"hist");
+        assert_eq!(
+            prepare_from_closed_plan(&plan, [1; 32], &[primary, extra]).unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+        );
+    }
+
+    #[test]
+    fn closed_member_set_has_specified_results() {
+        let id = aid(5);
+        let a = member_on(id, 0, "a", b"va");
+        let b = member_on(id, 1, "b", b"vb");
         let plan = close(
             id,
-            vec![PlanMutation {
-                kind: MutationKind::Create,
-                collection_id: cid(),
-                key: CanonicalKey::String("k".into()),
-                encoded_value: Some(b"v".to_vec()),
-                if_version: None,
-            }],
+            vec![mutation("a", b"va"), mutation("b", b"vb")],
             vec![],
             vec![],
             vec![],
             None,
         );
-        let primary = create_member(id, b"v");
-        let extra = AtomicMember {
-            atomic_id: id,
-            ordinal: 1,
-            object_identity: ObjectIdentity::new(cid(), CanonicalKey::String("hist".into())),
-            member_kind: MutationKind::Create,
-            before_version: None,
-            after_content_hash: Some(*blake3::hash(b"hist").as_bytes()),
-            event_id: vid(2),
-        };
-        let prepare = prepare_from_closed_plan(&plan, [1; 32], &[primary, extra.clone()]).unwrap();
+        let frontier = [2u8; 32];
+        let accepted = prepare_from_closed_plan(&plan, frontier, &[a.clone(), b.clone()]).unwrap();
+        let reordered = prepare_from_closed_plan(&plan, frontier, &[b.clone(), a.clone()]).unwrap();
+        assert_eq!(accepted, reordered);
         assert_eq!(
-            prepare.ordered_member_manifest_root,
-            ordered_member_manifest_root(hid(), &[create_member(id, b"v"), extra]).unwrap()
+            accepted.ordered_member_manifest_root,
+            ordered_member_manifest_root(hid(), &[a.clone(), b.clone()]).unwrap()
+        );
+        assert_eq!(accepted.content_root, plan_content_root(&plan).unwrap());
+        assert_eq!(
+            prepare_from_closed_plan(&plan, frontier, std::slice::from_ref(&a)).unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+        );
+        assert_eq!(
+            prepare_from_closed_plan(
+                &plan,
+                frontier,
+                &[a.clone(), b.clone(), member_on(id, 2, "c", b"vc")]
+            )
+            .unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+        );
+        let mut duplicate = a.clone();
+        duplicate.ordinal = 2;
+        duplicate.event_id = vid(3);
+        assert_eq!(
+            prepare_from_closed_plan(&plan, frontier, &[a.clone(), duplicate]).unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget)
+        );
+        let substituted = member_on(id, 0, "other", b"va");
+        assert_eq!(
+            prepare_from_closed_plan(&plan, frontier, &[substituted, b]).unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
+        );
+        let empty = close(id, vec![], vec![], vec![], vec![], None);
+        assert_eq!(
+            prepare_from_closed_plan(&empty, frontier, std::slice::from_ref(&a)).unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
         );
     }
 }

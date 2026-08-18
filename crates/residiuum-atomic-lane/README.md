@@ -30,6 +30,8 @@ Write order: closed-plan sidecar + `sync_all` → intent file + `sync_all` →
 prepare frame append + `sync_all` (`AfterPrepare`) → payload file +
 `sync_all` → member frame append + `sync_all` (`AfterMember(n)`).
 The prepare body is `prepare_from_closed_plan`, not synthetic empty roots.
+The member slice must equal the closed plan mutations; leftover members are
+refused before any sidecar or log append (CR-ATMR4-001).
 
 `seal_member_boundary` `sync_all`s `coordinator.log` and every shard log, then
 creates `sealed/<atomic_id>` and `sync_all`s that file and its directory. That
