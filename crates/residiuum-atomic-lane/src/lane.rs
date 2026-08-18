@@ -1,13 +1,13 @@
 //! File-backed coordinator / member lane.
 
 use crate::error::LaneError;
-use crate::limits::RecoveryLimits;
 use crate::io_fail::{self, IoPhase, IoPoint, IoSite};
-use crate::persist::{self, persist_log_ack, sync_dir, sync_path};
+use crate::limits::RecoveryLimits;
 use crate::limits::{max_encoded_member_bytes, max_intent_members, max_payload_bytes, MAX_SHARDS};
+use crate::persist::{self, persist_log_ack, sync_dir, sync_path};
 use crate::recover::{
-    encode_plan_sidecar, persist_recovery_checkpoint, recover_heap, seal_for,
-    RecoveryBudget, RecoveryStats,
+    encode_plan_sidecar, persist_recovery_checkpoint, recover_heap, seal_for, RecoveryBudget,
+    RecoveryStats,
 };
 use crate::seal::encode_seal;
 use crate::writer::LaneWriterGuard;
@@ -101,6 +101,14 @@ impl DurableLane {
 
     /// Reconstruct a lane from a directory image.
     pub fn open(root: impl AsRef<Path>) -> Result<Self, LaneError> {
+        Self::open_with_limits(root, RecoveryLimits::prototype())
+    }
+
+    /// Reconstruct a lane with explicit recovery ceilings (CR-ATMR4-007).
+    pub fn open_with_limits(
+        root: impl AsRef<Path>,
+        limits: RecoveryLimits,
+    ) -> Result<Self, LaneError> {
         let root = root.as_ref().to_path_buf();
         let writer = LaneWriterGuard::acquire(&root)?;
         let mut id_bytes = [0u8; 16];
@@ -108,7 +116,7 @@ impl DurableLane {
         let heap_id = HeapId::from_bytes(id_bytes)?;
         let shard_count = parse_shard_count(&fs::read_to_string(root.join("meta"))?)?;
         let mut heap = StagingHeap::new(heap_id, shard_count)?;
-        let mut budget = RecoveryBudget::new(RecoveryLimits::prototype());
+        let mut budget = RecoveryBudget::new(limits);
         recover_heap(&root, heap_id, shard_count, &mut heap, &mut budget)?;
         persist_recovery_checkpoint(&root, &heap, shard_count)?;
         Ok(Self {
@@ -265,8 +273,7 @@ impl DurableLane {
         self.heap
             .check_commit_chunk_manifest(atomic_id, ordinal, &plan)?;
         persist_chunk_manifest(&self.root, atomic_id, ordinal, &plan)?;
-        self.heap
-            .commit_chunk_manifest(atomic_id, ordinal, plan)?;
+        self.heap.commit_chunk_manifest(atomic_id, ordinal, plan)?;
         self.write_checkpoint()?;
         Ok(())
     }
@@ -289,9 +296,7 @@ impl DurableLane {
                     if existing == &body && staged.member == member {
                         return Ok(());
                     }
-                    return Err(
-                        AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget).into(),
-                    );
+                    return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget).into());
                 }
             }
         }
@@ -456,7 +461,11 @@ fn persist_payload(
     if payload.len() as u32 > max_payload_bytes() {
         return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
     }
-    persist::write_exclusive(&payload_path(root, atomic_id, ordinal), payload, IoSite::Payload)
+    persist::write_exclusive(
+        &payload_path(root, atomic_id, ordinal),
+        payload,
+        IoSite::Payload,
+    )
 }
 
 fn persist_member_frame(

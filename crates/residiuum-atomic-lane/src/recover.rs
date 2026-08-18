@@ -1,10 +1,10 @@
 //! Authenticated reopen of coordinator, intent, members, and seals (CR-R2-002).
 
-use crate::checkpoint::{load_checkpoint, placement_matches, store_checkpoint, RecoveryCheckpoint};
-use crate::error::LaneError;
-use crate::limits::{
-    max_encoded_member_bytes, max_intent_members, max_payload_bytes, RecoveryLimits,
+use crate::checkpoint::{
+    checkpoint_path, load_checkpoint, placement_matches, store_checkpoint, RecoveryCheckpoint,
 };
+use crate::error::LaneError;
+use crate::limits::{max_encoded_member_bytes, max_intent_members, RecoveryLimits, SidecarRole};
 use crate::seal::{decode_seal, SealRecord};
 use residiuum_atomics::{
     decode_canonical_plan, decode_member, decode_prepare, member_hash,
@@ -24,6 +24,8 @@ use std::path::Path;
 pub struct RecoveryStats {
     /// Bytes actually read from logs.
     pub bytes_scanned: u64,
+    /// Sidecar bytes charged after a metadata size check (CR-ATMR4-007).
+    pub sidecar_bytes: u64,
     /// Verified frames consumed.
     pub frames_verified: u32,
     /// Atomics installed in the live kernel.
@@ -63,6 +65,19 @@ impl RecoveryBudget {
             });
         }
         self.stats.bytes_scanned = next;
+        Ok(())
+    }
+
+    fn charge_sidecar(&mut self, n: u64) -> Result<(), LaneError> {
+        let next = self.stats.sidecar_bytes.saturating_add(n);
+        if next > self.limits.max_sidecar_bytes {
+            return Err(LaneError::Incomplete {
+                what: "sidecar bytes",
+                observed: next,
+                limit: self.limits.max_sidecar_bytes,
+            });
+        }
+        self.stats.sidecar_bytes = next;
         Ok(())
     }
 
@@ -184,12 +199,12 @@ pub fn replay_prepares(
         {
             return Err(LaneError::Corrupt("prepare envelope mismatch"));
         }
-        let members = read_intent(root, prepare.atomic_id)?;
+        let members = read_intent(root, prepare.atomic_id, budget)?;
         let recomputed = ordered_member_manifest_root(heap_id, &members)?;
         if recomputed != prepare.ordered_member_manifest_root {
             return Err(LaneError::Corrupt("intent manifest root"));
         }
-        let (plan, frontier) = read_plan(root, prepare.atomic_id)?;
+        let (plan, frontier) = read_plan(root, prepare.atomic_id, budget)?;
         if frontier != prepare.frontier {
             return Err(LaneError::Corrupt("plan frontier mismatch"));
         }
@@ -267,7 +282,7 @@ pub fn replay_members(
             if chunk_manifest_path(root, member.atomic_id, member.ordinal).exists() {
                 continue;
             }
-            let payload = read_payload(root, member.atomic_id, member.ordinal)?;
+            let payload = read_payload(root, member.atomic_id, member.ordinal, budget)?;
             if let Some(staged) = heap
                 .inspect_staged(member.atomic_id)
                 .and_then(|ms| ms.iter().find(|s| s.member.ordinal == member.ordinal))
@@ -311,7 +326,11 @@ pub fn replay_chunks(
         let Some((atomic_id, ordinal)) = parse_chunk_manifest_name(name) else {
             return Err(LaneError::Corrupt("chunk-manifest filename"));
         };
-        let plan = decode_chunk_manifest(&fs::read(entry.path())?)?;
+        let plan = decode_chunk_manifest(&read_sidecar(
+            &entry.path(),
+            SidecarRole::ChunkManifest,
+            budget,
+        )?)?;
         manifests.push((atomic_id, ordinal, plan));
     }
     manifests.sort_by_key(|(id, ord, _)| (id.to_bytes(), *ord));
@@ -343,7 +362,7 @@ pub fn replay_chunks(
             if !path.exists() {
                 continue;
             }
-            let body = fs::read(&path)?;
+            let body = read_sidecar(&path, SidecarRole::ChunkBody, budget)?;
             if let Some(staged) = heap
                 .inspect_staged(atomic_id)
                 .and_then(|ms| ms.iter().find(|s| s.member.ordinal == ordinal))
@@ -391,7 +410,7 @@ pub fn replay_seals(
             return Err(LaneError::Corrupt("seal filename"));
         };
         let named = AtomicId::from_bytes(id_bytes)?;
-        let record = decode_seal(&fs::read(entry.path())?)?;
+        let record = decode_seal(&read_sidecar(&entry.path(), SidecarRole::Seal, budget)?)?;
         if record.atomic_id != named {
             return Err(LaneError::Corrupt("seal name mismatch"));
         }
@@ -468,6 +487,10 @@ pub fn read_log_ack(log_path: &Path) -> Result<u64, LaneError> {
     let path = log_ack_path(log_path);
     if !path.exists() {
         return Ok(0);
+    }
+    let len = fs::metadata(&path)?.len();
+    if len > SidecarRole::Ack.max_bytes() {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
     }
     let bytes = fs::read(path)?;
     let arr: [u8; 8] = bytes
@@ -579,11 +602,11 @@ pub fn apply_checkpoint(
 ) -> Result<(), LaneError> {
     for item in &ck.atomics {
         budget.charge_atomic()?;
-        let members = read_intent(root, item.atomic_id)?;
+        let members = read_intent(root, item.atomic_id, budget)?;
         if members.len() as u32 != item.member_count {
             return Err(LaneError::Corrupt("checkpoint member count"));
         }
-        let (plan, frontier) = read_plan(root, item.atomic_id)?;
+        let (plan, frontier) = read_plan(root, item.atomic_id, budget)?;
         let derived = prepare_from_closed_plan(&plan, frontier, &members)?;
         if derived.content_root != item.content_root
             || derived.ordered_member_manifest_root != item.manifest_root
@@ -609,7 +632,7 @@ pub fn apply_checkpoint(
                 continue;
             }
             budget.charge_member()?;
-            let payload = read_payload(root, member.atomic_id, member.ordinal)?;
+            let payload = read_payload(root, member.atomic_id, member.ordinal, budget)?;
             heap.append_staged(member, payload)?;
         }
     }
@@ -632,6 +655,9 @@ pub fn recover_heap(
 ) -> Result<(), LaneError> {
     match load_checkpoint(root, budget.limits) {
         Ok(Some(ck)) if ck.shard_offsets.len() as u32 == shard_count => {
+            if let Ok(meta) = fs::metadata(checkpoint_path(root)) {
+                budget.charge_sidecar(meta.len())?;
+            }
             match apply_checkpoint(root, heap, &ck, budget) {
                 Ok(()) => {
                     verify_log_coverage(&coordinator_path(root), budget)?;
@@ -685,13 +711,34 @@ fn hole_reason_label(reason: &HoleReason) -> &'static str {
     }
 }
 
-fn read_plan(root: &Path, atomic_id: AtomicId) -> Result<(AtomicPlan, [u8; 32]), LaneError> {
-    let bytes = fs::read(plan_path(root, atomic_id))?;
+fn read_sidecar(
+    path: &Path,
+    role: SidecarRole,
+    budget: &mut RecoveryBudget,
+) -> Result<Vec<u8>, LaneError> {
+    let len = fs::metadata(path)?.len();
+    if len > role.max_bytes() {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
+    }
+    budget.charge_sidecar(len)?;
+    Ok(fs::read(path)?)
+}
+
+fn read_plan(
+    root: &Path,
+    atomic_id: AtomicId,
+    budget: &mut RecoveryBudget,
+) -> Result<(AtomicPlan, [u8; 32]), LaneError> {
+    let bytes = read_sidecar(&plan_path(root, atomic_id), SidecarRole::Plan, budget)?;
     decode_plan_sidecar(&bytes)
 }
 
-fn read_intent(root: &Path, atomic_id: AtomicId) -> Result<Vec<AtomicMember>, LaneError> {
-    let bytes = fs::read(intent_path(root, atomic_id))?;
+fn read_intent(
+    root: &Path,
+    atomic_id: AtomicId,
+    budget: &mut RecoveryBudget,
+) -> Result<Vec<AtomicMember>, LaneError> {
+    let bytes = read_sidecar(&intent_path(root, atomic_id), SidecarRole::Intent, budget)?;
     if bytes.len() < 4 {
         return Err(LaneError::Corrupt("intent truncated"));
     }
@@ -727,13 +774,17 @@ fn read_intent(root: &Path, atomic_id: AtomicId) -> Result<Vec<AtomicMember>, La
     Ok(out)
 }
 
-fn read_payload(root: &Path, atomic_id: AtomicId, ordinal: u32) -> Result<Vec<u8>, LaneError> {
-    let path = payload_path(root, atomic_id, ordinal);
-    let len = fs::metadata(&path)?.len();
-    if len > u64::from(max_payload_bytes()) {
-        return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
-    }
-    Ok(fs::read(path)?)
+fn read_payload(
+    root: &Path,
+    atomic_id: AtomicId,
+    ordinal: u32,
+    budget: &mut RecoveryBudget,
+) -> Result<Vec<u8>, LaneError> {
+    read_sidecar(
+        &payload_path(root, atomic_id, ordinal),
+        SidecarRole::Payload,
+        budget,
+    )
 }
 
 fn coordinator_path(root: &Path) -> std::path::PathBuf {
@@ -761,7 +812,12 @@ fn chunk_manifest_path(root: &Path, atomic_id: AtomicId, ordinal: u32) -> std::p
         .join(format!("{atomic_id}-{ordinal}"))
 }
 
-fn chunk_body_path(root: &Path, atomic_id: AtomicId, ordinal: u32, index: u32) -> std::path::PathBuf {
+fn chunk_body_path(
+    root: &Path,
+    atomic_id: AtomicId,
+    ordinal: u32,
+    index: u32,
+) -> std::path::PathBuf {
     root.join("chunk")
         .join(format!("{atomic_id}-{ordinal}-{index}"))
 }
@@ -780,9 +836,11 @@ fn decode_chunk_manifest(bytes: &[u8]) -> Result<ChunkPlan, LaneError> {
     }
     let total = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
     let expected = 4usize
-        .checked_add(32usize.checked_mul(total as usize).ok_or(LaneError::Corrupt(
-            "chunk-manifest overflow",
-        ))?)
+        .checked_add(
+            32usize
+                .checked_mul(total as usize)
+                .ok_or(LaneError::Corrupt("chunk-manifest overflow"))?,
+        )
         .ok_or(LaneError::Corrupt("chunk-manifest overflow"))?;
     if bytes.len() != expected {
         return Err(LaneError::Corrupt("chunk-manifest length"));

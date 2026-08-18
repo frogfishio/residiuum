@@ -34,6 +34,8 @@ The member slice must equal the closed plan mutations; leftover members are
 refused before any sidecar or log append (CR-ATMR4-001). Exclusive sidecars
 publish through a unique temp file and a no-replace link; a torn leftover is
 quarantined so exact same-ID retry is not an identity conflict (CR-ATMR4-006).
+Recovery size-checks every sidecar role from metadata before `read` and charges
+those bytes to `max_sidecar_bytes` (CR-ATMR4-007).
 
 `seal_member_boundary` `sync_all`s `coordinator.log` and every shard log, then
 creates `sealed/<atomic_id>` and `sync_all`s that file and its directory. That

@@ -2,8 +2,8 @@
 
 use crate::error::LaneError;
 use crate::io_fail::IoSite;
-use crate::persist;
 use crate::limits::RecoveryLimits;
+use crate::persist;
 use residiuum_atomics::{AtomicId, ContentRoot, MemberPhase, PlacementManifest, StagingHeap};
 use std::fs;
 use std::path::Path;
@@ -168,6 +168,13 @@ pub fn load_checkpoint(
     let path = checkpoint_path(root);
     if !path.exists() {
         return Ok(None);
+    }
+    let len = fs::metadata(&path)?.len();
+    if len > crate::limits::SidecarRole::Checkpoint.max_bytes() {
+        return Err(residiuum_atomics::AtomicsError::Refused(
+            residiuum_atomics::AtomicRefuseReason::LimitExceeded,
+        )
+        .into());
     }
     let bytes = fs::read(path)?;
     Ok(Some(decode_checkpoint(&bytes, limits)?))
