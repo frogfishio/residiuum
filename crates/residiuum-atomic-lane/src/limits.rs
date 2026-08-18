@@ -40,7 +40,7 @@ impl SidecarRole {
             Self::Plan => 8 + 32 + ResourceLimits::hard_local_heap().canonical_plan_bytes as u64,
             Self::Intent => 4 + (max_intent_members() as u64) * (4 + 2048),
             Self::Payload => max_payload_bytes() as u64,
-            Self::Checkpoint => 23 + 64 * 8 + 4096 * 101,
+            Self::Checkpoint => 23 + 64 * 8 + 4096 * 101 + 32 * (1 + 64) + 32,
             Self::Seal => 156,
             Self::ChunkManifest => 4 + (ChunkLimits::hard().max_chunks as u64) * 32,
             Self::ChunkBody => ChunkLimits::hard().max_chunk_bytes as u64,

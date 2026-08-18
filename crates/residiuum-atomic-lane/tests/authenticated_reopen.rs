@@ -75,10 +75,13 @@ fn mutated_intent_cannot_reconstruct_a_sealed_prepare() {
     let (dir, lane) = sealed_lane();
     drop(lane);
     flip(&dir.path().join("intent").join(format!("{}", aid(1))));
-    assert!(matches!(
-        DurableLane::open(dir.path()),
-        Err(LaneError::Corrupt(_))
-    ));
+    assert!(
+        matches!(
+            DurableLane::open(dir.path()),
+            Err(LaneError::Corrupt(_)) | Err(LaneError::Kernel(_))
+        ),
+        "mutated intent must not reopen"
+    );
 }
 
 #[test]

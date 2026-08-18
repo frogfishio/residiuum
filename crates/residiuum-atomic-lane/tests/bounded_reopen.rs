@@ -100,22 +100,20 @@ fn recovery_stats_are_reported() {
 }
 
 #[test]
-fn hostile_checkpoint_atomic_count_is_incomplete() {
+fn v1_checkpoint_is_rebuilt_from_logs() {
     let dir = tempfile::tempdir().unwrap();
-    let lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
+    let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
+    prepare_one(&mut lane, 3, "k", b"v");
     drop(lane);
     let mut buf = b"R2CKP1".to_vec();
     buf.push(1);
     buf.extend_from_slice(&0u64.to_be_bytes());
     buf.extend_from_slice(&1u32.to_be_bytes());
     buf.extend_from_slice(&0u64.to_be_bytes());
-    buf.extend_from_slice(&u32::MAX.to_be_bytes());
+    buf.extend_from_slice(&0u32.to_be_bytes());
     fs::write(dir.path().join("checkpoint"), buf).unwrap();
-    match DurableLane::open(dir.path()) {
-        Err(LaneError::Incomplete {
-            what: "checkpoint atomics",
-            ..
-        }) => {}
-        _other => panic!("expected Incomplete checkpoint atomics"),
-    }
+    let lane = DurableLane::open(dir.path()).unwrap();
+    assert!(lane.recovery_stats().rebuilt_checkpoint);
+    assert!(!lane.recovery_stats().used_checkpoint);
+    assert!(lane.heap().can_resolve(aid(3)));
 }

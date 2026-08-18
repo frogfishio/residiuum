@@ -9,7 +9,9 @@ use std::fs;
 use std::path::Path;
 
 const MAGIC: &[u8] = b"R2CKP1";
-const VERSION: u8 = 1;
+const VERSION_V1: u8 = 1;
+const VERSION: u8 = 2;
+const DOMAIN: &[u8] = b"RESIDIUUM-ATOMIC-LANE-CKP-V2";
 
 /// One reconstructed Atomic named by a checkpoint.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,13 +35,34 @@ pub struct RecoveryCheckpoint {
     pub coordinator_offset: u64,
     /// Per-shard covered lengths.
     pub shard_offsets: Vec<u64>,
+    /// BLAKE3 of the coordinator prefix `[0, coordinator_offset)`.
+    pub coordinator_hash: [u8; 32],
+    /// BLAKE3 of each shard prefix `[0, shard_offsets[i])`.
+    pub shard_hashes: Vec<[u8; 32]>,
     /// Reconstructed Atomics in coordinator order.
     pub atomics: Vec<CheckpointAtomic>,
 }
 
+/// How `checkpoint` was classified (CR-ATMR4-002).
+#[derive(Debug)]
+pub enum CheckpointLoad {
+    /// No checkpoint file.
+    Missing,
+    /// v1 or unrecognized image: rebuild from logs; do not apply facts.
+    Legacy,
+    /// Authenticated v2 body.
+    Ready(RecoveryCheckpoint),
+}
+
 impl RecoveryCheckpoint {
     /// Snapshot the live kernel and current acknowledged log lengths.
-    pub fn from_heap(heap: &StagingHeap, coordinator_offset: u64, shard_offsets: Vec<u64>) -> Self {
+    pub fn from_heap(
+        heap: &StagingHeap,
+        coordinator_offset: u64,
+        shard_offsets: Vec<u64>,
+        coordinator_hash: [u8; 32],
+        shard_hashes: Vec<[u8; 32]>,
+    ) -> Self {
         let mut atomics = Vec::new();
         for rec in heap.coordinator().records() {
             let Some(placement) = heap.placement(rec.atomic_id) else {
@@ -59,6 +82,8 @@ impl RecoveryCheckpoint {
         Self {
             coordinator_offset,
             shard_offsets,
+            coordinator_hash,
+            shard_hashes,
             atomics,
         }
     }
@@ -74,6 +99,10 @@ pub fn encode_checkpoint(ck: &RecoveryCheckpoint) -> Vec<u8> {
     for off in &ck.shard_offsets {
         buf.extend_from_slice(&off.to_be_bytes());
     }
+    buf.extend_from_slice(&ck.coordinator_hash);
+    for hash in &ck.shard_hashes {
+        buf.extend_from_slice(hash);
+    }
     buf.extend_from_slice(&(ck.atomics.len() as u32).to_be_bytes());
     for a in &ck.atomics {
         buf.extend_from_slice(a.atomic_id.as_bytes());
@@ -82,7 +111,43 @@ pub fn encode_checkpoint(ck: &RecoveryCheckpoint) -> Vec<u8> {
         buf.extend_from_slice(&a.member_count.to_be_bytes());
         buf.push(u8::from(a.sealed));
     }
+    let digest = checkpoint_digest(&buf);
+    buf.extend_from_slice(&digest);
     buf
+}
+
+fn checkpoint_digest(body: &[u8]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(DOMAIN);
+    hasher.update(body);
+    *hasher.finalize().as_bytes()
+}
+
+/// BLAKE3 of `DOMAIN || file[0..len]`. Missing file is empty prefix only when `len == 0`.
+pub fn prefix_digest(path: &Path, len: u64) -> Result<[u8; 32], LaneError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(DOMAIN);
+    if len == 0 {
+        return Ok(*hasher.finalize().as_bytes());
+    }
+    if !path.exists() {
+        return Err(LaneError::Corrupt("checkpoint prefix missing log"));
+    }
+    let file_len = fs::metadata(path)?.len();
+    if file_len < len {
+        return Err(LaneError::Corrupt("checkpoint prefix beyond log"));
+    }
+    let mut file = fs::File::open(path)?;
+    let mut left = len;
+    let mut buf = [0u8; 8192];
+    while left > 0 {
+        let n = std::cmp::min(left, buf.len() as u64) as usize;
+        use std::io::Read;
+        file.read_exact(&mut buf[..n])?;
+        hasher.update(&buf[..n]);
+        left -= n as u64;
+    }
+    Ok(*hasher.finalize().as_bytes())
 }
 
 /// Decode a checkpoint. Any structural problem is corruption.
@@ -91,8 +156,12 @@ pub fn decode_checkpoint(
     limits: RecoveryLimits,
 ) -> Result<RecoveryCheckpoint, LaneError> {
     let header = MAGIC.len() + 1 + 8 + 4;
-    if bytes.len() < header || !bytes.starts_with(MAGIC) || bytes[MAGIC.len()] != VERSION {
+    if bytes.len() < header + 32 || !bytes.starts_with(MAGIC) || bytes[MAGIC.len()] != VERSION {
         return Err(LaneError::Corrupt("checkpoint header"));
+    }
+    let (body, digest) = bytes.split_at(bytes.len() - 32);
+    if checkpoint_digest(body) != digest {
+        return Err(LaneError::Corrupt("checkpoint checksum"));
     }
     let mut off = MAGIC.len() + 1;
     let coordinator_offset = u64::from_be_bytes(bytes[off..off + 8].try_into().unwrap());
@@ -114,7 +183,20 @@ pub fn decode_checkpoint(
         shard_offsets.push(u64::from_be_bytes(bytes[off..off + 8].try_into().unwrap()));
         off += 8;
     }
-    if off + 4 > bytes.len() {
+    if off + 32 + shard_offsets.len() * 32 + 4 > body.len() {
+        return Err(LaneError::Corrupt("checkpoint prefix hashes"));
+    }
+    let mut coordinator_hash = [0u8; 32];
+    coordinator_hash.copy_from_slice(&bytes[off..off + 32]);
+    off += 32;
+    let mut shard_hashes = Vec::with_capacity(shard_offsets.len());
+    for _ in 0..shard_offsets.len() {
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&bytes[off..off + 32]);
+        shard_hashes.push(hash);
+        off += 32;
+    }
+    if off + 4 > body.len() {
         return Err(LaneError::Corrupt("checkpoint atomic count"));
     }
     let n = u32::from_be_bytes(bytes[off..off + 4].try_into().unwrap());
@@ -128,7 +210,7 @@ pub fn decode_checkpoint(
     }
     let mut atomics = Vec::new();
     for _ in 0..n {
-        if off + 32 + 32 + 32 + 4 + 1 > bytes.len() {
+        if off + 32 + 32 + 32 + 4 + 1 > body.len() {
             return Err(LaneError::Corrupt("checkpoint atomic truncated"));
         }
         let atomic_id = AtomicId::from_bytes(bytes[off..off + 32].try_into().unwrap())?;
@@ -150,24 +232,26 @@ pub fn decode_checkpoint(
             sealed,
         });
     }
-    if off != bytes.len() {
+    if off != body.len() {
         return Err(LaneError::Corrupt("checkpoint trailing bytes"));
+    }
+    if shard_hashes.len() != shard_offsets.len() {
+        return Err(LaneError::Corrupt("checkpoint hash count"));
     }
     Ok(RecoveryCheckpoint {
         coordinator_offset,
         shard_offsets,
+        coordinator_hash,
+        shard_hashes,
         atomics,
     })
 }
 
 /// Load `checkpoint` if present. Missing is `Ok(None)`. Corrupt is `Err`.
-pub fn load_checkpoint(
-    root: &Path,
-    limits: RecoveryLimits,
-) -> Result<Option<RecoveryCheckpoint>, LaneError> {
+pub fn load_checkpoint(root: &Path, limits: RecoveryLimits) -> Result<CheckpointLoad, LaneError> {
     let path = checkpoint_path(root);
     if !path.exists() {
-        return Ok(None);
+        return Ok(CheckpointLoad::Missing);
     }
     let len = fs::metadata(&path)?.len();
     if len > crate::limits::SidecarRole::Checkpoint.max_bytes() {
@@ -177,7 +261,13 @@ pub fn load_checkpoint(
         .into());
     }
     let bytes = fs::read(path)?;
-    Ok(Some(decode_checkpoint(&bytes, limits)?))
+    if bytes.len() > MAGIC.len() && bytes.starts_with(MAGIC) && bytes[MAGIC.len()] == VERSION_V1 {
+        return Ok(CheckpointLoad::Legacy);
+    }
+    if bytes.len() < MAGIC.len() + 1 || !bytes.starts_with(MAGIC) || bytes[MAGIC.len()] != VERSION {
+        return Ok(CheckpointLoad::Legacy);
+    }
+    Ok(CheckpointLoad::Ready(decode_checkpoint(&bytes, limits)?))
 }
 
 /// Persist `checkpoint` atomically.

@@ -1,7 +1,8 @@
 //! Authenticated reopen of coordinator, intent, members, and seals (CR-R2-002).
 
 use crate::checkpoint::{
-    checkpoint_path, load_checkpoint, placement_matches, store_checkpoint, RecoveryCheckpoint,
+    checkpoint_path, load_checkpoint, placement_matches, prefix_digest, store_checkpoint,
+    CheckpointLoad, RecoveryCheckpoint,
 };
 use crate::error::LaneError;
 use crate::limits::{max_encoded_member_bytes, max_intent_members, RecoveryLimits, SidecarRole};
@@ -36,6 +37,8 @@ pub struct RecoveryStats {
     pub dirents: u32,
     /// True when a valid checkpoint supplied the prefix.
     pub used_checkpoint: bool,
+    /// True when a v1/unrecognized checkpoint was ignored and logs were rebuilt.
+    pub rebuilt_checkpoint: bool,
 }
 
 /// Running recovery ceilings.
@@ -539,6 +542,7 @@ fn refuse_coverage_damage(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn verify_log_coverage(path: &Path, budget: &mut RecoveryBudget) -> Result<(), LaneError> {
     if !path.exists() {
         return Ok(());
@@ -637,9 +641,24 @@ pub fn apply_checkpoint(
         }
     }
     replay_chunks(root, heap, budget)?;
-    for item in &ck.atomics {
-        if item.sealed {
-            heap.seal_member_boundary(item.atomic_id)?;
+    Ok(())
+}
+
+fn verify_checkpoint_prefixes(root: &Path, ck: &RecoveryCheckpoint) -> Result<(), LaneError> {
+    if prefix_digest(&coordinator_path(root), ck.coordinator_offset)? != ck.coordinator_hash {
+        return Err(LaneError::Corrupt("checkpoint coordinator hash"));
+    }
+    if ck.shard_hashes.len() != ck.shard_offsets.len() {
+        return Err(LaneError::Corrupt("checkpoint hash count"));
+    }
+    for (i, (off, expect)) in ck
+        .shard_offsets
+        .iter()
+        .zip(ck.shard_hashes.iter())
+        .enumerate()
+    {
+        if prefix_digest(&shard_path(root, i as u32), *off)? != *expect {
+            return Err(LaneError::Corrupt("checkpoint shard hash"));
         }
     }
     Ok(())
@@ -653,33 +672,27 @@ pub fn recover_heap(
     heap: &mut StagingHeap,
     budget: &mut RecoveryBudget,
 ) -> Result<(), LaneError> {
-    match load_checkpoint(root, budget.limits) {
-        Ok(Some(ck)) if ck.shard_offsets.len() as u32 == shard_count => {
+    match load_checkpoint(root, budget.limits)? {
+        CheckpointLoad::Ready(ck) if ck.shard_offsets.len() as u32 == shard_count => {
             if let Ok(meta) = fs::metadata(checkpoint_path(root)) {
                 budget.charge_sidecar(meta.len())?;
             }
-            match apply_checkpoint(root, heap, &ck, budget) {
-                Ok(()) => {
-                    verify_log_coverage(&coordinator_path(root), budget)?;
-                    for shard in 0..shard_count {
-                        verify_log_coverage(&shard_path(root, shard), budget)?;
-                    }
-                    budget.stats.used_checkpoint = true;
-                    replay_prepares(root, heap_id, heap, ck.coordinator_offset, budget)?;
-                    replay_members(root, shard_count, heap, &ck.shard_offsets, budget)?;
-                    replay_chunks(root, heap, budget)?;
-                    replay_seals(root, heap, budget)?;
-                    return Ok(());
-                }
-                Err(LaneError::Corrupt(_)) | Err(LaneError::Kernel(_)) => {
-                    *heap = StagingHeap::new(heap_id, shard_count)?;
-                    budget.stats = RecoveryStats::default();
-                }
-                Err(e) => return Err(e),
-            }
+            verify_checkpoint_prefixes(root, &ck)?;
+            apply_checkpoint(root, heap, &ck, budget)?;
+            budget.stats.used_checkpoint = true;
+            replay_prepares(root, heap_id, heap, ck.coordinator_offset, budget)?;
+            replay_members(root, shard_count, heap, &ck.shard_offsets, budget)?;
+            replay_chunks(root, heap, budget)?;
+            replay_seals(root, heap, budget)?;
+            return Ok(());
         }
-        Ok(Some(_)) | Ok(None) | Err(LaneError::Corrupt(_)) => {}
-        Err(e) => return Err(e),
+        CheckpointLoad::Ready(_) => {
+            return Err(LaneError::Corrupt("checkpoint shard count"));
+        }
+        CheckpointLoad::Legacy => {
+            budget.stats.rebuilt_checkpoint = true;
+        }
+        CheckpointLoad::Missing => {}
     }
     replay_prepares(root, heap_id, heap, 0, budget)?;
     replay_members(root, shard_count, heap, &[], budget)?;
@@ -699,7 +712,18 @@ pub fn persist_recovery_checkpoint(
     for shard in 0..shard_count {
         shard_offsets.push(read_log_ack(&shard_path(root, shard))?);
     }
-    let ck = RecoveryCheckpoint::from_heap(heap, coordinator_offset, shard_offsets);
+    let coordinator_hash = prefix_digest(&coordinator_path(root), coordinator_offset)?;
+    let mut shard_hashes = Vec::with_capacity(shard_offsets.len());
+    for (i, off) in shard_offsets.iter().enumerate() {
+        shard_hashes.push(prefix_digest(&shard_path(root, i as u32), *off)?);
+    }
+    let ck = RecoveryCheckpoint::from_heap(
+        heap,
+        coordinator_offset,
+        shard_offsets,
+        coordinator_hash,
+        shard_hashes,
+    );
     store_checkpoint(root, &ck)
 }
 
