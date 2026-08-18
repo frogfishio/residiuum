@@ -9,6 +9,12 @@ Execution authority:
 2. [ATOMICS_IMPLEMENTATION_PLAN.md](./ATOMICS_IMPLEMENTATION_PLAN.md) — current
    baseline, package ownership, PR order, gates, evidence, and governance.
 
+Current acceptance review:
+
+- [ATM1_ATM2_DEEP_REVIEW_CR_ATMR3_2026-08-18.md](./ATM1_ATM2_DEEP_REVIEW_CR_ATMR3_2026-08-18.md)
+  — ATM-1 technically acceptable pending regenerated handoff; ATM-2 not
+  accepted; active changes use only the `CR-ATMR3-*` namespace.
+
 Compatibility note:
 [TRANSACTIONS.md](./TRANSACTIONS.md) explains how transaction terminology may
 later project the Atomic contract. It is subordinate and is not an
