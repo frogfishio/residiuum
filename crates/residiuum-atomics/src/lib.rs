@@ -95,6 +95,10 @@ pub use staging::{
 pub use validate::validate_closed_plan;
 
 #[cfg(test)]
+#[path = "builder_cases.rs"]
+mod builder_cases;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn crate_has_no_store_or_sdk_in_manifest() {

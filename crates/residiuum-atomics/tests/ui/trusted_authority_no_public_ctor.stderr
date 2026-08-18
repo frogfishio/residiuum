@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/trusted_authority_no_public_ctor.rs:3:54
+  |
+3 |     let _ = residiuum_atomics::TrustedAuthorityView::new(heap, [2u8; 32]);
+  |                                                      ^^^ private associated function
+  |
+ ::: src/builder.rs
+  |
+  |     pub(crate) fn new(heap_id: HeapId, revision: [u8; 32]) -> Self {
+  |     -------------------------------------------------------------- private associated function defined here

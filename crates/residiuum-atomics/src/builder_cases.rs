@@ -1,11 +1,11 @@
 //! ATM-1.3: typed builder, rights, authority binding, cross-Heap negatives.
 
-use residiuum_atomics::{
+use crate::{
     admit_closed_plan, plan_content_root, serialize_canonical_value, validate_closed_plan,
     AtomicBuilder, AtomicId, AtomicOptions, AtomicOutcome, AtomicRefuseReason, AtomicsError,
-    BoundCollection, CanonicalKey, CanonicalValue, CollectionId, CollectionRights,
-    CoordinationScope, EncodingProfile, HeapId, PredicateKind, ResourceLimits, SerialOracle,
-    TrustedAuthorityView, ValueEncoding, VersionId,
+    BoundCollection, CanonicalKey, CanonicalKeyKind, CanonicalValue, CollectionId,
+    CollectionRights, CoordinationScope, EncodingProfile, HeapId, PredicateKind, ResourceLimits,
+    SerialOracle, TrustedAuthorityView, ValueEncoding, VersionId,
 };
 use std::time::{Duration, Instant};
 
@@ -522,7 +522,7 @@ fn handle_carries_frozen_encoding_profile() {
     assert_eq!(handle.encoding(), EncodingProfile::INTEGER);
     assert_eq!(
         handle.encoding().key_kind(),
-        residiuum_atomics::CanonicalKeyKind::Integer
+        CanonicalKeyKind::Integer
     );
     assert_eq!(handle.encoding().value_encoding(), ValueEncoding::Integer);
 }

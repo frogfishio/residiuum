@@ -1,0 +1,17 @@
+error[E0451]: fields `heap_id`, `revision` and `grants` of struct `TrustedAuthorityView` are private
+ --> tests/ui/trusted_authority_no_struct_literal.rs:3:9
+  |
+2 |     let _view = residiuum_atomics::TrustedAuthorityView {
+  |                 --------------------------------------- in this type
+3 |         heap_id: residiuum_atomics::HeapId::from_bytes([1u8; 16]).unwrap(),
+  |         ^^^^^^^ private field
+4 |         revision: [2u8; 32],
+  |         ^^^^^^^^ private field
+5 |         grants: Default::default(),
+  |         ^^^^^^ private field
+
+error: type `builder::CollectionGrant` is private
+ --> tests/ui/trusted_authority_no_struct_literal.rs:5:17
+  |
+5 |         grants: Default::default(),
+  |                 ^^^^^^^^^^^^^^^^^^ private type

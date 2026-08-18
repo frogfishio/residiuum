@@ -71,9 +71,10 @@ struct CollectionGrant {
 
 /// Trusted current Heap authority and per-collection grants.
 ///
-/// The SDK (or a test harness) builds this from capability state. Application
-/// code cannot mint a [`BoundCollection`] except through this view, so rights
-/// and revision cannot be invented independently of a grant set.
+/// This type is a trust boundary, not a bag of fields. Downstream crates
+/// cannot construct or elevate a view (CR-R2-004). ATM-5 / the capability
+/// subsystem will mint one from an unforgeable token. Tests use
+/// `cfg(test)` or the crate-local `test-authority` feature only.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrustedAuthorityView {
     heap_id: HeapId,
@@ -83,7 +84,11 @@ pub struct TrustedAuthorityView {
 
 impl TrustedAuthorityView {
     /// Empty grant set at `revision` on one Heap.
-    pub fn new(heap_id: HeapId, revision: [u8; 32]) -> Self {
+    ///
+    /// Crate-internal / test mint only. Downstream crates cannot call this
+    /// (CR-R2-004). ATM-5 will mint from an unforgeable capability token.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new(heap_id: HeapId, revision: [u8; 32]) -> Self {
         Self {
             heap_id,
             revision,
@@ -92,7 +97,12 @@ impl TrustedAuthorityView {
     }
 
     /// Record granted ordinary rights. Encoding defaults to string keys / byte values.
-    pub fn grant(&mut self, collection_id: CollectionId, rights: CollectionRights) -> &mut Self {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn grant(
+        &mut self,
+        collection_id: CollectionId,
+        rights: CollectionRights,
+    ) -> &mut Self {
         let encoding = self
             .grants
             .get(&collection_id)
@@ -102,7 +112,8 @@ impl TrustedAuthorityView {
     }
 
     /// Record granted rights together with the collection's frozen encoding profile.
-    pub fn grant_with_encoding(
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn grant_with_encoding(
         &mut self,
         collection_id: CollectionId,
         rights: CollectionRights,

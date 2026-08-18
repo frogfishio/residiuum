@@ -1,0 +1,14 @@
+error[E0624]: method `grant` is private
+ --> tests/ui/trusted_authority_no_public_grant.rs:4:14
+  |
+4 |           view.grant(cid, residiuum_atomics::CollectionRights::ordinary());
+  |                ^^^^^ private method
+  |
+ ::: src/builder.rs
+  |
+  | /     pub(crate) fn grant(
+  | |         &mut self,
+  | |         collection_id: CollectionId,
+  | |         rights: CollectionRights,
+  | |     ) -> &mut Self {
+  | |__________________- private method defined here
