@@ -80,7 +80,9 @@ fn allowed(scenario: Scenario, site: IoSite, phase: IoPhase) -> &'static [Outcom
             Seal,
             AfterLogSync | BeforeWrite | ShortWrite | AfterWrite | BeforeRename,
         ) => &[StagedInvisible],
-        (Scenario::Seal, Seal, AfterFileSync | AfterRename | AfterDirSync) => &[DurableInvisible, StagedInvisible],
+        (Scenario::Seal, Seal, AfterFileSync | AfterRename | AfterDirSync) => {
+            &[DurableInvisible, StagedInvisible]
+        }
         (Scenario::Seal, Checkpoint, _) => &[DurableInvisible, StagedInvisible],
         (scenario, site, phase) => {
             panic!("unspecified I/O matrix cell {scenario:?} {site:?} {phase:?}")

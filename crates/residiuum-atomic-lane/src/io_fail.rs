@@ -237,10 +237,9 @@ pub fn hit(point: IoPoint) -> Result<(), IoInjected> {
 
 fn fire(point: IoPoint, action: IoAction) -> Result<(), IoInjected> {
     match action {
-        IoAction::Error => Err(IoInjected::Io(io::Error::new(
-            io::ErrorKind::Other,
-            format!("injected I/O error {point:?}"),
-        ))),
+        IoAction::Error => Err(IoInjected::Io(io::Error::other(format!(
+            "injected I/O error {point:?}"
+        )))),
         IoAction::ShortWrite => Ok(()),
         IoAction::Kill => Err(IoInjected::Kill(point)),
     }

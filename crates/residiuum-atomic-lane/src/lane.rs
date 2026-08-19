@@ -392,7 +392,7 @@ impl DurableLane {
             sync_path(&shard_path(&self.root, shard))?;
         }
         io_fail::hit(IoPoint::new(IoSite::Seal, IoPhase::AfterLogSync))
-            .map_err(|e| persist_injected(e))?;
+            .map_err(persist_injected)?;
         let record = seal_for(&self.heap, atomic_id)?;
         persist::write_atomic(
             &sealed_path(&self.root, atomic_id),

@@ -35,6 +35,7 @@ fn blow_up(path: &std::path::Path) {
     let file = OpenOptions::new()
         .create(true)
         .write(true)
+        .truncate(true)
         .open(path)
         .unwrap();
     file.set_len((1 << 30) + 1).unwrap();

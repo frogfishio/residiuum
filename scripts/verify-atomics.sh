@@ -7,7 +7,7 @@
 #
 # Writes commit-scoped run records under target/atomics-evidence/runs/
 # <commit12>-<profile>.json plus a detached .sha256 sidecar (CR-R2-007).
-# Labels are package-specific (CR-ATMR3-009):
+# Labels are package-specific (CR-ATMR4-010):
 #   ATM-1 may become acceptance_candidate on a clean full matrix.
 #   ATM-2 stays partial while not_store=true or a mandatory deliverable is absent.
 # Run-level label is the worse of the two packages (never upgrades ATM-2).
@@ -43,7 +43,7 @@ TOOLCHAIN="$(rustc --version 2>/dev/null || echo rustc-missing)"
 CARGO_V="$(cargo --version 2>/dev/null || echo cargo-missing)"
 PLATFORM="$(uname -srm)"
 SEED="${ATOMICS_EVIDENCE_SEED:-0}"
-SUITE_VERSION="atm-1-atm-2-atmr3-2026-08-18"
+SUITE_VERSION="atm-1-atm-2-atmr4-2026-08-19"
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_UNIX="$(date +%s)"
 # Label is decided after the run from dirty + family coverage (CR-R2-007).
@@ -144,6 +144,8 @@ case "$PROFILE" in
       cargo test -p residiuum-atomic-lane --offline --test honest_damage
     run_cmd ATM-CRS "exclusive_writer" \
       cargo test -p residiuum-atomic-lane --offline --test exclusive_writer
+    run_cmd ATM-CRS "exclusive_publish" \
+      cargo test -p residiuum-atomic-lane --offline --test exclusive_publish
     run_cmd ATM-CRS "io_prefix_matrix" \
       cargo test -p residiuum-atomic-lane --offline --test io_prefix_matrix
     ;;
@@ -214,7 +216,7 @@ ENDED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ENDED_UNIX="$(date +%s)"
 DURATION_S="$((ENDED_UNIX - STARTED_UNIX))"
 
-HANDOFF="doc/todo/atomics/ATM1_ATM2_HANDOFF_2026-08-18.md"
+HANDOFF="doc/todo/atomics/ATM1_ATM2_HANDOFF_ATMR4_2026-08-19.md"
 [[ -f "$HANDOFF" ]] || fail "missing package handoff $HANDOFF"
 
 python3 - "$COMMANDS_JSONL" "$OUT_ROOT" "$PROFILE" "$COMMIT" "$DIRTY" \
@@ -358,7 +360,7 @@ run = {
     "dirty": dirty,
     "acceptance": acceptance,
     "acceptance_rule": (
-        "Package-specific (CR-ATMR3-009). diagnostic = dirty or failing; "
+        "Package-specific (CR-ATMR4-010). diagnostic = dirty or failing; "
         "ATM-1 acceptance_candidate = clean full ENC/ORA/AUT/RES + format all-targets; "
         "ATM-2 stays partial while not_store=true or a mandatory deliverable is absent; "
         "run-level label is the worse of the two packages. "
@@ -486,7 +488,7 @@ atm2 = merge_pack(out / "atm-2" / "manifest.json", {
         "in-memory StagingHeap binds member_hash + payload (CR-ATM2-004/005)",
         "residiuum-atomic-lane file-backed prepare/member + fsync reopen (CR-ATM2-001)",
         "crash prefixes before_prepare / after_prepare / after_member_n",
-        "plan-derived prepare, honest damage, exclusive writer, durable chunks, I/O-phase matrix (CR-ATMR3)",
+        "closed member set, one store authority, exclusive publish, sidecar limits, authenticated checkpoint, durable chunks, I/O + store invisibility (CR-ATMR4)",
     ],
     "authoritative_files": [
         "coordinator.log (BatchPrepare frames, sync_all after append)",

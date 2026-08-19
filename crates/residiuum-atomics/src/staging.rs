@@ -546,10 +546,7 @@ impl StagingHeap {
                 .chunks
                 .as_ref()
                 .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
-            if chunks
-                .get(index as usize)
-                .is_some_and(Option::is_some)
-            {
+            if chunks.get(index as usize).is_some_and(Option::is_some) {
                 return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget));
             }
         } else {

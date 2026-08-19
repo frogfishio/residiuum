@@ -105,7 +105,10 @@ fn after_first_chunk_reopen_keeps_prefix_only() {
     let staged = lane.heap().inspect_staged(aid(2)).unwrap();
     assert_eq!(staged.len(), 1);
     assert!(!staged[0].payload_complete);
-    assert_eq!(staged[0].chunks.as_ref().unwrap()[0].as_deref(), Some(p0.as_slice()));
+    assert_eq!(
+        staged[0].chunks.as_ref().unwrap()[0].as_deref(),
+        Some(p0.as_slice())
+    );
     assert!(staged[0].chunks.as_ref().unwrap()[1].is_none());
     assert!(lane.seal_member_boundary(aid(2)).is_err());
     assert_no_ordinary_leak(lane.heap(), "k");

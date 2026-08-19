@@ -11,9 +11,9 @@
 mod checkpoint;
 mod error;
 pub mod io_fail;
-mod persist;
 mod lane;
 mod limits;
+mod persist;
 mod recover;
 mod seal;
 mod writer;

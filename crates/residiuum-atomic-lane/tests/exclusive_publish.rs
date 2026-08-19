@@ -16,15 +16,17 @@ fn refused(err: LaneError) -> AtomicRefuseReason {
     }
 }
 
-fn cleanup_failpoints() {
+fn cleanup_failpoints() -> std::sync::MutexGuard<'static, ()> {
+    let guard = io_fail::serial_guard();
     io_fail::disarm_all();
     io_fail::clear_visits();
     io_fail::clear_mutants();
+    guard
 }
 
 #[test]
 fn short_plan_write_retry_succeeds() {
-    cleanup_failpoints();
+    let _serial = cleanup_failpoints();
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
     let member = create_member(aid(1), 0, "k", b"v");
@@ -40,12 +42,11 @@ fn short_plan_write_retry_succeeds() {
     lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&member))
         .unwrap();
     assert!(lane.heap().can_resolve(aid(1)));
-    cleanup_failpoints();
 }
 
 #[test]
 fn pre_write_error_retry_succeeds() {
-    cleanup_failpoints();
+    let _serial = cleanup_failpoints();
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
     let member = create_member(aid(2), 0, "k", b"v");
@@ -61,12 +62,11 @@ fn pre_write_error_retry_succeeds() {
     lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&member))
         .unwrap();
     assert!(lane.heap().can_resolve(aid(2)));
-    cleanup_failpoints();
 }
 
 #[test]
 fn empty_torn_sidecar_does_not_conflict() {
-    cleanup_failpoints();
+    let _serial = cleanup_failpoints();
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
     let member = create_member(aid(3), 0, "k", b"v");
@@ -78,12 +78,11 @@ fn empty_torn_sidecar_does_not_conflict() {
         .unwrap();
     assert!(lane.heap().can_resolve(aid(3)));
     assert_ne!(fs::metadata(&sidecar).unwrap().len(), 0);
-    cleanup_failpoints();
 }
 
 #[test]
 fn different_valid_identity_still_conflicts() {
-    cleanup_failpoints();
+    let _serial = cleanup_failpoints();
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
     let member = create_member(aid(4), 0, "k", b"v");
@@ -99,12 +98,11 @@ fn different_valid_identity_still_conflicts() {
         ),
         AtomicRefuseReason::AtomicIdConflict
     );
-    cleanup_failpoints();
 }
 
 #[test]
 fn payload_and_intent_short_write_retry() {
-    cleanup_failpoints();
+    let _serial = cleanup_failpoints();
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
     let member = create_member(aid(5), 0, "k", b"payload-bytes");
@@ -129,5 +127,4 @@ fn payload_and_intent_short_write_retry() {
     io_fail::disarm_all();
     lane.append_staged(member, b"payload-bytes".to_vec())
         .unwrap();
-    cleanup_failpoints();
 }
