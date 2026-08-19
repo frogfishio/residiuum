@@ -17,16 +17,29 @@ const PREPARE_MAGIC: &[u8] = b"ATPREP1";
 const CHUNK_PLAN_MAGIC: &[u8] = b"ATMAP1";
 const CHUNK_BODY_MAGIC: &[u8] = b"ATCHK1";
 
+/// Locator for staged payload/chunk bytes in store media (CR-ATMR6-004).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BodyRef {
+    pub rel_path: String,
+    pub offset: u64,
+    pub len: u32,
+    pub hash: [u8; 32],
+}
+
 /// Staging facts recovered from store media only.
 #[derive(Debug, Default)]
 pub(crate) struct StageCatalog {
     pub prepares: BTreeMap<AtomicId, AtomicPrepare>,
     pub members: BTreeMap<AtomicId, Vec<AtomicMember>>,
     pub payloads: BTreeMap<(AtomicId, u32), Vec<u8>>,
+    /// Media locators for payloads (checkpoint authority, not a second copy).
+    pub payload_refs: BTreeMap<(AtomicId, u32), BodyRef>,
     /// Frozen chunk maps (CR-ATMR5-005).
     pub chunk_plans: BTreeMap<(AtomicId, u32), ChunkPlan>,
     /// Verified chunk bodies keyed by (atomic, ordinal, index).
     pub chunks: BTreeMap<(AtomicId, u32, u32), Vec<u8>>,
+    /// Media locators for chunk bodies.
+    pub chunk_refs: BTreeMap<(AtomicId, u32, u32), BodyRef>,
     pub seals: BTreeMap<AtomicId, ContentRoot>,
     /// Identities that must not be installed or reused (CR-ATMR5-002).
     pub blocked: BTreeSet<AtomicId>,
@@ -69,19 +82,33 @@ impl StageCatalog {
         self.seals.contains_key(&atomic_id)
     }
 
+    pub(crate) fn retained_payload_bytes(&self) -> u64 {
+        let live: u64 = self
+            .payloads
+            .values()
+            .map(|p| p.len() as u64)
+            .sum::<u64>()
+            .saturating_add(self.chunks.values().map(|p| p.len() as u64).sum());
+        let refs: u64 = self
+            .payload_refs
+            .values()
+            .map(|r| u64::from(r.len))
+            .sum::<u64>()
+            .saturating_add(self.chunk_refs.values().map(|r| u64::from(r.len)).sum());
+        live.max(refs)
+    }
+
     /// Approximate retained catalogue bytes (not a wire encoding).
     pub(crate) fn work_bytes(&self) -> u64 {
-        let payload: u64 = self.payloads.values().map(|p| p.len() as u64).sum();
-        let chunks: u64 = self.chunks.values().map(|p| p.len() as u64).sum();
+        let refs: u64 =
+            (self.payload_refs.len() as u64 + self.chunk_refs.len() as u64).saturating_mul(80);
         let plans: u64 = self
             .chunk_plans
             .values()
             .map(|p| 8 + p.chunk_hashes.len() as u64 * 32)
             .sum();
         let members: u64 = self.members.values().map(|ms| ms.len() as u64).sum();
-        payload
-            .saturating_add(chunks)
-            .saturating_add(plans)
+        refs.saturating_add(plans)
             .saturating_add(self.prepares.len() as u64 * 512)
             .saturating_add(members.saturating_mul(256))
             .saturating_add(self.seals.len() as u64 * 64)

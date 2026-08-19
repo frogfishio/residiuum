@@ -96,7 +96,8 @@ pub use atomic_stage_classify::{
 };
 pub use atomic_stage_recover::{
     atomic_coord_path, atomic_stage_checkpoint_path, AtomicStageDisposition, AtomicStageLimits,
-    AtomicStageOpenReport, ATOMIC_COORD_FILE, ATOMIC_STAGE_CHECKPOINT_FILE,
+    AtomicStageOpenReport, ADMISSION_OUTSTANDING_ATOMICS, ATOMIC_COORD_FILE,
+    ATOMIC_STAGE_CHECKPOINT_FILE,
 };
 pub use backup::{
     backup_manifest_path, backup_store_path, load_and_verify_manifest, restore_full_backup,

@@ -366,3 +366,7 @@ required-features = ["legacy-raw-store"]
 [[test]]
 name = "atomic_stage_seal"
 required-features = ["legacy-raw-store"]
+
+[[test]]
+name = "atomic_stage_limits"
+required-features = ["legacy-raw-store"]

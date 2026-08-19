@@ -95,9 +95,9 @@ fn checkpoint_reopen_skips_covered_prefix() {
     assert_eq!(report.catalog_loads, 1);
     assert!(report.files_skipped >= 1, "settled media must be skipped");
     assert!(
-        report.bytes_scanned >= 64 * 1024,
-        "covered prefix verification must charge actual bytes, scanned {}",
-        report.bytes_scanned
+        report.bytes_verified >= 64 * 1024,
+        "covered prefix verification must charge actual bytes, verified {}",
+        report.bytes_verified
     );
     assert!(first.kernel().placement(aid()).is_some());
     drop(first);
@@ -130,8 +130,13 @@ fn ordinary_growth_is_tailed_not_fully_rescanned() {
         "dirty active tail must be streamed"
     );
     assert!(
-        report.bytes_scanned >= 128 * 1024,
-        "covered prefix verification plus tail must charge actual bytes, scanned {}",
+        report.bytes_verified >= 128 * 1024,
+        "covered prefix verification must charge actual bytes, verified {}",
+        report.bytes_verified
+    );
+    assert!(
+        report.bytes_scanned > 16 * 1024,
+        "the new tail must be charged, scanned {}",
         report.bytes_scanned
     );
     assert!(stage.kernel().placement(aid()).is_some());
@@ -167,7 +172,7 @@ fn oversized_new_segment_is_refused_before_read() {
     let bomb = store.paths().segments_dir().join("hostile.residiuum");
     std::fs::create_dir_all(store.paths().segments_dir()).unwrap();
     let f = std::fs::File::create(&bomb).unwrap();
-    f.set_len(32 * 1024 * 1024).unwrap();
+    f.set_len(128 * 1024 * 1024).unwrap();
     drop(f);
     match store.atomic_stage() {
         Err(StoreError::AtomicStage(msg)) => {

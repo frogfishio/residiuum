@@ -9,10 +9,12 @@
 use crate::atomic_stage_classify::StageFindings;
 use crate::atomic_stage_media::{
     chunk_body_event_id, chunk_plan_event_id, encode_stage_chunk_body, encode_stage_chunk_plan,
-    encode_stage_payload, encode_stage_seal, payload_event_id, seal_event_id, StageCatalog,
+    encode_stage_payload, encode_stage_seal, payload_event_id, seal_event_id, BodyRef,
+    StageCatalog,
 };
 use crate::atomic_stage_recover::{
-    open_catalog, persist_live_checkpoint, AtomicStageLimits, AtomicStageOpenReport, CoveredFile,
+    open_catalog, persist_live_checkpoint, rel_path, resolve_chunk_body, resolve_payload_body,
+    AtomicStageLimits, AtomicStageOpenReport, CoveredFile,
 };
 use crate::error::StoreError;
 use crate::store::Store;
@@ -24,6 +26,7 @@ use residiuum_atomics::{
 use residiuum_format::{
     encode_atomic_member_envelope, encode_atomic_prepare_envelope, FrameKind, EMPTY_ENVELOPE,
 };
+use std::fs;
 use std::path::PathBuf;
 
 /// Store-owned handle to staged Atomic evidence.
@@ -34,11 +37,20 @@ pub struct StoreAtomicStage<'a> {
     covered: Vec<CoveredFile>,
     report: AtomicStageOpenReport,
     findings: StageFindings,
+    limits: AtomicStageLimits,
 }
 
 impl Store {
     /// Open the store-owned Atomic stage. Requires the exclusive writer lock.
     pub fn atomic_stage(&mut self) -> Result<StoreAtomicStage<'_>, StoreError> {
+        self.atomic_stage_with_limits(AtomicStageLimits::operable())
+    }
+
+    /// Open Atomic stage with explicit operable/test limits (CR-ATMR6-004).
+    pub fn atomic_stage_with_limits(
+        &mut self,
+        limits: AtomicStageLimits,
+    ) -> Result<StoreAtomicStage<'_>, StoreError> {
         if !self.holds_writer_lock() {
             return Err(StoreError::AtomicStage(
                 "atomic stage requires the store writer lock".into(),
@@ -46,8 +58,8 @@ impl Store {
         }
         let heap_id = HeapId::from_bytes(self.store_id())
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        let opened = open_catalog(self.paths(), AtomicStageLimits::prototype(), heap_id)?;
-        let heap = rebuild_heap(heap_id, &opened.catalog)?;
+        let opened = open_catalog(self.paths(), limits, heap_id)?;
+        let heap = rebuild_heap(self.paths(), heap_id, &opened.catalog)?;
         self.record_atomic_stage_open(opened.report);
         Ok(StoreAtomicStage {
             store: self,
@@ -56,6 +68,7 @@ impl Store {
             covered: opened.covered,
             report: opened.report,
             findings: opened.findings,
+            limits,
         })
     }
 }
@@ -122,6 +135,7 @@ impl StoreAtomicStage<'_> {
                 self.persist_prepare(&prepare)?;
             }
         } else {
+            self.admit_new_atomic()?;
             self.persist_prepare(&prepare)?;
         }
         if let Some(existing) = self.heap.placement(prepare.atomic_id) {
@@ -402,7 +416,14 @@ impl StoreAtomicStage<'_> {
         index: u32,
         body: &[u8],
     ) -> Result<(), StoreError> {
+        if !self
+            .catalog
+            .has_chunk(member.atomic_id, member.ordinal, index)
+        {
+            self.admit_payload_bytes(body.len() as u64)?;
+        }
         crate::failpoint::hit("store.atomic.chunk_body.before_append")?;
+        let start = self.active_len();
         let encoded = encode_stage_chunk_body(member.atomic_id, member.ordinal, index, body);
         self.store.append_unindexed_atomic_frame(
             FrameKind::PayloadChunk,
@@ -414,6 +435,7 @@ impl StoreAtomicStage<'_> {
         self.catalog
             .chunks
             .insert((member.atomic_id, member.ordinal, index), body.to_vec());
+        self.note_chunk_ref(member.atomic_id, member.ordinal, index, start, &encoded);
         persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
         crate::failpoint::hit("store.atomic.chunk_body.after_checkpoint")?;
         Ok(())
@@ -434,6 +456,65 @@ impl StoreAtomicStage<'_> {
         }
         let payload = staged.payload.clone();
         self.persist_payload(member, &payload)
+    }
+
+    fn admit_new_atomic(&self) -> Result<(), StoreError> {
+        let next = self.catalog.prepares.len().saturating_add(1) as u32;
+        if next > self.limits.max_atomics {
+            return Err(StoreError::AtomicStage(format!(
+                "atomic stage admission atomics {next} exceeds limit {}",
+                self.limits.max_atomics
+            )));
+        }
+        Ok(())
+    }
+
+    fn admit_payload_bytes(&self, extra: u64) -> Result<(), StoreError> {
+        let next = self.catalog.retained_payload_bytes().saturating_add(extra);
+        if next > self.limits.max_payload_bytes {
+            return Err(StoreError::AtomicStage(format!(
+                "atomic stage admission payload bytes {next} exceeds limit {}",
+                self.limits.max_payload_bytes
+            )));
+        }
+        Ok(())
+    }
+
+    fn active_len(&self) -> u64 {
+        fs::metadata(self.store.paths().active_segment())
+            .map(|m| m.len())
+            .unwrap_or(0)
+    }
+
+    fn note_written_ref(&self, start: u64) -> Option<BodyRef> {
+        let end = self.active_len();
+        if end < start {
+            return None;
+        }
+        let path = self.store.paths().active_segment();
+        let mut file = fs::File::open(&path).ok()?;
+        use std::io::{Read, Seek, SeekFrom};
+        file.seek(SeekFrom::Start(start)).ok()?;
+        let mut bytes = vec![0u8; (end - start) as usize];
+        file.read_exact(&mut bytes).ok()?;
+        Some(BodyRef {
+            rel_path: rel_path(self.store.paths(), &path),
+            offset: start,
+            len: bytes.len() as u32,
+            hash: *blake3::hash(&bytes).as_bytes(),
+        })
+    }
+
+    fn note_payload_ref(&mut self, id: AtomicId, ordinal: u32, start: u64, _body: &[u8]) {
+        if let Some(refer) = self.note_written_ref(start) {
+            self.catalog.payload_refs.insert((id, ordinal), refer);
+        }
+    }
+
+    fn note_chunk_ref(&mut self, id: AtomicId, ordinal: u32, index: u32, start: u64, _body: &[u8]) {
+        if let Some(refer) = self.note_written_ref(start) {
+            self.catalog.chunk_refs.insert((id, ordinal, index), refer);
+        }
     }
 
     fn persist_prepare(&mut self, prepare: &AtomicPrepare) -> Result<(), StoreError> {
@@ -497,7 +578,11 @@ impl StoreAtomicStage<'_> {
     }
 
     fn persist_payload(&mut self, member: &AtomicMember, payload: &[u8]) -> Result<(), StoreError> {
+        if !self.catalog.has_payload(member.atomic_id, member.ordinal) {
+            self.admit_payload_bytes(payload.len() as u64)?;
+        }
         crate::failpoint::hit("store.atomic.payload.before_append")?;
+        let start = self.active_len();
         let body = encode_stage_payload(member.atomic_id, member.ordinal, payload);
         self.store.append_unindexed_atomic_frame(
             FrameKind::PayloadChunk,
@@ -509,6 +594,7 @@ impl StoreAtomicStage<'_> {
         self.catalog
             .payloads
             .insert((member.atomic_id, member.ordinal), payload.to_vec());
+        self.note_payload_ref(member.atomic_id, member.ordinal, start, &body);
         persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
         crate::failpoint::hit("store.atomic.payload.after_checkpoint")?;
         Ok(())
@@ -544,7 +630,11 @@ impl From<AtomicsError> for StoreError {
     }
 }
 
-fn rebuild_heap(heap_id: HeapId, catalog: &StageCatalog) -> Result<StagingHeap, StoreError> {
+fn rebuild_heap(
+    paths: &crate::layout::StorePaths,
+    heap_id: HeapId,
+    catalog: &StageCatalog,
+) -> Result<StagingHeap, StoreError> {
     let mut heap =
         StagingHeap::new(heap_id, 1).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
     let mut ids: Vec<AtomicId> = catalog.prepares.keys().copied().collect();
@@ -578,23 +668,25 @@ fn rebuild_heap(heap_id: HeapId, catalog: &StageCatalog) -> Result<StagingHeap, 
                 let mut indexes: Vec<u32> = catalog
                     .chunks
                     .keys()
+                    .chain(catalog.chunk_refs.keys())
                     .filter(|(id, ord, _)| *id == atomic_id && *ord == member.ordinal)
                     .map(|(_, _, idx)| *idx)
                     .collect();
                 indexes.sort_unstable();
+                indexes.dedup();
                 for index in indexes {
-                    let body = catalog
-                        .chunks
-                        .get(&(atomic_id, member.ordinal, index))
-                        .cloned()
-                        .ok_or_else(|| {
-                            StoreError::AtomicStage("chunk index missing after key scan".into())
-                        })?;
+                    let body =
+                        resolve_chunk_body(paths, catalog, atomic_id, member.ordinal, index)?
+                            .ok_or_else(|| {
+                                StoreError::AtomicStage("chunk index missing after key scan".into())
+                            })?;
                     heap.append_chunk(member.clone(), index, body)
                         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
                 }
-            } else if let Some(payload) = catalog.payloads.get(&(atomic_id, member.ordinal)) {
-                heap.append_staged(member.clone(), payload.clone())
+            } else if let Some(payload) =
+                resolve_payload_body(paths, catalog, atomic_id, member.ordinal)?
+            {
+                heap.append_staged(member.clone(), payload)
                     .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
             }
         }

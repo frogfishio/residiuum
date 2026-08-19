@@ -13,7 +13,7 @@ use crate::atomic_stage_classify::{
     encode_finding_class, encode_finding_kind, finalize_catalog, ingest_classified_frame,
     StageEvidenceClass, StageFinding, StageFindings,
 };
-use crate::atomic_stage_media::StageCatalog;
+use crate::atomic_stage_media::{decode_stage_sidecar, BodyRef, SidecarDecode, StageCatalog};
 use crate::error::StoreError;
 use crate::layout::StorePaths;
 use residiuum_atomics::{
@@ -26,8 +26,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 7;
-const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V7";
+const CHECKPOINT_VERSION: u8 = 8;
+const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V8";
 const BLOCK_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-BLK-V1";
 /// Fixed leaf size for the covered-prefix block frontier (CR-ATMR6-001).
 const FRONTIER_BLOCK: u64 = 64 * 1024;
@@ -39,12 +39,17 @@ pub const ATOMIC_STAGE_CHECKPOINT_FILE: &str = "atomic-stage.ckpt";
 /// Durable coordinator sequence log (CR-ATMR5-004).
 pub const ATOMIC_COORD_FILE: &str = "atomic-coord.ckpt";
 
+/// Outstanding LocalHeap Atomics admitted before reclaim (CR-ATMR6-004).
+pub const ADMISSION_OUTSTANDING_ATOMICS: u32 = 8;
+/// Store default segment growth; covered prefixes may be this large.
+const STORE_SEGMENT_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Ceilings applied before allocation (independent of total store size).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AtomicStageLimits {
-    /// Maximum bytes read from one segment file (tail or whole).
+    /// Maximum dirty tail or uncovered file bytes read from one media file.
     pub max_segment_bytes: u64,
-    /// Maximum aggregate bytes actually read.
+    /// Maximum aggregate dirty-tail / rebuild bytes actually ingested.
     pub max_scan_bytes: u64,
     /// Maximum reconstructed Atomics.
     pub max_atomics: u32,
@@ -65,20 +70,32 @@ pub struct AtomicStageLimits {
 }
 
 impl AtomicStageLimits {
-    /// Prototype diagnostic ceilings. Not a function of database size.
-    pub const fn prototype() -> Self {
+    /// Operable ceilings derived from LocalHeap hard limits and admission.
+    ///
+    /// Covered immutable segment length is not a recovery ceiling. Dirty tails
+    /// are bounded to one store segment. Payload admission is outstanding
+    /// Atomics times the frozen 8 MiB per-Atomic value ceiling.
+    pub const fn operable() -> Self {
+        let hard = residiuum_atomics::ResourceLimits::hard_local_heap();
+        let atomics = ADMISSION_OUTSTANDING_ATOMICS;
+        let payload = atomics as u64 * hard.total_proposed_value_bytes as u64;
         Self {
-            max_segment_bytes: 16 * 1024 * 1024,
-            max_scan_bytes: 16 * 1024 * 1024,
-            max_atomics: 4096,
-            max_members: 4096,
-            max_payload_bytes: 16 * 1024 * 1024,
+            max_segment_bytes: STORE_SEGMENT_BYTES,
+            max_scan_bytes: STORE_SEGMENT_BYTES,
+            max_atomics: atomics,
+            max_members: atomics.saturating_mul(hard.total_generated_members),
+            max_payload_bytes: payload,
             max_dirents: 8192,
             max_depth: 8,
             max_files: 4096,
-            max_work_bytes: 16 * 1024 * 1024,
+            max_work_bytes: payload.saturating_add(16 * 1024 * 1024),
             max_checkpoint_bytes: 16 * 1024 * 1024,
         }
+    }
+
+    /// Historical name. Same as [`Self::operable`].
+    pub const fn prototype() -> Self {
+        Self::operable()
     }
 }
 
@@ -139,6 +156,10 @@ pub struct AtomicStageOpenReport {
     pub foreign: u32,
     /// Covered media is missing, replaced, or otherwise degraded (CR-ATMR6-002).
     pub coverage_degraded: bool,
+    /// Covered-prefix verification bytes (not charged against `max_scan_bytes`).
+    pub bytes_verified: u64,
+    /// Limits applied for this open (CR-ATMR6-004).
+    pub limits: AtomicStageLimits,
 }
 
 #[derive(Clone, Debug)]
@@ -161,7 +182,10 @@ impl Budget {
     fn new(limits: AtomicStageLimits) -> Self {
         Self {
             limits,
-            report: AtomicStageOpenReport::default(),
+            report: AtomicStageOpenReport {
+                limits,
+                ..AtomicStageOpenReport::default()
+            },
         }
     }
 
@@ -231,7 +255,7 @@ impl Budget {
                 u64::from(self.limits.max_members),
             ));
         }
-        let payload: u64 = catalog.payloads.values().map(|p| p.len() as u64).sum();
+        let payload = catalog.retained_payload_bytes();
         if payload > self.limits.max_payload_bytes {
             return Err(Self::fail(
                 "payload bytes",
@@ -296,19 +320,13 @@ pub(crate) fn open_catalog(
         let rel = rel_path(paths, &path);
         let meta = fs::metadata(&path)?;
         let size = meta.len();
-        if size > limits.max_segment_bytes {
-            return Err(Budget::fail(
-                "segment bytes",
-                size,
-                limits.max_segment_bytes,
-            ));
-        }
         if let Some(idx) = unmatched.iter().position(|c| c.rel_path == rel) {
             let c = unmatched.swap_remove(idx);
             if size < c.covered_len {
                 budget.report.files_rebuilt = budget.report.files_rebuilt.saturating_add(1);
                 ingest_file_tail(
                     &path,
+                    &rel,
                     0,
                     size,
                     bound_heap,
@@ -320,7 +338,7 @@ pub(crate) fn open_catalog(
                 continue;
             }
             let n = verify_covered_blocks(&path, &c)?;
-            budget.charge_bytes(n)?;
+            budget.report.bytes_verified = budget.report.bytes_verified.saturating_add(n);
             if size == c.covered_len {
                 next_covered.push(CoveredFile { rel_path: rel, ..c });
                 budget.report.files_skipped = budget.report.files_skipped.saturating_add(1);
@@ -329,6 +347,7 @@ pub(crate) fn open_catalog(
             budget.report.files_tailed = budget.report.files_tailed.saturating_add(1);
             ingest_file_tail(
                 &path,
+                &rel,
                 c.covered_len,
                 size,
                 bound_heap,
@@ -336,12 +355,13 @@ pub(crate) fn open_catalog(
                 &mut findings,
                 &mut budget,
             )?;
-            next_covered.push(cover_file(&path, rel, size)?);
+            next_covered.push(extend_cover(&path, Some(&c), rel, size)?);
             continue;
         }
         budget.report.files_rebuilt = budget.report.files_rebuilt.saturating_add(1);
         ingest_file_tail(
             &path,
+            &rel,
             0,
             size,
             bound_heap,
@@ -407,7 +427,8 @@ fn cover_active(paths: &StorePaths, covered: &mut Vec<CoveredFile>) -> Result<()
     }
     let size = fs::metadata(&active)?.len();
     let rel = rel_path(paths, &active);
-    let next = cover_file(&active, rel.clone(), size)?;
+    let prev = covered.iter().find(|c| c.rel_path == rel).cloned();
+    let next = extend_cover(&active, prev.as_ref(), rel.clone(), size)?;
     if let Some(slot) = covered.iter_mut().find(|c| c.rel_path == rel) {
         *slot = next;
     } else {
@@ -418,6 +439,7 @@ fn cover_active(paths: &StorePaths, covered: &mut Vec<CoveredFile>) -> Result<()
 
 fn ingest_file_tail(
     path: &Path,
+    rel: &str,
     start: u64,
     size: u64,
     bound_heap: HeapId,
@@ -447,9 +469,21 @@ fn ingest_file_tail(
     for region in &report.regions {
         match region {
             ScanRegion::Hole { reason, .. } => classify_hole(findings, reason),
-            ScanRegion::VerifiedFrame { frame, .. } => {
+            ScanRegion::VerifiedFrame { frame, range } => {
                 budget.report.frames = budget.report.frames.saturating_add(1);
                 ingest_classified_frame(catalog, bound_heap, frame, findings);
+                let lo = range.start as usize;
+                let hi = (range.end as usize).min(bytes.len());
+                if lo < hi {
+                    record_frame_locator(
+                        catalog,
+                        rel,
+                        start.saturating_add(range.start),
+                        (hi - lo) as u64,
+                        &bytes[lo..hi],
+                        &frame.body,
+                    );
+                }
                 budget.charge_catalog(catalog)?;
             }
         }
@@ -506,7 +540,7 @@ fn collect_files(
     Ok(())
 }
 
-fn rel_path(paths: &StorePaths, path: &Path) -> String {
+pub(crate) fn rel_path(paths: &StorePaths, path: &Path) -> String {
     path.strip_prefix(&paths.root)
         .unwrap_or(path)
         .to_string_lossy()
@@ -583,6 +617,170 @@ fn cover_file(path: &Path, rel_path: String, covered_len: u64) -> Result<Covered
     let mut bytes = vec![0u8; covered_len as usize];
     file.read_exact(&mut bytes)?;
     Ok(coverage_from_bytes(rel_path, &bytes))
+}
+
+fn extend_cover(
+    path: &Path,
+    prev: Option<&CoveredFile>,
+    rel_path: String,
+    new_len: u64,
+) -> Result<CoveredFile, StoreError> {
+    let Some(prev) = prev else {
+        return cover_file(path, rel_path, new_len);
+    };
+    if prev.covered_len == 0 || prev.covered_len > new_len {
+        return cover_file(path, rel_path, new_len);
+    }
+    if prev.covered_len == new_len {
+        return Ok(CoveredFile {
+            rel_path,
+            ..prev.clone()
+        });
+    }
+    let mut file = File::open(path)?;
+    let mut marks = prev.clone();
+    marks.rel_path = rel_path;
+    let leftover_start = marks.block_hashes.len() as u64 * FRONTIER_BLOCK;
+    let mut leftover = vec![0u8; (new_len - leftover_start) as usize];
+    file.seek(SeekFrom::Start(leftover_start))?;
+    file.read_exact(&mut leftover)?;
+    marks
+        .block_hashes
+        .truncate((leftover_start / FRONTIER_BLOCK) as usize);
+    let mut rest = leftover.as_slice();
+    while rest.len() as u64 >= FRONTIER_BLOCK {
+        let (block, next) = rest.split_at(FRONTIER_BLOCK as usize);
+        marks
+            .block_hashes
+            .push(block_hash(marks.block_hashes.len() as u64, block));
+        rest = next;
+    }
+    marks.leftover_len = rest.len() as u32;
+    marks.leftover_hash = leftover_hash(rest);
+    marks.covered_len = new_len;
+    let tail_n = std::cmp::min(32, new_len as usize);
+    let mut tail = [0u8; 32];
+    file.seek(SeekFrom::Start(new_len - tail_n as u64))?;
+    file.read_exact(&mut tail[..tail_n])?;
+    marks.tail = tail;
+    if new_len <= 32 {
+        marks.head = tail;
+    }
+    Ok(marks)
+}
+
+fn record_frame_locator(
+    catalog: &mut StageCatalog,
+    rel: &str,
+    offset: u64,
+    len: u64,
+    frame_bytes: &[u8],
+    sidecar_body: &[u8],
+) {
+    let Ok(len) = u32::try_from(len) else {
+        return;
+    };
+    let refer = BodyRef {
+        rel_path: rel.to_string(),
+        offset,
+        len,
+        hash: *blake3::hash(frame_bytes).as_bytes(),
+    };
+    match decode_stage_sidecar(sidecar_body) {
+        SidecarDecode::Payload {
+            atomic_id, ordinal, ..
+        } => {
+            catalog.payload_refs.insert((atomic_id, ordinal), refer);
+        }
+        SidecarDecode::ChunkBody {
+            atomic_id,
+            ordinal,
+            index,
+            ..
+        } => {
+            catalog
+                .chunk_refs
+                .insert((atomic_id, ordinal, index), refer);
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn resolve_payload_body(
+    paths: &StorePaths,
+    catalog: &StageCatalog,
+    atomic_id: AtomicId,
+    ordinal: u32,
+) -> Result<Option<Vec<u8>>, StoreError> {
+    if let Some(payload) = catalog.payloads.get(&(atomic_id, ordinal)) {
+        return Ok(Some(payload.clone()));
+    }
+    let Some(refer) = catalog.payload_refs.get(&(atomic_id, ordinal)) else {
+        return Ok(None);
+    };
+    sidecar_payload_from_frame(&load_body_ref(paths, refer)?)
+}
+
+pub(crate) fn resolve_chunk_body(
+    paths: &StorePaths,
+    catalog: &StageCatalog,
+    atomic_id: AtomicId,
+    ordinal: u32,
+    index: u32,
+) -> Result<Option<Vec<u8>>, StoreError> {
+    if let Some(body) = catalog.chunks.get(&(atomic_id, ordinal, index)) {
+        return Ok(Some(body.clone()));
+    }
+    let Some(refer) = catalog.chunk_refs.get(&(atomic_id, ordinal, index)) else {
+        return Ok(None);
+    };
+    sidecar_chunk_from_frame(&load_body_ref(paths, refer)?)
+}
+
+fn sidecar_payload_from_frame(frame_bytes: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+    match decode_stage_sidecar(frame_bytes) {
+        SidecarDecode::Payload { payload, .. } => return Ok(Some(payload)),
+        _ => {}
+    }
+    let report = scan_forward(frame_bytes, SafetyLimits::draft_defaults());
+    for region in &report.regions {
+        if let ScanRegion::VerifiedFrame { frame, .. } = region {
+            if let SidecarDecode::Payload { payload, .. } = decode_stage_sidecar(&frame.body) {
+                return Ok(Some(payload));
+            }
+        }
+    }
+    Ok(None)
+}
+
+fn sidecar_chunk_from_frame(frame_bytes: &[u8]) -> Result<Option<Vec<u8>>, StoreError> {
+    match decode_stage_sidecar(frame_bytes) {
+        SidecarDecode::ChunkBody { body, .. } => return Ok(Some(body)),
+        _ => {}
+    }
+    let report = scan_forward(frame_bytes, SafetyLimits::draft_defaults());
+    for region in &report.regions {
+        if let ScanRegion::VerifiedFrame { frame, .. } = region {
+            if let SidecarDecode::ChunkBody { body, .. } = decode_stage_sidecar(&frame.body) {
+                return Ok(Some(body));
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn load_body_ref(paths: &StorePaths, refer: &BodyRef) -> Result<Vec<u8>, StoreError> {
+    let path = paths.root.join(&refer.rel_path);
+    let mut file = File::open(&path)?;
+    file.seek(SeekFrom::Start(refer.offset))?;
+    let mut bytes = vec![0u8; refer.len as usize];
+    file.read_exact(&mut bytes)?;
+    if *blake3::hash(&bytes).as_bytes() != refer.hash {
+        return Err(StoreError::AtomicStage(
+            "atomic stage body locator hash mismatch".into(),
+        ));
+    }
+    Ok(bytes)
 }
 
 fn verify_covered_blocks(path: &Path, covered: &CoveredFile) -> Result<u64, StoreError> {
@@ -757,15 +955,47 @@ fn persist_checkpoint(
     catalog: &StageCatalog,
     covered: &[CoveredFile],
 ) -> Result<(), StoreError> {
+    if crate::failpoint::hit("store.atomic.checkpoint.capacity").is_err() {
+        return Ok(());
+    }
     let bytes = encode_checkpoint(catalog, covered)?;
-    if bytes.len() as u64 > AtomicStageLimits::prototype().max_checkpoint_bytes {
-        return Err(Budget::fail(
-            "checkpoint bytes",
-            bytes.len() as u64,
-            AtomicStageLimits::prototype().max_checkpoint_bytes,
-        ));
+    if bytes.len() as u64 > AtomicStageLimits::operable().max_checkpoint_bytes {
+        // Do not strand acknowledged media behind a sidecar ceiling.
+        return Ok(());
     }
     write_atomic(&atomic_stage_checkpoint_path(paths), &bytes)
+}
+
+fn encode_body_ref(body: &mut Vec<u8>, refer: &BodyRef) {
+    let rel = refer.rel_path.as_bytes();
+    body.extend_from_slice(&(rel.len() as u16).to_be_bytes());
+    body.extend_from_slice(rel);
+    body.extend_from_slice(&refer.offset.to_be_bytes());
+    body.extend_from_slice(&refer.len.to_be_bytes());
+    body.extend_from_slice(&refer.hash);
+}
+
+fn decode_body_ref(cur: &mut &[u8]) -> Option<BodyRef> {
+    let n = read_u16(cur)? as usize;
+    if cur.len() < n + 8 + 4 + 32 {
+        return None;
+    }
+    let rel = String::from_utf8(cur[..n].to_vec()).ok()?;
+    *cur = &cur[n..];
+    let offset = read_u64(cur)?;
+    let len = read_u32(cur)?;
+    if cur.len() < 32 {
+        return None;
+    }
+    let mut hash = [0u8; 32];
+    hash.copy_from_slice(&cur[..32]);
+    *cur = &cur[32..];
+    Some(BodyRef {
+        rel_path: rel,
+        offset,
+        len,
+        hash,
+    })
 }
 
 fn encode_checkpoint(
@@ -807,12 +1037,11 @@ fn encode_checkpoint(
             body.extend_from_slice(&encoded);
         }
     }
-    body.extend_from_slice(&(catalog.payloads.len() as u32).to_be_bytes());
-    for ((id, ordinal), payload) in &catalog.payloads {
+    body.extend_from_slice(&(catalog.payload_refs.len() as u32).to_be_bytes());
+    for ((id, ordinal), refer) in &catalog.payload_refs {
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(&ordinal.to_be_bytes());
-        body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-        body.extend_from_slice(payload);
+        encode_body_ref(&mut body, refer);
     }
     body.extend_from_slice(&(catalog.seals.len() as u32).to_be_bytes());
     for (id, root) in &catalog.seals {
@@ -843,13 +1072,12 @@ fn encode_checkpoint(
             body.extend_from_slice(hash);
         }
     }
-    body.extend_from_slice(&(catalog.chunks.len() as u32).to_be_bytes());
-    for ((id, ordinal, index), chunk) in &catalog.chunks {
+    body.extend_from_slice(&(catalog.chunk_refs.len() as u32).to_be_bytes());
+    for ((id, ordinal, index), refer) in &catalog.chunk_refs {
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(&ordinal.to_be_bytes());
         body.extend_from_slice(&index.to_be_bytes());
-        body.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
-        body.extend_from_slice(chunk);
+        encode_body_ref(&mut body, refer);
     }
     body.push(u8::from(catalog.coverage_degraded));
     body.extend_from_slice(&(catalog.findings.records.len() as u32).to_be_bytes());
@@ -966,18 +1194,14 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
     }
     let n_payloads = read_u32(&mut cur)? as usize;
     for _ in 0..n_payloads {
-        if cur.len() < 32 + 4 + 4 {
+        if cur.len() < 32 + 4 {
             return None;
         }
         let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
         cur = &cur[32..];
         let ordinal = read_u32(&mut cur)?;
-        let n = read_u32(&mut cur)? as usize;
-        if cur.len() < n {
-            return None;
-        }
-        catalog.payloads.insert((id, ordinal), cur[..n].to_vec());
-        cur = &cur[n..];
+        let refer = decode_body_ref(&mut cur)?;
+        catalog.payload_refs.insert((id, ordinal), refer);
     }
     let n_seals = read_u32(&mut cur)? as usize;
     for _ in 0..n_seals {
@@ -1051,21 +1275,15 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
     }
     let n_chunks = read_u32(&mut cur)? as usize;
     for _ in 0..n_chunks {
-        if cur.len() < 32 + 4 + 4 + 4 {
+        if cur.len() < 32 + 4 + 4 {
             return None;
         }
         let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
         cur = &cur[32..];
         let ordinal = read_u32(&mut cur)?;
         let index = read_u32(&mut cur)?;
-        let n = read_u32(&mut cur)? as usize;
-        if cur.len() < n {
-            return None;
-        }
-        catalog
-            .chunks
-            .insert((id, ordinal, index), cur[..n].to_vec());
-        cur = &cur[n..];
+        let refer = decode_body_ref(&mut cur)?;
+        catalog.chunk_refs.insert((id, ordinal, index), refer);
     }
     if cur.is_empty() {
         return None;
