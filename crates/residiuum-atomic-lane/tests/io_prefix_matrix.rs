@@ -75,6 +75,7 @@ fn allowed(scenario: Scenario, site: IoSite, phase: IoPhase) -> &'static [Outcom
             &[PreparedInvisible]
         }
         (Scenario::Chunk, Chunk, AfterDirSync) => &[PreparedInvisible, StagedInvisible],
+        (Scenario::Chunk, Checkpoint, _) => &[PreparedInvisible, StagedInvisible],
         (
             Scenario::Seal,
             Seal,
@@ -203,6 +204,12 @@ fn prefix_matrix_never_publishes_and_stays_in_recorded_classes() {
     }
     for (p, a) in atomic_cells(IoSite::Ack) {
         cases.push((Scenario::Member, p, a));
+    }
+    for (p, a) in exclusive_cells(IoSite::Chunk) {
+        cases.push((Scenario::Chunk, p, a));
+    }
+    for (p, a) in atomic_cells(IoSite::Checkpoint) {
+        cases.push((Scenario::Chunk, p, a));
     }
 
     cases.push((
