@@ -712,11 +712,11 @@ impl StagingHeap {
         Ok(())
     }
 
-    /// First stable boundary: prepare plus every named member is complete and still invisible.
-    pub fn seal_member_boundary(&mut self, atomic_id: AtomicId) -> Result<(), AtomicsError> {
+    /// Validate first-stable-boundary readiness without mutating lifecycle.
+    pub fn check_seal_member_boundary(&self, atomic_id: AtomicId) -> Result<(), AtomicsError> {
         let slot = self
             .staged
-            .get_mut(&atomic_id)
+            .get(&atomic_id)
             .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
         if slot.lifecycle.prepare != PreparePhase::Prepared {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
@@ -744,6 +744,16 @@ impl StagingHeap {
         if recomputed != slot.manifest.member_manifest_root {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         }
+        Ok(())
+    }
+
+    /// First stable boundary: prepare plus every named member is complete and still invisible.
+    pub fn seal_member_boundary(&mut self, atomic_id: AtomicId) -> Result<(), AtomicsError> {
+        self.check_seal_member_boundary(atomic_id)?;
+        let slot = self
+            .staged
+            .get_mut(&atomic_id)
+            .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
         slot.lifecycle.members = MemberPhase::DurableInvisible;
         Ok(())
     }

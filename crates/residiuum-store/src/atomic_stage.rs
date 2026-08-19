@@ -274,22 +274,25 @@ impl StoreAtomicStage<'_> {
 
     /// First stable member boundary: persist a store seal, then apply the model.
     pub fn seal_member_boundary(&mut self, atomic_id: AtomicId) -> Result<(), StoreError> {
-        if !self
+        let already_applied = self
             .heap
             .lifecycle(atomic_id)
-            .is_some_and(|life| life.members == MemberPhase::DurableInvisible)
-        {
-            self.heap
-                .seal_member_boundary(atomic_id)
-                .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        }
+            .is_some_and(|life| life.members == MemberPhase::DurableInvisible);
         if !self.catalog.is_sealed(atomic_id) {
+            self.heap
+                .check_seal_member_boundary(atomic_id)
+                .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
             let content_root = self
                 .heap
                 .placement(atomic_id)
                 .ok_or_else(|| StoreError::AtomicStage("seal without prepare".into()))?
                 .content_root();
             self.persist_seal(atomic_id, content_root)?;
+        }
+        if !already_applied {
+            self.heap
+                .seal_member_boundary(atomic_id)
+                .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         }
         Ok(())
     }
@@ -516,6 +519,9 @@ impl StoreAtomicStage<'_> {
         atomic_id: AtomicId,
         content_root: residiuum_atomics::ContentRoot,
     ) -> Result<(), StoreError> {
+        if self.catalog.is_sealed(atomic_id) {
+            return Ok(());
+        }
         crate::failpoint::hit("store.atomic.seal.before_append")?;
         let body = encode_stage_seal(atomic_id, content_root);
         self.store.append_unindexed_atomic_frame(
@@ -524,8 +530,8 @@ impl StoreAtomicStage<'_> {
             &body,
             seal_event_id(atomic_id),
         )?;
-        crate::failpoint::hit("store.atomic.seal.after_append")?;
         self.catalog.seals.insert(atomic_id, content_root);
+        crate::failpoint::hit("store.atomic.seal.after_append")?;
         persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
         crate::failpoint::hit("store.atomic.seal.after_checkpoint")?;
         Ok(())
