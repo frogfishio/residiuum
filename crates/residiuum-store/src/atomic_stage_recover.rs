@@ -20,7 +20,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 2;
+const CHECKPOINT_VERSION: u8 = 3;
 const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V1";
 /// On-disk catalogue under `store-info/`.
 pub const ATOMIC_STAGE_CHECKPOINT_FILE: &str = "atomic-stage.ckpt";
@@ -590,6 +590,10 @@ fn encode_checkpoint(
     for id in &catalog.blocked {
         body.extend_from_slice(id.as_bytes());
     }
+    body.extend_from_slice(&(catalog.prepare_batch.len() as u32).to_be_bytes());
+    for id in &catalog.prepare_batch {
+        body.extend_from_slice(id.as_bytes());
+    }
     let mut hasher = blake3::Hasher::new();
     hasher.update(CHECKPOINT_DOMAIN);
     hasher.update(&body);
@@ -693,6 +697,15 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
         let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
         cur = &cur[32..];
         catalog.blocked.insert(id);
+    }
+    let n_batch = read_u32(&mut cur)? as usize;
+    for _ in 0..n_batch {
+        if cur.len() < 32 {
+            return None;
+        }
+        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
+        cur = &cur[32..];
+        catalog.prepare_batch.insert(id);
     }
     if !cur.is_empty() {
         return None;

@@ -11575,10 +11575,12 @@ fn rebuild_active_from_bytes(
 
     let report = scan_forward(kept, limits);
     for (_offset, frame) in report.verified_frames() {
-        // Re-append application content frames (items + payload chunks).
+        // Re-append items, payload chunks, and Atomic BatchPrepare (CR-ATMR5-006).
         // Preserve flags/kind via append_parts so chunked puts survive reopen.
         match frame.header.known_kind() {
-            Some(FrameKind::ItemEvent) | Some(FrameKind::PayloadChunk) => {
+            Some(FrameKind::ItemEvent)
+            | Some(FrameKind::PayloadChunk)
+            | Some(FrameKind::BatchPrepare) => {
                 let mut header = frame.header.clone();
                 // writer_sequence is reassigned by append_parts.
                 header.writer_sequence = 0;

@@ -98,7 +98,7 @@ pub fn ingest_classified_frame(
         Some(AtomicEvidenceClass::Valid(link)) => match link.role {
             AtomicFrameRole::Prepare => {
                 if let Ok(prepare) = residiuum_atomics::decode_prepare(&frame.body) {
-                    admit_prepare(catalog, bound_heap, prepare, findings);
+                    admit_prepare(catalog, bound_heap, prepare, true, findings);
                 } else {
                     let id = AtomicId::from_bytes(link.atomic_id).ok();
                     block(catalog, id);
@@ -172,11 +172,17 @@ pub fn finalize_catalog(
             continue;
         }
         let members = catalog.members.get(&id).cloned().unwrap_or_default();
-        if !members_match_prepare(&prepare, &members) {
-            catalog.blocked.insert(id);
+        if members.is_empty() {
             findings.push(
                 StageEvidenceKind::Member,
                 StageEvidenceClass::Partial,
+                Some(id),
+            );
+        } else if !members_match_prepare(&prepare, &members) {
+            catalog.blocked.insert(id);
+            findings.push(
+                StageEvidenceKind::Member,
+                StageEvidenceClass::Conflict,
                 Some(id),
             );
         }
@@ -209,7 +215,7 @@ fn ingest_sidecar(
             findings.push(sidecar_kind(kind), StageEvidenceClass::Corrupt, atomic_id);
         }
         SidecarDecode::Prepare(prepare) => {
-            admit_prepare(catalog, bound_heap, *prepare, findings);
+            admit_prepare(catalog, bound_heap, *prepare, false, findings);
         }
         SidecarDecode::Payload {
             atomic_id,
@@ -227,6 +233,7 @@ fn admit_prepare(
     catalog: &mut StageCatalog,
     bound_heap: HeapId,
     prepare: AtomicPrepare,
+    from_batch: bool,
     findings: &mut StageFindings,
 ) {
     let id = prepare.atomic_id;
@@ -249,6 +256,9 @@ fn admit_prepare(
     match catalog.prepares.get(&id) {
         None => {
             catalog.prepares.insert(id, prepare);
+            if from_batch {
+                catalog.prepare_batch.insert(id);
+            }
             findings.push(
                 StageEvidenceKind::Prepare,
                 StageEvidenceClass::Valid,
@@ -256,6 +266,9 @@ fn admit_prepare(
             );
         }
         Some(existing) if existing == &prepare => {
+            if from_batch {
+                catalog.prepare_batch.insert(id);
+            }
             findings.push(
                 StageEvidenceKind::Prepare,
                 StageEvidenceClass::Valid,

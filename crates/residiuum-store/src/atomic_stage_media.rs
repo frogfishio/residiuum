@@ -24,6 +24,8 @@ pub(crate) struct StageCatalog {
     pub seals: BTreeMap<AtomicId, ContentRoot>,
     /// Identities that must not be installed or reused (CR-ATMR5-002).
     pub blocked: BTreeSet<AtomicId>,
+    /// Prepares observed as format-admitted `BatchPrepare` (CR-ATMR5-006).
+    pub prepare_batch: BTreeSet<AtomicId>,
 }
 
 impl StageCatalog {
@@ -50,6 +52,7 @@ impl StageCatalog {
             .saturating_add(members.saturating_mul(256))
             .saturating_add(self.seals.len() as u64 * 64)
             .saturating_add(self.blocked.len() as u64 * 32)
+            .saturating_add(self.prepare_batch.len() as u64 * 32)
     }
 }
 
@@ -62,6 +65,8 @@ pub(crate) fn encode_stage_payload(atomic_id: AtomicId, ordinal: u32, payload: &
     out
 }
 
+/// Legacy ATPREP1 writer. New prepares use `BatchPrepare` only (CR-ATMR5-006).
+#[allow(dead_code)]
 pub(crate) fn encode_stage_prepare(prepare: &AtomicPrepare) -> Result<Vec<u8>, StoreError> {
     let encoded = encode_prepare(prepare).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
     let mut out = Vec::with_capacity(PREPARE_MAGIC.len() + encoded.len());
@@ -89,6 +94,7 @@ pub(crate) fn payload_event_id(atomic_id: AtomicId, ordinal: u32) -> [u8; 16] {
     id
 }
 
+#[allow(dead_code)]
 pub(crate) fn prepare_event_id(atomic_id: AtomicId) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"residiuum.atomic-stage.prepare");

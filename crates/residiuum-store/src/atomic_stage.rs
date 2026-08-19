@@ -7,8 +7,7 @@
 
 use crate::atomic_stage_classify::StageFindings;
 use crate::atomic_stage_media::{
-    encode_stage_payload, encode_stage_prepare, encode_stage_seal, payload_event_id,
-    prepare_event_id, seal_event_id, StageCatalog,
+    encode_stage_payload, encode_stage_seal, payload_event_id, seal_event_id, StageCatalog,
 };
 use crate::atomic_stage_recover::{
     open_catalog, persist_live_checkpoint, AtomicStageLimits, AtomicStageOpenReport, CoveredFile,
@@ -94,6 +93,17 @@ impl StoreAtomicStage<'_> {
                 "atomic identity is blocked by conflicting or damaged evidence".into(),
             ));
         }
+        if let Some(stored) = self.catalog.prepares.get(&prepare.atomic_id) {
+            if stored != &prepare {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
+            }
+            if !self.catalog.prepare_batch.contains(&prepare.atomic_id) {
+                // Legacy ATPREP1-only prefix: repair the BatchPrepare authority.
+                self.persist_prepare(&prepare)?;
+            }
+        } else {
+            self.persist_prepare(&prepare)?;
+        }
         if let Some(existing) = self.heap.placement(prepare.atomic_id) {
             if existing.content_root() == prepare.content_root
                 && members_match_prepare(&prepare, members)
@@ -105,13 +115,6 @@ impl StoreAtomicStage<'_> {
                 return Ok((seq, existing.clone()));
             }
             return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
-        }
-        if let Some(stored) = self.catalog.prepares.get(&prepare.atomic_id) {
-            if stored != &prepare {
-                return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
-            }
-        } else {
-            self.persist_prepare(&prepare)?;
         }
         for member in members {
             if !self.catalog.has_member(member.atomic_id, member.ordinal) {
@@ -227,6 +230,7 @@ impl StoreAtomicStage<'_> {
     }
 
     fn persist_prepare(&mut self, prepare: &AtomicPrepare) -> Result<(), StoreError> {
+        crate::failpoint::hit("store.atomic.prepare.before_append")?;
         let envelope = encode_atomic_prepare_envelope(
             prepare.heap_id.as_bytes(),
             prepare.atomic_id.as_bytes(),
@@ -242,19 +246,14 @@ impl StoreAtomicStage<'_> {
             &body,
             event_id,
         )?;
-        // Open rebuild keeps ItemEvent/PayloadChunk only. Persist the prepare
-        // again as a store-stage chunk so reopen does not lose authority.
-        let stage_body = encode_stage_prepare(prepare)?;
-        self.store.append_unindexed_atomic_frame(
-            FrameKind::PayloadChunk,
-            EMPTY_ENVELOPE,
-            &stage_body,
-            prepare_event_id(prepare.atomic_id),
-        )?;
+        crate::failpoint::hit("store.atomic.prepare.after_append")?;
         self.catalog
             .prepares
             .insert(prepare.atomic_id, prepare.clone());
-        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)
+        self.catalog.prepare_batch.insert(prepare.atomic_id);
+        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        crate::failpoint::hit("store.atomic.prepare.after_checkpoint")?;
+        Ok(())
     }
 
     fn persist_member(
@@ -271,20 +270,25 @@ impl StoreAtomicStage<'_> {
         )
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         let body = encode_member(member).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        crate::failpoint::hit("store.atomic.member.before_append")?;
         self.store.append_unindexed_atomic_frame(
             FrameKind::ItemEvent,
             &envelope,
             &body,
             member.event_id.to_bytes(),
         )?;
+        crate::failpoint::hit("store.atomic.member.after_append")?;
         let slot = self.catalog.members.entry(member.atomic_id).or_default();
         if !slot.iter().any(|m| m.ordinal == member.ordinal) {
             slot.push(member.clone());
         }
-        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)
+        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        crate::failpoint::hit("store.atomic.member.after_checkpoint")?;
+        Ok(())
     }
 
     fn persist_payload(&mut self, member: &AtomicMember, payload: &[u8]) -> Result<(), StoreError> {
+        crate::failpoint::hit("store.atomic.payload.before_append")?;
         let body = encode_stage_payload(member.atomic_id, member.ordinal, payload);
         self.store.append_unindexed_atomic_frame(
             FrameKind::PayloadChunk,
@@ -292,10 +296,13 @@ impl StoreAtomicStage<'_> {
             &body,
             payload_event_id(member.atomic_id, member.ordinal),
         )?;
+        crate::failpoint::hit("store.atomic.payload.after_append")?;
         self.catalog
             .payloads
             .insert((member.atomic_id, member.ordinal), payload.to_vec());
-        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)
+        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        crate::failpoint::hit("store.atomic.payload.after_checkpoint")?;
+        Ok(())
     }
 
     fn persist_seal(
@@ -303,6 +310,7 @@ impl StoreAtomicStage<'_> {
         atomic_id: AtomicId,
         content_root: residiuum_atomics::ContentRoot,
     ) -> Result<(), StoreError> {
+        crate::failpoint::hit("store.atomic.seal.before_append")?;
         let body = encode_stage_seal(atomic_id, content_root);
         self.store.append_unindexed_atomic_frame(
             FrameKind::PayloadChunk,
@@ -310,8 +318,11 @@ impl StoreAtomicStage<'_> {
             &body,
             seal_event_id(atomic_id),
         )?;
+        crate::failpoint::hit("store.atomic.seal.after_append")?;
         self.catalog.seals.insert(atomic_id, content_root);
-        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)
+        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        crate::failpoint::hit("store.atomic.seal.after_checkpoint")?;
+        Ok(())
     }
 }
 
@@ -333,9 +344,7 @@ fn rebuild_heap(heap_id: HeapId, catalog: &StageCatalog) -> Result<StagingHeap, 
         }
         let members = catalog.members.get(atomic_id).cloned().unwrap_or_default();
         if !members_match_prepare(prepare, &members) {
-            return Err(StoreError::AtomicStage(format!(
-                "atomic {atomic_id:?} members do not match prepare; identity is not reusable"
-            )));
+            continue;
         }
         heap.begin_prepare(*atomic_id, prepare.content_root, &members)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
