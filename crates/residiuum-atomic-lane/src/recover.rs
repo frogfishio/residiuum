@@ -2,7 +2,7 @@
 
 use crate::checkpoint::{
     checkpoint_path, extend_log_frontier, load_checkpoint, placement_matches, store_checkpoint,
-    verify_prefix_marks, CheckpointLoad, RecoveryCheckpoint,
+    verify_prefix_blocks, CheckpointLoad, RecoveryCheckpoint,
 };
 use crate::error::LaneError;
 use crate::limits::{max_encoded_member_bytes, max_intent_members, RecoveryLimits, SidecarRole};
@@ -660,7 +660,7 @@ fn verify_checkpoint_prefixes(
     {
         return Err(LaneError::Corrupt("checkpoint hash count"));
     }
-    let n = verify_prefix_marks(
+    let n = verify_prefix_blocks(
         &coordinator_path(root),
         ck.coordinator_offset,
         &ck.coordinator_marks,
@@ -672,7 +672,7 @@ fn verify_checkpoint_prefixes(
         .zip(ck.shard_marks.iter())
         .enumerate()
     {
-        let n = verify_prefix_marks(&shard_path(root, i as u32), *off, marks)?;
+        let n = verify_prefix_blocks(&shard_path(root, i as u32), *off, marks)?;
         budget.charge_bytes(n)?;
     }
     Ok(())
@@ -944,7 +944,7 @@ mod tests {
     use crate::checkpoint::{extend_log_frontier, store_checkpoint, RecoveryCheckpoint};
 
     #[test]
-    fn covered_prefix_larger_than_budget_opens_from_tails() {
+    fn covered_prefix_larger_than_budget_is_incomplete() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let coord = coordinator_path(root);
@@ -978,12 +978,17 @@ mod tests {
         store_checkpoint(root, &ck).unwrap();
         let mut heap = StagingHeap::new(heap_id, 1).unwrap();
         let mut budget = RecoveryBudget::new(RecoveryLimits::prototype());
-        recover_heap(root, heap_id, 1, &mut heap, &mut budget).unwrap();
-        assert!(budget.stats.used_checkpoint);
-        assert!(
-            budget.stats.bytes_scanned < 64 * 1024,
-            "historical prefix must not be charged: {}",
-            budget.stats.bytes_scanned
-        );
+        match recover_heap(root, heap_id, 1, &mut heap, &mut budget) {
+            Err(LaneError::Incomplete {
+                what,
+                observed,
+                limit,
+            }) => {
+                assert_eq!(what, "log bytes");
+                assert_eq!(observed, covered);
+                assert_eq!(limit, RecoveryLimits::prototype().max_log_bytes);
+            }
+            other => panic!("expected incomplete covered-prefix verify, got {other:?}"),
+        }
     }
 }

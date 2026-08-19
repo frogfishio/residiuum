@@ -61,7 +61,11 @@ fn flipped_coordinator_head_is_corrupt() {
     match DurableLane::open(dir.path()) {
         Err(LaneError::Corrupt(msg)) => {
             assert!(
-                msg.contains("prefix") || msg.contains("head") || msg.contains("hash"),
+                msg.contains("prefix")
+                    || msg.contains("head")
+                    || msg.contains("hash")
+                    || msg.contains("frontier")
+                    || msg.contains("leftover"),
                 "unexpected corrupt reason {msg}"
             );
         }

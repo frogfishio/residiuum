@@ -95,8 +95,8 @@ fn checkpoint_reopen_skips_covered_prefix() {
     assert_eq!(report.catalog_loads, 1);
     assert!(report.files_skipped >= 1, "settled media must be skipped");
     assert!(
-        report.bytes_scanned < 8 * 1024,
-        "covered prefix must not be reread, scanned {}",
+        report.bytes_scanned >= 64 * 1024,
+        "covered prefix verification must charge actual bytes, scanned {}",
         report.bytes_scanned
     );
     assert!(first.kernel().placement(aid()).is_some());
@@ -130,13 +130,8 @@ fn ordinary_growth_is_tailed_not_fully_rescanned() {
         "dirty active tail must be streamed"
     );
     assert!(
-        report.bytes_scanned < 100 * 1024,
-        "must not reread the settled 128KiB prefix, scanned {}",
-        report.bytes_scanned
-    );
-    assert!(
-        report.bytes_scanned > 16 * 1024,
-        "the new tail must be charged, scanned {}",
+        report.bytes_scanned >= 128 * 1024,
+        "covered prefix verification plus tail must charge actual bytes, scanned {}",
         report.bytes_scanned
     );
     assert!(stage.kernel().placement(aid()).is_some());
@@ -205,5 +200,40 @@ fn directory_depth_ceiling_is_refused() {
         }
         Ok(_) => panic!("expected AtomicStage depth refusal"),
         Err(other) => panic!("expected AtomicStage depth refusal, got {other}"),
+    }
+}
+
+#[test]
+fn interior_covered_prefix_flip_is_not_healthy_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    store
+        .put("hist", &vec![0xAB; 64 * 1024], DurabilityMode::Durable)
+        .unwrap();
+    stage_one(&mut store);
+    let active = store.paths().active_segment();
+    let mut bytes = std::fs::read(&active).unwrap();
+    assert!(
+        bytes.len() > 64,
+        "need interior bytes that are neither head nor tail, got {}",
+        bytes.len()
+    );
+    let flip_at = bytes.len() / 2;
+    bytes[flip_at] ^= 0xff;
+    std::fs::write(&active, &bytes).unwrap();
+
+    match store.atomic_stage() {
+        Err(StoreError::AtomicStage(msg)) => {
+            assert!(
+                msg.contains("covered prefix"),
+                "expected covered-prefix refusal, got {msg}"
+            );
+        }
+        Ok(stage) => panic!(
+            "interior flip must not be a healthy checkpoint, disposition {:?}",
+            stage.open_report().disposition
+        ),
+        Err(other) => panic!("expected AtomicStage covered-prefix refusal, got {other}"),
     }
 }

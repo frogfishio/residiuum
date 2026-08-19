@@ -360,7 +360,8 @@ pub fn extend_log_frontier(
     ))
 }
 
-/// Constant-I/O check: file length plus head/tail fingerprints.
+/// Cheap length/head/tail check. Not the production covered-prefix verifier.
+#[allow(dead_code)]
 pub fn verify_prefix_marks(
     path: &Path,
     offset: u64,
@@ -393,7 +394,8 @@ pub fn verify_prefix_marks(
 }
 
 /// Re-hash stored leaves and leftover. Detects any changed covered byte.
-#[allow(dead_code)]
+///
+/// Production recovery must use this, not [`verify_prefix_marks`] (CR-ATMR6-001).
 pub fn verify_prefix_blocks(
     path: &Path,
     offset: u64,
@@ -401,6 +403,13 @@ pub fn verify_prefix_blocks(
 ) -> Result<u64, LaneError> {
     if offset == 0 {
         return Ok(0);
+    }
+    if !path.exists() {
+        return Err(LaneError::Corrupt("checkpoint prefix missing log"));
+    }
+    let file_len = fs::metadata(path)?.len();
+    if file_len < offset {
+        return Err(LaneError::Corrupt("checkpoint prefix beyond log"));
     }
     let mut file = File::open(path)?;
     let mut read = 0u64;
