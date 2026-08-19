@@ -9,7 +9,8 @@
 # <commit12>-<profile>.json plus a detached .sha256 sidecar (CR-R2-007).
 # Labels are package-specific (CR-ATMR4-010):
 #   ATM-1 may become acceptance_candidate on a clean full matrix.
-#   ATM-2 stays partial while not_store=true or a mandatory deliverable is absent.
+#   ATM-2 stays partial while not_store=true or any mandatory store/lane
+#   deliverable listed in the assembler is absent.
 # Run-level label is the worse of the two packages (never upgrades ATM-2).
 # Dirty or failing runs are diagnostic. Capabilities::atomics must stay false.
 set -euo pipefail
@@ -43,7 +44,7 @@ TOOLCHAIN="$(rustc --version 2>/dev/null || echo rustc-missing)"
 CARGO_V="$(cargo --version 2>/dev/null || echo cargo-missing)"
 PLATFORM="$(uname -srm)"
 SEED="${ATOMICS_EVIDENCE_SEED:-0}"
-SUITE_VERSION="atm-1-atm-2-atmr4-2026-08-19"
+SUITE_VERSION="atm-1-atm-2-atmr5-2026-08-19"
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_UNIX="$(date +%s)"
 # Label is decided after the run from dirty + family coverage (CR-R2-007).
@@ -127,6 +128,50 @@ run_model_kernel() {
     cargo test -p residiuum-atomics --offline --test validator_oracle --test oracle_histories --test atm0_evidence
 }
 
+# Store-owned ATM-2 proofs (CR-ATMR5-010). Scoped to Atomic staging tests,
+# not residiuum-store --all-targets (pre-existing store warnings are residual).
+run_store_atmr5_crash() {
+  run_cmd ATM-CRS "store atomic_stage_retry" \
+    cargo test -p residiuum-store --offline --test atomic_stage_retry \
+    --features legacy-raw-store
+  run_cmd ATM-CRS "store atomic_stage_chunks" \
+    cargo test -p residiuum-store --offline --test atomic_stage_chunks \
+    --features legacy-raw-store
+  run_cmd ATM-CRS "store atomic_stage_io_matrix" \
+    cargo test -p residiuum-store --offline --test atomic_stage_io_matrix \
+    --features legacy-raw-store
+}
+
+run_store_atmr5_full() {
+  run_store_atmr5_crash
+  run_cmd ATM-CRS "store atomic_stage_bounded" \
+    cargo test -p residiuum-store --offline --test atomic_stage_bounded \
+    --features legacy-raw-store
+  run_cmd ATM-CRS "store atomic_stage_classify" \
+    cargo test -p residiuum-store --offline --test atomic_stage_classify \
+    --features legacy-raw-store
+  run_cmd ATM-CRS "store atomic_stage_coordinator" \
+    cargo test -p residiuum-store --offline --test atomic_stage_coordinator \
+    --features legacy-raw-store
+  run_cmd ATM-CRS "store atomic_stage_prepare_authority" \
+    cargo test -p residiuum-store --offline --test atomic_stage_prepare_authority \
+    --features legacy-raw-store
+  run_cmd ATM-ENC "store atomic_stage rustfmt --check" \
+    rustfmt --check \
+    crates/residiuum-store/src/atomic_stage.rs \
+    crates/residiuum-store/src/atomic_stage_media.rs \
+    crates/residiuum-store/src/atomic_stage_classify.rs \
+    crates/residiuum-store/src/atomic_stage_recover.rs \
+    crates/residiuum-store/tests/atomic_stage_invisibility.rs \
+    crates/residiuum-store/tests/atomic_stage_bounded.rs \
+    crates/residiuum-store/tests/atomic_stage_classify.rs \
+    crates/residiuum-store/tests/atomic_stage_coordinator.rs \
+    crates/residiuum-store/tests/atomic_stage_retry.rs \
+    crates/residiuum-store/tests/atomic_stage_chunks.rs \
+    crates/residiuum-store/tests/atomic_stage_prepare_authority.rs \
+    crates/residiuum-store/tests/atomic_stage_io_matrix.rs
+}
+
 case "$PROFILE" in
   quick)
     run_enc
@@ -148,6 +193,7 @@ case "$PROFILE" in
       cargo test -p residiuum-atomic-lane --offline --test exclusive_publish
     run_cmd ATM-CRS "io_prefix_matrix" \
       cargo test -p residiuum-atomic-lane --offline --test io_prefix_matrix
+    run_store_atmr5_crash
     ;;
   model)
     run_model_kernel
@@ -167,6 +213,7 @@ case "$PROFILE" in
     run_cmd ATM-CRS "store atomic_stage_invisibility" \
       cargo test -p residiuum-store --offline --test atomic_stage_invisibility \
       --features legacy-raw-store
+    run_store_atmr5_full
     run_cmd ATM-RES "raised_limits_are_refused" \
       cargo test -p residiuum-atomics --offline --all-targets
     run_cmd ATM-CRS "residiuum-atomic-lane --all-targets" \
@@ -207,6 +254,10 @@ run_negatives() {
       run_cmd ATM-CRS "executed:negative_control_detects_a_leaked_staged_member" \
         cargo test -p residiuum-atomic-lane --offline --test crash_reopen -- \
         negative_control_detects_a_leaked_staged_member --exact
+      run_cmd ATM-CRS "executed:leak_negative_control_is_visible_on_each_surface" \
+        cargo test -p residiuum-store --offline --test atomic_stage_invisibility \
+        --features legacy-raw-store -- \
+        leak_negative_control_is_visible_on_each_surface --exact
       ;;
   esac
 }
@@ -216,7 +267,7 @@ ENDED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ENDED_UNIX="$(date +%s)"
 DURATION_S="$((ENDED_UNIX - STARTED_UNIX))"
 
-HANDOFF="doc/todo/atomics/ATM1_ATM2_HANDOFF_ATMR4_2026-08-19.md"
+HANDOFF="doc/todo/atomics/ATM1_ATM2_HANDOFF_ATMR5_2026-08-19.md"
 [[ -f "$HANDOFF" ]] || fail "missing package handoff $HANDOFF"
 
 python3 - "$COMMANDS_JSONL" "$OUT_ROOT" "$PROFILE" "$COMMIT" "$DIRTY" \
@@ -278,21 +329,43 @@ if profile == "full" and not cmd_passed(cmds, "residiuum-format --offline --all-
     atm1_blockers.append("missing residiuum-format --all-targets")
 
 atm2_blockers = [
-    "not_store=true; peer lane is prototype/mechanics, not an accepted store contract",
+    "not_store=true; store staging is not an accepted ATM-2 durability contract",
+    "ATM-3 must not consume StoreAtomicStage or the peer lane",
+    "RQL/watch/residiuum-examine/Recovery Shadow/backup-restore-clone remain untested store surfaces",
+    "store rotation/compaction/pending-seal transitions are not in the Atomic I/O matrix",
+    "omit-file-sync/omit-dir-sync mutants still check instrumentation visits, not media loss",
+    "store-wide clippy -D warnings is not an Atomics gate (pre-existing store warnings)",
 ]
+if profile in {"crash", "full"}:
+    if not cmd_passed(cmds, "atomic_stage_retry"):
+        atm2_blockers.append("missing store exact same-ID retry (CR-ATMR5-003)")
+    if not cmd_passed(cmds, "atomic_stage_chunks"):
+        atm2_blockers.append("missing store durable chunk prefixes (CR-ATMR5-005)")
+    if not cmd_passed(cmds, "atomic_stage_io_matrix"):
+        atm2_blockers.append("missing store-authority I/O prefix matrix (CR-ATMR5-009)")
 if profile == "full":
     if not (cmd_passed(cmds, "durable_chunks") or cmd_passed(cmds, "residiuum-atomic-lane --offline --all-targets")):
-        atm2_blockers.append("missing durable chunk tests")
+        atm2_blockers.append("missing peer-lane durable chunk tests")
     if not (cmd_passed(cmds, "honest_damage") or cmd_passed(cmds, "residiuum-atomic-lane --offline --all-targets")):
-        atm2_blockers.append("missing honest damage tests")
+        atm2_blockers.append("missing peer-lane honest damage tests")
     if not (cmd_passed(cmds, "exclusive_writer") or cmd_passed(cmds, "residiuum-atomic-lane --offline --all-targets")):
         atm2_blockers.append("missing writer-lock tests")
     if not (cmd_passed(cmds, "io_prefix_matrix") or cmd_passed(cmds, "residiuum-atomic-lane --offline --all-targets")):
-        atm2_blockers.append("missing I/O-phase prefix matrix")
+        atm2_blockers.append("missing peer-lane I/O-phase prefix matrix")
     if not cmd_passed(cmds, "atomic_stage_invisibility"):
         atm2_blockers.append("missing store get/scan/history visibility")
     if not cmd_passed(cmds, "legacy_31_32"):
         atm2_blockers.append("missing store envelope key migration")
+    if not cmd_passed(cmds, "atomic_stage_bounded"):
+        atm2_blockers.append("missing store bounded catalogue (CR-ATMR5-001)")
+    if not cmd_passed(cmds, "atomic_stage_classify"):
+        atm2_blockers.append("missing store honest damage/conflict classifier (CR-ATMR5-002)")
+    if not cmd_passed(cmds, "atomic_stage_coordinator"):
+        atm2_blockers.append("missing store durable coordinator sequence (CR-ATMR5-004)")
+    if not cmd_passed(cmds, "atomic_stage_prepare_authority"):
+        atm2_blockers.append("missing store single prepare authority (CR-ATMR5-006)")
+    if not cmd_passed(cmds, "atomic_stage rustfmt --check"):
+        atm2_blockers.append("missing scoped store Atomic staging rustfmt --check")
 
 deferred = [
     {"family": "ATM-DMG", "result": "not_in_scope", "reason": "ATM-4 damage/material truth"},
@@ -362,7 +435,7 @@ run = {
     "acceptance_rule": (
         "Package-specific (CR-ATMR4-010). diagnostic = dirty or failing; "
         "ATM-1 acceptance_candidate = clean full ENC/ORA/AUT/RES + format all-targets; "
-        "ATM-2 stays partial while not_store=true or a mandatory deliverable is absent; "
+        "ATM-2 stays partial while not_store=true or any listed mandatory/residual blocker remains; "
         "run-level label is the worse of the two packages. "
         "Run payload is hashed in a sidecar; this file never contains its own digest."
     ),
@@ -394,6 +467,7 @@ artifacts = [
     hash_existing("spec/atomics/cbor-v1.json"),
     hash_existing("crates/residiuum-format/src/envelope_keys.rs"),
     hash_existing("crates/residiuum-atomic-lane/src/lane.rs"),
+    hash_existing("crates/residiuum-store/src/atomic_stage.rs"),
     hash_existing("crates/residiuum-atomics/src/builder.rs"),
     hash_existing("crates/residiuum-atomics/src/validate.rs"),
 ]
@@ -489,6 +563,7 @@ atm2 = merge_pack(out / "atm-2" / "manifest.json", {
         "residiuum-atomic-lane file-backed prepare/member + fsync reopen (CR-ATM2-001)",
         "crash prefixes before_prepare / after_prepare / after_member_n",
         "closed member set, one store authority, exclusive publish, sidecar limits, authenticated checkpoint, durable chunks, I/O + store invisibility (CR-ATMR4)",
+        "store bounded catalogue, honest classifier, exact retry, durable chunks, coordinator seq, one prepare, exclusive no-prefix-guess, incremental frontier, store I/O matrix (CR-ATMR5 labor)",
     ],
     "authoritative_files": [
         "coordinator.log (BatchPrepare frames, sync_all after append)",
@@ -502,6 +577,7 @@ atm2 = merge_pack(out / "atm-2" / "manifest.json", {
         and n["name"].split(":", 1)[-1] in {
             "negative_control_detects_a_leaked_staged_member",
             "second_heap_cannot_resolve_first_atomic",
+            "leak_negative_control_is_visible_on_each_surface",
         }
     ],
     "not_store": True,

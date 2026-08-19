@@ -27,19 +27,25 @@ fn vid(tag: u8) -> VersionId {
     VersionId::from_bytes(b).unwrap()
 }
 
+fn payload(tag: u8) -> Vec<u8> {
+    vec![tag]
+}
+
 fn member(tag: u8) -> AtomicMember {
+    let value = payload(tag);
     AtomicMember {
         atomic_id: aid(tag),
         ordinal: 0,
         object_identity: ObjectIdentity::new(cid(), CanonicalKey::String(format!("k{tag}"))),
         member_kind: MutationKind::Create,
         before_version: None,
-        after_content_hash: Some(*blake3::hash(&[tag]).as_bytes()),
+        after_content_hash: Some(*blake3::hash(&value).as_bytes()),
         event_id: vid(tag),
     }
 }
 
 fn plan(heap: HeapId, m: &AtomicMember) -> AtomicPlan {
+    let tag = m.atomic_id.as_bytes()[0];
     AtomicPlan::close(AtomicPlanParts {
         profile: AtomicProfile::LocalHeapV1,
         atomic_id: m.atomic_id,
@@ -52,7 +58,7 @@ fn plan(heap: HeapId, m: &AtomicMember) -> AtomicPlan {
             kind: m.member_kind,
             collection_id: m.object_identity.collection_id,
             key: m.object_identity.key.clone(),
-            encoded_value: Some(b"secret".to_vec()),
+            encoded_value: Some(payload(tag)),
             if_version: m.before_version,
         }],
         active_rule_revisions: vec![],
