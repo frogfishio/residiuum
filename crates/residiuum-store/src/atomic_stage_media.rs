@@ -7,11 +7,7 @@
 
 use crate::error::StoreError;
 use residiuum_atomics::{
-    decode_member, decode_prepare, encode_prepare, AtomicId, AtomicMember, AtomicPrepare,
-    ContentRoot,
-};
-use residiuum_format::{
-    examine_atomic_frame, AtomicEvidenceClass, AtomicFrameRole, DecodedFrame, FrameKind,
+    decode_prepare, encode_prepare, AtomicId, AtomicMember, AtomicPrepare, ContentRoot,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -25,7 +21,9 @@ pub(crate) struct StageCatalog {
     pub prepares: BTreeMap<AtomicId, AtomicPrepare>,
     pub members: BTreeMap<AtomicId, Vec<AtomicMember>>,
     pub payloads: BTreeMap<(AtomicId, u32), Vec<u8>>,
-    pub seals: BTreeSet<AtomicId>,
+    pub seals: BTreeMap<AtomicId, ContentRoot>,
+    /// Identities that must not be installed or reused (CR-ATMR5-002).
+    pub blocked: BTreeSet<AtomicId>,
 }
 
 impl StageCatalog {
@@ -40,7 +38,7 @@ impl StageCatalog {
     }
 
     pub(crate) fn is_sealed(&self, atomic_id: AtomicId) -> bool {
-        self.seals.contains(&atomic_id)
+        self.seals.contains_key(&atomic_id)
     }
 
     /// Approximate retained catalogue bytes (not a wire encoding).
@@ -50,7 +48,8 @@ impl StageCatalog {
         payload
             .saturating_add(self.prepares.len() as u64 * 512)
             .saturating_add(members.saturating_mul(256))
-            .saturating_add(self.seals.len() as u64 * 32)
+            .saturating_add(self.seals.len() as u64 * 64)
+            .saturating_add(self.blocked.len() as u64 * 32)
     }
 }
 
@@ -110,73 +109,137 @@ pub(crate) fn seal_event_id(atomic_id: AtomicId) -> [u8; 16] {
     id
 }
 
-/// Fold one verified store frame into the live catalogue (CR-ATMR5-001).
-pub(crate) fn ingest_frame(catalog: &mut StageCatalog, frame: &DecodedFrame) {
-    if frame.header.known_kind() == Some(FrameKind::PayloadChunk) {
-        if let Some((id, ordinal, payload)) = decode_stage_payload(&frame.body) {
-            catalog.payloads.insert((id, ordinal), payload);
-        }
-        if let Some(id) = decode_stage_seal(&frame.body) {
-            catalog.seals.insert(id);
-        }
-        if let Some(prepare) = decode_stage_prepare(&frame.body) {
-            catalog.prepares.insert(prepare.atomic_id, prepare);
-        }
-        return;
+/// Which staging sidecar magic was observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SidecarKind {
+    Prepare,
+    Payload,
+    Seal,
+}
+
+/// Decode of an Atomic staging sidecar (`ATPREP1` / `ATPAY1` / `ATSEAL1`).
+#[derive(Debug)]
+pub(crate) enum SidecarDecode {
+    /// Body is not a staging sidecar.
+    NotSidecar,
+    /// Magic present but truncated.
+    Partial { kind: SidecarKind },
+    /// Magic present but the body is damaged.
+    Corrupt {
+        kind: SidecarKind,
+        atomic_id: Option<AtomicId>,
+    },
+    /// Valid prepare sidecar.
+    Prepare(Box<AtomicPrepare>),
+    /// Valid payload sidecar.
+    Payload {
+        atomic_id: AtomicId,
+        ordinal: u32,
+        payload: Vec<u8>,
+    },
+    /// Valid seal sidecar (identity + content root).
+    Seal {
+        atomic_id: AtomicId,
+        content_root: ContentRoot,
+    },
+}
+
+/// Classify a PayloadChunk body as a staging sidecar or not-ours.
+pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
+    if body.starts_with(PREPARE_MAGIC) {
+        return match decode_prepare(&body[PREPARE_MAGIC.len()..]) {
+            Ok(prepare) => SidecarDecode::Prepare(Box::new(prepare)),
+            Err(_) if body.len() < PREPARE_MAGIC.len() + 8 => SidecarDecode::Partial {
+                kind: SidecarKind::Prepare,
+            },
+            Err(_) => SidecarDecode::Corrupt {
+                kind: SidecarKind::Prepare,
+                atomic_id: None,
+            },
+        };
     }
-    let Some(AtomicEvidenceClass::Valid(link)) = examine_atomic_frame(frame) else {
-        return;
-    };
-    match link.role {
-        AtomicFrameRole::Prepare => {
-            if let Ok(prepare) = decode_prepare(&frame.body) {
-                catalog.prepares.insert(prepare.atomic_id, prepare);
-            }
+    if body.starts_with(PAYLOAD_MAGIC) {
+        let header = PAYLOAD_MAGIC.len() + 32 + 4;
+        if body.len() < header {
+            return SidecarDecode::Partial {
+                kind: SidecarKind::Payload,
+            };
         }
-        AtomicFrameRole::Member => {
-            if let Ok(member) = decode_member(&frame.body) {
-                let slot = catalog.members.entry(member.atomic_id).or_default();
-                if !slot.iter().any(|m| m.ordinal == member.ordinal) {
-                    slot.push(member);
+        let id = match body[PAYLOAD_MAGIC.len()..PAYLOAD_MAGIC.len() + 32].try_into() {
+            Ok(bytes) => match AtomicId::from_bytes(bytes) {
+                Ok(id) => id,
+                Err(_) => {
+                    return SidecarDecode::Corrupt {
+                        kind: SidecarKind::Payload,
+                        atomic_id: None,
+                    };
                 }
+            },
+            Err(_) => {
+                return SidecarDecode::Corrupt {
+                    kind: SidecarKind::Payload,
+                    atomic_id: None,
+                };
             }
+        };
+        let ord_at = PAYLOAD_MAGIC.len() + 32;
+        let ordinal = u32::from_be_bytes(body[ord_at..ord_at + 4].try_into().unwrap_or([0; 4]));
+        return SidecarDecode::Payload {
+            atomic_id: id,
+            ordinal,
+            payload: body[header..].to_vec(),
+        };
+    }
+    if body.starts_with(SEAL_MAGIC) {
+        let header = SEAL_MAGIC.len() + 64;
+        if body.len() < header {
+            return SidecarDecode::Partial {
+                kind: SidecarKind::Seal,
+            };
         }
-        AtomicFrameRole::Commit => {}
+        if body.len() != header {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::Seal,
+                atomic_id: AtomicId::from_bytes(
+                    body[SEAL_MAGIC.len()..SEAL_MAGIC.len() + 32]
+                        .try_into()
+                        .unwrap_or([0; 32]),
+                )
+                .ok(),
+            };
+        }
+        let id_bytes: [u8; 32] = match body[SEAL_MAGIC.len()..SEAL_MAGIC.len() + 32].try_into() {
+            Ok(b) => b,
+            Err(_) => {
+                return SidecarDecode::Corrupt {
+                    kind: SidecarKind::Seal,
+                    atomic_id: None,
+                };
+            }
+        };
+        let root_bytes: [u8; 32] =
+            match body[SEAL_MAGIC.len() + 32..SEAL_MAGIC.len() + 64].try_into() {
+                Ok(b) => b,
+                Err(_) => {
+                    return SidecarDecode::Corrupt {
+                        kind: SidecarKind::Seal,
+                        atomic_id: AtomicId::from_bytes(id_bytes).ok(),
+                    };
+                }
+            };
+        let (Ok(atomic_id), Ok(content_root)) = (
+            AtomicId::from_bytes(id_bytes),
+            ContentRoot::from_bytes(root_bytes),
+        ) else {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::Seal,
+                atomic_id: AtomicId::from_bytes(id_bytes).ok(),
+            };
+        };
+        return SidecarDecode::Seal {
+            atomic_id,
+            content_root,
+        };
     }
-}
-
-fn decode_stage_payload(body: &[u8]) -> Option<(AtomicId, u32, Vec<u8>)> {
-    let header = PAYLOAD_MAGIC.len() + 32 + 4;
-    if body.len() < header || !body.starts_with(PAYLOAD_MAGIC) {
-        return None;
-    }
-    let id = AtomicId::from_bytes(
-        body[PAYLOAD_MAGIC.len()..PAYLOAD_MAGIC.len() + 32]
-            .try_into()
-            .ok()?,
-    )
-    .ok()?;
-    let ord_at = PAYLOAD_MAGIC.len() + 32;
-    let ordinal = u32::from_be_bytes(body[ord_at..ord_at + 4].try_into().ok()?);
-    Some((id, ordinal, body[header..].to_vec()))
-}
-
-fn decode_stage_prepare(body: &[u8]) -> Option<AtomicPrepare> {
-    if !body.starts_with(PREPARE_MAGIC) {
-        return None;
-    }
-    decode_prepare(&body[PREPARE_MAGIC.len()..]).ok()
-}
-
-fn decode_stage_seal(body: &[u8]) -> Option<AtomicId> {
-    let header = SEAL_MAGIC.len() + 64;
-    if body.len() != header || !body.starts_with(SEAL_MAGIC) {
-        return None;
-    }
-    AtomicId::from_bytes(
-        body[SEAL_MAGIC.len()..SEAL_MAGIC.len() + 32]
-            .try_into()
-            .ok()?,
-    )
-    .ok()
+    SidecarDecode::NotSidecar
 }

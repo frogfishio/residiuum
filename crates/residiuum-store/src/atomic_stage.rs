@@ -5,6 +5,7 @@
 //! opened, created, or consulted. Ordinary `get` / scan / history stay empty.
 //! The live catalogue is opened once from a store-owned checkpoint plus tails.
 
+use crate::atomic_stage_classify::StageFindings;
 use crate::atomic_stage_media::{
     encode_stage_payload, encode_stage_prepare, encode_stage_seal, payload_event_id,
     prepare_event_id, seal_event_id, StageCatalog,
@@ -31,6 +32,7 @@ pub struct StoreAtomicStage<'a> {
     catalog: StageCatalog,
     covered: Vec<CoveredFile>,
     report: AtomicStageOpenReport,
+    findings: StageFindings,
 }
 
 impl Store {
@@ -43,7 +45,7 @@ impl Store {
         }
         let heap_id = HeapId::from_bytes(self.store_id())
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        let opened = open_catalog(self.paths(), AtomicStageLimits::prototype())?;
+        let opened = open_catalog(self.paths(), AtomicStageLimits::prototype(), heap_id)?;
         let heap = rebuild_heap(heap_id, &opened.catalog)?;
         self.record_atomic_stage_open(opened.report);
         Ok(StoreAtomicStage {
@@ -52,6 +54,7 @@ impl Store {
             catalog: opened.catalog,
             covered: opened.covered,
             report: opened.report,
+            findings: opened.findings,
         })
     }
 }
@@ -72,6 +75,11 @@ impl StoreAtomicStage<'_> {
         self.report
     }
 
+    /// Honest damage/conflict observations (CR-ATMR5-002).
+    pub fn findings(&self) -> &StageFindings {
+        &self.findings
+    }
+
     /// Validate a closed plan, persist it on the store segment, then apply.
     pub fn begin_prepare(
         &mut self,
@@ -81,6 +89,11 @@ impl StoreAtomicStage<'_> {
     ) -> Result<(CoordinatorSeq, PlacementManifest), StoreError> {
         let prepare = prepare_from_closed_plan(plan, frontier, members)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        if self.catalog.blocked.contains(&prepare.atomic_id) {
+            return Err(StoreError::AtomicStage(
+                "atomic identity is blocked by conflicting or damaged evidence".into(),
+            ));
+        }
         if let Some(existing) = self.heap.placement(prepare.atomic_id) {
             if existing.content_root() == prepare.content_root
                 && members_match_prepare(&prepare, members)
@@ -297,7 +310,7 @@ impl StoreAtomicStage<'_> {
             &body,
             seal_event_id(atomic_id),
         )?;
-        self.catalog.seals.insert(atomic_id);
+        self.catalog.seals.insert(atomic_id, content_root);
         persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)
     }
 }
@@ -312,9 +325,17 @@ fn rebuild_heap(heap_id: HeapId, catalog: &StageCatalog) -> Result<StagingHeap, 
     let mut heap =
         StagingHeap::new(heap_id, 1).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
     for (atomic_id, prepare) in &catalog.prepares {
+        if catalog.blocked.contains(atomic_id) {
+            continue;
+        }
+        if prepare.heap_id != heap_id {
+            continue;
+        }
         let members = catalog.members.get(atomic_id).cloned().unwrap_or_default();
         if !members_match_prepare(prepare, &members) {
-            continue;
+            return Err(StoreError::AtomicStage(format!(
+                "atomic {atomic_id:?} members do not match prepare; identity is not reusable"
+            )));
         }
         heap.begin_prepare(*atomic_id, prepare.content_root, &members)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
@@ -324,7 +345,10 @@ fn rebuild_heap(heap_id: HeapId, catalog: &StageCatalog) -> Result<StagingHeap, 
                     .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
             }
         }
-        if catalog.is_sealed(*atomic_id) {
+        if let Some(root) = catalog.seals.get(atomic_id) {
+            if *root != prepare.content_root {
+                continue;
+            }
             heap.seal_member_boundary(*atomic_id)
                 .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         }

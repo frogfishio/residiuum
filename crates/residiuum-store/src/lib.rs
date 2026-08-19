@@ -34,6 +34,7 @@ pub mod adaptive_write;
 
 mod atomic_file;
 mod atomic_stage;
+mod atomic_stage_classify;
 mod atomic_stage_media;
 mod atomic_stage_recover;
 mod backup;
@@ -90,6 +91,9 @@ pub use atomic_file::{
     write_atomic, write_atomic_keep_previous, write_atomic_with, AtomicWriteOptions, PREV_SUFFIX,
 };
 pub use atomic_stage::StoreAtomicStage;
+pub use atomic_stage_classify::{
+    StageEvidenceClass, StageEvidenceKind, StageFinding, StageFindings,
+};
 pub use atomic_stage_recover::{
     atomic_stage_checkpoint_path, AtomicStageDisposition, AtomicStageLimits, AtomicStageOpenReport,
     ATOMIC_STAGE_CHECKPOINT_FILE,

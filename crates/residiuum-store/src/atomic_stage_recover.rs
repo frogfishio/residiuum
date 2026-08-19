@@ -5,17 +5,22 @@
 //! directory trees, and does not rescan settled history on each staging call.
 
 use crate::atomic_file::write_atomic;
-use crate::atomic_stage_media::{ingest_frame, StageCatalog};
+use crate::atomic_stage_classify::{
+    classify_hole, finalize_catalog, ingest_classified_frame, StageEvidenceClass, StageFindings,
+};
+use crate::atomic_stage_media::StageCatalog;
 use crate::error::StoreError;
 use crate::layout::StorePaths;
-use residiuum_atomics::{decode_member, decode_prepare, encode_member, encode_prepare, AtomicId};
-use residiuum_format::{scan_forward, SafetyLimits};
+use residiuum_atomics::{
+    decode_member, decode_prepare, encode_member, encode_prepare, AtomicId, ContentRoot, HeapId,
+};
+use residiuum_format::{scan_forward, SafetyLimits, ScanRegion};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 1;
+const CHECKPOINT_VERSION: u8 = 2;
 const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V1";
 /// On-disk catalogue under `store-info/`.
 pub const ATOMIC_STAGE_CHECKPOINT_FILE: &str = "atomic-stage.ckpt";
@@ -110,6 +115,14 @@ pub struct AtomicStageOpenReport {
     pub work_bytes: u64,
     /// Catalogue loads performed (must stay 1 for the life of a handle).
     pub catalog_loads: u32,
+    /// Physical holes observed during media ingest.
+    pub holes: u32,
+    /// Corrupt / partial records.
+    pub corrupt: u32,
+    /// Conflicting records for one identity.
+    pub conflicts: u32,
+    /// Foreign-Heap records refused locally.
+    pub foreign: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -228,12 +241,14 @@ pub(crate) struct CatalogOpen {
     pub catalog: StageCatalog,
     pub covered: Vec<CoveredFile>,
     pub report: AtomicStageOpenReport,
+    pub findings: StageFindings,
 }
 
 /// Open or rebuild the store-owned catalogue from checkpoint plus tails.
 pub(crate) fn open_catalog(
     paths: &StorePaths,
     limits: AtomicStageLimits,
+    bound_heap: HeapId,
 ) -> Result<CatalogOpen, StoreError> {
     let mut budget = Budget::new(limits);
     let (mut catalog, mut covered, disposition) = match load_checkpoint(paths, &mut budget)? {
@@ -246,6 +261,7 @@ pub(crate) fn open_catalog(
     };
     budget.report.disposition = disposition;
     budget.charge_catalog(&catalog)?;
+    let mut findings = StageFindings::default();
 
     let files = list_media_files(paths, &mut budget)?;
     let mut unmatched: Vec<CoveredFile> = covered.clone();
@@ -295,7 +311,15 @@ pub(crate) fn open_catalog(
         } else {
             budget.report.files_rebuilt = budget.report.files_rebuilt.saturating_add(1);
         }
-        ingest_file_tail(&path, start, size, &mut catalog, &mut budget)?;
+        ingest_file_tail(
+            &path,
+            start,
+            size,
+            bound_heap,
+            &mut catalog,
+            &mut findings,
+            &mut budget,
+        )?;
         let fp = fingerprint(&path, size)?;
         next_covered.push(CoveredFile {
             rel_path: rel,
@@ -305,14 +329,25 @@ pub(crate) fn open_catalog(
         });
     }
 
+    finalize_catalog(&mut catalog, bound_heap, &mut findings);
     budget.charge_catalog(&catalog)?;
     budget.report.catalog_loads = 1;
+    budget.report.holes = findings
+        .records
+        .iter()
+        .filter(|r| r.kind == crate::atomic_stage_classify::StageEvidenceKind::Hole)
+        .count() as u32;
+    budget.report.corrupt =
+        findings.count(StageEvidenceClass::Corrupt) + findings.count(StageEvidenceClass::Partial);
+    budget.report.conflicts = findings.count(StageEvidenceClass::Conflict);
+    budget.report.foreign = findings.count(StageEvidenceClass::ForeignHeap);
     covered = next_covered;
     persist_checkpoint(paths, &catalog, &covered)?;
     Ok(CatalogOpen {
         catalog,
         covered,
         report: budget.report,
+        findings,
     })
 }
 
@@ -353,7 +388,9 @@ fn ingest_file_tail(
     path: &Path,
     start: u64,
     size: u64,
+    bound_heap: HeapId,
     catalog: &mut StageCatalog,
+    findings: &mut StageFindings,
     budget: &mut Budget,
 ) -> Result<(), StoreError> {
     if start > size {
@@ -375,11 +412,15 @@ fn ingest_file_tail(
     let mut bytes = vec![0u8; want as usize];
     file.read_exact(&mut bytes)?;
     let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
-    for (_, frame) in report.verified_frames() {
-        let next = budget.report.frames.saturating_add(1);
-        budget.report.frames = next;
-        ingest_frame(catalog, frame);
-        budget.charge_catalog(catalog)?;
+    for region in &report.regions {
+        match region {
+            ScanRegion::Hole { reason, .. } => classify_hole(findings, reason),
+            ScanRegion::VerifiedFrame { frame, .. } => {
+                budget.report.frames = budget.report.frames.saturating_add(1);
+                ingest_classified_frame(catalog, bound_heap, frame, findings);
+                budget.charge_catalog(catalog)?;
+            }
+        }
     }
     Ok(())
 }
@@ -541,7 +582,12 @@ fn encode_checkpoint(
         body.extend_from_slice(payload);
     }
     body.extend_from_slice(&(catalog.seals.len() as u32).to_be_bytes());
-    for id in &catalog.seals {
+    for (id, root) in &catalog.seals {
+        body.extend_from_slice(id.as_bytes());
+        body.extend_from_slice(root.as_bytes());
+    }
+    body.extend_from_slice(&(catalog.blocked.len() as u32).to_be_bytes());
+    for id in &catalog.blocked {
         body.extend_from_slice(id.as_bytes());
     }
     let mut hasher = blake3::Hasher::new();
@@ -631,12 +677,22 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
     }
     let n_seals = read_u32(&mut cur)? as usize;
     for _ in 0..n_seals {
+        if cur.len() < 64 {
+            return None;
+        }
+        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
+        let root = ContentRoot::from_bytes(cur[32..64].try_into().ok()?).ok()?;
+        cur = &cur[64..];
+        catalog.seals.insert(id, root);
+    }
+    let n_blocked = read_u32(&mut cur)? as usize;
+    for _ in 0..n_blocked {
         if cur.len() < 32 {
             return None;
         }
         let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
         cur = &cur[32..];
-        catalog.seals.insert(id);
+        catalog.blocked.insert(id);
     }
     if !cur.is_empty() {
         return None;
