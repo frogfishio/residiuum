@@ -1,4 +1,5 @@
 //! Store-owned Atomic staging (CR-ATMR4-005 / CR-ATMR5-001).
+//! CR-ATMR5-003: exact same-ID member/payload/chunk retries are idempotent.
 //!
 //! One durable authority: the store segment under the exclusive writer.
 //! `StagingHeap` is the in-memory model only. The peer `DurableLane` is not
@@ -137,24 +138,28 @@ impl StoreAtomicStage<'_> {
     }
 
     /// Persist a staged payload on the store segment. Not a `put`.
+    ///
+    /// Exact same-ID retries succeed without writing more media. A changed
+    /// member or payload is `DuplicateTarget` (CR-ATMR5-003).
     pub fn append_staged(
         &mut self,
         member: AtomicMember,
         payload: Vec<u8>,
     ) -> Result<(), StoreError> {
+        if self.existing_payload_conflicts(&member, &payload) {
+            return Err(Self::duplicate_target());
+        }
+        if self.find_staged(member.atomic_id, member.ordinal).is_some() {
+            if !self.catalog.has_payload(member.atomic_id, member.ordinal) {
+                self.persist_payload(&member, &payload)?;
+            }
+            return Ok(());
+        }
         self.heap
             .check_append_staged(&member, &payload)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         if !self.catalog.has_payload(member.atomic_id, member.ordinal) {
             self.persist_payload(&member, &payload)?;
-        }
-        if self
-            .heap
-            .inspect_staged(member.atomic_id)
-            .and_then(|ms| ms.iter().find(|s| s.member.ordinal == member.ordinal))
-            .is_some()
-        {
-            return Ok(());
         }
         self.heap
             .append_staged(member, payload)
@@ -162,20 +167,29 @@ impl StoreAtomicStage<'_> {
     }
 
     /// Record the chunk map in the in-memory model only (CR-ATMR4-004 persists it).
+    /// Exact plan retry is a no-op; a different plan is `DuplicateTarget`.
     pub fn commit_chunk_manifest(
         &mut self,
         atomic_id: AtomicId,
         ordinal: u32,
         plan: ChunkPlan,
     ) -> Result<(), StoreError> {
+        if let Some(existing) = self.heap.chunk_plan(atomic_id, ordinal) {
+            if existing == &plan {
+                return Ok(());
+            }
+            return Err(Self::duplicate_target());
+        }
         self.heap
             .commit_chunk_manifest(atomic_id, ordinal, plan)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))
     }
 
     /// Install one chunk in the model. When the payload first completes, persist
-    /// the member payload on the store. Retry writes a missing store payload
-    /// even if the in-memory member is already complete.
+    /// the member payload on the store.
+    ///
+    /// Exact chunk retries succeed without extra media. A different member,
+    /// index body, or completed payload is `DuplicateTarget` (CR-ATMR5-003).
     pub fn append_chunk(
         &mut self,
         member: AtomicMember,
@@ -184,19 +198,18 @@ impl StoreAtomicStage<'_> {
     ) -> Result<(), StoreError> {
         let atomic_id = member.atomic_id;
         let ordinal = member.ordinal;
-        let already = self
-            .heap
-            .inspect_staged(atomic_id)
-            .and_then(|ms| ms.iter().find(|s| s.member.ordinal == ordinal))
-            .is_some_and(|s| s.payload_complete);
-        if !already {
-            self.heap
-                .check_append_chunk(&member, index, &body)
-                .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-            self.heap
-                .append_chunk(member.clone(), index, body)
-                .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        if let Some(decision) = self.existing_chunk_decision(&member, index, &body) {
+            if decision.is_ok() {
+                self.persist_completed_payload_if_missing(&member)?;
+            }
+            return decision;
         }
+        self.heap
+            .check_append_chunk(&member, index, &body)
+            .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        self.heap
+            .append_chunk(member.clone(), index, body)
+            .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         let complete = self
             .heap
             .inspect_staged(atomic_id)
@@ -237,6 +250,99 @@ impl StoreAtomicStage<'_> {
             self.persist_seal(atomic_id, content_root)?;
         }
         Ok(())
+    }
+
+    fn duplicate_target() -> StoreError {
+        AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget).into()
+    }
+
+    fn find_staged(
+        &self,
+        atomic_id: AtomicId,
+        ordinal: u32,
+    ) -> Option<&residiuum_atomics::StagedMember> {
+        self.heap
+            .inspect_staged(atomic_id)
+            .and_then(|ms| ms.iter().find(|s| s.member.ordinal == ordinal))
+    }
+
+    fn catalog_member(&self, atomic_id: AtomicId, ordinal: u32) -> Option<&AtomicMember> {
+        self.catalog
+            .members
+            .get(&atomic_id)
+            .and_then(|ms| ms.iter().find(|m| m.ordinal == ordinal))
+    }
+
+    fn existing_payload_conflicts(&self, member: &AtomicMember, payload: &[u8]) -> bool {
+        if let Some(staged) = self.find_staged(member.atomic_id, member.ordinal) {
+            return staged.member != *member || staged.payload.as_slice() != payload;
+        }
+        if let Some(stored) = self
+            .catalog
+            .payloads
+            .get(&(member.atomic_id, member.ordinal))
+        {
+            if stored.as_slice() != payload {
+                return true;
+            }
+            if let Some(stored_member) = self.catalog_member(member.atomic_id, member.ordinal) {
+                return stored_member != member;
+            }
+        }
+        false
+    }
+
+    /// `Some(Ok(()))` exact retry, `Some(Err(_))` identity conflict, `None` first write.
+    fn existing_chunk_decision(
+        &self,
+        member: &AtomicMember,
+        index: u32,
+        body: &[u8],
+    ) -> Option<Result<(), StoreError>> {
+        let staged = self.find_staged(member.atomic_id, member.ordinal)?;
+        if staged.member != *member {
+            return Some(Err(Self::duplicate_target()));
+        }
+        if let Some(chunks) = staged.chunks.as_ref() {
+            match chunks.get(index as usize) {
+                Some(Some(existing)) if existing.as_slice() == body => {
+                    return Some(Ok(()));
+                }
+                Some(Some(_)) => return Some(Err(Self::duplicate_target())),
+                Some(None) | None => return None,
+            }
+        }
+        if !staged.payload_complete {
+            return None;
+        }
+        let plan = self.heap.chunk_plan(member.atomic_id, member.ordinal)?;
+        if index >= plan.total {
+            return Some(Err(AtomicsError::Refused(
+                AtomicRefuseReason::MalformedInput,
+            )
+            .into()));
+        }
+        if *blake3::hash(body).as_bytes() != plan.chunk_hashes[index as usize] {
+            return Some(Err(Self::duplicate_target()));
+        }
+        Some(Ok(()))
+    }
+
+    fn persist_completed_payload_if_missing(
+        &mut self,
+        member: &AtomicMember,
+    ) -> Result<(), StoreError> {
+        if self.catalog.has_payload(member.atomic_id, member.ordinal) {
+            return Ok(());
+        }
+        let Some(staged) = self.find_staged(member.atomic_id, member.ordinal) else {
+            return Ok(());
+        };
+        if !staged.payload_complete {
+            return Ok(());
+        }
+        let payload = staged.payload.clone();
+        self.persist_payload(member, &payload)
     }
 
     fn persist_prepare(&mut self, prepare: &AtomicPrepare) -> Result<(), StoreError> {
