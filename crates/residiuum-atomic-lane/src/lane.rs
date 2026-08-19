@@ -17,7 +17,9 @@ use residiuum_atomics::{
     HeapId, OrdinaryCell, PlacementManifest, StagingFailpoint, StagingHeap,
 };
 use residiuum_format::{
-    encode_atomic_frame, encode_atomic_member_envelope, encode_atomic_prepare_envelope, FrameKind,
+    encode_atomic_frame, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
+    examine_atomic_frame, scan_forward, AtomicEvidenceClass, AtomicFrameRole, FrameKind,
+    SafetyLimits,
 };
 use std::fs::{self, File};
 use std::io::Read;
@@ -294,6 +296,9 @@ impl DurableLane {
             if let Some(chunks) = &staged.chunks {
                 if let Some(Some(existing)) = chunks.get(index as usize) {
                     if existing == &body && staged.member == member {
+                        if staged.payload_complete {
+                            self.persist_completed_chunked_member(&member)?;
+                        }
                         return Ok(());
                     }
                     return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget).into());
@@ -303,19 +308,13 @@ impl DurableLane {
         self.heap.check_append_chunk(&member, index, &body)?;
         persist_chunk_body(&self.root, member.atomic_id, member.ordinal, index, &body)?;
         self.heap.append_chunk(member.clone(), index, body)?;
-        if let Some(staged) = self
+        if self
             .heap
             .inspect_staged(member.atomic_id)
             .and_then(|ms| ms.iter().find(|s| s.member.ordinal == member.ordinal))
+            .is_some_and(|s| s.payload_complete)
         {
-            if staged.payload_complete {
-                persist_payload(
-                    &self.root,
-                    member.atomic_id,
-                    member.ordinal,
-                    &staged.payload,
-                )?;
-            }
+            self.persist_completed_chunked_member(&member)?;
         }
         self.write_checkpoint()?;
         if self.armed
@@ -332,8 +331,60 @@ impl DurableLane {
         Ok(())
     }
 
-    /// First stable boundary: kernel seal, then `sync_all` logs + `sealed/<id>`.
+    fn persist_completed_chunked_member(&self, member: &AtomicMember) -> Result<(), LaneError> {
+        let staged = self
+            .heap
+            .inspect_staged(member.atomic_id)
+            .and_then(|ms| ms.iter().find(|s| s.member.ordinal == member.ordinal))
+            .ok_or(LaneError::Corrupt("complete chunk without member"))?;
+        persist_payload(
+            &self.root,
+            member.atomic_id,
+            member.ordinal,
+            &staged.payload,
+        )?;
+        let placement = self
+            .heap
+            .placement(member.atomic_id)
+            .ok_or(LaneError::Corrupt("append without prepare"))?;
+        let entry = placement
+            .entries()
+            .iter()
+            .find(|e| e.member.ordinal == member.ordinal)
+            .ok_or(LaneError::Corrupt("member ordinal not in prepare"))?;
+        if !shard_has_member(
+            &self.root,
+            entry.shard.as_u32(),
+            member.atomic_id,
+            member.ordinal,
+        )? {
+            persist_member_frame(
+                &self.root,
+                self.heap.heap_id(),
+                entry.shard.as_u32(),
+                member,
+                placement.content_root().to_bytes(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// First stable boundary: member frames on the shard log, then kernel seal.
     pub fn seal_member_boundary(&mut self, atomic_id: AtomicId) -> Result<(), LaneError> {
+        let placement = self
+            .heap
+            .placement(atomic_id)
+            .ok_or(LaneError::Corrupt("seal without prepare"))?;
+        for entry in placement.entries() {
+            if !shard_has_member(
+                &self.root,
+                entry.shard.as_u32(),
+                atomic_id,
+                entry.member.ordinal,
+            )? {
+                return Err(LaneError::Corrupt("member missing from shard log"));
+            }
+        }
         self.heap.seal_member_boundary(atomic_id)?;
         sync_path(&coordinator_path(&self.root))?;
         let shard_count = shard_count_from_layout(&self.root)?;
@@ -492,6 +543,32 @@ fn persist_member_frame(
     )
     .map_err(|e| LaneError::Format(e.to_string()))?;
     persist::append_synced(&shard_path(root, shard), &frame, IoSite::Shard)
+}
+
+fn shard_has_member(
+    root: &Path,
+    shard: u32,
+    atomic_id: AtomicId,
+    ordinal: u32,
+) -> Result<bool, LaneError> {
+    let path = shard_path(root, shard);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let bytes = fs::read(&path)?;
+    let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
+    for (_, frame) in report.verified_frames() {
+        let Some(AtomicEvidenceClass::Valid(link)) = examine_atomic_frame(frame) else {
+            continue;
+        };
+        if link.role == AtomicFrameRole::Member
+            && link.atomic_id == *atomic_id.as_bytes()
+            && link.ordinal == Some(u64::from(ordinal))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn parse_shard_count(meta: &str) -> Result<u32, LaneError> {

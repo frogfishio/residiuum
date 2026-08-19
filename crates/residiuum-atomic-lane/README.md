@@ -30,6 +30,8 @@ Write order: closed-plan sidecar + `sync_all` → intent file + `sync_all` →
 prepare frame append + `sync_all` (`AfterPrepare`) → payload file +
 `sync_all` → member frame append + `sync_all` (`AfterMember(n)`).
 The prepare body is `prepare_from_closed_plan`, not synthetic empty roots.
+A completed chunked member appends the same shard `ItemEvent` as an unchunked
+member before seal is allowed (CR-ATMR4-004).
 The member slice must equal the closed plan mutations; leftover members are
 refused before any sidecar or log append (CR-ATMR4-001). Exclusive sidecars
 publish through a unique temp file and a no-replace link; a torn leftover is

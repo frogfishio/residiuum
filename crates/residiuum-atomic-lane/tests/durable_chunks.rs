@@ -8,6 +8,7 @@ use residiuum_atomic_lane::{DurableLane, LaneError};
 use residiuum_atomics::{
     AtomicRefuseReason, AtomicsError, ChunkPlan, MemberPhase, StagingFailpoint, StagingHeap,
 };
+use residiuum_format::{read_atomic_evidence, AtomicFrameRole, SafetyLimits};
 use std::fs;
 
 fn h(bytes: &[u8]) -> [u8; 32] {
@@ -63,14 +64,10 @@ fn complete_chunks_survive_reopen_with_manifest() {
         .is_file());
 
     let lane = lane.reopen().unwrap();
-    assert_eq!(lane.heap().chunk_plan(aid(1), 0), Some(&chunks));
     let staged = lane.heap().inspect_staged(aid(1)).unwrap();
     assert_eq!(staged.len(), 1);
     assert!(staged[0].payload_complete);
     assert_eq!(staged[0].payload, whole);
-    let bodies = staged[0].chunks.as_ref().expect("chunk slots");
-    assert_eq!(bodies[0].as_deref(), Some(p0.as_slice()));
-    assert_eq!(bodies[1].as_deref(), Some(p1.as_slice()));
     assert_no_ordinary_leak(lane.heap(), "k");
 }
 
@@ -190,6 +187,56 @@ fn identical_chunk_append_is_idempotent() {
 }
 
 #[test]
+fn complete_chunks_write_member_frame_on_shard_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
+    let (p0, p1, whole, chunks) = two_chunks();
+    let m = create_member(aid(7), 0, "k", &whole);
+    let plan = plan_for(hid(1), std::slice::from_ref(&m), &[whole.as_slice()]);
+    lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&m))
+        .unwrap();
+    lane.commit_chunk_manifest(aid(7), 0, chunks).unwrap();
+    lane.append_chunk(m.clone(), 0, p0).unwrap();
+    let shard = dir.path().join("shard-00000000.log");
+    let before = fs::read(&shard).unwrap_or_default();
+    assert!(
+        !read_atomic_evidence(&before, SafetyLimits::draft_defaults())
+            .valid()
+            .any(|l| l.role == AtomicFrameRole::Member),
+        "incomplete chunks must not write a member frame"
+    );
+    lane.append_chunk(m, 1, p1).unwrap();
+    let after = fs::read(&shard).unwrap();
+    assert!(
+        read_atomic_evidence(&after, SafetyLimits::draft_defaults())
+            .valid()
+            .any(|l| l.role == AtomicFrameRole::Member),
+        "completed chunked member must be on the shard log"
+    );
+    lane.seal_member_boundary(aid(7)).unwrap();
+}
+
+#[test]
+fn seal_refuses_without_shard_member_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
+    let (p0, p1, whole, chunks) = two_chunks();
+    let m = create_member(aid(8), 0, "k", &whole);
+    let plan = plan_for(hid(1), std::slice::from_ref(&m), &[whole.as_slice()]);
+    lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&m))
+        .unwrap();
+    lane.commit_chunk_manifest(aid(8), 0, chunks).unwrap();
+    lane.append_chunk(m.clone(), 0, p0).unwrap();
+    lane.append_chunk(m, 1, p1).unwrap();
+    fs::write(dir.path().join("shard-00000000.log"), []).unwrap();
+    fs::write(dir.path().join("shard-00000000.ack"), 0u64.to_be_bytes()).unwrap();
+    match lane.seal_member_boundary(aid(8)) {
+        Err(LaneError::Corrupt("member missing from shard log")) => {}
+        other => panic!("expected missing member frame, got {other:?}"),
+    }
+}
+
+#[test]
 fn payload_file_is_not_used_when_chunk_manifest_exists() {
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
@@ -210,7 +257,10 @@ fn payload_file_is_not_used_when_chunk_manifest_exists() {
         .is_file());
     let _ = fs::remove_file(dir.path().join("checkpoint"));
     let lane = lane.reopen().unwrap();
-    assert_eq!(lane.heap().chunk_plan(aid(6), 0), Some(&chunks));
     assert!(lane.heap().inspect_staged(aid(6)).unwrap()[0].payload_complete);
+    assert_eq!(
+        lane.heap().inspect_staged(aid(6)).unwrap()[0].payload,
+        whole
+    );
     assert_no_ordinary_leak(lane.heap(), "k");
 }

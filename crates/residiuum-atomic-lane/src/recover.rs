@@ -282,7 +282,9 @@ pub fn replay_members(
                 return Err(LaneError::Corrupt("member shard mismatch"));
             }
             budget.charge_frame()?;
-            if chunk_manifest_path(root, member.atomic_id, member.ordinal).exists() {
+            if chunk_manifest_path(root, member.atomic_id, member.ordinal).exists()
+                && !payload_path(root, member.atomic_id, member.ordinal).exists()
+            {
                 continue;
             }
             let payload = read_payload(root, member.atomic_id, member.ordinal, budget)?;
@@ -341,6 +343,13 @@ pub fn replay_chunks(
         if heap
             .lifecycle(atomic_id)
             .is_some_and(|lc| lc.members == MemberPhase::DurableInvisible)
+        {
+            continue;
+        }
+        if heap
+            .inspect_staged(atomic_id)
+            .and_then(|ms| ms.iter().find(|s| s.member.ordinal == ordinal))
+            .is_some_and(|s| s.payload_complete)
         {
             continue;
         }
@@ -628,9 +637,6 @@ pub fn apply_checkpoint(
             }
         }
         for member in members {
-            if chunk_manifest_path(root, member.atomic_id, member.ordinal).exists() {
-                continue;
-            }
             let path = payload_path(root, member.atomic_id, member.ordinal);
             if !path.exists() {
                 continue;
