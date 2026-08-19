@@ -65,7 +65,7 @@ fn pre_write_error_retry_succeeds() {
 }
 
 #[test]
-fn empty_torn_sidecar_does_not_conflict() {
+fn empty_legacy_sidecar_is_preserved_damage() {
     let _serial = cleanup_failpoints();
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
@@ -74,10 +74,12 @@ fn empty_torn_sidecar_does_not_conflict() {
     let sidecar = dir.path().join("plan").join(format!("{}", aid(3)));
     fs::create_dir_all(sidecar.parent().unwrap()).unwrap();
     fs::write(&sidecar, []).unwrap();
-    lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&member))
-        .unwrap();
-    assert!(lane.heap().can_resolve(aid(3)));
-    assert_ne!(fs::metadata(&sidecar).unwrap().len(), 0);
+    match lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&member)) {
+        Err(LaneError::Corrupt("unauthenticated exclusive final")) => {}
+        other => panic!("expected damaged exclusive final, got {other:?}"),
+    }
+    assert_eq!(fs::metadata(&sidecar).unwrap().len(), 0);
+    assert!(!lane.heap().can_resolve(aid(3)));
 }
 
 #[test]

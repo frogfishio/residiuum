@@ -2,6 +2,7 @@
 
 use crate::error::LaneError;
 use crate::io_fail::{self, IoInjected, IoPhase, IoPoint, IoSite};
+use crate::limits::SidecarRole;
 use residiuum_atomics::{AtomicRefuseReason, AtomicsError};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -26,21 +27,22 @@ fn hit(site: IoSite, phase: IoPhase) -> Result<(), LaneError> {
 
 /// Publish `path` via a unique temp file. Never replace a different identity.
 ///
-/// A torn leftover (empty or a strict prefix of `bytes`) is quarantined so
-/// exact same-ID retry can complete. Shared `.tmp` names are not used
-/// (CR-ATMR4-006).
+/// Partial temps are never final authority. An existing final is same-ID
+/// retry only when the bytes match exactly. Prefix/empty/other bytes are
+/// preserved as conflict or unauthenticated damage (CR-ATMR5-007).
+/// Shared `.tmp` names are not used (CR-ATMR4-006).
 pub fn write_exclusive(path: &Path, bytes: &[u8], site: IoSite) -> Result<(), LaneError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     if path.exists() {
-        match classify_existing(path, bytes)? {
-            Existing::Same => return Ok(()),
+        return match classify_existing(path, bytes, site)? {
+            Existing::Same => Ok(()),
             Existing::Conflict => {
-                return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
+                Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into())
             }
-            Existing::Torn => quarantine_torn(path)?,
-        }
+            Existing::Damaged => Err(LaneError::Corrupt("unauthenticated exclusive final")),
+        };
     }
     hit(site, IoPhase::BeforeWrite)?;
     let tmp = unique_sidecar_temp(path);
@@ -63,7 +65,7 @@ pub fn write_exclusive(path: &Path, bytes: &[u8], site: IoSite) -> Result<(), La
     }
     hit(site, IoPhase::BeforeRename)?;
     if !io_fail::omit_rename() {
-        publish_no_replace(&tmp, path, bytes)?;
+        publish_no_replace(&tmp, path, bytes, site)?;
         hit(site, IoPhase::AfterRename)?;
         let _ = fs::remove_file(&tmp);
     }
@@ -78,23 +80,42 @@ pub fn write_exclusive(path: &Path, bytes: &[u8], site: IoSite) -> Result<(), La
 
 enum Existing {
     Same,
-    Torn,
     Conflict,
+    Damaged,
 }
 
-fn classify_existing(path: &Path, intended: &[u8]) -> Result<Existing, LaneError> {
-    let existing = fs::read(path)?;
-    if existing == intended {
-        Ok(Existing::Same)
-    } else if is_torn_identity(&existing, intended) {
-        Ok(Existing::Torn)
-    } else {
-        Ok(Existing::Conflict)
+fn sidecar_limit(site: IoSite) -> u64 {
+    match site {
+        IoSite::Plan => SidecarRole::Plan.max_bytes(),
+        IoSite::Intent => SidecarRole::Intent.max_bytes(),
+        IoSite::Payload => SidecarRole::Payload.max_bytes(),
+        IoSite::ChunkManifest => SidecarRole::ChunkManifest.max_bytes(),
+        IoSite::Chunk => SidecarRole::ChunkBody.max_bytes(),
+        IoSite::Seal => SidecarRole::Seal.max_bytes(),
+        IoSite::Ack => SidecarRole::Ack.max_bytes(),
+        IoSite::Checkpoint => SidecarRole::Checkpoint.max_bytes(),
+        IoSite::Identity => SidecarRole::Plan.max_bytes(),
+        IoSite::Coordinator | IoSite::Shard => {
+            crate::limits::RecoveryLimits::prototype().max_log_bytes
+        }
     }
 }
 
-fn is_torn_identity(existing: &[u8], intended: &[u8]) -> bool {
-    existing.is_empty() || (existing.len() < intended.len() && intended.starts_with(existing))
+fn classify_existing(path: &Path, intended: &[u8], site: IoSite) -> Result<Existing, LaneError> {
+    let len = fs::metadata(path)?.len();
+    let limit = sidecar_limit(site);
+    if len > limit {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded).into());
+    }
+    if len == 0 {
+        return Ok(Existing::Damaged);
+    }
+    let existing = fs::read(path)?;
+    if existing.as_slice() == intended {
+        Ok(Existing::Same)
+    } else {
+        Ok(Existing::Conflict)
+    }
 }
 
 fn unique_sidecar_temp(path: &Path) -> PathBuf {
@@ -106,32 +127,21 @@ fn unique_sidecar_temp(path: &Path) -> PathBuf {
     path.with_file_name(format!(".{name}.{}.{seq}.tmp", std::process::id()))
 }
 
-fn quarantine_torn(path: &Path) -> Result<(), LaneError> {
-    let dest = path.with_file_name(format!(
-        ".{}.torn.{}",
-        path.file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "exclusive".into()),
-        TEMP_SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    fs::rename(path, dest)?;
-    Ok(())
-}
-
-fn publish_no_replace(tmp: &Path, dest: &Path, bytes: &[u8]) -> Result<(), LaneError> {
+fn publish_no_replace(
+    tmp: &Path,
+    dest: &Path,
+    bytes: &[u8],
+    site: IoSite,
+) -> Result<(), LaneError> {
     match fs::hard_link(tmp, dest) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            match classify_existing(dest, bytes)? {
+            match classify_existing(dest, bytes, site)? {
                 Existing::Same => Ok(()),
-                Existing::Torn => {
-                    quarantine_torn(dest)?;
-                    fs::hard_link(tmp, dest)?;
-                    Ok(())
-                }
                 Existing::Conflict => {
                     Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into())
                 }
+                Existing::Damaged => Err(LaneError::Corrupt("unauthenticated exclusive final")),
             }
         }
         Err(e) => Err(e.into()),
@@ -221,4 +231,68 @@ pub fn sync_path(path: &Path) -> Result<(), LaneError> {
 pub fn sync_dir(path: &Path) -> Result<(), LaneError> {
     File::open(path)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use residiuum_atomics::AtomicsError;
+
+    fn refused(err: LaneError) -> AtomicRefuseReason {
+        match err {
+            LaneError::Kernel(AtomicsError::Refused(r)) => r,
+            other => panic!("expected kernel refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exact_retry_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p");
+        write_exclusive(&path, b"same", IoSite::Payload).unwrap();
+        write_exclusive(&path, b"same", IoSite::Payload).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"same");
+    }
+
+    #[test]
+    fn shorter_prefix_identity_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p");
+        fs::write(&path, b"hello").unwrap();
+        assert_eq!(
+            refused(write_exclusive(&path, b"hello world", IoSite::Payload).unwrap_err()),
+            AtomicRefuseReason::AtomicIdConflict
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"hello");
+        assert!(!dir.path().read_dir().unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("torn")));
+    }
+
+    #[test]
+    fn empty_legacy_final_is_damaged_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p");
+        fs::write(&path, []).unwrap();
+        match write_exclusive(&path, b"intended", IoSite::Payload) {
+            Err(LaneError::Corrupt("unauthenticated exclusive final")) => {}
+            other => panic!("expected damaged exclusive final, got {other:?}"),
+        }
+        assert_eq!(fs::metadata(&path).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn oversized_existing_refuses_before_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p");
+        let file = File::create(&path).unwrap();
+        file.set_len(SidecarRole::Payload.max_bytes() + 1).unwrap();
+        drop(file);
+        assert_eq!(
+            refused(write_exclusive(&path, b"x", IoSite::Payload).unwrap_err()),
+            AtomicRefuseReason::LimitExceeded
+        );
+    }
 }
