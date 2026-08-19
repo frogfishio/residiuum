@@ -11,10 +11,9 @@ Execution authority:
 
 Current acceptance review:
 
-- [ATM1_ATM2_DEEP_REVIEW_CR_ATMR4_2026-08-18.md](./ATM1_ATM2_DEEP_REVIEW_CR_ATMR4_2026-08-18.md)
-  — ATM-1 core remains sound but its plan/prepare seam and package gate require
-  changes; ATM-2 is not accepted; active changes use only the `CR-ATMR4-*`
-  namespace.
+- [ATM1_ATM2_DEEP_REVIEW_CR_ATMR5_2026-08-19.md](./ATM1_ATM2_DEEP_REVIEW_CR_ATMR5_2026-08-19.md)
+  — ATM-1 is technically accepted at `00a06ae`; ATM-2 is not accepted; active
+  changes use only the `CR-ATMR5-*` namespace.
 
 Compatibility note:
 [TRANSACTIONS.md](./TRANSACTIONS.md) explains how transaction terminology may
