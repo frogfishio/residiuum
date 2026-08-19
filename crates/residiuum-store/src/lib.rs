@@ -37,6 +37,7 @@ mod atomic_stage;
 mod atomic_stage_classify;
 mod atomic_stage_media;
 mod atomic_stage_recover;
+mod atomic_stage_status;
 mod backup;
 mod boundary_probe;
 mod catalog;
@@ -91,6 +92,7 @@ pub use atomic_file::{
     write_atomic, write_atomic_keep_previous, write_atomic_with, AtomicWriteOptions, PREV_SUFFIX,
 };
 pub use atomic_stage::StoreAtomicStage;
+pub use atomic_stage_status::{AtomicStageClass, AtomicStageStatus};
 pub use atomic_stage_classify::{
     StageEvidenceClass, StageEvidenceKind, StageFinding, StageFindings,
 };

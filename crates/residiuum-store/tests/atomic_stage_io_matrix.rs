@@ -2,12 +2,12 @@
 
 use residiuum_atomics::{
     AtomicId, AtomicMember, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, ChunkPlan,
-    CollectionId, CoordinationScope, HeapId, MemberPhase, MutationKind, ObjectIdentity,
-    PlanMutation, ResourceLimits, VersionId,
+    CollectionId, CoordinationScope, HeapId, MutationKind, ObjectIdentity, PlanMutation,
+    ResourceLimits, VersionId,
 };
 use residiuum_store::{
     arm_failpoint_once, clear_failpoints, enable_failpoint_hit_proof, require_failpoint_visited,
-    FailpointAction, Store, StoreError,
+    AtomicStageClass, FailpointAction, Store, StoreError,
 };
 use std::sync::Mutex;
 
@@ -138,7 +138,8 @@ fn fp_name(scenario: Scenario, phase: Phase) -> &'static str {
 fn allowed(scenario: Scenario, phase: Phase) -> &'static [Outcome] {
     use Outcome::*;
     match (scenario, phase) {
-        (Scenario::Prepare, _) => &[Absence],
+        (Scenario::Prepare, Phase::BeforeAppend) => &[Absence],
+        (Scenario::Prepare, Phase::AfterAppend | Phase::AfterCheckpoint) => &[PreparedInvisible],
         (Scenario::Member, Phase::BeforeAppend) => &[PreparedInvisible],
         (Scenario::Member, Phase::AfterAppend | Phase::AfterCheckpoint) => &[StagedInvisible],
         (Scenario::ChunkPlan, _) => &[PreparedInvisible],
@@ -162,16 +163,12 @@ fn classify(store: &mut Store) -> Outcome {
         Ok(s) => s,
         Err(_) => return Outcome::Damage,
     };
-    let Some(life) = stage.kernel().lifecycle(aid()) else {
-        return Outcome::Absence;
-    };
-    if life.members == MemberPhase::DurableInvisible {
-        return Outcome::DurableInvisible;
-    }
-    match stage.kernel().inspect_staged(aid()) {
-        Some(ms) if ms.iter().any(|s| s.payload_complete) => Outcome::StagedInvisible,
-        Some(_) if stage.kernel().placement(aid()).is_some() => Outcome::PreparedInvisible,
-        _ => Outcome::PreparedInvisible,
+    match stage.examine(aid()).class {
+        AtomicStageClass::Absent => Outcome::Absence,
+        AtomicStageClass::Prepared => Outcome::PreparedInvisible,
+        AtomicStageClass::Staged => Outcome::StagedInvisible,
+        AtomicStageClass::Sealed => Outcome::DurableInvisible,
+        AtomicStageClass::Blocked => Outcome::Damage,
     }
 }
 
@@ -276,6 +273,14 @@ fn store_prefix_sentinels_are_exact() {
     assert_eq!(
         drive(Scenario::Prepare, Phase::BeforeAppend),
         Outcome::Absence
+    );
+    assert_eq!(
+        drive(Scenario::Prepare, Phase::AfterAppend),
+        Outcome::PreparedInvisible
+    );
+    assert_eq!(
+        drive(Scenario::Prepare, Phase::AfterCheckpoint),
+        Outcome::PreparedInvisible
     );
     assert_eq!(
         drive(Scenario::Member, Phase::BeforeAppend),

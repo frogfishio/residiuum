@@ -57,6 +57,8 @@ pub(crate) struct StageCatalog {
     pub coverage_degraded: bool,
     /// Covered paths that vanished after a checkpoint. Cleared only by scrub.
     pub missing_covered: Vec<String>,
+    /// Intended member counts from the issuing prepare (CR-ATMR6-005).
+    pub intended_members: BTreeMap<AtomicId, u32>,
 }
 
 impl StageCatalog {

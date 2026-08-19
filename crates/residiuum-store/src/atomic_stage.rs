@@ -94,6 +94,14 @@ impl StoreAtomicStage<'_> {
         &self.findings
     }
 
+    /// Store-authoritative examination of surviving prepare/material.
+    ///
+    /// A durable prepare with incomplete members is [`AtomicStageClass::Prepared`],
+    /// never absence (CR-ATMR6-005).
+    pub fn examine(&self, atomic_id: AtomicId) -> crate::AtomicStageStatus {
+        crate::atomic_stage_status::project_atomic(&self.catalog, atomic_id)
+    }
+
     /// Operator-only repair. Clears persisted coverage degradation when every
     /// covered path still exists. Does not unblock Atomic identities. Ordinary
     /// reopen and retry must not call this (CR-ATMR6-002).
@@ -132,11 +140,11 @@ impl StoreAtomicStage<'_> {
             }
             if !self.catalog.prepare_batch.contains(&prepare.atomic_id) {
                 // Legacy ATPREP1-only prefix: repair the BatchPrepare authority.
-                self.persist_prepare(&prepare)?;
+                self.persist_prepare(&prepare, members.len() as u32)?;
             }
         } else {
             self.admit_new_atomic()?;
-            self.persist_prepare(&prepare)?;
+            self.persist_prepare(&prepare, members.len() as u32)?;
         }
         if let Some(existing) = self.heap.placement(prepare.atomic_id) {
             if existing.content_root() == prepare.content_root
@@ -517,7 +525,11 @@ impl StoreAtomicStage<'_> {
         }
     }
 
-    fn persist_prepare(&mut self, prepare: &AtomicPrepare) -> Result<(), StoreError> {
+    fn persist_prepare(
+        &mut self,
+        prepare: &AtomicPrepare,
+        intended_members: u32,
+    ) -> Result<(), StoreError> {
         let _seq = self.catalog.assign_coord(prepare.atomic_id)?;
         persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
         crate::failpoint::hit("store.atomic.prepare.before_append")?;
@@ -541,6 +553,9 @@ impl StoreAtomicStage<'_> {
             .prepares
             .insert(prepare.atomic_id, prepare.clone());
         self.catalog.prepare_batch.insert(prepare.atomic_id);
+        self.catalog
+            .intended_members
+            .insert(prepare.atomic_id, intended_members);
         persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
         crate::failpoint::hit("store.atomic.prepare.after_checkpoint")?;
         Ok(())

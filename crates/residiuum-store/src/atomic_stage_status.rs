@@ -1,0 +1,153 @@
+//! Store-authoritative Atomic examination (CR-ATMR6-005).
+//!
+//! Derived from the catalogue, not from whether the kernel could install a
+//! complete member set. A durable prepare with missing members is `Prepared`,
+//! never absence.
+
+use crate::atomic_stage_media::StageCatalog;
+use residiuum_atomics::{members_match_prepare, AtomicId};
+
+/// Public classification of one Atomic identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AtomicStageClass {
+    /// No valid prepare for this identity.
+    Absent,
+    /// Valid durable prepare; members and/or payloads are incomplete.
+    Prepared,
+    /// Prepare plus complete matching members and payloads; not sealed.
+    Staged,
+    /// First stable boundary is recorded.
+    Sealed,
+    /// Identity blocked by conflict or damage.
+    Blocked,
+}
+
+/// Typed examination of surviving prepare/material evidence.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AtomicStageStatus {
+    /// Identity under examination.
+    pub atomic_id: AtomicId,
+    /// Catalogue class. `Absent` only when no valid prepare exists.
+    pub class: AtomicStageClass,
+    /// Intended member count when known (from the issuing prepare).
+    pub intended_members: u32,
+    /// Members present in the catalogue.
+    pub present_members: u32,
+    /// Payload bodies or locators present.
+    pub present_payloads: u32,
+    /// Frozen chunk maps present.
+    pub present_chunk_plans: u32,
+    /// Chunk bodies or locators present.
+    pub present_chunk_bodies: u32,
+    /// A matching seal is catalogued.
+    pub sealed: bool,
+    /// Identity is blocked.
+    pub blocked: bool,
+    /// Store coverage is degraded.
+    pub coverage_degraded: bool,
+}
+
+/// Project one identity from the authoritative catalogue.
+pub fn project_atomic(catalog: &StageCatalog, atomic_id: AtomicId) -> AtomicStageStatus {
+    let blocked = catalog.blocked.contains(&atomic_id);
+    let prepare = catalog.prepares.get(&atomic_id);
+    let members = catalog.members.get(&atomic_id);
+    let present_members = members.map(|ms| ms.len() as u32).unwrap_or(0);
+    let intended_members = catalog
+        .intended_members
+        .get(&atomic_id)
+        .copied()
+        .unwrap_or(present_members);
+    let present_payloads = unique_count(
+        catalog.payloads.keys().filter(|(id, _)| *id == atomic_id),
+        catalog
+            .payload_refs
+            .keys()
+            .filter(|(id, _)| *id == atomic_id),
+    );
+    let present_chunk_plans = catalog
+        .chunk_plans
+        .keys()
+        .filter(|(id, _)| *id == atomic_id)
+        .count() as u32;
+    let present_chunk_bodies = unique_triple(
+        catalog.chunks.keys().filter(|(id, _, _)| *id == atomic_id),
+        catalog
+            .chunk_refs
+            .keys()
+            .filter(|(id, _, _)| *id == atomic_id),
+    );
+    let sealed = catalog.seals.contains_key(&atomic_id);
+    let members_complete = prepare.is_some_and(|p| {
+        let ms = members.cloned().unwrap_or_default();
+        intended_members > 0 && present_members >= intended_members && members_match_prepare(p, &ms)
+    });
+    let material_complete = members.is_some_and(|ms| {
+        ms.iter().all(|m| {
+            catalog.has_payload(atomic_id, m.ordinal)
+                || catalog.payload_refs.contains_key(&(atomic_id, m.ordinal))
+                || chunk_complete(catalog, atomic_id, m.ordinal)
+        })
+    });
+    let class = if blocked {
+        AtomicStageClass::Blocked
+    } else if prepare.is_none() {
+        AtomicStageClass::Absent
+    } else if sealed {
+        AtomicStageClass::Sealed
+    } else if members_complete && material_complete {
+        AtomicStageClass::Staged
+    } else {
+        AtomicStageClass::Prepared
+    };
+    AtomicStageStatus {
+        atomic_id,
+        class,
+        intended_members,
+        present_members,
+        present_payloads,
+        present_chunk_plans,
+        present_chunk_bodies,
+        sealed,
+        blocked,
+        coverage_degraded: catalog.coverage_degraded,
+    }
+}
+
+fn chunk_complete(catalog: &StageCatalog, atomic_id: AtomicId, ordinal: u32) -> bool {
+    let Some(plan) = catalog.chunk_plans.get(&(atomic_id, ordinal)) else {
+        return false;
+    };
+    (0..plan.total).all(|i| {
+        catalog.has_chunk(atomic_id, ordinal, i)
+            || catalog.chunk_refs.contains_key(&(atomic_id, ordinal, i))
+    })
+}
+
+fn unique_count<'a, I, J>(a: I, b: J) -> u32
+where
+    I: Iterator<Item = &'a (AtomicId, u32)>,
+    J: Iterator<Item = &'a (AtomicId, u32)>,
+{
+    let mut seen = Vec::new();
+    for key in a.chain(b) {
+        if !seen.contains(key) {
+            seen.push(*key);
+        }
+    }
+    seen.len() as u32
+}
+
+fn unique_triple<'a, I, J>(a: I, b: J) -> u32
+where
+    I: Iterator<Item = &'a (AtomicId, u32, u32)>,
+    J: Iterator<Item = &'a (AtomicId, u32, u32)>,
+{
+    let mut seen = Vec::new();
+    for key in a.chain(b) {
+        if !seen.contains(key) {
+            seen.push(*key);
+        }
+    }
+    seen.len() as u32
+}

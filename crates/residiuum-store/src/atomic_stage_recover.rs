@@ -26,8 +26,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 8;
-const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V8";
+const CHECKPOINT_VERSION: u8 = 9;
+const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V9";
 const BLOCK_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-BLK-V1";
 /// Fixed leaf size for the covered-prefix block frontier (CR-ATMR6-001).
 const FRONTIER_BLOCK: u64 = 64 * 1024;
@@ -1098,6 +1098,11 @@ fn encode_checkpoint(
         body.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
         body.extend_from_slice(bytes);
     }
+    body.extend_from_slice(&(catalog.intended_members.len() as u32).to_be_bytes());
+    for (id, n) in &catalog.intended_members {
+        body.extend_from_slice(id.as_bytes());
+        body.extend_from_slice(&n.to_be_bytes());
+    }
     let mut hasher = blake3::Hasher::new();
     hasher.update(CHECKPOINT_DOMAIN);
     hasher.update(&body);
@@ -1329,6 +1334,16 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
         let rel = String::from_utf8(cur[..n].to_vec()).ok()?;
         cur = &cur[n..];
         catalog.missing_covered.push(rel);
+    }
+    let n_intended = read_u32(&mut cur)? as usize;
+    for _ in 0..n_intended {
+        if cur.len() < 36 {
+            return None;
+        }
+        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
+        cur = &cur[32..];
+        let n = read_u32(&mut cur)?;
+        catalog.intended_members.insert(id, n);
     }
     if !cur.is_empty() {
         return None;
