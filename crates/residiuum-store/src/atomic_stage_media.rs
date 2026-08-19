@@ -38,6 +38,12 @@ pub(crate) struct StageCatalog {
     pub coord_next: u64,
     /// Encounter order of prepares (not Atomic-ID sort).
     pub prepare_seen: Vec<AtomicId>,
+    /// Persisted honest findings (CR-ATMR6-002). Ordinary reopen must not drop them.
+    pub findings: crate::atomic_stage_classify::StageFindings,
+    /// Store/coverage degradation. Ordinary reopen must not clear it.
+    pub coverage_degraded: bool,
+    /// Covered paths that vanished after a checkpoint. Cleared only by scrub.
+    pub missing_covered: Vec<String>,
 }
 
 impl StageCatalog {
@@ -82,6 +88,9 @@ impl StageCatalog {
             .saturating_add(self.blocked.len() as u64 * 32)
             .saturating_add(self.prepare_batch.len() as u64 * 32)
             .saturating_add(self.coord_seq.len() as u64 * 40)
+            .saturating_add(self.findings.records.len() as u64 * 40)
+            .saturating_add(u64::from(self.coverage_degraded))
+            .saturating_add(self.missing_covered.iter().map(|p| p.len() as u64).sum())
     }
 
     /// Allocate or return the durable coordinator sequence for `atomic_id`.

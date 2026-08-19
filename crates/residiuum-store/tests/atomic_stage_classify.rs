@@ -1,13 +1,14 @@
 //! CR-ATMR5-002: store catalogue does not guess through damage or conflicts.
 
 use residiuum_atomics::{
-    encode_prepare, prepare_from_closed_plan, AtomicId, AtomicMember, AtomicPlan, AtomicPlanParts,
-    AtomicProfile, CanonicalKey, CollectionId, ContentRoot, CoordinationScope, HeapId,
-    MutationKind, ObjectIdentity, PlanMutation, ResourceLimits, VersionId,
+    encode_member, encode_prepare, prepare_from_closed_plan, AtomicId, AtomicMember, AtomicPlan,
+    AtomicPlanParts, AtomicProfile, CanonicalKey, ChunkPlan, CollectionId, ContentRoot,
+    CoordinationScope, HeapId, MutationKind, ObjectIdentity, PlanMutation, ResourceLimits,
+    VersionId,
 };
 use residiuum_format::{
-    encode_atomic_frame, encode_atomic_prepare_envelope, encode_frame, FrameHeader, FrameKind,
-    FrameParts, EMPTY_ENVELOPE,
+    encode_atomic_frame, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
+    encode_frame, FrameHeader, FrameKind, FrameParts, EMPTY_ENVELOPE,
 };
 use residiuum_store::{
     atomic_stage_checkpoint_path, StageEvidenceClass, StageEvidenceKind, Store, StoreError,
@@ -281,4 +282,302 @@ fn holes_are_reported_not_swallowed() {
         .records
         .iter()
         .any(|f| f.kind == StageEvidenceKind::Hole));
+}
+
+fn refuse_reuse(store: &mut Store) {
+    let heap_id = HeapId::from_bytes(store.store_id()).unwrap();
+    let p = plan(heap_id, std::slice::from_ref(&member()), b"secret");
+    let mut stage = store.atomic_stage().unwrap();
+    match stage.begin_prepare(&p, FRONTIER, &[member()]) {
+        Err(StoreError::AtomicStage(msg)) => {
+            assert!(
+                msg.contains("blocked"),
+                "identity must stay blocked, got {msg}"
+            );
+        }
+        Ok(_) => panic!("blocked identity must not prepare"),
+        Err(other) => panic!("expected blocked AtomicStage, got {other}"),
+    }
+}
+
+#[test]
+fn mismatched_seal_stays_blocked_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let m = member();
+    let p = plan(heap, std::slice::from_ref(&m), b"secret");
+    {
+        let mut stage = store.atomic_stage().unwrap();
+        stage
+            .begin_prepare(&p, FRONTIER, std::slice::from_ref(&m))
+            .unwrap();
+        stage.append_staged(m, b"secret".to_vec()).unwrap();
+    }
+    let mut wrong = [0x11u8; 32];
+    wrong[0] = 0x5E;
+    let root = ContentRoot::from_bytes(wrong).unwrap();
+    let mut body = b"ATSEAL1".to_vec();
+    body.extend_from_slice(aid().as_bytes());
+    body.extend_from_slice(root.as_bytes());
+    let segs = store.paths().segments_dir();
+    fs::create_dir_all(&segs).unwrap();
+    write_payload_chunk(&segs.join("bad-seal.residiuum"), body, 8);
+    let _ = fs::remove_file(atomic_stage_checkpoint_path(store.paths()));
+    {
+        let stage = store.atomic_stage().unwrap();
+        assert!(stage
+            .findings()
+            .records
+            .iter()
+            .any(|f| f.kind == StageEvidenceKind::Seal && f.class == StageEvidenceClass::Conflict));
+    }
+    {
+        let stage = store.atomic_stage().unwrap();
+        assert!(
+            stage
+                .findings()
+                .records
+                .iter()
+                .any(|f| f.kind == StageEvidenceKind::Seal
+                    && f.class == StageEvidenceClass::Conflict),
+            "seal conflict must survive checkpoint reopen, got {:?}",
+            stage.findings().records
+        );
+    }
+    refuse_reuse(&mut store);
+}
+
+#[test]
+fn conflicting_seals_stay_blocked_across_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let m = member();
+    let p = plan(heap, std::slice::from_ref(&m), b"secret");
+    let root_a = {
+        let mut stage = store.atomic_stage().unwrap();
+        let (_, placement) = stage
+            .begin_prepare(&p, FRONTIER, std::slice::from_ref(&m))
+            .unwrap();
+        stage.append_staged(m, b"secret".to_vec()).unwrap();
+        placement.content_root()
+    };
+    let mut other = *root_a.as_bytes();
+    other[0] ^= 0xFF;
+    let root_b = ContentRoot::from_bytes(other).unwrap();
+    let segs = store.paths().segments_dir();
+    fs::create_dir_all(&segs).unwrap();
+    for (name, root, ev) in [
+        ("seal-a.residiuum", root_a, 21u8),
+        ("seal-b.residiuum", root_b, 22),
+    ] {
+        let mut body = b"ATSEAL1".to_vec();
+        body.extend_from_slice(aid().as_bytes());
+        body.extend_from_slice(root.as_bytes());
+        write_payload_chunk(&segs.join(name), body, ev);
+    }
+    let _ = fs::remove_file(atomic_stage_checkpoint_path(store.paths()));
+    {
+        let stage = store.atomic_stage().unwrap();
+        assert!(stage
+            .findings()
+            .records
+            .iter()
+            .any(|f| f.kind == StageEvidenceKind::Seal && f.class == StageEvidenceClass::Conflict));
+    }
+    {
+        let stage = store.atomic_stage().unwrap();
+        assert!(stage
+            .findings()
+            .records
+            .iter()
+            .any(|f| f.kind == StageEvidenceKind::Seal && f.class == StageEvidenceClass::Conflict));
+    }
+    refuse_reuse(&mut store);
+}
+
+fn write_member_file(path: &Path, heap: HeapId, member: &AtomicMember, root: ContentRoot) {
+    let env = encode_atomic_member_envelope(
+        heap.as_bytes(),
+        member.atomic_id.as_bytes(),
+        u64::from(member.ordinal),
+        root.as_bytes(),
+        None,
+    )
+    .unwrap();
+    let body = encode_member(member).unwrap();
+    let bytes = encode_atomic_frame(
+        FrameKind::ItemEvent,
+        &env,
+        &body,
+        member.event_id.to_bytes(),
+    )
+    .unwrap();
+    fs::write(path, bytes).unwrap();
+}
+
+fn write_orphan_role(segs: &Path, heap: HeapId, role: &str) {
+    match role {
+        "member" => write_member_file(
+            &segs.join("orphan-member.residiuum"),
+            heap,
+            &member(),
+            ContentRoot::from_bytes([3u8; 32]).unwrap(),
+        ),
+        "payload" => {
+            let mut body = b"ATPAY1".to_vec();
+            body.extend_from_slice(aid().as_bytes());
+            body.extend_from_slice(&0u32.to_be_bytes());
+            body.extend_from_slice(b"secret");
+            write_payload_chunk(&segs.join("orphan-pay.residiuum"), body, 31);
+        }
+        "seal" => {
+            let mut body = b"ATSEAL1".to_vec();
+            body.extend_from_slice(aid().as_bytes());
+            body.extend_from_slice(&[0x44u8; 32]);
+            write_payload_chunk(&segs.join("orphan-seal.residiuum"), body, 32);
+        }
+        "chunk-plan" => {
+            let plan = ChunkPlan {
+                total: 2,
+                chunk_hashes: vec![[0x55u8; 32], [0x56u8; 32]],
+            };
+            let mut body = b"ATMAP1".to_vec();
+            body.extend_from_slice(aid().as_bytes());
+            body.extend_from_slice(&0u32.to_be_bytes());
+            body.extend_from_slice(&plan.total.to_be_bytes());
+            for hash in &plan.chunk_hashes {
+                body.extend_from_slice(hash);
+            }
+            write_payload_chunk(&segs.join("orphan-map.residiuum"), body, 33);
+        }
+        "chunk-body" => {
+            let mut body = b"ATCHK1".to_vec();
+            body.extend_from_slice(aid().as_bytes());
+            body.extend_from_slice(&0u32.to_be_bytes());
+            body.extend_from_slice(&0u32.to_be_bytes());
+            body.extend_from_slice(b"chunk");
+            write_payload_chunk(&segs.join("orphan-chk.residiuum"), body, 34);
+        }
+        other => panic!("unknown orphan role {other}"),
+    }
+}
+
+#[test]
+fn orphan_roles_before_prepare_block_reuse() {
+    for role in ["member", "payload", "seal", "chunk-plan", "chunk-body"] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(role);
+        let mut store = Store::create(&path).unwrap();
+        let heap = HeapId::from_bytes(store.store_id()).unwrap();
+        let segs = store.paths().segments_dir();
+        fs::create_dir_all(&segs).unwrap();
+        write_orphan_role(&segs, heap, role);
+        let _ = fs::remove_file(atomic_stage_checkpoint_path(store.paths()));
+        {
+            let stage = store.atomic_stage().unwrap();
+            assert!(
+                stage
+                    .findings()
+                    .records
+                    .iter()
+                    .any(|f| f.atomic_id == Some(aid()) && f.class == StageEvidenceClass::Corrupt),
+                "{role}: expected orphan damage, got {:?}",
+                stage.findings().records
+            );
+            assert!(stage.kernel().placement(aid()).is_none());
+        }
+        {
+            let stage = store.atomic_stage().unwrap();
+            assert!(
+                stage
+                    .findings()
+                    .records
+                    .iter()
+                    .any(|f| f.atomic_id == Some(aid()) && f.class == StageEvidenceClass::Corrupt),
+                "{role}: orphan must survive reopen, got {:?}",
+                stage.findings().records
+            );
+        }
+        refuse_reuse(&mut store);
+    }
+}
+
+#[test]
+fn holes_remain_after_two_checkpoint_reopens() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let segs = store.paths().segments_dir();
+    fs::create_dir_all(&segs).unwrap();
+    fs::write(segs.join("garbage.residiuum"), [0u8; 64]).unwrap();
+    let _ = fs::remove_file(atomic_stage_checkpoint_path(store.paths()));
+    {
+        let stage = store.atomic_stage().unwrap();
+        assert!(stage.open_report().holes >= 1);
+        assert!(stage
+            .findings()
+            .records
+            .iter()
+            .any(|f| f.kind == StageEvidenceKind::Hole));
+    }
+    {
+        let stage = store.atomic_stage().unwrap();
+        assert!(
+            stage.open_report().holes >= 1,
+            "holes must persist across checkpoint skip, report={:?}",
+            stage.open_report()
+        );
+        assert!(stage
+            .findings()
+            .records
+            .iter()
+            .any(|f| f.kind == StageEvidenceKind::Hole));
+    }
+}
+
+#[test]
+fn missing_covered_file_degrades_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let segs = store.paths().segments_dir();
+    fs::create_dir_all(&segs).unwrap();
+    let bomb = segs.join("garbage.residiuum");
+    fs::write(&bomb, [0u8; 64]).unwrap();
+    let _ = fs::remove_file(atomic_stage_checkpoint_path(store.paths()));
+    {
+        let stage = store.atomic_stage().unwrap();
+        assert!(!stage.open_report().coverage_degraded);
+    }
+    fs::remove_file(&bomb).unwrap();
+    {
+        let mut stage = store.atomic_stage().unwrap();
+        assert!(
+            stage.open_report().coverage_degraded,
+            "missing covered media must degrade coverage"
+        );
+        assert!(stage
+            .findings()
+            .records
+            .iter()
+            .any(|f| f.kind == StageEvidenceKind::Hole));
+        match stage.scrub_coverage() {
+            Err(StoreError::AtomicStage(msg)) => {
+                assert!(msg.contains("scrub"), "expected scrub refusal, got {msg}");
+            }
+            Ok(()) => panic!("scrub must refuse while covered media is missing"),
+            Err(other) => panic!("expected scrub refusal, got {other}"),
+        }
+    }
+    {
+        let stage = store.atomic_stage().unwrap();
+        assert!(
+            stage.open_report().coverage_degraded,
+            "ordinary reopen must not clear degradation"
+        );
+    }
 }

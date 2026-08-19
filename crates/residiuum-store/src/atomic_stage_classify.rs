@@ -1,8 +1,10 @@
-//! Honest store Atomic classifier (CR-ATMR5-002).
+//! Honest store Atomic classifier (CR-ATMR5-002 / CR-ATMR6-002).
 //!
 //! Recovery and examination share this path. Damaged, conflicting, foreign,
 //! and incomplete records are reported. They are never last-wins, first-wins,
-//! or translated into a reusable unused identity.
+//! or translated into a reusable unused identity. Seal conflicts and
+//! pre-prepare orphans block the named identity. Findings are persisted with
+//! the catalogue so an ordinary reopen cannot forget them.
 
 use crate::atomic_stage_media::{decode_stage_sidecar, SidecarDecode, SidecarKind, StageCatalog};
 use residiuum_atomics::{
@@ -75,11 +77,14 @@ impl StageFindings {
         class: StageEvidenceClass,
         atomic_id: Option<AtomicId>,
     ) {
-        self.records.push(StageFinding {
+        let finding = StageFinding {
             kind,
             class,
             atomic_id,
-        });
+        };
+        if !self.records.contains(&finding) {
+            self.records.push(finding);
+        }
     }
 
     /// Count of one class.
@@ -90,6 +95,11 @@ impl StageFindings {
 
 /// Record a physical coverage hole. Shared with independent examination.
 pub fn classify_hole(findings: &mut StageFindings, _reason: &HoleReason) {
+    findings.push(StageEvidenceKind::Hole, StageEvidenceClass::Corrupt, None);
+}
+
+/// Covered checkpoint media is missing or replaced (CR-ATMR6-002).
+pub fn classify_coverage_loss(findings: &mut StageFindings) {
     findings.push(StageEvidenceKind::Hole, StageEvidenceClass::Corrupt, None);
 }
 
@@ -195,12 +205,69 @@ pub fn finalize_catalog(
         if let Some(root) = catalog.seals.get(&id).copied() {
             if root != prepare.content_root {
                 catalog.seals.remove(&id);
+                catalog.blocked.insert(id);
                 findings.push(
                     StageEvidenceKind::Seal,
                     StageEvidenceClass::Conflict,
                     Some(id),
                 );
             }
+        }
+    }
+    sweep_orphans(catalog, findings);
+}
+
+fn sweep_orphans(catalog: &mut StageCatalog, findings: &mut StageFindings) {
+    let mut orphans = Vec::new();
+    orphans.extend(catalog.members.keys().copied());
+    orphans.extend(catalog.payloads.keys().map(|(id, _)| *id));
+    orphans.extend(catalog.seals.keys().copied());
+    orphans.extend(catalog.chunk_plans.keys().map(|(id, _)| *id));
+    orphans.extend(catalog.chunks.keys().map(|(id, _, _)| *id));
+    orphans.sort();
+    orphans.dedup();
+    for id in orphans {
+        if catalog.prepares.contains_key(&id) || catalog.blocked.contains(&id) {
+            continue;
+        }
+        catalog.blocked.insert(id);
+        if catalog.members.remove(&id).is_some() {
+            findings.push(
+                StageEvidenceKind::Member,
+                StageEvidenceClass::Corrupt,
+                Some(id),
+            );
+        }
+        if catalog.payloads.keys().any(|(oid, _)| *oid == id) {
+            catalog.payloads.retain(|(oid, _), _| *oid != id);
+            findings.push(
+                StageEvidenceKind::Payload,
+                StageEvidenceClass::Corrupt,
+                Some(id),
+            );
+        }
+        if catalog.seals.remove(&id).is_some() {
+            findings.push(
+                StageEvidenceKind::Seal,
+                StageEvidenceClass::Corrupt,
+                Some(id),
+            );
+        }
+        if catalog.chunk_plans.keys().any(|(oid, _)| *oid == id) {
+            catalog.chunk_plans.retain(|(oid, _), _| *oid != id);
+            findings.push(
+                StageEvidenceKind::ChunkPlan,
+                StageEvidenceClass::Corrupt,
+                Some(id),
+            );
+        }
+        if catalog.chunks.keys().any(|(oid, _, _)| *oid == id) {
+            catalog.chunks.retain(|(oid, _, _), _| *oid != id);
+            findings.push(
+                StageEvidenceKind::ChunkBody,
+                StageEvidenceClass::Corrupt,
+                Some(id),
+            );
         }
     }
 }
@@ -434,6 +501,7 @@ fn admit_seal(
         }
         Some(_) => {
             catalog.seals.remove(&atomic_id);
+            catalog.blocked.insert(atomic_id);
             findings.push(
                 StageEvidenceKind::Seal,
                 StageEvidenceClass::Conflict,
@@ -542,6 +610,56 @@ fn sidecar_kind(kind: SidecarKind) -> StageEvidenceKind {
         SidecarKind::ChunkPlan => StageEvidenceKind::ChunkPlan,
         SidecarKind::ChunkBody => StageEvidenceKind::ChunkBody,
     }
+}
+
+pub(crate) fn encode_finding_kind(kind: StageEvidenceKind) -> u8 {
+    match kind {
+        StageEvidenceKind::Hole => 0,
+        StageEvidenceKind::Prepare => 1,
+        StageEvidenceKind::Member => 2,
+        StageEvidenceKind::Payload => 3,
+        StageEvidenceKind::Seal => 4,
+        StageEvidenceKind::ChunkPlan => 5,
+        StageEvidenceKind::ChunkBody => 6,
+        StageEvidenceKind::Other => 7,
+    }
+}
+
+pub(crate) fn decode_finding_kind(byte: u8) -> Option<StageEvidenceKind> {
+    Some(match byte {
+        0 => StageEvidenceKind::Hole,
+        1 => StageEvidenceKind::Prepare,
+        2 => StageEvidenceKind::Member,
+        3 => StageEvidenceKind::Payload,
+        4 => StageEvidenceKind::Seal,
+        5 => StageEvidenceKind::ChunkPlan,
+        6 => StageEvidenceKind::ChunkBody,
+        7 => StageEvidenceKind::Other,
+        _ => return None,
+    })
+}
+
+pub(crate) fn encode_finding_class(class: StageEvidenceClass) -> u8 {
+    match class {
+        StageEvidenceClass::Valid => 0,
+        StageEvidenceClass::Partial => 1,
+        StageEvidenceClass::Corrupt => 2,
+        StageEvidenceClass::Conflict => 3,
+        StageEvidenceClass::Unsupported => 4,
+        StageEvidenceClass::ForeignHeap => 5,
+    }
+}
+
+pub(crate) fn decode_finding_class(byte: u8) -> Option<StageEvidenceClass> {
+    Some(match byte {
+        0 => StageEvidenceClass::Valid,
+        1 => StageEvidenceClass::Partial,
+        2 => StageEvidenceClass::Corrupt,
+        3 => StageEvidenceClass::Conflict,
+        4 => StageEvidenceClass::Unsupported,
+        5 => StageEvidenceClass::ForeignHeap,
+        _ => return None,
+    })
 }
 
 fn kind_from_role(role: Option<AtomicFrameRole>) -> StageEvidenceKind {

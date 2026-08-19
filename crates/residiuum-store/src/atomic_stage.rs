@@ -81,6 +81,24 @@ impl StoreAtomicStage<'_> {
         &self.findings
     }
 
+    /// Operator-only repair. Clears persisted coverage degradation when every
+    /// covered path still exists. Does not unblock Atomic identities. Ordinary
+    /// reopen and retry must not call this (CR-ATMR6-002).
+    pub fn scrub_coverage(&mut self) -> Result<(), StoreError> {
+        for rel in &self.catalog.missing_covered {
+            let path = self.store.paths().root.join(rel);
+            if !path.is_file() {
+                return Err(StoreError::AtomicStage(
+                    "atomic stage scrub refused: covered media still missing".into(),
+                ));
+            }
+        }
+        self.catalog.coverage_degraded = false;
+        self.catalog.missing_covered.clear();
+        self.report.coverage_degraded = false;
+        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)
+    }
+
     /// Validate a closed plan, persist it on the store segment, then apply.
     pub fn begin_prepare(
         &mut self,

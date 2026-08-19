@@ -1,14 +1,17 @@
-//! Bounded store-owned Atomic catalogue (CR-ATMR5-001 / CR-ATMR6-001).
+//! Bounded store-owned Atomic catalogue (CR-ATMR5-001 / CR-ATMR6-001 / CR-ATMR6-002).
 //!
 //! Recovery reads an authenticated checkpoint plus dirty segment tails. It
 //! never `fs::read`s a file before a size check and never walks unbounded
 //! directory trees. Covered prefixes are skipped for frame ingest only after
 //! every stored frontier block is re-hashed. Head/tail samples are not a
-//! coverage transfer.
+//! coverage transfer. Findings, blocked identities, and coverage degradation
+//! are persisted; ordinary reopen does not forget them.
 
 use crate::atomic_file::write_atomic;
 use crate::atomic_stage_classify::{
-    classify_hole, finalize_catalog, ingest_classified_frame, StageEvidenceClass, StageFindings,
+    classify_coverage_loss, classify_hole, decode_finding_class, decode_finding_kind,
+    encode_finding_class, encode_finding_kind, finalize_catalog, ingest_classified_frame,
+    StageEvidenceClass, StageFinding, StageFindings,
 };
 use crate::atomic_stage_media::StageCatalog;
 use crate::error::StoreError;
@@ -23,8 +26,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 6;
-const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V6";
+const CHECKPOINT_VERSION: u8 = 7;
+const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V7";
 const BLOCK_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-BLK-V1";
 /// Fixed leaf size for the covered-prefix block frontier (CR-ATMR6-001).
 const FRONTIER_BLOCK: u64 = 64 * 1024;
@@ -134,6 +137,8 @@ pub struct AtomicStageOpenReport {
     pub conflicts: u32,
     /// Foreign-Heap records refused locally.
     pub foreign: u32,
+    /// Covered media is missing, replaced, or otherwise degraded (CR-ATMR6-002).
+    pub coverage_degraded: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -280,7 +285,7 @@ pub(crate) fn open_catalog(
     };
     budget.report.disposition = disposition;
     budget.charge_catalog(&catalog)?;
-    let mut findings = StageFindings::default();
+    let mut findings = std::mem::take(&mut catalog.findings);
 
     let files = list_media_files(paths, &mut budget)?;
     let mut unmatched: Vec<CoveredFile> = covered.clone();
@@ -347,11 +352,23 @@ pub(crate) fn open_catalog(
         next_covered.push(cover_file(&path, rel, size)?);
     }
 
+    if !unmatched.is_empty() {
+        catalog.coverage_degraded = true;
+        for file in &unmatched {
+            if !catalog.missing_covered.iter().any(|p| p == &file.rel_path) {
+                catalog.missing_covered.push(file.rel_path.clone());
+            }
+        }
+        classify_coverage_loss(&mut findings);
+    }
+
     load_coordinator(paths, &mut catalog)?;
     finalize_catalog(&mut catalog, bound_heap, &mut findings);
     catalog.assign_missing_coord_seqs();
+    catalog.findings = findings.clone();
     budget.charge_catalog(&catalog)?;
     budget.report.catalog_loads = 1;
+    budget.report.coverage_degraded = catalog.coverage_degraded;
     budget.report.holes = findings
         .records
         .iter()
@@ -834,6 +851,25 @@ fn encode_checkpoint(
         body.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
         body.extend_from_slice(chunk);
     }
+    body.push(u8::from(catalog.coverage_degraded));
+    body.extend_from_slice(&(catalog.findings.records.len() as u32).to_be_bytes());
+    for finding in &catalog.findings.records {
+        body.push(encode_finding_kind(finding.kind));
+        body.push(encode_finding_class(finding.class));
+        match finding.atomic_id {
+            Some(id) => {
+                body.push(1);
+                body.extend_from_slice(id.as_bytes());
+            }
+            None => body.push(0),
+        }
+    }
+    body.extend_from_slice(&(catalog.missing_covered.len() as u32).to_be_bytes());
+    for rel in &catalog.missing_covered {
+        let bytes = rel.as_bytes();
+        body.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+        body.extend_from_slice(bytes);
+    }
     let mut hasher = blake3::Hasher::new();
     hasher.update(CHECKPOINT_DOMAIN);
     hasher.update(&body);
@@ -1030,6 +1066,51 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
             .chunks
             .insert((id, ordinal, index), cur[..n].to_vec());
         cur = &cur[n..];
+    }
+    if cur.is_empty() {
+        return None;
+    }
+    catalog.coverage_degraded = cur[0] != 0;
+    cur = &cur[1..];
+    let n_findings = read_u32(&mut cur)? as usize;
+    for _ in 0..n_findings {
+        if cur.len() < 3 {
+            return None;
+        }
+        let kind = decode_finding_kind(cur[0])?;
+        let class = decode_finding_class(cur[1])?;
+        let has_id = cur[2];
+        cur = &cur[3..];
+        let atomic_id = match has_id {
+            0 => None,
+            1 => {
+                if cur.len() < 32 {
+                    return None;
+                }
+                let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
+                cur = &cur[32..];
+                Some(id)
+            }
+            _ => return None,
+        };
+        let finding = StageFinding {
+            kind,
+            class,
+            atomic_id,
+        };
+        if !catalog.findings.records.contains(&finding) {
+            catalog.findings.records.push(finding);
+        }
+    }
+    let n_missing = read_u32(&mut cur)? as usize;
+    for _ in 0..n_missing {
+        let n = read_u16(&mut cur)? as usize;
+        if cur.len() < n {
+            return None;
+        }
+        let rel = String::from_utf8(cur[..n].to_vec()).ok()?;
+        cur = &cur[n..];
+        catalog.missing_covered.push(rel);
     }
     if !cur.is_empty() {
         return None;
