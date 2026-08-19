@@ -4,9 +4,7 @@
 mod harness;
 
 use harness::*;
-use residiuum_atomic_lane::io_fail::{
-    self, IoAction, IoMutant, IoPhase, IoPoint, IoSite,
-};
+use residiuum_atomic_lane::io_fail::{self, IoAction, IoMutant, IoPhase, IoPoint, IoSite};
 use residiuum_atomic_lane::DurableLane;
 use residiuum_atomics::{MemberPhase, StagingHeap};
 
@@ -23,6 +21,7 @@ enum Outcome {
 enum Scenario {
     Prepare,
     Member,
+    Chunk,
     Seal,
 }
 
@@ -57,25 +56,35 @@ fn allowed(scenario: Scenario, site: IoSite, phase: IoPhase) -> &'static [Outcom
     use IoSite::*;
     use Outcome::*;
     match (scenario, site, phase) {
-        (Scenario::Prepare, Plan | Intent, BeforeWrite | ShortWrite | AfterWrite) => {
-            &[Absence, Damage]
-        }
-        (Scenario::Prepare, Plan | Intent, _) => &[Absence, PreparedInvisible, Damage],
+        (Scenario::Prepare, Plan | Intent, _) => &[Absence],
         (Scenario::Prepare, Coordinator, BeforeWrite | ShortWrite) => &[Absence, Damage],
-        (Scenario::Prepare, Coordinator, _) => &[Absence, PreparedInvisible, Damage],
-        (Scenario::Prepare, Ack | Checkpoint, _) => &[PreparedInvisible, Damage],
-        (Scenario::Member, Payload, BeforeWrite | ShortWrite) => {
-            &[PreparedInvisible, Damage]
+        (Scenario::Prepare, Coordinator, AfterWrite | AfterFileSync | AfterDirSync) => {
+            &[PreparedInvisible, Absence]
         }
-        (Scenario::Member, Payload, _) => &[PreparedInvisible, StagedInvisible, Damage],
-        (Scenario::Member, Shard, _) => &[PreparedInvisible, StagedInvisible, Damage],
-        (Scenario::Member, Ack | Checkpoint, _) => &[StagedInvisible, PreparedInvisible, Damage],
-        (Scenario::Seal, Seal, AfterLogSync | BeforeWrite | ShortWrite | AfterWrite | BeforeRename) => {
-            &[StagedInvisible, Damage]
+        (Scenario::Prepare, Ack | Checkpoint, _) => &[PreparedInvisible],
+        (Scenario::Member, Payload, BeforeWrite | ShortWrite | AfterWrite | AfterFileSync) => {
+            &[PreparedInvisible]
         }
-        (Scenario::Seal, Seal, _) => &[StagedInvisible, DurableInvisible, Damage],
-        (Scenario::Seal, Checkpoint, _) => &[DurableInvisible, StagedInvisible, Damage],
-        _ => &[Absence, PreparedInvisible, StagedInvisible, DurableInvisible, Damage],
+        (Scenario::Member, Payload, AfterDirSync) => &[StagedInvisible, PreparedInvisible],
+        (Scenario::Member, Shard, BeforeWrite | ShortWrite | AfterWrite) => {
+            &[PreparedInvisible, StagedInvisible]
+        }
+        (Scenario::Member, Shard, AfterFileSync | AfterDirSync) => &[StagedInvisible],
+        (Scenario::Member, Ack | Checkpoint, _) => &[StagedInvisible, PreparedInvisible],
+        (Scenario::Chunk, Chunk, BeforeWrite | ShortWrite | AfterWrite | AfterFileSync) => {
+            &[PreparedInvisible]
+        }
+        (Scenario::Chunk, Chunk, AfterDirSync) => &[PreparedInvisible, StagedInvisible],
+        (
+            Scenario::Seal,
+            Seal,
+            AfterLogSync | BeforeWrite | ShortWrite | AfterWrite | BeforeRename,
+        ) => &[StagedInvisible],
+        (Scenario::Seal, Seal, AfterFileSync | AfterRename | AfterDirSync) => &[DurableInvisible, StagedInvisible],
+        (Scenario::Seal, Checkpoint, _) => &[DurableInvisible, StagedInvisible],
+        (scenario, site, phase) => {
+            panic!("unspecified I/O matrix cell {scenario:?} {site:?} {phase:?}")
+        }
     }
 }
 
@@ -83,7 +92,10 @@ fn exclusive_cells(site: IoSite) -> Vec<(IoPoint, IoAction)> {
     vec![
         (IoPoint::new(site, IoPhase::BeforeWrite), IoAction::Error),
         (IoPoint::new(site, IoPhase::BeforeWrite), IoAction::Kill),
-        (IoPoint::new(site, IoPhase::ShortWrite), IoAction::ShortWrite),
+        (
+            IoPoint::new(site, IoPhase::ShortWrite),
+            IoAction::ShortWrite,
+        ),
         (IoPoint::new(site, IoPhase::AfterWrite), IoAction::Kill),
         (IoPoint::new(site, IoPhase::AfterFileSync), IoAction::Kill),
         (IoPoint::new(site, IoPhase::AfterDirSync), IoAction::Kill),
@@ -107,10 +119,24 @@ fn setup_prefix(scenario: Scenario, lane: &mut DurableLane, n: u8) {
     let plan = plan_for(hid(1), std::slice::from_ref(&m), &[b"v"]);
     match scenario {
         Scenario::Prepare => {}
-        Scenario::Member | Scenario::Seal => {
+        Scenario::Member | Scenario::Chunk | Scenario::Seal => {
             lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&m))
                 .unwrap();
         }
+    }
+    if matches!(scenario, Scenario::Chunk) {
+        lane.commit_chunk_manifest(
+            aid(n),
+            0,
+            residiuum_atomics::ChunkPlan {
+                total: 2,
+                chunk_hashes: vec![
+                    *blake3::hash(b"v").as_bytes(),
+                    *blake3::hash(b"w").as_bytes(),
+                ],
+            },
+        )
+        .unwrap();
     }
     if matches!(scenario, Scenario::Seal) {
         let m = create_member(aid(n), 0, "k", b"v");
@@ -118,28 +144,21 @@ fn setup_prefix(scenario: Scenario, lane: &mut DurableLane, n: u8) {
     }
 }
 
-fn run_op(scenario: Scenario, lane: &mut DurableLane, n: u8) {
+fn run_op(scenario: Scenario, lane: &mut DurableLane, n: u8) -> bool {
     let m = create_member(aid(n), 0, "k", b"v");
     let plan = plan_for(hid(1), std::slice::from_ref(&m), &[b"v"]);
     match scenario {
-        Scenario::Prepare => {
-            let _ = lane.begin_prepare(&plan, FRONTIER, std::slice::from_ref(&m));
-        }
-        Scenario::Member => {
-            let _ = lane.append_staged(m, b"v".to_vec());
-        }
-        Scenario::Seal => {
-            let _ = lane.seal_member_boundary(aid(n));
-        }
+        Scenario::Prepare => lane
+            .begin_prepare(&plan, FRONTIER, std::slice::from_ref(&m))
+            .is_ok(),
+        Scenario::Member => lane.append_staged(m, b"v".to_vec()).is_ok(),
+        Scenario::Chunk => lane.append_chunk(m, 0, b"v".to_vec()).is_ok(),
+        Scenario::Seal => lane.seal_member_boundary(aid(n)).is_ok(),
     }
 }
 
-fn drive(
-    scenario: Scenario,
-    point: IoPoint,
-    action: IoAction,
-    n: u8,
-) -> Outcome {
+fn drive(scenario: Scenario, point: IoPoint, action: IoAction, n: u8) -> Outcome {
+    let _serial = io_fail::serial_guard();
     io_fail::reset_process();
     io_fail::clear_visits();
     let dir = tempfile::tempdir().unwrap();
@@ -147,7 +166,11 @@ fn drive(
     io_fail::clear_visits();
     setup_prefix(scenario, &mut lane, n);
     io_fail::arm_once(point, action);
-    run_op(scenario, &mut lane, n);
+    let op_ok = run_op(scenario, &mut lane, n);
+    io_fail::require_visited(point);
+    if matches!(point.phase, IoPhase::BeforeWrite | IoPhase::ShortWrite) {
+        assert!(!op_ok, "{scenario:?} {point:?} must fail the operation");
+    }
     drop(lane);
     classify(dir.path(), aid(n), "k")
 }
@@ -179,6 +202,7 @@ fn prefix_matrix_never_publishes_and_stays_in_recorded_classes() {
     for (p, a) in atomic_cells(IoSite::Ack) {
         cases.push((Scenario::Member, p, a));
     }
+
     cases.push((
         Scenario::Seal,
         IoPoint::new(IoSite::Seal, IoPhase::AfterLogSync),
@@ -254,10 +278,20 @@ fn sentinel_prefixes_have_exact_outcomes() {
         ),
         Outcome::DurableInvisible,
     );
+    assert_eq!(
+        drive(
+            Scenario::Chunk,
+            IoPoint::new(IoSite::Chunk, IoPhase::BeforeWrite),
+            IoAction::Error,
+            11,
+        ),
+        Outcome::PreparedInvisible,
+    );
 }
 
 #[test]
 fn production_write_visits_required_sync_and_rename_edges() {
+    let _serial = io_fail::serial_guard();
     io_fail::reset_process();
     io_fail::clear_visits();
     let dir = tempfile::tempdir().unwrap();
@@ -291,6 +325,7 @@ fn production_write_visits_required_sync_and_rename_edges() {
 
 #[test]
 fn mutant_omit_file_sync_is_detected_by_missing_edge() {
+    let _serial = io_fail::serial_guard();
     io_fail::reset_process();
     io_fail::clear_visits();
     io_fail::set_mutant(IoMutant::OmitFileSync);
@@ -314,6 +349,7 @@ fn mutant_omit_file_sync_is_detected_by_missing_edge() {
 
 #[test]
 fn mutant_omit_rename_leaves_seal_unpublished() {
+    let _serial = io_fail::serial_guard();
     io_fail::reset_process();
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
@@ -336,6 +372,7 @@ fn mutant_omit_rename_leaves_seal_unpublished() {
 
 #[test]
 fn mutant_omit_dir_sync_is_detected_by_missing_edge() {
+    let _serial = io_fail::serial_guard();
     io_fail::reset_process();
     io_fail::clear_visits();
     io_fail::set_mutant(IoMutant::OmitDirSync);

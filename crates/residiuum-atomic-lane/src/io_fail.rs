@@ -135,24 +135,24 @@ fn record_visit(point: IoPoint) {
 
 /// Arm `point` until [`disarm_all`].
 pub fn arm(point: IoPoint, action: IoAction) {
-    registry()
-        .lock()
-        .expect("io_fail registry")
-        .insert(point, Armed { action, remaining: None });
+    registry().lock().expect("io_fail registry").insert(
+        point,
+        Armed {
+            action,
+            remaining: None,
+        },
+    );
 }
 
 /// Arm `point` for a single visit.
 pub fn arm_once(point: IoPoint, action: IoAction) {
-    registry()
-        .lock()
-        .expect("io_fail registry")
-        .insert(
-            point,
-            Armed {
-                action,
-                remaining: Some(1),
-            },
-        );
+    registry().lock().expect("io_fail registry").insert(
+        point,
+        Armed {
+            action,
+            remaining: Some(1),
+        },
+    );
 }
 
 /// Drop every armed point. Does not clear visit counters or mutants.
@@ -271,6 +271,15 @@ pub fn consume_short_write(site: IoSite) -> bool {
 pub fn reset_process() {
     disarm_all();
     clear_mutants();
+}
+
+/// Serialize tests that mutate the process-global failpoint tables (CR-ATMR4-008).
+pub fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
+    static HARNESS: OnceLock<Mutex<()>> = OnceLock::new();
+    HARNESS
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// I/O error used after a short write.
