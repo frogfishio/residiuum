@@ -1,8 +1,8 @@
 //! Authenticated reopen of coordinator, intent, members, and seals (CR-R2-002).
 
 use crate::checkpoint::{
-    checkpoint_path, load_checkpoint, placement_matches, prefix_digest, store_checkpoint,
-    CheckpointLoad, RecoveryCheckpoint,
+    checkpoint_path, extend_log_frontier, load_checkpoint, placement_matches, store_checkpoint,
+    verify_prefix_marks, CheckpointLoad, RecoveryCheckpoint,
 };
 use crate::error::LaneError;
 use crate::limits::{max_encoded_member_bytes, max_intent_members, RecoveryLimits, SidecarRole};
@@ -650,22 +650,30 @@ pub fn apply_checkpoint(
     Ok(())
 }
 
-fn verify_checkpoint_prefixes(root: &Path, ck: &RecoveryCheckpoint) -> Result<(), LaneError> {
-    if prefix_digest(&coordinator_path(root), ck.coordinator_offset)? != ck.coordinator_hash {
-        return Err(LaneError::Corrupt("checkpoint coordinator hash"));
-    }
-    if ck.shard_hashes.len() != ck.shard_offsets.len() {
+fn verify_checkpoint_prefixes(
+    root: &Path,
+    ck: &RecoveryCheckpoint,
+    budget: &mut RecoveryBudget,
+) -> Result<(), LaneError> {
+    if ck.shard_hashes.len() != ck.shard_offsets.len()
+        || ck.shard_marks.len() != ck.shard_offsets.len()
+    {
         return Err(LaneError::Corrupt("checkpoint hash count"));
     }
-    for (i, (off, expect)) in ck
+    let n = verify_prefix_marks(
+        &coordinator_path(root),
+        ck.coordinator_offset,
+        &ck.coordinator_marks,
+    )?;
+    budget.charge_bytes(n)?;
+    for (i, (off, marks)) in ck
         .shard_offsets
         .iter()
-        .zip(ck.shard_hashes.iter())
+        .zip(ck.shard_marks.iter())
         .enumerate()
     {
-        if prefix_digest(&shard_path(root, i as u32), *off)? != *expect {
-            return Err(LaneError::Corrupt("checkpoint shard hash"));
-        }
+        let n = verify_prefix_marks(&shard_path(root, i as u32), *off, marks)?;
+        budget.charge_bytes(n)?;
     }
     Ok(())
 }
@@ -684,7 +692,7 @@ pub fn recover_heap(
             if let Ok(meta) = fs::metadata(checkpoint_path(root)) {
                 budget.charge_sidecar(meta.len())?;
             }
-            verify_checkpoint_prefixes(root, &ck)?;
+            verify_checkpoint_prefixes(root, &ck, budget)?;
             apply_checkpoint(root, heap, &ck, budget)?;
             budget.stats.used_checkpoint = true;
             replay_prepares(root, heap_id, heap, ck.coordinator_offset, budget)?;
@@ -719,10 +727,35 @@ pub fn persist_recovery_checkpoint(
     for shard in 0..shard_count {
         shard_offsets.push(read_log_ack(&shard_path(root, shard))?);
     }
-    let coordinator_hash = prefix_digest(&coordinator_path(root), coordinator_offset)?;
+    let prev = match load_checkpoint(root, RecoveryLimits::prototype())? {
+        CheckpointLoad::Ready(ck) => Some(ck),
+        _ => None,
+    };
+    let (coordinator_marks, coordinator_hash, _) = extend_log_frontier(
+        &coordinator_path(root),
+        prev.as_ref().map(|c| {
+            (
+                &c.coordinator_hash,
+                c.coordinator_offset,
+                &c.coordinator_marks,
+            )
+        }),
+        coordinator_offset,
+    )?;
     let mut shard_hashes = Vec::with_capacity(shard_offsets.len());
+    let mut shard_marks = Vec::with_capacity(shard_offsets.len());
     for (i, off) in shard_offsets.iter().enumerate() {
-        shard_hashes.push(prefix_digest(&shard_path(root, i as u32), *off)?);
+        let prev_shard = prev.as_ref().and_then(|c| {
+            Some((
+                c.shard_hashes.get(i)?,
+                *c.shard_offsets.get(i)?,
+                c.shard_marks.get(i)?,
+            ))
+        });
+        let (marks, digest, _) =
+            extend_log_frontier(&shard_path(root, i as u32), prev_shard, *off)?;
+        shard_hashes.push(digest);
+        shard_marks.push(marks);
     }
     let ck = RecoveryCheckpoint::from_heap(
         heap,
@@ -730,6 +763,8 @@ pub fn persist_recovery_checkpoint(
         shard_offsets,
         coordinator_hash,
         shard_hashes,
+        coordinator_marks,
+        shard_marks,
     );
     store_checkpoint(root, &ck)
 }
@@ -906,7 +941,7 @@ fn parse_hex32(s: &str) -> Option<[u8; 32]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::checkpoint::{prefix_digest, store_checkpoint, RecoveryCheckpoint};
+    use crate::checkpoint::{extend_log_frontier, store_checkpoint, RecoveryCheckpoint};
 
     #[test]
     fn covered_prefix_larger_than_budget_opens_from_tails() {
@@ -925,14 +960,21 @@ mod tests {
             .unwrap();
         std::fs::write(log_ack_path(&coord), covered.to_be_bytes()).unwrap();
         std::fs::write(log_ack_path(&shard), 0u64.to_be_bytes()).unwrap();
-        let coord_hash = prefix_digest(&coord, covered).unwrap();
-        let shard_hash = prefix_digest(&shard, 0).unwrap();
+        let (coord_marks, coord_hash, _) = extend_log_frontier(&coord, None, covered).unwrap();
+        let (shard_marks, shard_hash, _) = extend_log_frontier(&shard, None, 0).unwrap();
         let mut hid = [0u8; 16];
         hid[0] = 1;
         let heap_id = HeapId::from_bytes(hid).unwrap();
         let heap = StagingHeap::new(heap_id, 1).unwrap();
-        let ck =
-            RecoveryCheckpoint::from_heap(&heap, covered, vec![0], coord_hash, vec![shard_hash]);
+        let ck = RecoveryCheckpoint::from_heap(
+            &heap,
+            covered,
+            vec![0],
+            coord_hash,
+            vec![shard_hash],
+            coord_marks,
+            vec![shard_marks],
+        );
         store_checkpoint(root, &ck).unwrap();
         let mut heap = StagingHeap::new(heap_id, 1).unwrap();
         let mut budget = RecoveryBudget::new(RecoveryLimits::prototype());

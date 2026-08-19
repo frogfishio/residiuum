@@ -48,6 +48,29 @@ fn missing_seal_is_not_invented_from_checkpoint() {
 }
 
 #[test]
+fn flipped_coordinator_head_is_corrupt() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
+    prepare_and_seal(&mut lane);
+    drop(lane);
+    let path = dir.path().join("coordinator.log");
+    let mut bytes = fs::read(&path).unwrap();
+    assert!(!bytes.is_empty());
+    bytes[0] ^= 0x5a;
+    fs::write(&path, bytes).unwrap();
+    match DurableLane::open(dir.path()) {
+        Err(LaneError::Corrupt(msg)) => {
+            assert!(
+                msg.contains("prefix") || msg.contains("head") || msg.contains("hash"),
+                "unexpected corrupt reason {msg}"
+            );
+        }
+        Ok(_) => panic!("mutated covered prefix must not open"),
+        Err(e) => panic!("expected prefix corrupt, got {e:?}"),
+    }
+}
+
+#[test]
 fn valid_checkpoint_reopen_matches_lifecycle() {
     let dir = tempfile::tempdir().unwrap();
     let mut lane = DurableLane::create(dir.path(), hid(1), 1).unwrap();
