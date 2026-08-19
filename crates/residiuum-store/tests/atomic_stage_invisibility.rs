@@ -331,3 +331,124 @@ fn same_id_retry_and_final_chunk_close_store_payload() {
         MemberPhase::DurableInvisible
     );
 }
+
+fn collect_atomic_roles(root: &std::path::Path) -> (Vec<AtomicFrameRole>, bool, bool) {
+    let mut roles = Vec::new();
+    let mut any_valid = false;
+    let mut any_commit = false;
+    fn walk(
+        dir: &std::path::Path,
+        roles: &mut Vec<AtomicFrameRole>,
+        any_valid: &mut bool,
+        any_commit: &mut bool,
+    ) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, roles, any_valid, any_commit);
+                continue;
+            }
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(bytes) = fs::read(&path) else {
+                continue;
+            };
+            let report = read_atomic_evidence(&bytes, SafetyLimits::draft_defaults());
+            for e in &report.examined {
+                if let AtomicEvidenceClass::Valid(link) = &e.class {
+                    *any_valid = true;
+                    if link.role == AtomicFrameRole::Commit {
+                        *any_commit = true;
+                    }
+                    roles.push(link.role);
+                }
+            }
+        }
+    }
+    walk(root, &mut roles, &mut any_valid, &mut any_commit);
+    (roles, any_valid, any_commit)
+}
+
+fn assert_staged_invisible(store: &Store) {
+    assert_eq!(store.get("k").unwrap(), None);
+    assert_eq!(store.get("secret").unwrap(), None);
+    let scan = store.scan_live_logical().unwrap();
+    assert!(!scan
+        .entries
+        .iter()
+        .any(|(s, _)| s == b"k" || s == b"secret"));
+    assert!(store.history("k").unwrap().events.is_empty());
+    assert!(list_secondary_index_paths(store.paths(), "k")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn examination_and_rotation_keep_staged_invisible() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    store
+        .put("ordinary", b"visible", DurabilityMode::Durable)
+        .unwrap();
+    let heap_id = HeapId::from_bytes(store.store_id()).unwrap();
+    let m = member();
+    let p = plan(heap_id, std::slice::from_ref(&m), b"secret");
+    {
+        let mut stage = store.atomic_stage().unwrap();
+        stage
+            .begin_prepare(&p, FRONTIER, std::slice::from_ref(&m))
+            .unwrap();
+        stage.append_staged(m, b"secret".to_vec()).unwrap();
+        stage.seal_member_boundary(aid()).unwrap();
+    }
+
+    let (roles, any_valid, any_commit) = collect_atomic_roles(&path);
+    assert!(
+        any_valid,
+        "independent examination must see Valid Atomic frames"
+    );
+    assert!(
+        roles.contains(&AtomicFrameRole::Prepare),
+        "expected Prepare, got {roles:?}"
+    );
+    assert!(
+        roles.contains(&AtomicFrameRole::Member),
+        "expected Member, got {roles:?}"
+    );
+    assert!(!any_commit, "staged material must not be a Commit decision");
+
+    assert_eq!(
+        store.get("ordinary").unwrap().as_deref(),
+        Some(b"visible".as_slice())
+    );
+    assert_staged_invisible(&store);
+
+    store.seal_active().unwrap();
+    store.compact_live().unwrap();
+    assert_eq!(
+        store.get("ordinary").unwrap().as_deref(),
+        Some(b"visible".as_slice())
+    );
+    assert_staged_invisible(&store);
+
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.get("ordinary").unwrap().as_deref(),
+        Some(b"visible".as_slice())
+    );
+    assert_staged_invisible(&store);
+    {
+        let stage = store.atomic_stage().unwrap();
+        assert!(stage.kernel().can_resolve(aid()));
+    }
+    let (roles, any_valid, any_commit) = collect_atomic_roles(&path);
+    assert!(any_valid);
+    assert!(roles.contains(&AtomicFrameRole::Prepare) || roles.contains(&AtomicFrameRole::Member));
+    assert!(!any_commit);
+}
