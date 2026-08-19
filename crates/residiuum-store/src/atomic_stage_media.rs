@@ -7,13 +7,15 @@
 
 use crate::error::StoreError;
 use residiuum_atomics::{
-    decode_prepare, encode_prepare, AtomicId, AtomicMember, AtomicPrepare, ContentRoot,
+    decode_prepare, encode_prepare, AtomicId, AtomicMember, AtomicPrepare, ChunkPlan, ContentRoot,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
 const PAYLOAD_MAGIC: &[u8] = b"ATPAY1";
 const SEAL_MAGIC: &[u8] = b"ATSEAL1";
 const PREPARE_MAGIC: &[u8] = b"ATPREP1";
+const CHUNK_PLAN_MAGIC: &[u8] = b"ATMAP1";
+const CHUNK_BODY_MAGIC: &[u8] = b"ATCHK1";
 
 /// Staging facts recovered from store media only.
 #[derive(Debug, Default)]
@@ -21,6 +23,10 @@ pub(crate) struct StageCatalog {
     pub prepares: BTreeMap<AtomicId, AtomicPrepare>,
     pub members: BTreeMap<AtomicId, Vec<AtomicMember>>,
     pub payloads: BTreeMap<(AtomicId, u32), Vec<u8>>,
+    /// Frozen chunk maps (CR-ATMR5-005).
+    pub chunk_plans: BTreeMap<(AtomicId, u32), ChunkPlan>,
+    /// Verified chunk bodies keyed by (atomic, ordinal, index).
+    pub chunks: BTreeMap<(AtomicId, u32, u32), Vec<u8>>,
     pub seals: BTreeMap<AtomicId, ContentRoot>,
     /// Identities that must not be installed or reused (CR-ATMR5-002).
     pub blocked: BTreeSet<AtomicId>,
@@ -45,6 +51,14 @@ impl StageCatalog {
         self.payloads.contains_key(&(atomic_id, ordinal))
     }
 
+    pub(crate) fn has_chunk_plan(&self, atomic_id: AtomicId, ordinal: u32) -> bool {
+        self.chunk_plans.contains_key(&(atomic_id, ordinal))
+    }
+
+    pub(crate) fn has_chunk(&self, atomic_id: AtomicId, ordinal: u32, index: u32) -> bool {
+        self.chunks.contains_key(&(atomic_id, ordinal, index))
+    }
+
     pub(crate) fn is_sealed(&self, atomic_id: AtomicId) -> bool {
         self.seals.contains_key(&atomic_id)
     }
@@ -52,8 +66,16 @@ impl StageCatalog {
     /// Approximate retained catalogue bytes (not a wire encoding).
     pub(crate) fn work_bytes(&self) -> u64 {
         let payload: u64 = self.payloads.values().map(|p| p.len() as u64).sum();
+        let chunks: u64 = self.chunks.values().map(|p| p.len() as u64).sum();
+        let plans: u64 = self
+            .chunk_plans
+            .values()
+            .map(|p| 8 + p.chunk_hashes.len() as u64 * 32)
+            .sum();
         let members: u64 = self.members.values().map(|ms| ms.len() as u64).sum();
         payload
+            .saturating_add(chunks)
+            .saturating_add(plans)
             .saturating_add(self.prepares.len() as u64 * 512)
             .saturating_add(members.saturating_mul(256))
             .saturating_add(self.seals.len() as u64 * 64)
@@ -129,6 +151,37 @@ pub(crate) fn encode_stage_seal(atomic_id: AtomicId, content_root: ContentRoot) 
     out
 }
 
+pub(crate) fn encode_stage_chunk_plan(
+    atomic_id: AtomicId,
+    ordinal: u32,
+    plan: &ChunkPlan,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(CHUNK_PLAN_MAGIC.len() + 40 + plan.chunk_hashes.len() * 32);
+    out.extend_from_slice(CHUNK_PLAN_MAGIC);
+    out.extend_from_slice(atomic_id.as_bytes());
+    out.extend_from_slice(&ordinal.to_be_bytes());
+    out.extend_from_slice(&plan.total.to_be_bytes());
+    for hash in &plan.chunk_hashes {
+        out.extend_from_slice(hash);
+    }
+    out
+}
+
+pub(crate) fn encode_stage_chunk_body(
+    atomic_id: AtomicId,
+    ordinal: u32,
+    index: u32,
+    body: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(CHUNK_BODY_MAGIC.len() + 40 + body.len());
+    out.extend_from_slice(CHUNK_BODY_MAGIC);
+    out.extend_from_slice(atomic_id.as_bytes());
+    out.extend_from_slice(&ordinal.to_be_bytes());
+    out.extend_from_slice(&index.to_be_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
 pub(crate) fn payload_event_id(atomic_id: AtomicId, ordinal: u32) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"residiuum.atomic-stage.payload");
@@ -161,12 +214,37 @@ pub(crate) fn seal_event_id(atomic_id: AtomicId) -> [u8; 16] {
     id
 }
 
+pub(crate) fn chunk_plan_event_id(atomic_id: AtomicId, ordinal: u32) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"residiuum.atomic-stage.chunk-plan");
+    hasher.update(atomic_id.as_bytes());
+    hasher.update(&ordinal.to_be_bytes());
+    let hash = hasher.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash.as_bytes()[..16]);
+    id
+}
+
+pub(crate) fn chunk_body_event_id(atomic_id: AtomicId, ordinal: u32, index: u32) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"residiuum.atomic-stage.chunk-body");
+    hasher.update(atomic_id.as_bytes());
+    hasher.update(&ordinal.to_be_bytes());
+    hasher.update(&index.to_be_bytes());
+    let hash = hasher.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash.as_bytes()[..16]);
+    id
+}
+
 /// Which staging sidecar magic was observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidecarKind {
     Prepare,
     Payload,
     Seal,
+    ChunkPlan,
+    ChunkBody,
 }
 
 /// Decode of an Atomic staging sidecar (`ATPREP1` / `ATPAY1` / `ATSEAL1`).
@@ -193,6 +271,19 @@ pub(crate) enum SidecarDecode {
     Seal {
         atomic_id: AtomicId,
         content_root: ContentRoot,
+    },
+    /// Valid frozen chunk map.
+    ChunkPlan {
+        atomic_id: AtomicId,
+        ordinal: u32,
+        plan: ChunkPlan,
+    },
+    /// Valid verified chunk body.
+    ChunkBody {
+        atomic_id: AtomicId,
+        ordinal: u32,
+        index: u32,
+        body: Vec<u8>,
     },
 }
 
@@ -293,5 +384,81 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
             content_root,
         };
     }
+    if body.starts_with(CHUNK_PLAN_MAGIC) {
+        let header = CHUNK_PLAN_MAGIC.len() + 32 + 4 + 4;
+        if body.len() < header {
+            return SidecarDecode::Partial {
+                kind: SidecarKind::ChunkPlan,
+            };
+        }
+        let id = match decode_atomic_id(&body[CHUNK_PLAN_MAGIC.len()..CHUNK_PLAN_MAGIC.len() + 32])
+        {
+            Some(id) => id,
+            None => {
+                return SidecarDecode::Corrupt {
+                    kind: SidecarKind::ChunkPlan,
+                    atomic_id: None,
+                };
+            }
+        };
+        let ord_at = CHUNK_PLAN_MAGIC.len() + 32;
+        let ordinal = u32::from_be_bytes(body[ord_at..ord_at + 4].try_into().unwrap_or([0; 4]));
+        let total = u32::from_be_bytes(body[ord_at + 4..ord_at + 8].try_into().unwrap_or([0; 4]));
+        let hashes_len = body.len() - header;
+        if total < 2 || hashes_len % 32 != 0 || hashes_len / 32 != total as usize {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::ChunkPlan,
+                atomic_id: Some(id),
+            };
+        }
+        let mut chunk_hashes = Vec::with_capacity(total as usize);
+        let mut rest = &body[header..];
+        for _ in 0..total {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&rest[..32]);
+            chunk_hashes.push(hash);
+            rest = &rest[32..];
+        }
+        return SidecarDecode::ChunkPlan {
+            atomic_id: id,
+            ordinal,
+            plan: ChunkPlan {
+                total,
+                chunk_hashes,
+            },
+        };
+    }
+    if body.starts_with(CHUNK_BODY_MAGIC) {
+        let header = CHUNK_BODY_MAGIC.len() + 32 + 4 + 4;
+        if body.len() < header {
+            return SidecarDecode::Partial {
+                kind: SidecarKind::ChunkBody,
+            };
+        }
+        let id = match decode_atomic_id(&body[CHUNK_BODY_MAGIC.len()..CHUNK_BODY_MAGIC.len() + 32])
+        {
+            Some(id) => id,
+            None => {
+                return SidecarDecode::Corrupt {
+                    kind: SidecarKind::ChunkBody,
+                    atomic_id: None,
+                };
+            }
+        };
+        let ord_at = CHUNK_BODY_MAGIC.len() + 32;
+        let ordinal = u32::from_be_bytes(body[ord_at..ord_at + 4].try_into().unwrap_or([0; 4]));
+        let index = u32::from_be_bytes(body[ord_at + 4..ord_at + 8].try_into().unwrap_or([0; 4]));
+        return SidecarDecode::ChunkBody {
+            atomic_id: id,
+            ordinal,
+            index,
+            body: body[header..].to_vec(),
+        };
+    }
     SidecarDecode::NotSidecar
+}
+
+fn decode_atomic_id(bytes: &[u8]) -> Option<AtomicId> {
+    let arr: [u8; 32] = bytes.try_into().ok()?;
+    AtomicId::from_bytes(arr).ok()
 }

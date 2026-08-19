@@ -8,6 +8,7 @@
 
 use crate::atomic_stage_classify::StageFindings;
 use crate::atomic_stage_media::{
+    chunk_body_event_id, chunk_plan_event_id, encode_stage_chunk_body, encode_stage_chunk_plan,
     encode_stage_payload, encode_stage_seal, payload_event_id, seal_event_id, StageCatalog,
 };
 use crate::atomic_stage_recover::{
@@ -166,7 +167,7 @@ impl StoreAtomicStage<'_> {
             .map_err(|e| StoreError::AtomicStage(e.to_string()))
     }
 
-    /// Record the chunk map in the in-memory model only (CR-ATMR4-004 persists it).
+    /// Persist the frozen chunk map, then install it in the kernel (CR-ATMR5-005).
     /// Exact plan retry is a no-op; a different plan is `DuplicateTarget`.
     pub fn commit_chunk_manifest(
         &mut self,
@@ -175,10 +176,25 @@ impl StoreAtomicStage<'_> {
         plan: ChunkPlan,
     ) -> Result<(), StoreError> {
         if let Some(existing) = self.heap.chunk_plan(atomic_id, ordinal) {
-            if existing == &plan {
-                return Ok(());
+            if existing != &plan {
+                return Err(Self::duplicate_target());
             }
-            return Err(Self::duplicate_target());
+        } else if let Some(stored) = self.catalog.chunk_plans.get(&(atomic_id, ordinal)) {
+            if stored != &plan {
+                return Err(Self::duplicate_target());
+            }
+        }
+        if self.heap.chunk_plan(atomic_id, ordinal).is_some() {
+            if !self.catalog.has_chunk_plan(atomic_id, ordinal) {
+                self.persist_chunk_plan(atomic_id, ordinal, &plan)?;
+            }
+            return Ok(());
+        }
+        self.heap
+            .check_commit_chunk_manifest(atomic_id, ordinal, &plan)
+            .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        if !self.catalog.has_chunk_plan(atomic_id, ordinal) {
+            self.persist_chunk_plan(atomic_id, ordinal, &plan)?;
         }
         self.heap
             .commit_chunk_manifest(atomic_id, ordinal, plan)
@@ -204,9 +220,17 @@ impl StoreAtomicStage<'_> {
             }
             return decision;
         }
+        if let Some(stored) = self.catalog.chunks.get(&(atomic_id, ordinal, index)) {
+            if stored != &body {
+                return Err(Self::duplicate_target());
+            }
+        }
         self.heap
             .check_append_chunk(&member, index, &body)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        if !self.catalog.has_chunk(atomic_id, ordinal, index) {
+            self.persist_chunk_body(&member, index, &body)?;
+        }
         self.heap
             .append_chunk(member.clone(), index, body)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
@@ -326,6 +350,52 @@ impl StoreAtomicStage<'_> {
             return Some(Err(Self::duplicate_target()));
         }
         Some(Ok(()))
+    }
+
+    fn persist_chunk_plan(
+        &mut self,
+        atomic_id: AtomicId,
+        ordinal: u32,
+        plan: &ChunkPlan,
+    ) -> Result<(), StoreError> {
+        crate::failpoint::hit("store.atomic.chunk_plan.before_append")?;
+        let body = encode_stage_chunk_plan(atomic_id, ordinal, plan);
+        self.store.append_unindexed_atomic_frame(
+            FrameKind::PayloadChunk,
+            EMPTY_ENVELOPE,
+            &body,
+            chunk_plan_event_id(atomic_id, ordinal),
+        )?;
+        crate::failpoint::hit("store.atomic.chunk_plan.after_append")?;
+        self.catalog
+            .chunk_plans
+            .insert((atomic_id, ordinal), plan.clone());
+        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        crate::failpoint::hit("store.atomic.chunk_plan.after_checkpoint")?;
+        Ok(())
+    }
+
+    fn persist_chunk_body(
+        &mut self,
+        member: &AtomicMember,
+        index: u32,
+        body: &[u8],
+    ) -> Result<(), StoreError> {
+        crate::failpoint::hit("store.atomic.chunk_body.before_append")?;
+        let encoded = encode_stage_chunk_body(member.atomic_id, member.ordinal, index, body);
+        self.store.append_unindexed_atomic_frame(
+            FrameKind::PayloadChunk,
+            EMPTY_ENVELOPE,
+            &encoded,
+            chunk_body_event_id(member.atomic_id, member.ordinal, index),
+        )?;
+        crate::failpoint::hit("store.atomic.chunk_body.after_append")?;
+        self.catalog
+            .chunks
+            .insert((member.atomic_id, member.ordinal, index), body.to_vec());
+        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        crate::failpoint::hit("store.atomic.chunk_body.after_checkpoint")?;
+        Ok(())
     }
 
     fn persist_completed_payload_if_missing(
@@ -478,7 +548,28 @@ fn rebuild_heap(heap_id: HeapId, catalog: &StageCatalog) -> Result<StagingHeap, 
         heap.install_prepared(seq, atomic_id, prepare.content_root, &members)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         for member in &members {
-            if let Some(payload) = catalog.payloads.get(&(atomic_id, member.ordinal)) {
+            if let Some(plan) = catalog.chunk_plans.get(&(atomic_id, member.ordinal)) {
+                heap.commit_chunk_manifest(atomic_id, member.ordinal, plan.clone())
+                    .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+                let mut indexes: Vec<u32> = catalog
+                    .chunks
+                    .keys()
+                    .filter(|(id, ord, _)| *id == atomic_id && *ord == member.ordinal)
+                    .map(|(_, _, idx)| *idx)
+                    .collect();
+                indexes.sort_unstable();
+                for index in indexes {
+                    let body = catalog
+                        .chunks
+                        .get(&(atomic_id, member.ordinal, index))
+                        .cloned()
+                        .ok_or_else(|| {
+                            StoreError::AtomicStage("chunk index missing after key scan".into())
+                        })?;
+                    heap.append_chunk(member.clone(), index, body)
+                        .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+                }
+            } else if let Some(payload) = catalog.payloads.get(&(atomic_id, member.ordinal)) {
                 heap.append_staged(member.clone(), payload.clone())
                     .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
             }

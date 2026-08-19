@@ -5,7 +5,9 @@
 //! or translated into a reusable unused identity.
 
 use crate::atomic_stage_media::{decode_stage_sidecar, SidecarDecode, SidecarKind, StageCatalog};
-use residiuum_atomics::{members_match_prepare, AtomicId, AtomicMember, AtomicPrepare, HeapId};
+use residiuum_atomics::{
+    members_match_prepare, AtomicId, AtomicMember, AtomicPrepare, ChunkPlan, HeapId,
+};
 use residiuum_format::{
     examine_atomic_frame, AtomicEvidenceClass, AtomicFrameRole, DecodedFrame, HoleReason,
 };
@@ -23,6 +25,10 @@ pub enum StageEvidenceKind {
     Payload,
     /// ATSEAL1 first-stable-boundary sidecar.
     Seal,
+    /// ATMAP1 frozen chunk map.
+    ChunkPlan,
+    /// ATCHK1 verified chunk body.
+    ChunkBody,
     /// Verified frame that is not Atomic staging evidence.
     Other,
 }
@@ -226,6 +232,17 @@ fn ingest_sidecar(
             atomic_id,
             content_root,
         } => admit_seal(catalog, atomic_id, content_root, findings),
+        SidecarDecode::ChunkPlan {
+            atomic_id,
+            ordinal,
+            plan,
+        } => admit_chunk_plan(catalog, atomic_id, ordinal, plan, findings),
+        SidecarDecode::ChunkBody {
+            atomic_id,
+            ordinal,
+            index,
+            body,
+        } => admit_chunk_body(catalog, atomic_id, ordinal, index, body, findings),
     }
 }
 
@@ -432,11 +449,98 @@ fn block(catalog: &mut StageCatalog, id: Option<AtomicId>) {
     }
 }
 
+fn admit_chunk_plan(
+    catalog: &mut StageCatalog,
+    atomic_id: AtomicId,
+    ordinal: u32,
+    plan: ChunkPlan,
+    findings: &mut StageFindings,
+) {
+    if catalog.blocked.contains(&atomic_id) {
+        findings.push(
+            StageEvidenceKind::ChunkPlan,
+            StageEvidenceClass::Conflict,
+            Some(atomic_id),
+        );
+        return;
+    }
+    match catalog.chunk_plans.get(&(atomic_id, ordinal)) {
+        None => {
+            catalog.chunk_plans.insert((atomic_id, ordinal), plan);
+            findings.push(
+                StageEvidenceKind::ChunkPlan,
+                StageEvidenceClass::Valid,
+                Some(atomic_id),
+            );
+        }
+        Some(existing) if existing == &plan => {
+            findings.push(
+                StageEvidenceKind::ChunkPlan,
+                StageEvidenceClass::Valid,
+                Some(atomic_id),
+            );
+        }
+        Some(_) => {
+            catalog.blocked.insert(atomic_id);
+            findings.push(
+                StageEvidenceKind::ChunkPlan,
+                StageEvidenceClass::Conflict,
+                Some(atomic_id),
+            );
+        }
+    }
+}
+
+fn admit_chunk_body(
+    catalog: &mut StageCatalog,
+    atomic_id: AtomicId,
+    ordinal: u32,
+    index: u32,
+    body: Vec<u8>,
+    findings: &mut StageFindings,
+) {
+    if catalog.blocked.contains(&atomic_id) {
+        findings.push(
+            StageEvidenceKind::ChunkBody,
+            StageEvidenceClass::Conflict,
+            Some(atomic_id),
+        );
+        return;
+    }
+    match catalog.chunks.get(&(atomic_id, ordinal, index)) {
+        None => {
+            catalog.chunks.insert((atomic_id, ordinal, index), body);
+            findings.push(
+                StageEvidenceKind::ChunkBody,
+                StageEvidenceClass::Valid,
+                Some(atomic_id),
+            );
+        }
+        Some(existing) if existing == &body => {
+            findings.push(
+                StageEvidenceKind::ChunkBody,
+                StageEvidenceClass::Valid,
+                Some(atomic_id),
+            );
+        }
+        Some(_) => {
+            catalog.blocked.insert(atomic_id);
+            findings.push(
+                StageEvidenceKind::ChunkBody,
+                StageEvidenceClass::Conflict,
+                Some(atomic_id),
+            );
+        }
+    }
+}
+
 fn sidecar_kind(kind: SidecarKind) -> StageEvidenceKind {
     match kind {
         SidecarKind::Prepare => StageEvidenceKind::Prepare,
         SidecarKind::Payload => StageEvidenceKind::Payload,
         SidecarKind::Seal => StageEvidenceKind::Seal,
+        SidecarKind::ChunkPlan => StageEvidenceKind::ChunkPlan,
+        SidecarKind::ChunkBody => StageEvidenceKind::ChunkBody,
     }
 }
 

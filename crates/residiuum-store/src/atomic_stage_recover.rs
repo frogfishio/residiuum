@@ -12,7 +12,8 @@ use crate::atomic_stage_media::StageCatalog;
 use crate::error::StoreError;
 use crate::layout::StorePaths;
 use residiuum_atomics::{
-    decode_member, decode_prepare, encode_member, encode_prepare, AtomicId, ContentRoot, HeapId,
+    decode_member, decode_prepare, encode_member, encode_prepare, AtomicId, ChunkPlan, ContentRoot,
+    HeapId,
 };
 use residiuum_format::{scan_forward, SafetyLimits, ScanRegion};
 use std::fs::{self, File};
@@ -20,7 +21,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 4;
+const CHECKPOINT_VERSION: u8 = 5;
 const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V1";
 const COORD_MAGIC: &[u8] = b"ATCRD1";
 const COORD_VERSION: u8 = 1;
@@ -710,6 +711,24 @@ fn encode_checkpoint(
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(&seq.to_be_bytes());
     }
+    body.extend_from_slice(&(catalog.chunk_plans.len() as u32).to_be_bytes());
+    for ((id, ordinal), plan) in &catalog.chunk_plans {
+        body.extend_from_slice(id.as_bytes());
+        body.extend_from_slice(&ordinal.to_be_bytes());
+        body.extend_from_slice(&plan.total.to_be_bytes());
+        body.extend_from_slice(&(plan.chunk_hashes.len() as u32).to_be_bytes());
+        for hash in &plan.chunk_hashes {
+            body.extend_from_slice(hash);
+        }
+    }
+    body.extend_from_slice(&(catalog.chunks.len() as u32).to_be_bytes());
+    for ((id, ordinal, index), chunk) in &catalog.chunks {
+        body.extend_from_slice(id.as_bytes());
+        body.extend_from_slice(&ordinal.to_be_bytes());
+        body.extend_from_slice(&index.to_be_bytes());
+        body.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+        body.extend_from_slice(chunk);
+    }
     let mut hasher = blake3::Hasher::new();
     hasher.update(CHECKPOINT_DOMAIN);
     hasher.update(&body);
@@ -836,6 +855,52 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
             return None;
         }
         catalog.coord_seq.insert(id, seq);
+    }
+    let n_plans = read_u32(&mut cur)? as usize;
+    for _ in 0..n_plans {
+        if cur.len() < 32 + 4 + 4 + 4 {
+            return None;
+        }
+        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
+        cur = &cur[32..];
+        let ordinal = read_u32(&mut cur)?;
+        let total = read_u32(&mut cur)?;
+        let n_hashes = read_u32(&mut cur)? as usize;
+        if n_hashes != total as usize || cur.len() < n_hashes.saturating_mul(32) {
+            return None;
+        }
+        let mut chunk_hashes = Vec::with_capacity(n_hashes);
+        for _ in 0..n_hashes {
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&cur[..32]);
+            cur = &cur[32..];
+            chunk_hashes.push(hash);
+        }
+        catalog.chunk_plans.insert(
+            (id, ordinal),
+            ChunkPlan {
+                total,
+                chunk_hashes,
+            },
+        );
+    }
+    let n_chunks = read_u32(&mut cur)? as usize;
+    for _ in 0..n_chunks {
+        if cur.len() < 32 + 4 + 4 + 4 {
+            return None;
+        }
+        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
+        cur = &cur[32..];
+        let ordinal = read_u32(&mut cur)?;
+        let index = read_u32(&mut cur)?;
+        let n = read_u32(&mut cur)? as usize;
+        if cur.len() < n {
+            return None;
+        }
+        catalog
+            .chunks
+            .insert((id, ordinal, index), cur[..n].to_vec());
+        cur = &cur[n..];
     }
     if !cur.is_empty() {
         return None;
