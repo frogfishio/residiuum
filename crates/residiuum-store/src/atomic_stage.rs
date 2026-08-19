@@ -121,9 +121,19 @@ impl StoreAtomicStage<'_> {
                 self.persist_member(&prepare, member)?;
             }
         }
+        let seq = self
+            .catalog
+            .coord_seq
+            .get(&prepare.atomic_id)
+            .copied()
+            .and_then(CoordinatorSeq::from_raw)
+            .ok_or_else(|| {
+                StoreError::AtomicStage("prepare without coordinator sequence".into())
+            })?;
         self.heap
-            .begin_prepare(prepare.atomic_id, prepare.content_root, members)
+            .install_prepared(seq, prepare.atomic_id, prepare.content_root, members)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))
+            .map(|manifest| (seq, manifest))
     }
 
     /// Persist a staged payload on the store segment. Not a `put`.
@@ -230,6 +240,8 @@ impl StoreAtomicStage<'_> {
     }
 
     fn persist_prepare(&mut self, prepare: &AtomicPrepare) -> Result<(), StoreError> {
+        let _seq = self.catalog.assign_coord(prepare.atomic_id)?;
+        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
         crate::failpoint::hit("store.atomic.prepare.before_append")?;
         let envelope = encode_atomic_prepare_envelope(
             prepare.heap_id.as_bytes(),
@@ -335,30 +347,41 @@ impl From<AtomicsError> for StoreError {
 fn rebuild_heap(heap_id: HeapId, catalog: &StageCatalog) -> Result<StagingHeap, StoreError> {
     let mut heap =
         StagingHeap::new(heap_id, 1).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-    for (atomic_id, prepare) in &catalog.prepares {
-        if catalog.blocked.contains(atomic_id) {
+    let mut ids: Vec<AtomicId> = catalog.prepares.keys().copied().collect();
+    ids.sort_by_key(|id| catalog.coord_seq.get(id).copied().unwrap_or(u64::MAX));
+    for atomic_id in ids {
+        if catalog.blocked.contains(&atomic_id) {
             continue;
         }
+        let prepare = &catalog.prepares[&atomic_id];
         if prepare.heap_id != heap_id {
             continue;
         }
-        let members = catalog.members.get(atomic_id).cloned().unwrap_or_default();
+        let members = catalog.members.get(&atomic_id).cloned().unwrap_or_default();
         if !members_match_prepare(prepare, &members) {
             continue;
         }
-        heap.begin_prepare(*atomic_id, prepare.content_root, &members)
+        let seq = catalog
+            .coord_seq
+            .get(&atomic_id)
+            .copied()
+            .and_then(CoordinatorSeq::from_raw)
+            .ok_or_else(|| {
+                StoreError::AtomicStage("prepare missing durable coordinator sequence".into())
+            })?;
+        heap.install_prepared(seq, atomic_id, prepare.content_root, &members)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         for member in &members {
-            if let Some(payload) = catalog.payloads.get(&(*atomic_id, member.ordinal)) {
+            if let Some(payload) = catalog.payloads.get(&(atomic_id, member.ordinal)) {
                 heap.append_staged(member.clone(), payload.clone())
                     .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
             }
         }
-        if let Some(root) = catalog.seals.get(atomic_id) {
+        if let Some(root) = catalog.seals.get(&atomic_id) {
             if *root != prepare.content_root {
                 continue;
             }
-            heap.seal_member_boundary(*atomic_id)
+            heap.seal_member_boundary(atomic_id)
                 .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         }
     }

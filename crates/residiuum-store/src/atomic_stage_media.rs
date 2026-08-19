@@ -26,6 +26,12 @@ pub(crate) struct StageCatalog {
     pub blocked: BTreeSet<AtomicId>,
     /// Prepares observed as format-admitted `BatchPrepare` (CR-ATMR5-006).
     pub prepare_batch: BTreeSet<AtomicId>,
+    /// Durable coordinator sequence per Atomic (CR-ATMR5-004).
+    pub coord_seq: BTreeMap<AtomicId, u64>,
+    /// Next sequence to allocate (strictly above every issued sequence).
+    pub coord_next: u64,
+    /// Encounter order of prepares (not Atomic-ID sort).
+    pub prepare_seen: Vec<AtomicId>,
 }
 
 impl StageCatalog {
@@ -53,6 +59,46 @@ impl StageCatalog {
             .saturating_add(self.seals.len() as u64 * 64)
             .saturating_add(self.blocked.len() as u64 * 32)
             .saturating_add(self.prepare_batch.len() as u64 * 32)
+            .saturating_add(self.coord_seq.len() as u64 * 40)
+    }
+
+    /// Allocate or return the durable coordinator sequence for `atomic_id`.
+    pub(crate) fn assign_coord(&mut self, atomic_id: AtomicId) -> Result<u64, StoreError> {
+        if let Some(seq) = self.coord_seq.get(&atomic_id).copied() {
+            return Ok(seq);
+        }
+        let seq = if self.coord_next == 0 {
+            1
+        } else {
+            self.coord_next
+        };
+        if self.coord_seq.values().any(|&s| s == seq) {
+            return Err(StoreError::AtomicStage(format!(
+                "duplicate coordinator sequence {seq}"
+            )));
+        }
+        self.coord_seq.insert(atomic_id, seq);
+        self.coord_next = seq.saturating_add(1);
+        if !self.prepare_seen.contains(&atomic_id) {
+            self.prepare_seen.push(atomic_id);
+        }
+        Ok(seq)
+    }
+
+    /// Fill missing sequences in encounter order, never Atomic-ID sort.
+    pub(crate) fn assign_missing_coord_seqs(&mut self) {
+        let mut ids = self.prepare_seen.clone();
+        for id in self.prepares.keys() {
+            if !ids.contains(id) {
+                ids.push(*id);
+            }
+        }
+        for id in ids {
+            if self.blocked.contains(&id) {
+                continue;
+            }
+            let _ = self.assign_coord(id);
+        }
     }
 }
 

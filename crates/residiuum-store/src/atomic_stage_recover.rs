@@ -20,10 +20,15 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 3;
+const CHECKPOINT_VERSION: u8 = 4;
 const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V1";
+const COORD_MAGIC: &[u8] = b"ATCRD1";
+const COORD_VERSION: u8 = 1;
+const COORD_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-COORD-V1";
 /// On-disk catalogue under `store-info/`.
 pub const ATOMIC_STAGE_CHECKPOINT_FILE: &str = "atomic-stage.ckpt";
+/// Durable coordinator sequence log (CR-ATMR5-004).
+pub const ATOMIC_COORD_FILE: &str = "atomic-coord.ckpt";
 
 /// Ceilings applied before allocation (independent of total store size).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,6 +242,11 @@ pub fn atomic_stage_checkpoint_path(paths: &StorePaths) -> PathBuf {
     paths.store_info().join(ATOMIC_STAGE_CHECKPOINT_FILE)
 }
 
+/// Path of the durable coordinator sequence snapshot.
+pub fn atomic_coord_path(paths: &StorePaths) -> PathBuf {
+    paths.store_info().join(ATOMIC_COORD_FILE)
+}
+
 pub(crate) struct CatalogOpen {
     pub catalog: StageCatalog,
     pub covered: Vec<CoveredFile>,
@@ -329,7 +339,9 @@ pub(crate) fn open_catalog(
         });
     }
 
+    load_coordinator(paths, &mut catalog)?;
     finalize_catalog(&mut catalog, bound_heap, &mut findings);
+    catalog.assign_missing_coord_seqs();
     budget.charge_catalog(&catalog)?;
     budget.report.catalog_loads = 1;
     budget.report.holes = findings
@@ -343,6 +355,7 @@ pub(crate) fn open_catalog(
     budget.report.foreign = findings.count(StageEvidenceClass::ForeignHeap);
     covered = next_covered;
     persist_checkpoint(paths, &catalog, &covered)?;
+    persist_coordinator(paths, &catalog)?;
     Ok(CatalogOpen {
         catalog,
         covered,
@@ -358,7 +371,8 @@ pub(crate) fn persist_live_checkpoint(
     covered: &mut Vec<CoveredFile>,
 ) -> Result<(), StoreError> {
     cover_active(paths, covered)?;
-    persist_checkpoint(paths, catalog, covered)
+    persist_checkpoint(paths, catalog, covered)?;
+    persist_coordinator(paths, catalog)
 }
 
 fn cover_active(paths: &StorePaths, covered: &mut Vec<CoveredFile>) -> Result<(), StoreError> {
@@ -525,6 +539,102 @@ fn load_checkpoint(
     Ok(decode_checkpoint(&bytes))
 }
 
+fn persist_coordinator(paths: &StorePaths, catalog: &StageCatalog) -> Result<(), StoreError> {
+    let mut body = Vec::new();
+    body.extend_from_slice(COORD_MAGIC);
+    body.push(COORD_VERSION);
+    body.extend_from_slice(&catalog.coord_next.to_be_bytes());
+    body.extend_from_slice(&(catalog.coord_seq.len() as u32).to_be_bytes());
+    let mut rows: Vec<(u64, AtomicId)> = catalog
+        .coord_seq
+        .iter()
+        .map(|(id, seq)| (*seq, *id))
+        .collect();
+    rows.sort_by_key(|(seq, _)| *seq);
+    for (seq, id) in rows {
+        body.extend_from_slice(&seq.to_be_bytes());
+        body.extend_from_slice(id.as_bytes());
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(COORD_DOMAIN);
+    hasher.update(&body);
+    body.extend_from_slice(hasher.finalize().as_bytes());
+    write_atomic(&atomic_coord_path(paths), &body)
+}
+
+fn load_coordinator(paths: &StorePaths, catalog: &mut StageCatalog) -> Result<(), StoreError> {
+    let path = atomic_coord_path(paths);
+    if !path.is_file() {
+        return Ok(());
+    }
+    let len = fs::metadata(&path)?.len();
+    if len > AtomicStageLimits::prototype().max_checkpoint_bytes {
+        return Err(StoreError::AtomicStage(format!(
+            "atomic coordinator bytes {len} exceed limit"
+        )));
+    }
+    let bytes = fs::read(&path)?;
+    if bytes.len() < COORD_MAGIC.len() + 1 + 32 {
+        return Ok(());
+    }
+    let (body, digest) = bytes.split_at(bytes.len() - 32);
+    if !body.starts_with(COORD_MAGIC) || body[COORD_MAGIC.len()] != COORD_VERSION {
+        return Ok(());
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(COORD_DOMAIN);
+    hasher.update(body);
+    if hasher.finalize().as_bytes() != digest {
+        return Err(StoreError::AtomicStage(
+            "atomic coordinator checksum mismatch".into(),
+        ));
+    }
+    let mut cur = &body[COORD_MAGIC.len() + 1..];
+    let next = read_u64(&mut cur)
+        .ok_or_else(|| StoreError::AtomicStage("atomic coordinator truncated".into()))?;
+    let n = read_u32(&mut cur)
+        .ok_or_else(|| StoreError::AtomicStage("atomic coordinator truncated".into()))?
+        as usize;
+    let mut seen = std::collections::BTreeSet::new();
+    catalog.coord_seq.clear();
+    for _ in 0..n {
+        let seq = read_u64(&mut cur)
+            .ok_or_else(|| StoreError::AtomicStage("atomic coordinator truncated".into()))?;
+        if cur.len() < 32 {
+            return Err(StoreError::AtomicStage(
+                "atomic coordinator truncated".into(),
+            ));
+        }
+        let id = AtomicId::from_bytes(cur[..32].try_into().unwrap_or([0; 32]))
+            .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        cur = &cur[32..];
+        if seq == 0 || !seen.insert(seq) {
+            return Err(StoreError::AtomicStage(format!(
+                "duplicate or zero coordinator sequence {seq}"
+            )));
+        }
+        catalog.coord_seq.insert(id, seq);
+        if !catalog.prepare_seen.contains(&id) {
+            catalog.prepare_seen.push(id);
+        }
+    }
+    if !cur.is_empty() {
+        return Err(StoreError::AtomicStage(
+            "atomic coordinator trailing bytes".into(),
+        ));
+    }
+    catalog.coord_next = next.max(
+        catalog
+            .coord_seq
+            .values()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1),
+    );
+    Ok(())
+}
+
 fn persist_checkpoint(
     paths: &StorePaths,
     catalog: &StageCatalog,
@@ -593,6 +703,12 @@ fn encode_checkpoint(
     body.extend_from_slice(&(catalog.prepare_batch.len() as u32).to_be_bytes());
     for id in &catalog.prepare_batch {
         body.extend_from_slice(id.as_bytes());
+    }
+    body.extend_from_slice(&catalog.coord_next.to_be_bytes());
+    body.extend_from_slice(&(catalog.coord_seq.len() as u32).to_be_bytes());
+    for (id, seq) in &catalog.coord_seq {
+        body.extend_from_slice(id.as_bytes());
+        body.extend_from_slice(&seq.to_be_bytes());
     }
     let mut hasher = blake3::Hasher::new();
     hasher.update(CHECKPOINT_DOMAIN);
@@ -706,6 +822,20 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
         let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
         cur = &cur[32..];
         catalog.prepare_batch.insert(id);
+    }
+    catalog.coord_next = read_u64(&mut cur)?;
+    let n_coord = read_u32(&mut cur)? as usize;
+    for _ in 0..n_coord {
+        if cur.len() < 40 {
+            return None;
+        }
+        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
+        cur = &cur[32..];
+        let seq = read_u64(&mut cur)?;
+        if seq == 0 || catalog.coord_seq.values().any(|&s| s == seq) {
+            return None;
+        }
+        catalog.coord_seq.insert(id, seq);
     }
     if !cur.is_empty() {
         return None;

@@ -259,6 +259,9 @@ fn admit_prepare(
             if from_batch {
                 catalog.prepare_batch.insert(id);
             }
+            if !catalog.prepare_seen.contains(&id) {
+                catalog.prepare_seen.push(id);
+            }
             findings.push(
                 StageEvidenceKind::Prepare,
                 StageEvidenceClass::Valid,

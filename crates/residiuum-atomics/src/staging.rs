@@ -42,6 +42,15 @@ impl CoordinatorSeq {
     pub const fn as_u64(self) -> u64 {
         self.0
     }
+
+    /// Construct a nonzero coordinator sequence.
+    pub const fn from_raw(n: u64) -> Option<Self> {
+        if n == 0 {
+            None
+        } else {
+            Some(Self(n))
+        }
+    }
 }
 
 /// One coordinator-stream record (prepare only; decision is ATM-3).
@@ -98,6 +107,40 @@ impl CoordinatorStream {
             content_root,
         });
         Ok(seq)
+    }
+
+    /// Install a previously issued sequence (store recovery).
+    ///
+    /// Duplicate sequence ownership and identity/seq disagreement are refused.
+    /// Historical sequences may arrive out of order; `next` becomes strictly
+    /// above every durable issued sequence.
+    fn install(
+        &mut self,
+        seq: CoordinatorSeq,
+        atomic_id: AtomicId,
+        content_root: ContentRoot,
+    ) -> Result<(), AtomicsError> {
+        let n = seq.as_u64();
+        if n == 0 {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+        }
+        if let Some(existing) = self.records.iter().find(|r| r.atomic_id == atomic_id) {
+            if existing.seq != seq || existing.content_root != content_root {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict));
+            }
+            return Ok(());
+        }
+        if self.records.iter().any(|r| r.seq == seq) {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict));
+        }
+        self.records.push(CoordinatorRecord {
+            seq,
+            atomic_id,
+            content_root,
+        });
+        self.records.sort_by_key(|r| r.seq);
+        self.next = self.next.max(n.saturating_add(1));
+        Ok(())
     }
 }
 
@@ -383,6 +426,34 @@ impl StagingHeap {
             },
         );
         Ok((seq, manifest))
+    }
+
+    /// Install a prepare at a durable coordinator sequence (CR-ATMR5-004).
+    pub fn install_prepared(
+        &mut self,
+        seq: CoordinatorSeq,
+        atomic_id: AtomicId,
+        content_root: ContentRoot,
+        members: &[AtomicMember],
+    ) -> Result<PlacementManifest, AtomicsError> {
+        let manifest = self.check_begin_prepare(atomic_id, content_root, members)?;
+        self.coordinator.install(seq, atomic_id, content_root)?;
+        self.staged.insert(
+            atomic_id,
+            StagedAtomic {
+                seq,
+                manifest: manifest.clone(),
+                members: Vec::new(),
+                chunk_plans: BTreeMap::new(),
+                lifecycle: AtomicLifecycle {
+                    prepare: PreparePhase::Prepared,
+                    members: MemberPhase::Absent,
+                    decision: DecisionPhase::None,
+                    publication: PublicationPhase::Unpublished,
+                },
+            },
+        );
+        Ok(manifest)
     }
 
     /// Validate a staged append without installing it.

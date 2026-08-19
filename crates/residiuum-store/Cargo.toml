@@ -346,3 +346,7 @@ required-features = ["legacy-raw-store"]
 [[test]]
 name = "atomic_stage_prepare_authority"
 required-features = ["legacy-raw-store"]
+
+[[test]]
+name = "atomic_stage_coordinator"
+required-features = ["legacy-raw-store"]
