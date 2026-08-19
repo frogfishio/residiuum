@@ -17,6 +17,7 @@ use crate::compact::{
 };
 use crate::large_value::{AdmitDecision, LargeValuePolicy, PayloadLayout, LARGE_VALUE_PROFILE_ID};
 
+use crate::atomic_stage_recover::AtomicStageDisposition;
 use crate::durability::DurabilityMode;
 use crate::envelope::{
     decode_item_envelope, encode_item_envelope, EventKind, ItemEnvelope, MAX_SUBJECT_LEN,
@@ -818,6 +819,22 @@ pub struct StoreOpenMetrics {
     pub compaction_jobs_examined: u64,
     /// Recovery-mode reload.
     pub recovery_mode_ns: u64,
+    /// Atomic-stage catalogue path (CR-ATMR5-001). `NotRun` until `atomic_stage`.
+    pub atomic_stage_disposition: AtomicStageDisposition,
+    /// Bytes read while opening the Atomic-stage catalogue.
+    pub atomic_stage_bytes_scanned: u64,
+    /// Checkpoint sidecar bytes examined for Atomic-stage recovery.
+    pub atomic_stage_checkpoint_bytes: u64,
+    /// Verified Atomic-stage frames ingested from media.
+    pub atomic_stage_frames: u32,
+    /// Directory entries visited while opening the Atomic-stage catalogue.
+    pub atomic_stage_dirents: u32,
+    /// Segment files skipped because the Atomic-stage checkpoint covered them.
+    pub atomic_stage_files_skipped: u32,
+    /// Segment files whose dirty tail was streamed for Atomic-stage recovery.
+    pub atomic_stage_files_tailed: u32,
+    /// Atomics reconstructed into the Atomic-stage catalogue.
+    pub atomic_stage_atomics: u32,
 }
 
 /// Structured startup report returned to applications after a successful open.
@@ -2101,6 +2118,20 @@ impl Store {
     /// Structured startup disposition, recovery actions, counts, and timings.
     pub fn open_report(&self) -> StoreOpenReport {
         self.open_metrics
+    }
+
+    pub(crate) fn record_atomic_stage_open(
+        &mut self,
+        report: crate::atomic_stage_recover::AtomicStageOpenReport,
+    ) {
+        self.open_metrics.atomic_stage_disposition = report.disposition;
+        self.open_metrics.atomic_stage_bytes_scanned = report.bytes_scanned;
+        self.open_metrics.atomic_stage_checkpoint_bytes = report.checkpoint_bytes;
+        self.open_metrics.atomic_stage_frames = report.frames;
+        self.open_metrics.atomic_stage_dirents = report.dirents;
+        self.open_metrics.atomic_stage_files_skipped = report.files_skipped;
+        self.open_metrics.atomic_stage_files_tailed = report.files_tailed;
+        self.open_metrics.atomic_stage_atomics = report.atomics;
     }
 
     /// Number of live (non-deleted) subjects in the primary index.

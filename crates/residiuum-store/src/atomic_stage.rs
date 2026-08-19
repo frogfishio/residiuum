@@ -1,12 +1,16 @@
-//! Store-owned Atomic staging (CR-ATMR4-005).
+//! Store-owned Atomic staging (CR-ATMR4-005 / CR-ATMR5-001).
 //!
 //! One durable authority: the store segment under the exclusive writer.
 //! `StagingHeap` is the in-memory model only. The peer `DurableLane` is not
 //! opened, created, or consulted. Ordinary `get` / scan / history stay empty.
+//! The live catalogue is opened once from a store-owned checkpoint plus tails.
 
 use crate::atomic_stage_media::{
     encode_stage_payload, encode_stage_prepare, encode_stage_seal, payload_event_id,
-    prepare_event_id, scan_stage_catalog, seal_event_id, StageCatalog,
+    prepare_event_id, seal_event_id, StageCatalog,
+};
+use crate::atomic_stage_recover::{
+    open_catalog, persist_live_checkpoint, AtomicStageLimits, AtomicStageOpenReport, CoveredFile,
 };
 use crate::error::StoreError;
 use crate::store::Store;
@@ -24,6 +28,9 @@ use std::path::PathBuf;
 pub struct StoreAtomicStage<'a> {
     store: &'a mut Store,
     heap: StagingHeap,
+    catalog: StageCatalog,
+    covered: Vec<CoveredFile>,
+    report: AtomicStageOpenReport,
 }
 
 impl Store {
@@ -36,9 +43,16 @@ impl Store {
         }
         let heap_id = HeapId::from_bytes(self.store_id())
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        let catalog = scan_stage_catalog(self.paths())?;
-        let heap = rebuild_heap(heap_id, &catalog)?;
-        Ok(StoreAtomicStage { store: self, heap })
+        let opened = open_catalog(self.paths(), AtomicStageLimits::prototype())?;
+        let heap = rebuild_heap(heap_id, &opened.catalog)?;
+        self.record_atomic_stage_open(opened.report);
+        Ok(StoreAtomicStage {
+            store: self,
+            heap,
+            catalog: opened.catalog,
+            covered: opened.covered,
+            report: opened.report,
+        })
     }
 }
 
@@ -51,6 +65,11 @@ impl StoreAtomicStage<'_> {
     /// In-memory kernel reconstructed from store media.
     pub fn kernel(&self) -> &StagingHeap {
         &self.heap
+    }
+
+    /// Bounded recovery costs for this handle (CR-ATMR5-001).
+    pub fn open_report(&self) -> AtomicStageOpenReport {
+        self.report
     }
 
     /// Validate a closed plan, persist it on the store segment, then apply.
@@ -74,8 +93,7 @@ impl StoreAtomicStage<'_> {
             }
             return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
         }
-        let catalog = scan_stage_catalog(self.store.paths())?;
-        if let Some(stored) = catalog.prepares.get(&prepare.atomic_id) {
+        if let Some(stored) = self.catalog.prepares.get(&prepare.atomic_id) {
             if stored != &prepare {
                 return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
             }
@@ -83,7 +101,7 @@ impl StoreAtomicStage<'_> {
             self.persist_prepare(&prepare)?;
         }
         for member in members {
-            if !catalog.has_member(member.atomic_id, member.ordinal) {
+            if !self.catalog.has_member(member.atomic_id, member.ordinal) {
                 self.persist_member(&prepare, member)?;
             }
         }
@@ -101,8 +119,7 @@ impl StoreAtomicStage<'_> {
         self.heap
             .check_append_staged(&member, &payload)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        let catalog = scan_stage_catalog(self.store.paths())?;
-        if !catalog.has_payload(member.atomic_id, member.ordinal) {
+        if !self.catalog.has_payload(member.atomic_id, member.ordinal) {
             self.persist_payload(&member, &payload)?;
         }
         if self
@@ -168,8 +185,7 @@ impl StoreAtomicStage<'_> {
             .and_then(|ms| ms.iter().find(|s| s.member.ordinal == ordinal))
             .map(|s| s.payload.clone())
             .ok_or_else(|| StoreError::AtomicStage("complete chunk without payload".into()))?;
-        let catalog = scan_stage_catalog(self.store.paths())?;
-        if !catalog.has_payload(atomic_id, ordinal) {
+        if !self.catalog.has_payload(atomic_id, ordinal) {
             self.persist_payload(&member, &payload)?;
         }
         Ok(())
@@ -186,8 +202,7 @@ impl StoreAtomicStage<'_> {
                 .seal_member_boundary(atomic_id)
                 .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         }
-        let catalog = scan_stage_catalog(self.store.paths())?;
-        if !catalog.is_sealed(atomic_id) {
+        if !self.catalog.is_sealed(atomic_id) {
             let content_root = self
                 .heap
                 .placement(atomic_id)
@@ -222,7 +237,11 @@ impl StoreAtomicStage<'_> {
             EMPTY_ENVELOPE,
             &stage_body,
             prepare_event_id(prepare.atomic_id),
-        )
+        )?;
+        self.catalog
+            .prepares
+            .insert(prepare.atomic_id, prepare.clone());
+        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)
     }
 
     fn persist_member(
@@ -244,7 +263,12 @@ impl StoreAtomicStage<'_> {
             &envelope,
             &body,
             member.event_id.to_bytes(),
-        )
+        )?;
+        let slot = self.catalog.members.entry(member.atomic_id).or_default();
+        if !slot.iter().any(|m| m.ordinal == member.ordinal) {
+            slot.push(member.clone());
+        }
+        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)
     }
 
     fn persist_payload(&mut self, member: &AtomicMember, payload: &[u8]) -> Result<(), StoreError> {
@@ -254,7 +278,11 @@ impl StoreAtomicStage<'_> {
             EMPTY_ENVELOPE,
             &body,
             payload_event_id(member.atomic_id, member.ordinal),
-        )
+        )?;
+        self.catalog
+            .payloads
+            .insert((member.atomic_id, member.ordinal), payload.to_vec());
+        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)
     }
 
     fn persist_seal(
@@ -268,7 +296,9 @@ impl StoreAtomicStage<'_> {
             EMPTY_ENVELOPE,
             &body,
             seal_event_id(atomic_id),
-        )
+        )?;
+        self.catalog.seals.insert(atomic_id);
+        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)
     }
 }
 

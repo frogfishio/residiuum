@@ -6,18 +6,14 @@
 //! is not a second authority.
 
 use crate::error::StoreError;
-use crate::layout::StorePaths;
 use residiuum_atomics::{
     decode_member, decode_prepare, encode_prepare, AtomicId, AtomicMember, AtomicPrepare,
     ContentRoot,
 };
 use residiuum_format::{
-    examine_atomic_frame, scan_forward, AtomicEvidenceClass, AtomicFrameRole, FrameKind,
-    SafetyLimits,
+    examine_atomic_frame, AtomicEvidenceClass, AtomicFrameRole, DecodedFrame, FrameKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
-use std::path::{Path, PathBuf};
 
 const PAYLOAD_MAGIC: &[u8] = b"ATPAY1";
 const SEAL_MAGIC: &[u8] = b"ATSEAL1";
@@ -45,6 +41,16 @@ impl StageCatalog {
 
     pub(crate) fn is_sealed(&self, atomic_id: AtomicId) -> bool {
         self.seals.contains(&atomic_id)
+    }
+
+    /// Approximate retained catalogue bytes (not a wire encoding).
+    pub(crate) fn work_bytes(&self) -> u64 {
+        let payload: u64 = self.payloads.values().map(|p| p.len() as u64).sum();
+        let members: u64 = self.members.values().map(|ms| ms.len() as u64).sum();
+        payload
+            .saturating_add(self.prepares.len() as u64 * 512)
+            .saturating_add(members.saturating_mul(256))
+            .saturating_add(self.seals.len() as u64 * 32)
     }
 }
 
@@ -104,46 +110,39 @@ pub(crate) fn seal_event_id(atomic_id: AtomicId) -> [u8; 16] {
     id
 }
 
-pub(crate) fn scan_stage_catalog(paths: &StorePaths) -> Result<StageCatalog, StoreError> {
-    let mut catalog = StageCatalog::default();
-    for path in segment_files(paths) {
-        let bytes = fs::read(&path)?;
-        let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
-        for (_, frame) in report.verified_frames() {
-            if frame.header.known_kind() == Some(FrameKind::PayloadChunk) {
-                if let Some((id, ordinal, payload)) = decode_stage_payload(&frame.body) {
-                    catalog.payloads.insert((id, ordinal), payload);
-                }
-                if let Some(id) = decode_stage_seal(&frame.body) {
-                    catalog.seals.insert(id);
-                }
-                if let Some(prepare) = decode_stage_prepare(&frame.body) {
-                    catalog.prepares.insert(prepare.atomic_id, prepare);
-                }
-                continue;
-            }
-            let Some(AtomicEvidenceClass::Valid(link)) = examine_atomic_frame(frame) else {
-                continue;
-            };
-            match link.role {
-                AtomicFrameRole::Prepare => {
-                    if let Ok(prepare) = decode_prepare(&frame.body) {
-                        catalog.prepares.insert(prepare.atomic_id, prepare);
-                    }
-                }
-                AtomicFrameRole::Member => {
-                    if let Ok(member) = decode_member(&frame.body) {
-                        let slot = catalog.members.entry(member.atomic_id).or_default();
-                        if !slot.iter().any(|m| m.ordinal == member.ordinal) {
-                            slot.push(member);
-                        }
-                    }
-                }
-                AtomicFrameRole::Commit => {}
+/// Fold one verified store frame into the live catalogue (CR-ATMR5-001).
+pub(crate) fn ingest_frame(catalog: &mut StageCatalog, frame: &DecodedFrame) {
+    if frame.header.known_kind() == Some(FrameKind::PayloadChunk) {
+        if let Some((id, ordinal, payload)) = decode_stage_payload(&frame.body) {
+            catalog.payloads.insert((id, ordinal), payload);
+        }
+        if let Some(id) = decode_stage_seal(&frame.body) {
+            catalog.seals.insert(id);
+        }
+        if let Some(prepare) = decode_stage_prepare(&frame.body) {
+            catalog.prepares.insert(prepare.atomic_id, prepare);
+        }
+        return;
+    }
+    let Some(AtomicEvidenceClass::Valid(link)) = examine_atomic_frame(frame) else {
+        return;
+    };
+    match link.role {
+        AtomicFrameRole::Prepare => {
+            if let Ok(prepare) = decode_prepare(&frame.body) {
+                catalog.prepares.insert(prepare.atomic_id, prepare);
             }
         }
+        AtomicFrameRole::Member => {
+            if let Ok(member) = decode_member(&frame.body) {
+                let slot = catalog.members.entry(member.atomic_id).or_default();
+                if !slot.iter().any(|m| m.ordinal == member.ordinal) {
+                    slot.push(member);
+                }
+            }
+        }
+        AtomicFrameRole::Commit => {}
     }
-    Ok(catalog)
 }
 
 fn decode_stage_payload(body: &[u8]) -> Option<(AtomicId, u32, Vec<u8>)> {
@@ -180,29 +179,4 @@ fn decode_stage_seal(body: &[u8]) -> Option<AtomicId> {
             .ok()?,
     )
     .ok()
-}
-
-fn segment_files(paths: &StorePaths) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    collect_files(&paths.active_dir(), &mut out);
-    collect_files(&paths.segments_dir(), &mut out);
-    collect_files(&paths.pending_seal_dir(), &mut out);
-    out
-}
-
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if entry.file_name().to_string_lossy().ends_with(".tmp") {
-            continue;
-        }
-        if path.is_dir() {
-            collect_files(&path, out);
-        } else if path.is_file() {
-            out.push(path);
-        }
-    }
 }

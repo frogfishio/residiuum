@@ -334,3 +334,7 @@ required-features = ["legacy-raw-store"]
 [[test]]
 name = "atomic_stage_invisibility"
 required-features = ["legacy-raw-store"]
+
+[[test]]
+name = "atomic_stage_bounded"
+required-features = ["legacy-raw-store"]
