@@ -11,6 +11,9 @@ Execution authority:
 
 Current continuation point:
 
+- [ATM5D_STABLE_VOCABULARY_BASELINE_2026-08-20.md](./ATM5D_STABLE_VOCABULARY_BASELINE_2026-08-20.md)
+  — complete §22 public vocabulary, precise structural mappings and
+  evidence-safe outcome/status classification.
 - [ATM5C_EXTERNAL_SIGKILL_BASELINE_2026-08-20.md](./ATM5C_EXTERNAL_SIGKILL_BASELINE_2026-08-20.md)
   — real external signal-9 decision/before-ack crash and unclean public-client
   recovery/replay proof.

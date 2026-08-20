@@ -311,6 +311,10 @@ fn atomic_driver_runs_gremlin_three_record_journey_and_restart_resolution() {
         .unwrap();
     let conflict = block_on(heap.commit_atomic(changed.build().unwrap())).unwrap_err();
     assert_eq!(conflict.code, ErrorCode::AtomicIdConflict);
+    assert_eq!(
+        conflict.atomic_code,
+        Some(residiuum_sdk::driver::atomics::AtomicCode::AtomicIdConflict)
+    );
     assert!(block_on(turns.get("same-id-different-root"))
         .unwrap()
         .is_none());
@@ -485,6 +489,10 @@ fn atomic_builder_refuses_collection_from_another_heap_before_build() {
         Err(error) => error,
     };
     assert_eq!(error.code, ErrorCode::PermissionDenied);
+    assert_eq!(
+        error.atomic_code,
+        Some(residiuum_sdk::driver::atomics::AtomicCode::AtomicScopeEscape)
+    );
 }
 
 #[test]
@@ -513,6 +521,10 @@ fn atomic_submission_deadline_before_dispatch_issues_nothing_and_plan_can_be_ren
 
     let error = block_on(heap.commit_atomic(plan.clone())).unwrap_err();
     assert_eq!(error.code, ErrorCode::AtomicDeadlineExceeded);
+    assert_eq!(
+        error.atomic_code,
+        Some(residiuum_sdk::driver::atomics::AtomicCode::AtomicDeadlineExceeded)
+    );
     assert_eq!(
         block_on(heap.atomic_status(atomic_id)).unwrap().logical,
         residiuum_atomics::LogicalStatus::NotFound

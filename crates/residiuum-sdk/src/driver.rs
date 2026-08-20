@@ -350,6 +350,8 @@ pub enum ErrorClass {
 pub struct Error {
     /// Stable code.
     pub code: ErrorCode,
+    /// Atomics-specific semantic code, when this failure has one.
+    pub atomic_code: Option<atomics::AtomicCode>,
     /// Broad handling class.
     pub class: ErrorClass,
     /// Operator-readable detail; not a decision interface.
@@ -383,6 +385,7 @@ impl Error {
     fn local(code: ErrorCode, class: ErrorClass, message: impl Into<String>) -> Self {
         Self {
             code,
+            atomic_code: None,
             class,
             message: message.into(),
             request_id: None,
@@ -404,6 +407,7 @@ impl Error {
     ) -> Self {
         Self {
             code,
+            atomic_code: None,
             class,
             message: message.into(),
             request_id: Some(request_id),
@@ -419,6 +423,12 @@ impl Error {
         request_id: RequestId,
         operation_id: Option<OperationId>,
     ) -> Self {
+        let atomic_code = match &source {
+            SdkError::Store(residiuum_store::StoreError::Atomic(error)) => {
+                atomics::AtomicCode::from_error(*error)
+            }
+            _ => None,
+        };
         let (code, class, retry) = match &source {
             SdkError::Store(residiuum_store::StoreError::OperationIdentityConflict) => (
                 ErrorCode::OperationIdentityConflict,
@@ -500,6 +510,7 @@ impl Error {
         let message = source.to_string();
         Self {
             code,
+            atomic_code,
             class,
             message,
             request_id: Some(request_id),
@@ -507,6 +518,19 @@ impl Error {
             retry,
             terminal: TerminalOutcome::Refused,
             source: Some(source),
+        }
+    }
+
+    fn with_atomic_code(mut self, code: atomics::AtomicCode) -> Self {
+        self.atomic_code = Some(code);
+        self
+    }
+
+    fn with_atomic_code_if(self, condition: bool, code: atomics::AtomicCode) -> Self {
+        if condition {
+            self.with_atomic_code(code)
+        } else {
+            self
         }
     }
 }
@@ -2166,6 +2190,7 @@ impl Scheduler {
         T: Send + 'static,
         F: FnOnce() -> Result<T, SdkError> + Send + 'static,
     {
+        let atomic_request = unknown_after_dispatch.is_some();
         let reject = |code, message, counters: &Counters| {
             counters.refused.fetch_add(1, Ordering::Relaxed);
             let (future, responder) = response_pair();
@@ -2177,6 +2202,10 @@ impl Scheduler {
                 None,
                 TerminalOutcome::Refused,
                 RetryDisposition::Never,
+            )
+            .with_atomic_code_if(
+                atomic_request && code == ErrorCode::ResourceLimit,
+                atomics::AtomicCode::AtomicLimitExceeded,
             )));
             future
         };
@@ -2247,6 +2276,10 @@ impl Scheduler {
                 operation_id,
                 TerminalOutcome::DeadlineExceeded,
                 RetryDisposition::Never,
+            )
+            .with_atomic_code_if(
+                atomic_deadline,
+                atomics::AtomicCode::AtomicDeadlineExceeded,
             )));
             return future;
         }
@@ -2275,6 +2308,10 @@ impl Scheduler {
                     operation_id,
                     TerminalOutcome::DeadlineExceeded,
                     RetryDisposition::Never,
+                )
+                .with_atomic_code_if(
+                    task_atomic_deadline,
+                    atomics::AtomicCode::AtomicDeadlineExceeded,
                 )));
                 return;
             }
@@ -2397,6 +2434,10 @@ impl Scheduler {
                             operation_id,
                             TerminalOutcome::DeadlineExceeded,
                             RetryDisposition::Never,
+                        )
+                        .with_atomic_code_if(
+                            callback_unknown.is_some(),
+                            atomics::AtomicCode::AtomicDeadlineExceeded,
                         )
                     } else {
                         Error::for_request(

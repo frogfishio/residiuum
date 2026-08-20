@@ -13,8 +13,162 @@ use std::{sync::atomic::Ordering, sync::Arc};
 
 pub use residiuum_atomics::{
     AtomicAbortReason, AtomicId, AtomicMemberReceipt, AtomicOptions, AtomicOutcome, AtomicReceipt,
-    AtomicResolutionHandle, AtomicStatus, ResourceLimits,
+    AtomicRefuseReason, AtomicResolutionHandle, AtomicStatus, LogicalStatus, MaterialStatus,
+    ResourceLimits,
 };
+
+/// Stable Atomics semantic code from `ATOMICS_SPEC` §22.
+///
+/// This vocabulary is independent of the driver's transport/admission
+/// [`super::ErrorCode`]. Not every reserved code is emitted by the v1 kernel:
+/// callers receive only distinctions supported by durable evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AtomicCode {
+    /// One identity was reused for different canonical content.
+    AtomicIdConflict,
+    /// Atomic identity bytes were illegal.
+    AtomicIdInvalid,
+    /// A plan or member escaped its authorised Heap scope.
+    AtomicScopeEscape,
+    /// The requested Atomic scope/profile is unavailable.
+    AtomicScopeUnavailable,
+    /// A configured or hard Atomic bound was exceeded.
+    AtomicLimitExceeded,
+    /// The deadline expired before Atomic acceptance or dispatch.
+    AtomicDeadlineExceeded,
+    /// A construction read no longer matches the serialization frontier.
+    AtomicReadConflict,
+    /// A predicate no longer holds at the serialization frontier.
+    AtomicPredicateConflict,
+    /// The governing rule changed after construction.
+    AtomicRuleChanged,
+    /// The closed plan violates an active rule.
+    AtomicRuleViolation,
+    /// Durable evidence proves a not-committed decision.
+    AtomicNotCommitted,
+    /// The observer cannot yet establish the logical outcome.
+    AtomicOutcomeUnknown,
+    /// Valid durable decision or material evidence conflicts.
+    AtomicEvidenceConflicting,
+    /// Required evidence coverage is incomplete.
+    AtomicCoverageIncomplete,
+    /// A committed decision exists but named material is incomplete.
+    AtomicMaterialPartial,
+    /// The capability lacks a required Atomic right.
+    AtomicRightDenied,
+    /// A relationship requires a parent that is absent.
+    RelationshipParentMissing,
+    /// A relationship prevents removal while children exist.
+    RelationshipChildrenExist,
+    /// Relationship enforcement is operating in a degraded state.
+    RelationshipDegraded,
+    /// A uniqueness rule found an existing live value.
+    UniqueValueExists,
+}
+
+impl AtomicCode {
+    /// Exact stable machine-readable spelling.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AtomicIdConflict => "atomic_id_conflict",
+            Self::AtomicIdInvalid => "atomic_id_invalid",
+            Self::AtomicScopeEscape => "atomic_scope_escape",
+            Self::AtomicScopeUnavailable => "atomic_scope_unavailable",
+            Self::AtomicLimitExceeded => "atomic_limit_exceeded",
+            Self::AtomicDeadlineExceeded => "atomic_deadline_exceeded",
+            Self::AtomicReadConflict => "atomic_read_conflict",
+            Self::AtomicPredicateConflict => "atomic_predicate_conflict",
+            Self::AtomicRuleChanged => "atomic_rule_changed",
+            Self::AtomicRuleViolation => "atomic_rule_violation",
+            Self::AtomicNotCommitted => "atomic_not_committed",
+            Self::AtomicOutcomeUnknown => "atomic_outcome_unknown",
+            Self::AtomicEvidenceConflicting => "atomic_evidence_conflicting",
+            Self::AtomicCoverageIncomplete => "atomic_coverage_incomplete",
+            Self::AtomicMaterialPartial => "atomic_material_partial",
+            Self::AtomicRightDenied => "atomic_right_denied",
+            Self::RelationshipParentMissing => "relationship_parent_missing",
+            Self::RelationshipChildrenExist => "relationship_children_exist",
+            Self::RelationshipDegraded => "relationship_degraded",
+            Self::UniqueValueExists => "unique_value_exists",
+        }
+    }
+
+    /// Classify a structural refusal when the kernel proves a §22 distinction.
+    pub const fn from_refusal(reason: AtomicRefuseReason) -> Option<Self> {
+        match reason {
+            AtomicRefuseReason::ScopeUnavailable => Some(Self::AtomicScopeUnavailable),
+            AtomicRefuseReason::CrossHeapCollection => Some(Self::AtomicScopeEscape),
+            AtomicRefuseReason::StaleOrForeignCapability
+            | AtomicRefuseReason::AuthorizationFailure => Some(Self::AtomicRightDenied),
+            AtomicRefuseReason::LimitExceeded => Some(Self::AtomicLimitExceeded),
+            AtomicRefuseReason::Deadline => Some(Self::AtomicDeadlineExceeded),
+            AtomicRefuseReason::AtomicIdConflict => Some(Self::AtomicIdConflict),
+            AtomicRefuseReason::MalformedInput
+            | AtomicRefuseReason::UnsupportedProfile
+            | AtomicRefuseReason::DuplicateTarget
+            | AtomicRefuseReason::InvalidValue
+            | AtomicRefuseReason::UnknownMutationKind
+            | AtomicRefuseReason::UnsupportedPredicate
+            | AtomicRefuseReason::CancelledBeforeAcceptance => None,
+        }
+    }
+
+    /// Classify an issued Atomic outcome. `None` means committed.
+    ///
+    /// The v1 durable abort record intentionally has coarse reason codes.
+    /// Therefore precondition and rule aborts report `atomic_not_committed`
+    /// until durable evidence can honestly distinguish their finer §22 forms.
+    pub const fn from_outcome(outcome: &AtomicOutcome) -> Option<Self> {
+        match outcome {
+            AtomicOutcome::Committed(_) => None,
+            AtomicOutcome::Unknown { .. } => Some(Self::AtomicOutcomeUnknown),
+            AtomicOutcome::NotCommitted {
+                reason: AtomicAbortReason::CoverageIncomplete,
+                ..
+            } => Some(Self::AtomicCoverageIncomplete),
+            AtomicOutcome::NotCommitted { .. } => Some(Self::AtomicNotCommitted),
+        }
+    }
+
+    /// Classify a status result, prioritising conflicting and incomplete proof.
+    pub const fn from_status(status: &AtomicStatus) -> Option<Self> {
+        if matches!(status.logical, LogicalStatus::ConflictingDecisionEvidence)
+            || matches!(status.material, MaterialStatus::Conflicting)
+        {
+            return Some(Self::AtomicEvidenceConflicting);
+        }
+        if matches!(status.material, MaterialStatus::CoverageIncomplete) {
+            return Some(Self::AtomicCoverageIncomplete);
+        }
+        if matches!(status.logical, LogicalStatus::Committed)
+            && !matches!(status.material, MaterialStatus::Complete)
+        {
+            return Some(Self::AtomicMaterialPartial);
+        }
+        match status.logical {
+            LogicalStatus::UnknownCommit => Some(Self::AtomicOutcomeUnknown),
+            LogicalStatus::NotCommitted => Some(Self::AtomicNotCommitted),
+            LogicalStatus::Committed
+            | LogicalStatus::ConflictingDecisionEvidence
+            | LogicalStatus::NotFound => None,
+        }
+    }
+
+    pub(super) const fn from_error(error: residiuum_atomics::AtomicsError) -> Option<Self> {
+        match error {
+            residiuum_atomics::AtomicsError::InvalidIdentity(_) => Some(Self::AtomicIdInvalid),
+            residiuum_atomics::AtomicsError::Refused(reason) => Self::from_refusal(reason),
+            residiuum_atomics::AtomicsError::EntropyUnavailable
+            | residiuum_atomics::AtomicsError::Cbor(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for AtomicCode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
 
 /// Immutable canonical Atomic plan plus non-canonical submission metadata.
 /// Application code cannot construct or modify the canonical inner plan.
@@ -100,7 +254,8 @@ impl AtomicBuilder {
                 ErrorCode::PermissionDenied,
                 ErrorClass::Request,
                 "Atomic collection belongs to a foreign capability instance",
-            ));
+            )
+            .with_atomic_code(AtomicCode::AtomicScopeEscape));
         }
         let capability = self.heap.heap.capability();
         let slot = std::sync::Arc::clone(capability.slot());
@@ -362,7 +517,8 @@ pub(super) async fn commit(heap: &HeapClient, plan: AtomicPlan) -> Result<Atomic
             ErrorCode::PermissionDenied,
             ErrorClass::Request,
             "Atomic plan belongs to a foreign Heap",
-        ));
+        )
+        .with_atomic_code(AtomicCode::AtomicScopeEscape));
     }
     let bytes = residiuum_atomics::encode_canonical_plan(&plan.inner)
         .map_err(atomics_error)?
@@ -513,16 +669,182 @@ fn absent_hash(collection: residiuum_heap::CollectionId, key: &[u8]) -> [u8; 32]
 
 fn atomics_error(error: residiuum_atomics::AtomicsError) -> Error {
     use residiuum_atomics::AtomicRefuseReason;
-    let code = match &error {
+    let (code, class) = match &error {
         residiuum_atomics::AtomicsError::Refused(
             AtomicRefuseReason::AuthorizationFailure
             | AtomicRefuseReason::CrossHeapCollection
             | AtomicRefuseReason::StaleOrForeignCapability,
-        ) => ErrorCode::PermissionDenied,
+        ) => (ErrorCode::PermissionDenied, ErrorClass::Request),
         residiuum_atomics::AtomicsError::Refused(AtomicRefuseReason::LimitExceeded) => {
-            ErrorCode::ResourceLimit
+            (ErrorCode::ResourceLimit, ErrorClass::Request)
         }
-        _ => ErrorCode::Validation,
+        residiuum_atomics::AtomicsError::Refused(AtomicRefuseReason::Deadline) => {
+            (ErrorCode::AtomicDeadlineExceeded, ErrorClass::Cancellation)
+        }
+        residiuum_atomics::AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict) => {
+            (ErrorCode::AtomicIdConflict, ErrorClass::Request)
+        }
+        _ => (ErrorCode::Validation, ErrorClass::Request),
     };
-    Error::local(code, ErrorClass::Request, error.to_string())
+    let atomic_code = AtomicCode::from_error(error);
+    let error = Error::local(code, class, error.to_string());
+    match atomic_code {
+        Some(code) => error.with_atomic_code(code),
+        None => error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn section_22_vocabulary_has_exact_stable_spellings() {
+        let cases = [
+            (AtomicCode::AtomicIdConflict, "atomic_id_conflict"),
+            (AtomicCode::AtomicIdInvalid, "atomic_id_invalid"),
+            (AtomicCode::AtomicScopeEscape, "atomic_scope_escape"),
+            (
+                AtomicCode::AtomicScopeUnavailable,
+                "atomic_scope_unavailable",
+            ),
+            (AtomicCode::AtomicLimitExceeded, "atomic_limit_exceeded"),
+            (
+                AtomicCode::AtomicDeadlineExceeded,
+                "atomic_deadline_exceeded",
+            ),
+            (AtomicCode::AtomicReadConflict, "atomic_read_conflict"),
+            (
+                AtomicCode::AtomicPredicateConflict,
+                "atomic_predicate_conflict",
+            ),
+            (AtomicCode::AtomicRuleChanged, "atomic_rule_changed"),
+            (AtomicCode::AtomicRuleViolation, "atomic_rule_violation"),
+            (AtomicCode::AtomicNotCommitted, "atomic_not_committed"),
+            (AtomicCode::AtomicOutcomeUnknown, "atomic_outcome_unknown"),
+            (
+                AtomicCode::AtomicEvidenceConflicting,
+                "atomic_evidence_conflicting",
+            ),
+            (
+                AtomicCode::AtomicCoverageIncomplete,
+                "atomic_coverage_incomplete",
+            ),
+            (AtomicCode::AtomicMaterialPartial, "atomic_material_partial"),
+            (AtomicCode::AtomicRightDenied, "atomic_right_denied"),
+            (
+                AtomicCode::RelationshipParentMissing,
+                "relationship_parent_missing",
+            ),
+            (
+                AtomicCode::RelationshipChildrenExist,
+                "relationship_children_exist",
+            ),
+            (AtomicCode::RelationshipDegraded, "relationship_degraded"),
+            (AtomicCode::UniqueValueExists, "unique_value_exists"),
+        ];
+        for (code, expected) in cases {
+            assert_eq!(code.as_str(), expected);
+            assert_eq!(code.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn classifications_preserve_proof_strength() {
+        assert_eq!(
+            AtomicCode::from_refusal(AtomicRefuseReason::CrossHeapCollection),
+            Some(AtomicCode::AtomicScopeEscape)
+        );
+        assert_eq!(
+            AtomicCode::from_refusal(AtomicRefuseReason::MalformedInput),
+            None
+        );
+
+        let atomic_id = AtomicId::from_bytes([7; 32]).unwrap();
+        let coarse_abort = AtomicOutcome::NotCommitted {
+            atomic_id,
+            reason: AtomicAbortReason::PreconditionConflict,
+        };
+        assert_eq!(
+            AtomicCode::from_outcome(&coarse_abort),
+            Some(AtomicCode::AtomicNotCommitted)
+        );
+        let coverage_abort = AtomicOutcome::NotCommitted {
+            atomic_id,
+            reason: AtomicAbortReason::CoverageIncomplete,
+        };
+        assert_eq!(
+            AtomicCode::from_outcome(&coverage_abort),
+            Some(AtomicCode::AtomicCoverageIncomplete)
+        );
+
+        let conflicting = AtomicStatus {
+            logical: LogicalStatus::UnknownCommit,
+            material: MaterialStatus::Conflicting,
+            content_root: None,
+            receipt: None,
+        };
+        assert_eq!(
+            AtomicCode::from_status(&conflicting),
+            Some(AtomicCode::AtomicEvidenceConflicting)
+        );
+        assert_eq!(
+            AtomicCode::from_status(&AtomicStatus::incomplete_coverage()),
+            Some(AtomicCode::AtomicCoverageIncomplete)
+        );
+        assert_eq!(AtomicCode::from_status(&AtomicStatus::not_found()), None);
+    }
+
+    #[test]
+    fn structural_errors_carry_the_precise_atomic_code() {
+        let cases = [
+            (
+                AtomicRefuseReason::CrossHeapCollection,
+                ErrorCode::PermissionDenied,
+                AtomicCode::AtomicScopeEscape,
+            ),
+            (
+                AtomicRefuseReason::ScopeUnavailable,
+                ErrorCode::Validation,
+                AtomicCode::AtomicScopeUnavailable,
+            ),
+            (
+                AtomicRefuseReason::AuthorizationFailure,
+                ErrorCode::PermissionDenied,
+                AtomicCode::AtomicRightDenied,
+            ),
+            (
+                AtomicRefuseReason::LimitExceeded,
+                ErrorCode::ResourceLimit,
+                AtomicCode::AtomicLimitExceeded,
+            ),
+            (
+                AtomicRefuseReason::Deadline,
+                ErrorCode::AtomicDeadlineExceeded,
+                AtomicCode::AtomicDeadlineExceeded,
+            ),
+            (
+                AtomicRefuseReason::AtomicIdConflict,
+                ErrorCode::AtomicIdConflict,
+                AtomicCode::AtomicIdConflict,
+            ),
+        ];
+        for (reason, driver_code, atomic_code) in cases {
+            let error = atomics_error(residiuum_atomics::AtomicsError::Refused(reason));
+            assert_eq!(error.code, driver_code);
+            assert_eq!(error.atomic_code, Some(atomic_code));
+        }
+
+        let invalid = atomics_error(residiuum_atomics::AtomicsError::InvalidIdentity(
+            "test identity",
+        ));
+        assert_eq!(invalid.code, ErrorCode::Validation);
+        assert_eq!(invalid.atomic_code, Some(AtomicCode::AtomicIdInvalid));
+
+        let malformed = atomics_error(residiuum_atomics::AtomicsError::Refused(
+            AtomicRefuseReason::MalformedInput,
+        ));
+        assert_eq!(malformed.code, ErrorCode::Validation);
+        assert_eq!(malformed.atomic_code, None);
+    }
 }
