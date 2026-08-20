@@ -191,11 +191,23 @@ Delivered and locally qualified:
 - transition/activation/rollback, corrupt-needed versus corrupt-unused bundle
   behavior, four restoration crash cuts and both sides of bundle publication
   are qualified. Replacement coverage retires old sealed identities without
-  leaving a false frontier gap.
+  leaving a false frontier gap;
+- online external tier roots participate in pre-mutation collision inventory
+  and Atomic media discovery. Checkpoint deletion followed by reopen rebuilds
+  the exact Atomic from its externally moved segment;
+- a missing online external segment is restored from its exact Shadow at the
+  configured tier path, never duplicated into hot. An offline external tier is
+  not read or repaired, remains explicit incomplete coverage, and cannot prove
+  ordinary absence. With independent authority, the Atomic remains materially
+  complete; without it, the checkpoint preserves `Committed` while material is
+  `CoverageIncomplete`, emits no receipt and never leaks raw `ENOENT`;
+- destructive compaction resolves external sources through the current
+  canonical tier path, physically removes them before reporting reclaimed,
+  preserves authenticated absolute supersession markers through the swap, and
+  reopens on the replacement generation.
 
 Still open in ATM-4C:
 
-- external configured tier-root online/offline coverage truth;
 - tombstone-index obsolete-page generation-swap crash qualification;
 - canonical crash-matrix expansion for multi-source deletion cuts beyond the
   already registered first-source cut.

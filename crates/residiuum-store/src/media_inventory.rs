@@ -260,6 +260,24 @@ pub fn build_authoritative_inventory_with_policy(
     limits: SafetyLimits,
     policy: InventoryPolicy,
 ) -> Result<MediaInventory, StoreError> {
+    build_authoritative_inventory_with_placement_policy(
+        paths,
+        store_id,
+        writer_shards,
+        limits,
+        policy,
+        None,
+    )
+}
+
+fn build_authoritative_inventory_with_placement_policy(
+    paths: &StorePaths,
+    store_id: [u8; 16],
+    writer_shards: usize,
+    limits: SafetyLimits,
+    policy: InventoryPolicy,
+    placement: Option<&crate::tier::TierPlacement>,
+) -> Result<MediaInventory, StoreError> {
     let mut inv = MediaInventory::default();
 
     for path in list_residiuum_files(&paths.segments_dir())? {
@@ -270,10 +288,34 @@ pub fn build_authoritative_inventory_with_policy(
     }
 
     // Tier placement copies (stable segment identity on other mount roots).
-    let tier_root = paths.root.join("tiers");
-    if tier_root.is_dir() {
-        for ent in walkdir_residiuum(&tier_root)? {
-            inventory_residiuum_file(&mut inv, ent, store_id, limits, "tier", policy)?;
+    // A placement-aware open scans configured external roots as well as local
+    // tiers, but never touches a tier explicitly declared offline.
+    if let Some(placement) = placement {
+        let mut tier_dirs = [
+            crate::tier::TierClass::Warm,
+            crate::tier::TierClass::Cold,
+            crate::tier::TierClass::Archive,
+        ]
+        .into_iter()
+        .filter(|tier| placement.is_tier_available(*tier))
+        .map(|tier| crate::tier::tier_media_dir(paths, placement, tier))
+        .collect::<Vec<_>>();
+        tier_dirs.sort();
+        tier_dirs.dedup();
+        for tier_dir in tier_dirs {
+            if !tier_dir.is_dir() {
+                continue;
+            }
+            for entry in walkdir_residiuum(&tier_dir)? {
+                inventory_residiuum_file(&mut inv, entry, store_id, limits, "tier", policy)?;
+            }
+        }
+    } else {
+        let tier_root = paths.root.join("tiers");
+        if tier_root.is_dir() {
+            for entry in walkdir_residiuum(&tier_root)? {
+                inventory_residiuum_file(&mut inv, entry, store_id, limits, "tier", policy)?;
+            }
         }
     }
 
@@ -344,17 +386,44 @@ pub fn inventory_authoritative_media(
     limits: SafetyLimits,
     policy: InventoryPolicy,
 ) -> Result<MediaInventory, StoreError> {
-    let mut inv =
-        build_authoritative_inventory_with_policy(paths, store_id, writer_shards, limits, policy)?;
+    inventory_authoritative_media_with_placement(
+        paths,
+        store_id,
+        writer_shards,
+        limits,
+        policy,
+        None,
+    )
+}
+
+/// Placement-aware writable inventory used by Store open. External online
+/// roots participate in collision truth; offline roots remain coverage holes.
+pub(crate) fn inventory_authoritative_media_with_placement(
+    paths: &StorePaths,
+    store_id: [u8; 16],
+    writer_shards: usize,
+    limits: SafetyLimits,
+    policy: InventoryPolicy,
+    placement: Option<&crate::tier::TierPlacement>,
+) -> Result<MediaInventory, StoreError> {
+    let mut inv = build_authoritative_inventory_with_placement_policy(
+        paths,
+        store_id,
+        writer_shards,
+        limits,
+        policy,
+        placement,
+    )?;
     if matches!(policy, InventoryPolicy::FailClosed) && heal_publish_aliases_from_inventory(&inv)? {
         // Directory entries changed. Rebuild once so collision evidence and
         // open metrics describe the post-heal authoritative set.
-        inv = build_authoritative_inventory_with_policy(
+        inv = build_authoritative_inventory_with_placement_policy(
             paths,
             store_id,
             writer_shards,
             limits,
             policy,
+            placement,
         )?;
     }
     if let Some((segment_id, collision_paths)) = inv.first_collision() {

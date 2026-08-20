@@ -1523,17 +1523,22 @@ impl Store {
         store.recovery_mode = early_recovery_mode;
         if early_recovery_mode == crate::recovery_shadow::RecoveryMode::CompactShadow {
             crate::recovery_shadow::restore_atomic_authority_shadow(&store.paths, store.store_id)?;
-            crate::recovery_shadow::restore_missing_segment_images(&store.paths, store.store_id)?;
+            crate::recovery_shadow::restore_missing_segment_images(
+                &store.paths,
+                store.store_id,
+                &store.tier_placement,
+            )?;
         }
         // P0: inventory authoritative media and refuse collisions **before**
         // pending recovery, index rebuild, or any overwrite-capable mutation.
         let phase = Instant::now();
-        let inventory = crate::media_inventory::inventory_authoritative_media(
+        let inventory = crate::media_inventory::inventory_authoritative_media_with_placement(
             &store.paths,
             store.store_id,
             store.writer_shards,
             store.limits,
             options.inventory_policy,
+            Some(&store.tier_placement),
         )?;
         open_metrics.inventory_ns = elapsed_ns(phase);
         open_metrics.inventory_descriptor_probe_bytes = inventory.descriptor_probe_bytes;
@@ -6368,7 +6373,8 @@ impl Store {
         // evidence before history-loss compaction is allowed to remove it.
         self.reconcile_write_dedup_from_media()?;
         self.write_dedup_recovery_required = false;
-        let (reclaimed, retained, deleted_ids) = reclaim_source_segments(&self.paths, job)?;
+        let (reclaimed, retained, deleted_ids) =
+            reclaim_source_segments(&self.paths, job, Some(&self.tier_placement))?;
         crate::atomic_stage_recover::prune_deleted_superseded_media(&self.paths)?;
         for id in &deleted_ids {
             self.tier_placement.remove(id);

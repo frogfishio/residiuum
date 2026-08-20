@@ -364,6 +364,25 @@ inventory. Every restoration step is idempotent; a corrupt needed bundle fails
 before segment restoration, while an unused corrupt bundle cannot override or
 kneel complete local authority.
 
+Covered-file and `BodyRef` names are store-relative for store-owned media. A
+configured external tier segment uses its canonical absolute filesystem path;
+checkpoint load accepts such a reference only when its parent is one of the
+configured tier roots and its filename is a canonical segment identity.
+Superseded external references are comparison markers and are never deletion
+authority by themselves.
+
+Tier placement remains authoritative for the restoration destination. A
+missing segment assigned to an online configured tier is restored to that
+tier's canonical `<segment-id>.residiuum` path; it is not copied into the hot
+tier. A tier declared offline is never read or repaired during open and remains
+an explicit incomplete-coverage condition. Online external tier roots
+participate in pre-mutation segment-collision inventory and Atomic covered-file
+relocation. Recovery discovery reconstructs these roots from `tiers/roots.txt`
+and does not use the derived placement catalogue as Atomic authority.
+When an Atomic-bearing tier is offline, its authenticated checkpoint retains
+the exact logical decision while material reports `CoverageIncomplete` and no
+receipt is issued; examination does not fail with a raw missing-file error.
+
 Backup profile `residiuum-backup-v1` copies `store-info/` (including
 `atomic-stage.ckpt` and `atomic-coord.ckpt`) plus `active/`, `segments/`,
 `chunks/`, `recovery/`, and `tiers/`. Same-identity restore preserves staging.

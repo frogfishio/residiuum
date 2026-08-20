@@ -161,8 +161,16 @@ media permits and are never interpreted as the new composite-key format.
   after deleting every local sealed segment and Atomic support file. Corruption
   polarity and six Recovery Shadow publication/restoration boundaries are
   registered and exercised.
-- **Remaining:** external tier-root discovery/offline truth; tombstone-index
-  page generation reclaim; and expanded multi-source deletion crash cuts.
+- **Delivered:** online external tier roots participate in authoritative
+  collision inventory, Atomic checkpoint rebuild and exact covered-path
+  relocation. Missing online tier media is restored in place from its Shadow;
+  offline media is neither read nor resurrected into hot and remains explicit
+  incomplete coverage that cannot prove ordinary absence. Logical Atomic truth
+  remains exact while unavailable material reports `CoverageIncomplete`
+  without a receipt or raw I/O error. Destructive compaction physically
+  reclaims external sources and reopens on its consolidated generation.
+- **Remaining:** tombstone-index page generation reclaim and expanded
+  multi-source deletion crash cuts.
 
 ### ATM-4D — serial histories and predicates
 

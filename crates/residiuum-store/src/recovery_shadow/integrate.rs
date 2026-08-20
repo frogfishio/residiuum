@@ -417,6 +417,7 @@ pub fn rebuild_coverage_from_shadows(
 pub(crate) fn restore_missing_segment_images(
     paths: &StorePaths,
     store_id: [u8; 16],
+    placement: &crate::tier::TierPlacement,
 ) -> Result<u64, StoreError> {
     let dir = super::wire::shadow_dir(paths);
     if !dir.is_dir() {
@@ -437,10 +438,26 @@ pub(crate) fn restore_missing_segment_images(
             // Dedicated non-segment Shadows live in the same directory.
             continue;
         };
-        let target = paths.sealed_segment(&segment_id);
-        if target.is_file() {
-            continue;
-        }
+        let target = if let Some(known) = placement.get(&segment_id) {
+            // An offline tier is an explicit coverage hole. Never silently
+            // turn it into hot residency merely because a Shadow is local.
+            if !placement.is_tier_available(known.tier) {
+                continue;
+            }
+            let recorded = crate::tier::resolve_placement_path(paths, known)?;
+            let configured =
+                crate::tier::segment_path_on_tier(paths, placement, known.tier, &segment_id);
+            if recorded.is_file() || configured.is_file() {
+                continue;
+            }
+            configured
+        } else {
+            let hot = paths.sealed_segment(&segment_id);
+            if hot.is_file() {
+                continue;
+            }
+            hot
+        };
         let bytes = fs::read(&path)?;
         let (embedded_id, image) = if super::dual_stream::is_dual_magic(&bytes) {
             let (_, embedded, image) =

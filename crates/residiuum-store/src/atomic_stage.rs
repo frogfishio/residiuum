@@ -2653,6 +2653,14 @@ fn rebuild_heap(
             })?;
         heap.install_prepared(seq, atomic_id, prepare.content_root, &members)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let reference_unavailable = |reference: &BodyRef| {
+            if !catalog.missing_covered.contains(&reference.rel_path) {
+                return false;
+            }
+            let path = paths.root.join(&reference.rel_path);
+            !path.is_file() || crate::tier::is_offline_tier_segment_path(paths, &path)
+        };
+        let mut material_loaded = true;
         for member in &members {
             if let Some(plan) = catalog.chunk_plans.get(&(key.0, atomic_id, member.ordinal)) {
                 heap.commit_chunk_manifest(atomic_id, member.ordinal, plan.clone())
@@ -2667,6 +2675,14 @@ fn rebuild_heap(
                 indexes.sort_unstable();
                 indexes.dedup();
                 for index in indexes {
+                    if catalog
+                        .chunk_refs
+                        .get(&(key.0, atomic_id, member.ordinal, index))
+                        .is_some_and(&reference_unavailable)
+                    {
+                        material_loaded = false;
+                        continue;
+                    }
                     let body = resolve_chunk_body(paths, catalog, key, member.ordinal, index)?
                         .ok_or_else(|| {
                             StoreError::AtomicStage("chunk index missing after key scan".into())
@@ -2674,18 +2690,32 @@ fn rebuild_heap(
                     heap.append_chunk(member.clone(), index, body)
                         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
                 }
-            } else if let Some(payload) = resolve_payload_body(paths, catalog, key, member.ordinal)?
-            {
-                heap.append_staged(member.clone(), payload)
-                    .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+            } else {
+                if catalog
+                    .payload_refs
+                    .get(&(key.0, atomic_id, member.ordinal))
+                    .is_some_and(&reference_unavailable)
+                {
+                    material_loaded = false;
+                    continue;
+                }
+                match resolve_payload_body(paths, catalog, key, member.ordinal) {
+                    Ok(Some(payload)) => heap
+                        .append_staged(member.clone(), payload)
+                        .map_err(|e| StoreError::AtomicStage(e.to_string()))?,
+                    Ok(None) => {}
+                    Err(error) => return Err(error),
+                }
             }
         }
-        if let Some(root) = catalog.seals.get(&key) {
-            if *root != prepare.content_root {
-                continue;
+        if material_loaded {
+            if let Some(root) = catalog.seals.get(&key) {
+                if *root != prepare.content_root {
+                    continue;
+                }
+                heap.seal_member_boundary(atomic_id)
+                    .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
             }
-            heap.seal_member_boundary(atomic_id)
-                .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         }
     }
     Ok(heap)

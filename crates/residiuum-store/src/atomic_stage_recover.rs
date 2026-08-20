@@ -660,6 +660,21 @@ fn safe_store_relative_path(rel: &str) -> bool {
         })
 }
 
+/// Authenticated checkpoint references may name configured external tier
+/// media by absolute path. They are comparison/coverage references only: code
+/// that removes files must still require [`safe_store_relative_path`].
+fn safe_checkpoint_media_reference(reference: &str) -> bool {
+    let path = Path::new(reference);
+    safe_store_relative_path(reference)
+        || (path.is_absolute()
+            && path.components().all(|component| {
+                matches!(
+                    component,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )
+            }))
+}
+
 fn verify_replacement_catalog(
     paths: &StorePaths,
     old: &StageCatalog,
@@ -1218,12 +1233,15 @@ fn list_media_files(paths: &StorePaths, budget: &mut Budget) -> Result<Vec<PathB
         budget,
         &mut out,
     )?;
-    let mut tier_files = Vec::new();
-    collect_files(&paths.tiers_dir(), 0, budget, &mut tier_files)?;
-    out.extend(tier_files.into_iter().filter(|path| {
-        path.extension().and_then(|extension| extension.to_str()) == Some("residiuum")
-    }));
+    for tier_dir in crate::tier::configured_available_tier_dirs(paths) {
+        let mut tier_files = Vec::new();
+        collect_files(&tier_dir, 0, budget, &mut tier_files)?;
+        out.extend(tier_files.into_iter().filter(|path| {
+            path.extension().and_then(|extension| extension.to_str()) == Some("residiuum")
+        }));
+    }
     out.sort();
+    out.dedup();
     Ok(out)
 }
 
@@ -1743,7 +1761,22 @@ fn load_checkpoint(
     budget.report.checkpoint_bytes = len;
     let bytes = fs::read(&path)?;
     let decoded = decode_checkpoint(&bytes);
-    if let Some((catalog, _)) = &decoded {
+    if let Some((catalog, covered)) = &decoded {
+        let allowed = |reference: &str| {
+            safe_store_relative_path(reference)
+                || crate::tier::is_configured_tier_segment_path(paths, Path::new(reference))
+        };
+        let references_are_allowed = catalog
+            .payload_refs
+            .values()
+            .chain(catalog.chunk_refs.values())
+            .all(|reference| allowed(&reference.rel_path))
+            && covered.iter().all(|file| allowed(&file.rel_path))
+            && catalog.missing_covered.iter().all(|path| allowed(path))
+            && catalog.superseded_media.iter().all(|path| allowed(path));
+        if !references_are_allowed {
+            return Ok(None);
+        }
         if let Some(index) = catalog.tombstone_index {
             if validate_index(paths, index).is_err() {
                 return Ok(None);
@@ -2508,7 +2541,7 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
         let rel = String::from_utf8(cur[..n].to_vec()).ok()?;
         cur = &cur[n..];
         if rel.is_empty()
-            || !safe_store_relative_path(&rel)
+            || !safe_checkpoint_media_reference(&rel)
             || catalog.superseded_media.contains(&rel)
         {
             return None;
@@ -2614,6 +2647,41 @@ mod checkpoint_v18_freeze {
         fresh.findings.records.push(corrupt);
         let err = verify_replacement_catalog(&paths, &old, &fresh).unwrap_err();
         assert!(err.to_string().contains("findings"));
+    }
+
+    #[test]
+    fn absolute_body_reference_requires_a_configured_tier_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StorePaths::new(dir.path().join("store"));
+        paths.create_dirs().unwrap();
+        let external = dir.path().join("external");
+        fs::create_dir_all(&external).unwrap();
+        let segment = crate::ids::mint_sortable_segment_id(1, &[3u8; 16]);
+        let absolute = external
+            .join(format!("{}.residiuum", crate::layout::hex16(&segment)))
+            .to_string_lossy()
+            .into_owned();
+        let heap_id = HeapId::from_bytes([0x44; 16]).unwrap();
+        let mut catalog = StageCatalog::default();
+        catalog.payload_refs.insert(
+            (heap_id, aid(), 0),
+            BodyRef {
+                rel_path: absolute,
+                offset: 0,
+                len: 1,
+                hash: [7u8; 32],
+            },
+        );
+        let checkpoint = encode_checkpoint(&catalog, &[]).unwrap();
+        fs::write(atomic_stage_checkpoint_path(&paths), &checkpoint).unwrap();
+        let mut budget = Budget::new(AtomicStageLimits::operable());
+        assert!(load_checkpoint(&paths, &mut budget).unwrap().is_none());
+
+        let mut placement = crate::tier::TierPlacement::new();
+        placement.set_external_root(crate::tier::TierClass::Cold, external);
+        crate::tier::write_tier_roots_file(&paths, &placement).unwrap();
+        let mut budget = Budget::new(AtomicStageLimits::operable());
+        assert!(load_checkpoint(&paths, &mut budget).unwrap().is_some());
     }
 
     #[test]

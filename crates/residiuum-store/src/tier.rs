@@ -333,6 +333,55 @@ pub fn tier_media_dir(paths: &StorePaths, placement: &TierPlacement, tier: TierC
     default_tier_dir(paths, tier)
 }
 
+/// Configured non-hot media directories that are currently declared online.
+///
+/// This is intentionally reconstructed from the operator-owned roots file so
+/// low-level recovery code does not trust the derived placement catalogue and
+/// does not walk a tier explicitly declared offline.
+pub(crate) fn configured_available_tier_dirs(paths: &StorePaths) -> Vec<PathBuf> {
+    let mut placement = TierPlacement::new();
+    load_tier_roots_file(paths, &mut placement);
+    let mut dirs = [TierClass::Warm, TierClass::Cold, TierClass::Archive]
+        .into_iter()
+        .filter(|tier| placement.is_tier_available(*tier))
+        .map(|tier| tier_media_dir(paths, &placement, tier))
+        .collect::<Vec<_>>();
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+/// Whether an absolute checkpoint media reference is exactly one canonical
+/// segment file beneath a configured tier root (online or offline).
+pub(crate) fn is_configured_tier_segment_path(paths: &StorePaths, path: &Path) -> bool {
+    if !path.is_absolute() || segment_id_from_filename(path).is_none() {
+        return false;
+    }
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let mut placement = TierPlacement::new();
+    load_tier_roots_file(paths, &mut placement);
+    [TierClass::Warm, TierClass::Cold, TierClass::Archive]
+        .into_iter()
+        .map(|tier| tier_media_dir(paths, &placement, tier))
+        .any(|root| root == parent)
+}
+
+/// Whether a canonical segment path belongs to a tier declared offline.
+pub(crate) fn is_offline_tier_segment_path(paths: &StorePaths, path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let mut placement = TierPlacement::new();
+    load_tier_roots_file(paths, &mut placement);
+    [TierClass::Warm, TierClass::Cold, TierClass::Archive]
+        .into_iter()
+        .any(|tier| {
+            tier_media_dir(paths, &placement, tier) == parent && !placement.is_tier_available(tier)
+        })
+}
+
 /// Absolute path where a sealed segment should live on a tier.
 pub fn segment_path_on_tier(
     paths: &StorePaths,

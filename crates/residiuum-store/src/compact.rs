@@ -817,6 +817,7 @@ pub fn verify_live_segment(
 pub fn reclaim_source_segments(
     paths: &StorePaths,
     job: &CompactJob,
+    placement: Option<&crate::tier::TierPlacement>,
 ) -> Result<(u64, u64, Vec<[u8; 16]>), StoreError> {
     if !job.allow_history_loss {
         return Err(StoreError::ConsistencyViolation(
@@ -865,7 +866,13 @@ pub fn reclaim_source_segments(
         if id == output {
             continue;
         }
-        let path = paths.sealed_segment(&id);
+        let path = placement
+            .and_then(|placement| {
+                placement.get(&id).map(|known| {
+                    crate::tier::segment_path_on_tier(paths, placement, known.tier, &id)
+                })
+            })
+            .unwrap_or_else(|| paths.sealed_segment(&id));
         if !path.is_file() {
             continue;
         }
@@ -886,7 +893,20 @@ pub fn reclaim_source_segments(
             .source_segment_ids
             .iter()
             .filter_map(|id| unhex16(id))
-            .filter(|id| id != &output && !paths.sealed_segment(id).is_file())
+            .filter(|id| {
+                if id == &output {
+                    return false;
+                }
+                let present = placement
+                    .and_then(|placement| {
+                        placement.get(id).map(|known| {
+                            crate::tier::segment_path_on_tier(paths, placement, known.tier, id)
+                                .is_file()
+                        })
+                    })
+                    .unwrap_or_else(|| paths.sealed_segment(id).is_file());
+                !present
+            })
             .collect::<Vec<_>>();
         crate::recovery_shadow::retire_shadows_after_replacement(
             paths,

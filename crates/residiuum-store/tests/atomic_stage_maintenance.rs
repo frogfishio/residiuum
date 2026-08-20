@@ -269,6 +269,50 @@ fn erase_local_material_and_atomic_support(root: &std::path::Path) {
     }
 }
 
+fn configure_external_cold(root: &std::path::Path, external: &std::path::Path, online: bool) {
+    fs::create_dir_all(external).unwrap();
+    let state = if online { "online" } else { "offline" };
+    let body = format!(
+        "# residiuum tier roots v1\n\
+         hot online {}\n\
+         warm online {}\n\
+         cold {state} {}\n\
+         archive online {}\n",
+        root.join("segments").display(),
+        root.join("tiers/warm").display(),
+        external.display(),
+        root.join("tiers/archive").display(),
+    );
+    fs::write(root.join("tiers/roots.txt"), body).unwrap();
+}
+
+fn compact_output_with_atomic_and_ordinary(
+    root: &std::path::Path,
+) -> (HeapId, AtomicPlan, Vec<u8>, [u8; 16]) {
+    let mut store = Store::create(root).unwrap();
+    let (heap_id, plan, atomic_subject) = committed_plan(&mut store);
+    store
+        .put("ordinary/external", b"ordinary", DurabilityMode::Durable)
+        .unwrap();
+    store
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap();
+    let job = store
+        .list_compact_jobs()
+        .unwrap()
+        .into_iter()
+        .find(|job| job.reclaim_requested)
+        .unwrap();
+    let output = residiuum_store::unhex16(&job.output_segment_id).unwrap();
+    store.abandon_for_crash_test();
+    drop(store);
+    (heap_id, plan, atomic_subject, output)
+}
+
 fn media_has_prepare_or_member(root: &std::path::Path) -> bool {
     fn walk(dir: &std::path::Path) -> bool {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -1051,6 +1095,246 @@ fn corrupt_atomic_shadow_is_ignored_with_local_authority_and_refused_when_needed
         0,
         "Atomic Shadow must verify before segment restoration mutates media"
     );
+}
+
+#[test]
+fn compact_shadow_external_tier_restores_in_place_and_inventory_sees_collisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("s");
+    let external = dir.path().join("external-cold");
+    let (heap_id, closed, atomic_subject, output) = compact_output_with_atomic_and_ordinary(&root);
+    configure_external_cold(&root, &external, true);
+
+    let mut store = Store::open(&root).unwrap();
+    store
+        .transfer_segment_to_tier(output, TierClass::Cold, TierMoveMode::Move)
+        .unwrap();
+    let hot = root
+        .join("segments")
+        .join(format!("{}.residiuum", residiuum_store::hex16(&output)));
+    let cold = external.join(format!("{}.residiuum", residiuum_store::hex16(&output)));
+    assert!(!hot.is_file());
+    assert!(cold.is_file());
+    store.abandon_for_crash_test();
+    drop(store);
+
+    // A missing online external segment is reconstructed at its configured
+    // canonical tier path, never silently duplicated into hot storage.
+    fs::remove_file(&cold).unwrap();
+    let mut restored = Store::open(&root).unwrap();
+    assert!(cold.is_file());
+    assert!(!hot.is_file());
+    assert_committed_complete(&mut restored, heap_id, &atomic_subject);
+    assert_eq!(
+        restored
+            .atomic_stage_for_heap(heap_id)
+            .unwrap()
+            .decide_plan_evidence(&closed)
+            .unwrap()
+            .commit_position,
+        Some(1)
+    );
+    restored.abandon_for_crash_test();
+    drop(restored);
+
+    // Online external media participates in P0 collision truth.
+    fs::copy(&cold, &hot).unwrap();
+    let err = Store::open(&root)
+        .err()
+        .expect("hot plus external owner must be a collision");
+    assert!(matches!(err, StoreError::SegmentIdCollision { .. }));
+}
+
+#[test]
+fn atomic_checkpoint_rebuild_discovers_online_external_tier_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("s");
+    let external = dir.path().join("external-cold");
+    let mut store = Store::create(&root).unwrap();
+    let (heap_id, closed, atomic_subject) = committed_plan(&mut store);
+    store.seal_active().unwrap();
+    let atomic_segment = fs::read_dir(root.join("segments"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            fs::read(path).is_ok_and(|bytes| {
+                !read_atomic_evidence(&bytes, SafetyLimits::draft_defaults())
+                    .examined
+                    .is_empty()
+            })
+        })
+        .and_then(|path| residiuum_store::segment_id_from_filename(&path))
+        .expect("Atomic-bearing sealed segment");
+    store.abandon_for_crash_test();
+    drop(store);
+    configure_external_cold(&root, &external, true);
+
+    let mut store = Store::open(&root).unwrap();
+    store
+        .transfer_segment_to_tier(atomic_segment, TierClass::Cold, TierMoveMode::Move)
+        .unwrap();
+    let hot = root.join("segments").join(format!(
+        "{}.residiuum",
+        residiuum_store::hex16(&atomic_segment)
+    ));
+    let cold = external.join(format!(
+        "{}.residiuum",
+        residiuum_store::hex16(&atomic_segment)
+    ));
+    assert!(!hot.is_file());
+    assert!(cold.is_file());
+    store.abandon_for_crash_test();
+    drop(store);
+
+    fs::remove_file(root.join("store-info/atomic-stage.ckpt")).unwrap();
+    let mut rebuilt = Store::open(&root).unwrap();
+    assert!(!hot.is_file());
+    assert!(cold.is_file());
+    assert_committed_complete(&mut rebuilt, heap_id, &atomic_subject);
+    assert_eq!(
+        rebuilt
+            .atomic_stage_for_heap(heap_id)
+            .unwrap()
+            .decide_plan_evidence(&closed)
+            .unwrap()
+            .commit_position,
+        Some(1)
+    );
+
+    let report = rebuilt
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap();
+    assert_eq!(report.phase, residiuum_store::CompactPhase::Reclaimed);
+    assert!(
+        !cold.is_file(),
+        "external source must be physically reclaimed, not merely marked reclaimed"
+    );
+    rebuilt.abandon_for_crash_test();
+    drop(rebuilt);
+
+    let mut reopened = Store::open(&root).unwrap();
+    assert_committed_complete(&mut reopened, heap_id, &atomic_subject);
+    assert_eq!(
+        reopened
+            .atomic_stage_for_heap(heap_id)
+            .unwrap()
+            .decide_plan_evidence(&closed)
+            .unwrap()
+            .commit_position,
+        Some(1)
+    );
+}
+
+#[test]
+fn compact_shadow_offline_external_tier_stays_an_explicit_coverage_hole() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("s");
+    let external = dir.path().join("external-cold");
+    let (heap_id, closed, atomic_subject, output) = compact_output_with_atomic_and_ordinary(&root);
+    configure_external_cold(&root, &external, true);
+
+    let mut store = Store::open(&root).unwrap();
+    store
+        .transfer_segment_to_tier(output, TierClass::Cold, TierMoveMode::Move)
+        .unwrap();
+    let hot = root
+        .join("segments")
+        .join(format!("{}.residiuum", residiuum_store::hex16(&output)));
+    let cold = external.join(format!("{}.residiuum", residiuum_store::hex16(&output)));
+    assert!(cold.is_file());
+    store.abandon_for_crash_test();
+    drop(store);
+    configure_external_cold(&root, &external, false);
+
+    let mut reopened = Store::open(&root).unwrap();
+    assert!(
+        !hot.is_file(),
+        "offline media must not be resurrected into hot"
+    );
+    assert!(
+        cold.is_file(),
+        "offline declaration must not mutate tier media"
+    );
+    let coverage = reopened.tier_coverage();
+    assert!(coverage.is_incomplete());
+    assert!(coverage.offline.contains(&TierClass::Cold));
+    assert!(coverage.unavailable_segments.contains(&output));
+    let ordinary = reopened
+        .get_with_tier_coverage("ordinary/external")
+        .unwrap();
+    assert!(ordinary.value.is_none());
+    assert!(!ordinary.absence_proven);
+
+    // The independent Atomic authority generation remains exact even though
+    // the tier projection is deliberately unavailable.
+    assert_committed_complete(&mut reopened, heap_id, &atomic_subject);
+    assert_eq!(
+        reopened
+            .atomic_stage_for_heap(heap_id)
+            .unwrap()
+            .decide_plan_evidence(&closed)
+            .unwrap()
+            .commit_position,
+        Some(1)
+    );
+}
+
+#[test]
+fn offline_external_atomic_keeps_logical_truth_without_claiming_material() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("s");
+    let external = dir.path().join("external-cold");
+    let mut store = Store::create(&root).unwrap();
+    let (heap_id, _closed, atomic_subject) = committed_plan(&mut store);
+    store.seal_active().unwrap();
+    let atomic_segment = fs::read_dir(root.join("segments"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            fs::read(path).is_ok_and(|bytes| {
+                !read_atomic_evidence(&bytes, SafetyLimits::draft_defaults())
+                    .examined
+                    .is_empty()
+            })
+        })
+        .and_then(|path| residiuum_store::segment_id_from_filename(&path))
+        .unwrap();
+    store.abandon_for_crash_test();
+    drop(store);
+    configure_external_cold(&root, &external, true);
+
+    let mut store = Store::open(&root).unwrap();
+    store
+        .transfer_segment_to_tier(atomic_segment, TierClass::Cold, TierMoveMode::Move)
+        .unwrap();
+    store.abandon_for_crash_test();
+    drop(store);
+    configure_external_cold(&root, &external, false);
+
+    let mut reopened = Store::open(&root).unwrap();
+    let hot = root.join("segments").join(format!(
+        "{}.residiuum",
+        residiuum_store::hex16(&atomic_segment)
+    ));
+    assert!(!hot.is_file());
+    assert!(reopened
+        .get_subject_bytes(&atomic_subject)
+        .unwrap()
+        .is_none());
+    let status = reopened
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .atomic_status(aid())
+        .unwrap();
+    assert_eq!(status.logical, LogicalStatus::Committed);
+    assert_eq!(status.material, MaterialStatus::CoverageIncomplete);
+    assert!(status.receipt.is_none());
 }
 
 #[test]
