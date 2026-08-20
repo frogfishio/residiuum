@@ -15,7 +15,9 @@ use residiuum_sdk::{Parameters, QueryRunOptions, ResidiuumDeployment, RqlFullExe
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
 use serde_json::{json, Value};
 use std::future::Future;
+use std::path::Path;
 use std::pin::pin;
+use std::process::Command;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::{Duration, Instant};
@@ -148,6 +150,57 @@ fn prepared_two_heap_deployment() -> (tempfile::TempDir, HeapCap, HeapCap) {
     let gremlin_capability = mint_cap_for(gremlin_id, deployment_id);
     drop(deployment);
     (directory, tinker_capability, gremlin_capability)
+}
+
+fn crash_deployment_ids() -> (DeploymentId, HeapId) {
+    let mut deployment = [0x51; 16];
+    deployment[6] = (deployment[6] & 0x0f) | 0x40;
+    deployment[8] = (deployment[8] & 0x3f) | 0x80;
+    let mut heap = [0x52; 16];
+    heap[6] = (heap[6] & 0x0f) | 0x40;
+    heap[8] = (heap[8] & 0x3f) | 0x80;
+    (
+        DeploymentId::from_bytes(deployment).unwrap(),
+        HeapId::from_bytes(heap).unwrap(),
+    )
+}
+
+fn prepare_crash_deployment(root: &Path) -> HeapCap {
+    let deployment = ResidiuumDeployment::create(root).unwrap();
+    let layout = HeapMetaLayout::new(root);
+    let (deployment_id, heap_id) = crash_deployment_ids();
+    let staged = stage_heap_genesis(
+        &layout,
+        *deployment_id.as_bytes(),
+        *heap_id.as_bytes(),
+        [0x53; 16],
+        "gremlin-crash",
+    )
+    .unwrap();
+    publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
+    drop(deployment);
+    mint_cap_for(heap_id, deployment_id)
+}
+
+fn crash_atomic_id() -> AtomicId {
+    AtomicId::from_bytes([0x54; 32]).unwrap()
+}
+
+fn build_crash_plan(
+    heap: &HeapClient,
+    states: &Collection<Value>,
+    turns: &Collection<Value>,
+    locators: &Collection<Value>,
+) -> residiuum_sdk::driver::atomics::AtomicPlan {
+    let mut atomic = heap.atomic(AtomicOptions::new(crash_atomic_id())).unwrap();
+    atomic
+        .create(states, "conversation-kill", &json!({"turn": 1}))
+        .unwrap()
+        .create(turns, "turn-kill", &json!({"text": "survives sigkill"}))
+        .unwrap()
+        .create(locators, "turn-id-kill", &json!({"turn_key": "turn-kill"}))
+        .unwrap();
+    atomic.build().unwrap()
 }
 
 fn operation(byte: u8) -> OperationId {
@@ -480,6 +533,110 @@ fn atomic_submission_deadline_before_dispatch_issues_nothing_and_plan_can_be_ren
     assert_eq!(inspection.submitted_members, 2);
     assert_eq!(inspection.max_members, 1);
     assert!(inspection.submitted_plan_bytes >= inspection.max_plan_bytes as u64);
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_external_sigkill_after_decision_before_ack_resolves_and_replays() {
+    const CHILD_ROOT: &str = "RESIDIUUM_ATM5_SIGKILL_ROOT";
+    const CHILD_MARKER: &str = "RESIDIUUM_ATM5_SIGKILL_MARKER";
+    const FAILPOINT: &str = "store.atomic.before_ack";
+
+    if let (Ok(root), Ok(marker)) = (std::env::var(CHILD_ROOT), std::env::var(CHILD_MARKER)) {
+        let capability = prepare_crash_deployment(Path::new(&root));
+        let connection = block_on(Client::open_embedded(EmbeddedOptions::new(&root))).unwrap();
+        let heap = block_on(connection.open_heap(capability)).unwrap();
+        let states: Collection<Value> =
+            block_on(heap.create_collection("kill-states", CreateCollectionOptions::default()))
+                .unwrap();
+        let turns: Collection<Value> =
+            block_on(heap.create_collection("kill-turns", CreateCollectionOptions::default()))
+                .unwrap();
+        let locators: Collection<Value> =
+            block_on(heap.create_collection("kill-locators", CreateCollectionOptions::default()))
+                .unwrap();
+        let plan = build_crash_plan(&heap, &states, &turns, &locators);
+
+        residiuum_store::clear_failpoint_visits();
+        residiuum_store::enable_failpoint_hit_proof();
+        let marker_path = std::path::PathBuf::from(marker);
+        std::thread::spawn(move || loop {
+            if residiuum_store::failpoint_visit_count(FAILPOINT) != 0 {
+                std::fs::write(&marker_path, FAILPOINT).unwrap();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        });
+        residiuum_store::arm_failpoint_once(FAILPOINT, residiuum_store::FailpointAction::Pause);
+        let _never_returns = block_on(heap.commit_atomic(plan));
+        panic!("external crash controller did not kill paused child");
+    }
+
+    let directory = tempdir().unwrap();
+    let marker = directory.path().join("before-ack.reached");
+    let executable = std::env::current_exe().unwrap();
+    let mut child = Command::new(executable)
+        .args([
+            "--exact",
+            "atomic_external_sigkill_after_decision_before_ack_resolves_and_replays",
+            "--nocapture",
+        ])
+        .env(CHILD_ROOT, directory.path())
+        .env(CHILD_MARKER, &marker)
+        .spawn()
+        .unwrap();
+
+    let wait_deadline = Instant::now() + Duration::from_secs(15);
+    while !marker.is_file() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("crash child exited before the boundary: {status}");
+        }
+        assert!(
+            Instant::now() < wait_deadline,
+            "crash child did not reach {FAILPOINT}"
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    child.kill().unwrap();
+    let status = child.wait().unwrap();
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        status.signal(),
+        Some(9),
+        "child must die by external SIGKILL"
+    );
+
+    let (deployment_id, heap_id) = crash_deployment_ids();
+    let capability = mint_cap_for(heap_id, deployment_id);
+    let connection = block_on(Client::open_embedded(EmbeddedOptions::new(
+        directory.path(),
+    )))
+    .unwrap();
+    let heap = block_on(connection.open_heap(capability)).unwrap();
+    let status = block_on(heap.atomic_status(crash_atomic_id())).unwrap();
+    assert_eq!(status.logical, residiuum_atomics::LogicalStatus::Committed);
+    assert!(status.receipt.is_some());
+
+    let states: Collection<Value> = block_on(heap.open_collection("kill-states")).unwrap();
+    let turns: Collection<Value> = block_on(heap.open_collection("kill-turns")).unwrap();
+    let locators: Collection<Value> = block_on(heap.open_collection("kill-locators")).unwrap();
+    assert_eq!(
+        block_on(states.get("conversation-kill")).unwrap().unwrap()["turn"],
+        1
+    );
+    assert_eq!(
+        block_on(turns.get("turn-kill")).unwrap().unwrap()["text"],
+        "survives sigkill"
+    );
+    assert_eq!(
+        block_on(locators.get("turn-id-kill")).unwrap().unwrap()["turn_key"],
+        "turn-kill"
+    );
+    let plan = build_crash_plan(&heap, &states, &turns, &locators);
+    let AtomicOutcome::Committed(replayed) = block_on(heap.commit_atomic(plan)).unwrap() else {
+        panic!("same plan did not replay committed after SIGKILL")
+    };
+    assert!(replayed.replayed);
 }
 
 #[test]

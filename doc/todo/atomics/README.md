@@ -11,9 +11,11 @@ Execution authority:
 
 Current continuation point:
 
+- [ATM5C_EXTERNAL_SIGKILL_BASELINE_2026-08-20.md](./ATM5C_EXTERNAL_SIGKILL_BASELINE_2026-08-20.md)
+  — real external signal-9 decision/before-ack crash and unclean public-client
+  recovery/replay proof.
 - [ATM5B_OUTCOME_AND_JOURNEY_BASELINE_2026-08-20.md](./ATM5B_OUTCOME_AND_JOURNEY_BASELINE_2026-08-20.md)
-  — current async outcome/cancellation contract, adversarial Gremlin journey,
-  bounded inspection and remaining release delta.
+  — predecessor async outcome/cancellation and adversarial journey baseline.
 - [ATM5_ASYNC_SDK_BASELINE_2026-08-20.md](./ATM5_ASYNC_SDK_BASELINE_2026-08-20.md)
   — superseded ATM-5A continuation point retained as historical evidence.
 

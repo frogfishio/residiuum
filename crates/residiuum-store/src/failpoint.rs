@@ -11,6 +11,8 @@
 //!   `catch_unwind` in tests; drop the store handle and reopen).
 //! - [`Action::Abort`] — true process death via [`std::process::abort`] (for
 //!   multi-process kill harnesses; not catchable).
+//! - [`Action::Pause`] — park at an exact boundary until an external crash
+//!   controller sends a real process-kill signal.
 //! - [`Action::Error`] / [`Action::Return`] — inject [`StoreError::Failpoint`].
 //! - [`Action::IoEnospc`] / [`Action::IoPermission`] — inject realistic
 //!   [`StoreError::Io`] kinds (filesystem-full / permission loss).
@@ -42,6 +44,9 @@ pub enum Action {
     Panic,
     /// Kill the process immediately (multi-process crash harness).
     Abort,
+    /// Stop the current thread at the named boundary until an external crash
+    /// controller kills the process. Qualification harnesses only.
+    Pause,
     /// Return [`StoreError::Failpoint`] to the caller.
     Error,
     /// Same as [`Action::Error`] (matrix synonym for injected I/O failure).
@@ -252,6 +257,11 @@ pub fn hit(name: &'static str) -> Result<(), StoreError> {
             // True process death — not catchable with catch_unwind.
             std::process::abort();
         }
+        Action::Pause => loop {
+            // Deliberately no timeout and no cooperative release: the external
+            // controller must terminate the process, proving a real kill path.
+            std::thread::park();
+        },
         Action::Error | Action::Return => Err(StoreError::Failpoint(name)),
         Action::IoEnospc => Err(StoreError::Io(io::Error::new(
             io::ErrorKind::StorageFull,
