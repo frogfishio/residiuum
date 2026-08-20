@@ -11,13 +11,13 @@ use crate::atomic_stage_classify::{
 };
 use crate::atomic_stage_media::{
     chunk_body_event_id, chunk_plan_event_id, encode_stage_chunk_body, encode_stage_chunk_plan,
-    encode_stage_payload, encode_stage_seal, payload_event_id, seal_event_id, BodyRef,
-    StageCatalog,
+    encode_stage_payload, encode_stage_seal, payload_event_id, seal_event_id, AtomicPublishMember,
+    AtomicValueRef, BodyRef, StageCatalog,
 };
 use crate::atomic_stage_recover::{
     checkpoint_encoded_len, open_catalog, persist_live_checkpoint, rel_path, resolve_chunk_body,
-    resolve_payload_body, verify_missing_coverage, AtomicStageLimits, AtomicStageOpenReport,
-    CoveredFile,
+    resolve_payload_body, resolve_published_payload, verify_missing_coverage, AtomicStageLimits,
+    AtomicStageOpenReport, CoveredFile,
 };
 use crate::error::StoreError;
 use crate::store::Store;
@@ -25,8 +25,8 @@ use residiuum_atomics::{
     encode_decision, encode_member, encode_prepare, members_match_prepare,
     ordered_member_manifest_root, plan_content_root, prepare_from_closed_plan, prepare_hash,
     AtomicAbortReason, AtomicDecision, AtomicId, AtomicMember, AtomicPlan, AtomicPrepare,
-    AtomicRefuseReason, AtomicsError, ChunkPlan, CoordinatorSeq, HeapId, MemberPhase, MutationKind,
-    ObjectIdentity, PlacementManifest, PredicateKind, StagingHeap, VersionId,
+    AtomicRefuseReason, AtomicsError, ChunkPlan, CoordinatorSeq, DecisionCode, HeapId, MemberPhase,
+    MutationKind, ObjectIdentity, PlacementManifest, PredicateKind, StagingHeap, VersionId,
 };
 use residiuum_format::{
     encode_atomic_commit_envelope, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
@@ -95,6 +95,58 @@ impl Store {
             findings: opened.findings,
             limits,
         })
+    }
+
+    /// Reconstruct every committed Atomic projection after the ordinary index
+    /// has opened. The decision catalogue is authority; publication is derived.
+    pub(crate) fn recover_committed_atomic_publications(&mut self) -> Result<(), StoreError> {
+        // Preserve the ordinary-store fast path. Atomic admission creates both
+        // control files before a decision can exist, so their joint absence is
+        // a sufficient negative check without scanning segment contents.
+        if !crate::atomic_stage_recover::atomic_stage_checkpoint_path(self.paths()).is_file()
+            && !crate::atomic_stage_recover::atomic_coord_path(self.paths()).is_file()
+        {
+            return Ok(());
+        }
+        let opened = open_catalog(self.paths(), AtomicStageLimits::operable())?;
+        self.record_atomic_stage_open(opened.report);
+        if opened.catalog.coverage_degraded {
+            if opened
+                .catalog
+                .decisions
+                .values()
+                .any(|decision| decision.decision == DecisionCode::Committed)
+            {
+                return Err(StoreError::AtomicStage(
+                    "committed Atomic publication refused: evidence coverage is incomplete".into(),
+                ));
+            }
+            return Ok(());
+        }
+
+        let mut committed: Vec<_> = opened
+            .catalog
+            .decisions
+            .iter()
+            .filter_map(|(atomic_id, decision)| {
+                decision.commit_position.map(|position| {
+                    let heap = opened.catalog.evidence_heaps.get(atomic_id).copied();
+                    (*atomic_id, heap, position)
+                })
+            })
+            .collect();
+        committed.sort_by_key(|(atomic_id, heap, position)| {
+            (
+                heap.map(|id| *id.as_bytes()).unwrap_or([0; 16]),
+                *position,
+                *atomic_id,
+            )
+        });
+        for (atomic_id, _, _) in committed {
+            let delta = publication_delta(self.paths(), &opened.catalog, atomic_id)?;
+            self.publish_atomic_generation(&delta)?;
+        }
+        Ok(())
     }
 }
 
@@ -576,7 +628,11 @@ impl StoreAtomicStage<'_> {
                 return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
             }
             if let Some(decision) = self.catalog.decisions.get(&plan.atomic_id()) {
-                return Ok(decision.clone());
+                let decision = decision.clone();
+                if decision.decision == DecisionCode::Committed {
+                    self.publish_decision(plan.atomic_id())?;
+                }
+                return Ok(decision);
             }
         }
 
@@ -593,7 +649,16 @@ impl StoreAtomicStage<'_> {
             self.append_staged(member.clone(), payload)?;
         }
         self.seal_member_boundary(prepare.atomic_id)?;
-        self.persist_committed_decision(prepare.atomic_id)
+        let decision = self.persist_committed_decision(prepare.atomic_id)?;
+        crate::failpoint::hit("store.atomic.before_publish")?;
+        self.publish_decision(prepare.atomic_id)?;
+        crate::failpoint::hit("store.atomic.after_publish")?;
+        Ok(decision)
+    }
+
+    fn publish_decision(&mut self, atomic_id: AtomicId) -> Result<(), StoreError> {
+        let delta = publication_delta(self.store.paths(), &self.catalog, atomic_id)?;
+        self.store.publish_atomic_generation(&delta)
     }
 
     fn members_for_frontier(&self, plan: &AtomicPlan) -> Result<Vec<AtomicMember>, StoreError> {
@@ -1216,6 +1281,97 @@ fn atomic_subject(
         &key.identity_bytes(),
     )
     .map_err(|e| StoreError::AtomicStage(format!("atomic SubjectV2 encode: {e}")))
+}
+
+/// Authenticate and fully resolve one committed decision into a private
+/// publication delta. No live projection is touched until this succeeds.
+fn publication_delta(
+    paths: &crate::layout::StorePaths,
+    catalog: &StageCatalog,
+    atomic_id: AtomicId,
+) -> Result<Vec<AtomicPublishMember>, StoreError> {
+    if catalog.blocked.contains(&atomic_id) {
+        return Err(StoreError::AtomicStage(
+            "committed Atomic publication blocked by damaged evidence".into(),
+        ));
+    }
+    let decision = catalog
+        .decisions
+        .get(&atomic_id)
+        .ok_or_else(|| StoreError::AtomicStage("publication without decision".into()))?;
+    if decision.decision != DecisionCode::Committed {
+        return Err(StoreError::AtomicStage(
+            "not-committed Atomic cannot be published".into(),
+        ));
+    }
+    let commit_position = decision
+        .commit_position
+        .filter(|position| *position != 0)
+        .ok_or_else(|| StoreError::AtomicStage("committed decision without position".into()))?;
+    let prepare = catalog
+        .prepares
+        .get(&atomic_id)
+        .ok_or_else(|| StoreError::AtomicStage("committed decision without prepare".into()))?;
+    if catalog.seals.get(&atomic_id) != Some(&prepare.content_root)
+        || prepare_hash(prepare).map_err(|e| StoreError::AtomicStage(e.to_string()))?
+            != decision.prepare_hash
+    {
+        return Err(StoreError::AtomicStage(
+            "committed Atomic prepare or stable boundary does not verify".into(),
+        ));
+    }
+    let mut members = catalog.members.get(&atomic_id).cloned().unwrap_or_default();
+    members.sort_by_key(|member| member.ordinal);
+    if members.len() != decision.member_count as usize
+        || !members_match_prepare(prepare, &members)
+        || ordered_member_manifest_root(prepare.heap_id, &members)
+            .map_err(|e| StoreError::AtomicStage(e.to_string()))?
+            != decision.member_root
+    {
+        return Err(StoreError::AtomicStage(
+            "committed Atomic member manifest does not verify".into(),
+        ));
+    }
+
+    let mut delta = Vec::with_capacity(members.len());
+    for member in members {
+        let subject = atomic_subject(
+            prepare.heap_id,
+            member.object_identity.collection_id,
+            &member.object_identity.key,
+        )?;
+        let payload = if member.member_kind == MutationKind::Delete {
+            None
+        } else {
+            let body = catalog
+                .payload_refs
+                .get(&(atomic_id, member.ordinal))
+                .cloned()
+                .ok_or_else(|| {
+                    StoreError::AtomicStage(
+                        "committed Atomic member lacks a durable payload locator".into(),
+                    )
+                })?;
+            let bytes = resolve_published_payload(paths, &body, atomic_id, member.ordinal)?;
+            if member.after_content_hash != Some(*blake3::hash(&bytes).as_bytes()) {
+                return Err(StoreError::AtomicStage(
+                    "committed Atomic payload hash does not match member".into(),
+                ));
+            }
+            Some(AtomicValueRef {
+                atomic_id,
+                ordinal: member.ordinal,
+                body,
+            })
+        };
+        delta.push(AtomicPublishMember {
+            subject,
+            member,
+            payload,
+            commit_position,
+        });
+    }
+    Ok(delta)
 }
 
 impl From<AtomicsError> for StoreError {

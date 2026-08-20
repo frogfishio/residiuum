@@ -8,7 +8,19 @@ use residiuum_atomics::{
     ResourceLimits, VersionId,
 };
 use residiuum_format::{encode_subject_v2, SubjectObjectKind};
-use residiuum_store::{AtomicStageClass, DurabilityMode, StageEvidenceClass, Store};
+use residiuum_store::{
+    arm_failpoint_once, clear_failpoints, AtomicStageClass, DurabilityMode, FailpointAction,
+    StageEvidenceClass, Store, StoreError,
+};
+use std::sync::Mutex;
+
+static FAILPOINT_LOCK: Mutex<()> = Mutex::new(());
+
+fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    FAILPOINT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 fn atomic(first: u8) -> AtomicId {
     let mut bytes = [0u8; 32];
@@ -61,8 +73,41 @@ fn plan(
     .unwrap()
 }
 
+fn create_two_plan(heap: HeapId, atomic_id: AtomicId) -> AtomicPlan {
+    AtomicPlan::close(AtomicPlanParts {
+        profile: AtomicProfile::LocalHeapV1,
+        atomic_id,
+        heap_id: heap,
+        scope: CoordinationScope::LocalHeap,
+        read_frontier: None,
+        reads: vec![],
+        predicates: vec![],
+        mutations: vec![
+            PlanMutation {
+                kind: MutationKind::Create,
+                collection_id: collection(),
+                key: CanonicalKey::string("left"),
+                encoded_value: Some(b"L".to_vec()),
+                if_version: None,
+            },
+            PlanMutation {
+                kind: MutationKind::Create,
+                collection_id: collection(),
+                key: CanonicalKey::string("right"),
+                encoded_value: Some(b"R".to_vec()),
+                if_version: None,
+            },
+        ],
+        active_rule_revisions: vec![],
+        limits: ResourceLimits::hard_local_heap(),
+    })
+    .unwrap()
+}
+
 #[test]
 fn stale_create_is_durably_not_committed_and_consumes_no_position() {
+    let _guard = test_guard();
+    clear_failpoints();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
     let mut store = Store::create(&path).unwrap();
@@ -108,13 +153,23 @@ fn stale_create_is_durably_not_committed_and_consumes_no_position() {
     assert_eq!(committed.commit_position, Some(1));
     assert_eq!(
         store.get_subject_bytes(&subject).unwrap(),
-        Some(b"old".to_vec()),
-        "ATM-3B must not expose a member before whole-delta publication"
+        Some(b"new".to_vec()),
+        "ATM-3C publishes the committed delta before returning"
+    );
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        reopened.get_subject_bytes(&subject).unwrap(),
+        Some(b"new".to_vec()),
+        "restart must reconstruct committed publication from decision evidence"
     );
 }
 
 #[test]
 fn stale_replace_replays_exact_terminal_decision_after_restart() {
+    let _guard = test_guard();
+    clear_failpoints();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
     let atomic_id = atomic(3);
@@ -162,4 +217,114 @@ fn stale_replace_replays_exact_terminal_decision_after_restart() {
         .iter()
         .any(|finding| finding.atomic_id == Some(atomic_id)
             && finding.class == StageEvidenceClass::Partial));
+}
+
+#[test]
+fn two_member_commit_is_visible_as_one_generation_and_survives_restart() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let left = subject(heap, &CanonicalKey::string("left"));
+    let right = subject(heap, &CanonicalKey::string("right"));
+
+    let decision = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_evidence(&create_two_plan(heap, atomic(4)))
+        .unwrap();
+    assert_eq!(decision.decision, DecisionCode::Committed);
+    assert_eq!(store.get_subject_bytes(&left).unwrap(), Some(b"L".to_vec()));
+    assert_eq!(
+        store.get_subject_bytes(&right).unwrap(),
+        Some(b"R".to_vec())
+    );
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        reopened.get_subject_bytes(&left).unwrap(),
+        Some(b"L".to_vec())
+    );
+    assert_eq!(
+        reopened.get_subject_bytes(&right).unwrap(),
+        Some(b"R".to_vec())
+    );
+}
+
+#[test]
+fn durable_decision_before_publish_recovers_the_whole_batch() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let left = subject(heap, &CanonicalKey::string("left"));
+    let right = subject(heap, &CanonicalKey::string("right"));
+    arm_failpoint_once("store.atomic.before_publish", FailpointAction::Error);
+
+    let outcome = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_evidence(&create_two_plan(heap, atomic(5)));
+    assert!(matches!(
+        outcome,
+        Err(StoreError::Failpoint("store.atomic.before_publish"))
+    ));
+    assert_eq!(store.get_subject_bytes(&left).unwrap(), None);
+    assert_eq!(store.get_subject_bytes(&right).unwrap(), None);
+    clear_failpoints();
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        reopened.get_subject_bytes(&left).unwrap(),
+        Some(b"L".to_vec())
+    );
+    assert_eq!(
+        reopened.get_subject_bytes(&right).unwrap(),
+        Some(b"R".to_vec())
+    );
+}
+
+#[test]
+fn failure_after_publish_never_rolls_back_the_committed_generation() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let left = subject(heap, &CanonicalKey::string("left"));
+    let right = subject(heap, &CanonicalKey::string("right"));
+    arm_failpoint_once("store.atomic.after_publish", FailpointAction::Error);
+
+    let outcome = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_evidence(&create_two_plan(heap, atomic(6)));
+    assert!(matches!(
+        outcome,
+        Err(StoreError::Failpoint("store.atomic.after_publish"))
+    ));
+    assert_eq!(store.get_subject_bytes(&left).unwrap(), Some(b"L".to_vec()));
+    assert_eq!(
+        store.get_subject_bytes(&right).unwrap(),
+        Some(b"R".to_vec())
+    );
+    clear_failpoints();
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        reopened.get_subject_bytes(&left).unwrap(),
+        Some(b"L".to_vec())
+    );
+    assert_eq!(
+        reopened.get_subject_bytes(&right).unwrap(),
+        Some(b"R".to_vec())
+    );
 }

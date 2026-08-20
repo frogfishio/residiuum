@@ -990,6 +990,49 @@ pub(crate) fn resolve_payload_body(
     sidecar_payload_from_frame(&load_body_ref(paths, refer)?)
 }
 
+/// Resolve one exact locator-backed ATPAY1 payload for a published Atomic
+/// value. Both identity fields are checked after full frame/hash verification.
+pub(crate) fn resolve_published_payload(
+    paths: &StorePaths,
+    refer: &BodyRef,
+    expected_atomic_id: AtomicId,
+    expected_ordinal: u32,
+) -> Result<Vec<u8>, StoreError> {
+    let bytes = load_body_ref(paths, refer)?;
+    let decoded = sidecar_payload_from_frame(&bytes)?;
+    let Some(payload) = decoded else {
+        return Err(StoreError::AtomicStage(
+            "published Atomic locator does not name a payload".into(),
+        ));
+    };
+
+    // sidecar_payload_from_frame deliberately returns only the body for older
+    // staging callers. Re-decode the verified bytes here to bind the locator to
+    // the exact Atomic identity and ordinal used by the primary projection.
+    let matches = match decode_stage_sidecar(&bytes) {
+        SidecarDecode::Payload {
+            atomic_id, ordinal, ..
+        } => atomic_id == expected_atomic_id && ordinal == expected_ordinal,
+        _ => {
+            let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
+            let matched = report.verified_frames().any(|(_, frame)| {
+                matches!(
+                    decode_stage_sidecar(&frame.body),
+                    SidecarDecode::Payload { atomic_id, ordinal, .. }
+                        if atomic_id == expected_atomic_id && ordinal == expected_ordinal
+                )
+            });
+            matched
+        }
+    };
+    if !matches {
+        return Err(StoreError::AtomicStage(
+            "published Atomic locator identity mismatch".into(),
+        ));
+    }
+    Ok(payload)
+}
+
 pub(crate) fn resolve_chunk_body(
     paths: &StorePaths,
     catalog: &StageCatalog,

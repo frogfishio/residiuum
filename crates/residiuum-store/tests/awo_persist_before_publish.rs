@@ -8,9 +8,22 @@ use residiuum_store::{
     arm_failpoint_once, clear_failpoints, enable_failpoint_hit_proof, require_failpoint_visited,
     DurabilityMode, FailpointAction, Store,
 };
+use std::sync::Mutex;
+
+/// Failpoints are process-global; serialize every test in this integration
+/// binary so a sibling success path cannot consume an armed failure.
+static FAILPOINT_LOCK: Mutex<()> = Mutex::new(());
+
+fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+    FAILPOINT_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[test]
 fn awo_failpoints_closed_set_named() {
+    let _guard = test_guard();
+    clear_failpoints();
     assert!(AWO_FAILPOINTS.contains(&"awo.persist.before"));
     assert!(AWO_FAILPOINTS.contains(&"awo.publish.before"));
     assert_eq!(AWO_FAILPOINTS.len(), 11);
@@ -18,6 +31,7 @@ fn awo_failpoints_closed_set_named() {
 
 #[test]
 fn put_many_persist_fail_publishes_nothing() {
+    let _guard = test_guard();
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::create(dir.path()).unwrap();
     clear_failpoints();
@@ -47,6 +61,7 @@ fn put_many_persist_fail_publishes_nothing() {
 
 #[test]
 fn put_many_success_publish_after_persist() {
+    let _guard = test_guard();
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::create(dir.path()).unwrap();
     clear_failpoints();
@@ -66,6 +81,7 @@ fn put_many_success_publish_after_persist() {
 
 #[test]
 fn multi_shard_put_many_persist_fail_publishes_nothing() {
+    let _guard = test_guard();
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::create_with_shards(dir.path(), 4).unwrap();
     clear_failpoints();

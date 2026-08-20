@@ -1027,6 +1027,11 @@ pub struct Store {
     /// Ordinary chunked get uses these for bounded preads; absence falls back to
     /// a generation-filtered segment scan (never mixes generations by item_id).
     chunk_locators: ChunkLocatorMap,
+    /// Derived Atomic event-id -> authenticated ATPAY1 payload locator.
+    ///
+    /// This is installed with the primary/durable index generation and rebuilt
+    /// from committed decisions. Payload bytes are never retained here.
+    atomic_value_refs: HashMap<[u8; 16], crate::atomic_stage_media::AtomicValueRef>,
     /// Secret continuation-token keyring (DEF-097). Never logged or exported.
     token_keyring: ContinuationKeyring,
     /// Optional PQH boundary instrumentation (write/sync/rotate/publish/lifecycle).
@@ -1325,6 +1330,7 @@ impl Store {
             rotation_stage_totals: RotationStageTotals::default(),
             enrichment_stage_totals: EnrichmentStageTotals::default(),
             chunk_locators: HashMap::new(),
+            atomic_value_refs: HashMap::new(),
             token_keyring,
             boundary_probe: crate::boundary_probe::BoundaryProbe::disabled(),
             diagnostic_io: DiagnosticIoSink::Real,
@@ -1475,6 +1481,7 @@ impl Store {
             rotation_stage_totals: RotationStageTotals::default(),
             enrichment_stage_totals: EnrichmentStageTotals::default(),
             chunk_locators: HashMap::new(),
+            atomic_value_refs: HashMap::new(),
             token_keyring,
             boundary_probe: crate::boundary_probe::BoundaryProbe::disabled(),
             diagnostic_io: DiagnosticIoSink::Real,
@@ -1578,6 +1585,10 @@ impl Store {
         let phase = Instant::now();
         store.resume_or_start_all_actives()?;
         open_metrics.active_resume_ns = elapsed_ns(phase);
+        // ATM-3: ordinary index recovery intentionally ignores staged Atomic
+        // evidence. Reconstruct committed whole-delta generations only after
+        // the decision catalogue and every referenced payload verify.
+        store.recover_committed_atomic_publications()?;
         // Finish or cancel incomplete compaction jobs (DEF-024).
         let phase = Instant::now();
         let compaction_jobs = store.recover_compact_jobs()?;
@@ -1750,6 +1761,7 @@ impl Store {
             rotation_stage_totals: RotationStageTotals::default(),
             enrichment_stage_totals: EnrichmentStageTotals::default(),
             chunk_locators: HashMap::new(),
+            atomic_value_refs: HashMap::new(),
             token_keyring,
             boundary_probe: crate::boundary_probe::BoundaryProbe::disabled(),
             diagnostic_io: DiagnosticIoSink::Real,
@@ -7080,6 +7092,9 @@ impl Store {
         writer_sequence: u64,
         frame_offset: u64,
     ) {
+        if let Some(previous_event) = self.live_event_id(&subject) {
+            self.atomic_value_refs.remove(&previous_event);
+        }
         // DEF-095: durable projection is locator-first; do not pin full payloads
         // in both visibility and durable maps (was O(dataset) RSS dual-copy).
         let body = slim_put_body_for_index(body, false);
@@ -7105,6 +7120,78 @@ impl Store {
         );
     }
 
+    /// Install a complete committed Atomic as one derived read generation.
+    ///
+    /// Every fallible check and allocation happens against private clones.
+    /// The live primary index, durable projection, and Atomic locator table are
+    /// replaced only after the complete delta has been assembled.
+    pub(crate) fn publish_atomic_generation(
+        &mut self,
+        members: &[crate::atomic_stage_media::AtomicPublishMember],
+    ) -> Result<(), StoreError> {
+        let mut next_index = self.index.clone();
+        let mut next_durable = self.durable_index.clone();
+        let mut next_refs = self.atomic_value_refs.clone();
+        let mut affected_collections = std::collections::BTreeSet::new();
+
+        for published in members {
+            let event_id = published.member.event_id.to_bytes();
+            if let Some(crate::index::IndexEntry::Live(previous)) =
+                next_index.get(&published.subject)
+            {
+                next_refs.remove(&previous.event_id);
+            }
+            let item_id = next_index
+                .get(&published.subject)
+                .map(crate::index::IndexEntry::item_id)
+                .unwrap_or_else(|| subject_item_id(&published.subject));
+            let (kind, frame_offset) = match published.member.member_kind {
+                residiuum_atomics::MutationKind::Delete => {
+                    next_refs.remove(&event_id);
+                    (EventKind::Delete, 0)
+                }
+                residiuum_atomics::MutationKind::Create
+                | residiuum_atomics::MutationKind::Put
+                | residiuum_atomics::MutationKind::Replace => {
+                    let refer = published.payload.clone().ok_or_else(|| {
+                        StoreError::AtomicStage(
+                            "committed Atomic put is missing its payload locator".into(),
+                        )
+                    })?;
+                    let offset = refer.body.offset;
+                    next_refs.insert(event_id, refer);
+                    (EventKind::Put, offset)
+                }
+            };
+            for projection in [&mut next_index, &mut next_durable] {
+                projection.apply_event(
+                    published.subject.clone(),
+                    kind,
+                    Vec::new(),
+                    item_id,
+                    event_id,
+                    [0; 16],
+                    published.commit_position,
+                    frame_offset,
+                );
+            }
+            if let Some(collection) =
+                crate::catalog::collection_name_from_subject(&published.subject)
+            {
+                affected_collections.insert(collection);
+            }
+        }
+
+        self.index = next_index;
+        self.durable_index = next_durable;
+        self.atomic_value_refs = next_refs;
+        self.recompute_collection_catalogs_from_index();
+        for collection in affected_collections {
+            self.secondary_projection_cache_clear(&collection);
+        }
+        self.note_durable_derived_by(members.len() as u64)
+    }
+
     /// Resolve logical stored body for a live entry (resident or frame pread).
     fn resolve_live_value_body(
         &self,
@@ -7120,6 +7207,18 @@ impl Store {
             .ok()
             .and_then(|cache| cache.get(subject, &lv.event_id))
         {
+            return Ok(body);
+        }
+        if let Some(refer) = self.atomic_value_refs.get(&lv.event_id) {
+            let body = crate::atomic_stage_recover::resolve_published_payload(
+                &self.paths,
+                &refer.body,
+                refer.atomic_id,
+                refer.ordinal,
+            )?;
+            if let Ok(mut cache) = self.verified_body_cache.lock() {
+                cache.insert(subject, lv.event_id, &body);
+            }
             return Ok(body);
         }
         let expect = crate::compact::LocatorExpect {
@@ -9876,6 +9975,9 @@ impl Store {
                 None => subject_item_id(subject_bytes),
             };
             let event_id = self.next_event_id()?;
+            if let Some(previous_event) = self.live_event_id(subject_bytes) {
+                self.atomic_value_refs.remove(&previous_event);
+            }
             // Memory mode: body must stay resident (no durable frame to pread).
             self.index.apply_event(
                 subject_bytes.to_vec(),

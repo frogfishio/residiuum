@@ -2,6 +2,16 @@
 
 Status: implementation baseline, 2026-08-20
 
+Implementation checkpoint (2026-08-20): ATM-3A and ATM-3B are committed.
+ATM-3C now has locator-backed whole-generation primary publication and writer-
+open reconstruction under qualification. Published puts resolve directly from
+authenticated `ATPAY1` frame locators; payload bodies are not retained in the
+primary index. Multi-member publication and the decision-before-publish and
+publish-before-ack failpoint cases are covered. This is not yet ATM-3
+acceptance: history-generation publication, read-only inspection recovery,
+universal ordinary-write ordering, and the complete concurrent/crash proof
+remain open.
+
 This record satisfies the mandatory ATM-3 design review in
 `ATOMICS_IMPLEMENTATION_PLAN.md` section 9. It is deliberately narrower than
 ATM-4 recovery/status and does not enable the product capability.
@@ -112,6 +122,13 @@ remains independently authenticated.
   publication; committed-unpublished reopen repair.
 - ATM-3D: ordinary-write participation in the Heap order, scan/RQL concurrency
   proof, grouped stable boundaries, crash-prefix and resource qualification.
+
+Current ATM-3C implementation deliberately stops short of calling the primary
+projection sufficient. A later ordinary mutation of an Atomic target must be
+ordered against the Atomic decision during reconstruction, not guessed from
+the surviving current value. Until ATM-3D supplies that universal Heap order,
+the hidden qualification commit path must not be advertised as a product
+capability.
 
 `Capabilities::atomics` remains `false` until all slices and the ATM-3 exit gate
 are green.

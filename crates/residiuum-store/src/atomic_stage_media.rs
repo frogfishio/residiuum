@@ -27,6 +27,25 @@ pub(crate) struct BodyRef {
     pub hash: [u8; 32],
 }
 
+/// Derived locator installed in the live primary projection for a committed
+/// Atomic put. The referenced ATPAY1 frame remains authoritative staging
+/// material; this locator is rebuilt from the durable decision catalogue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AtomicValueRef {
+    pub atomic_id: AtomicId,
+    pub ordinal: u32,
+    pub body: BodyRef,
+}
+
+/// One member of a privately assembled Atomic publication generation.
+#[derive(Clone, Debug)]
+pub(crate) struct AtomicPublishMember {
+    pub subject: Vec<u8>,
+    pub member: AtomicMember,
+    pub payload: Option<AtomicValueRef>,
+    pub commit_position: u64,
+}
+
 /// Staging facts recovered from store media only.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StageCatalog {
