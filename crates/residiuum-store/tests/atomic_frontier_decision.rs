@@ -328,3 +328,166 @@ fn failure_after_publish_never_rolls_back_the_committed_generation() {
         Some(b"R".to_vec())
     );
 }
+
+#[test]
+fn later_ordinary_put_wins_after_full_index_rebuild() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create_with_shards(&path, 4).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let key = CanonicalKey::string("ordered-put");
+    let subject = subject(heap, &key);
+
+    store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_evidence(&plan(
+            heap,
+            atomic(7),
+            MutationKind::Create,
+            key,
+            Some(b"atomic"),
+            None,
+        ))
+        .unwrap();
+    store
+        .put_subject_bytes(&subject, b"ordinary", DurabilityMode::Durable)
+        .unwrap();
+    drop(store);
+    std::fs::remove_file(path.join("indexes/primary.idx")).unwrap();
+
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        reopened.get_subject_bytes(&subject).unwrap(),
+        Some(b"ordinary".to_vec()),
+        "an ordinary write beyond the witnessed shard frontier must outrank the Atomic"
+    );
+}
+
+#[test]
+fn later_ordinary_delete_wins_after_full_index_rebuild() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create_with_shards(&path, 4).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let key = CanonicalKey::string("ordered-delete");
+    let subject = subject(heap, &key);
+
+    store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_evidence(&plan(
+            heap,
+            atomic(8),
+            MutationKind::Create,
+            key,
+            Some(b"atomic"),
+            None,
+        ))
+        .unwrap();
+    store
+        .delete_subject_bytes(&subject, DurabilityMode::Durable)
+        .unwrap();
+    drop(store);
+    std::fs::remove_file(path.join("indexes/primary.idx")).unwrap();
+
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(reopened.get_subject_bytes(&subject).unwrap(), None);
+}
+
+#[test]
+fn overlapping_atomics_replay_in_heap_commit_order() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create_with_shards(&path, 4).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let key = CanonicalKey::string("atomic-chain");
+    let subject = subject(heap, &key);
+
+    let first = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_evidence(&plan(
+            heap,
+            atomic(9),
+            MutationKind::Create,
+            key.clone(),
+            Some(b"first"),
+            None,
+        ))
+        .unwrap();
+    let first_version = store.live_event_id(&subject).unwrap();
+    let second = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_evidence(&plan(
+            heap,
+            atomic(10),
+            MutationKind::Replace,
+            key,
+            Some(b"second"),
+            Some(VersionId::from_bytes(first_version).unwrap()),
+        ))
+        .unwrap();
+    assert_eq!(first.commit_position, Some(1));
+    assert_eq!(second.commit_position, Some(2));
+    drop(store);
+    std::fs::remove_file(path.join("indexes/primary.idx")).unwrap();
+
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        reopened.get_subject_bytes(&subject).unwrap(),
+        Some(b"second".to_vec())
+    );
+}
+
+#[test]
+fn order_witness_without_decision_never_publishes_and_retry_commits_once() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create_with_shards(&path, 4).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let key = CanonicalKey::string("witness-prefix");
+    let subject = subject(heap, &key);
+    let atomic_plan = plan(
+        heap,
+        atomic(11),
+        MutationKind::Create,
+        key,
+        Some(b"committed"),
+        None,
+    );
+    arm_failpoint_once("store.atomic.before_decision", FailpointAction::Error);
+    let first = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_evidence(&atomic_plan);
+    assert!(matches!(
+        first,
+        Err(StoreError::Failpoint("store.atomic.before_decision"))
+    ));
+    assert_eq!(store.get_subject_bytes(&subject).unwrap(), None);
+    clear_failpoints();
+    drop(store);
+
+    let mut reopened = Store::open(&path).unwrap();
+    assert_eq!(reopened.get_subject_bytes(&subject).unwrap(), None);
+    let decision = reopened
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_evidence(&atomic_plan)
+        .unwrap();
+    assert_eq!(decision.commit_position, Some(1));
+    assert_eq!(
+        reopened.get_subject_bytes(&subject).unwrap(),
+        Some(b"committed".to_vec())
+    );
+}

@@ -13,7 +13,9 @@ use crate::atomic_stage_classify::{
     encode_finding_class, encode_finding_kind, finalize_catalog, ingest_classified_frame,
     StageEvidenceClass, StageFinding, StageFindings,
 };
-use crate::atomic_stage_media::{decode_stage_sidecar, BodyRef, SidecarDecode, StageCatalog};
+use crate::atomic_stage_media::{
+    decode_stage_sidecar, AtomicShardFrontier, BodyRef, SidecarDecode, StageCatalog,
+};
 use crate::error::StoreError;
 use crate::layout::StorePaths;
 use residiuum_atomics::{
@@ -28,8 +30,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 12;
-const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V12";
+const CHECKPOINT_VERSION: u8 = 13;
+const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V13";
 const BLOCK_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-BLK-V1";
 /// Fixed leaf size for the covered-prefix block frontier (CR-ATMR6-001).
 const FRONTIER_BLOCK: u64 = 64 * 1024;
@@ -304,7 +306,9 @@ pub fn atomic_coord_path(paths: &StorePaths) -> PathBuf {
     paths.store_info().join(ATOMIC_COORD_FILE)
 }
 
-const ATOMIC_BODY_MAGICS: [&[u8]; 5] = [b"ATPAY1", b"ATSEAL1", b"ATPREP1", b"ATMAP1", b"ATCHK1"];
+const ATOMIC_BODY_MAGICS: [&[u8]; 6] = [
+    b"ATPAY1", b"ATSEAL1", b"ATPREP1", b"ATMAP1", b"ATCHK1", b"ATORD1",
+];
 
 /// True when durable Atomic staging evidence exists that seal, compact,
 /// reclaim, or identity-reassign clone must not retire (CR-ATMR6-006).
@@ -636,7 +640,15 @@ pub(crate) fn verify_missing_coverage(
 }
 
 fn cover_active(paths: &StorePaths, covered: &mut Vec<CoveredFile>) -> Result<(), StoreError> {
-    let active = paths.active_segment();
+    // Atomic coordinator evidence is always appended on writer shard zero.
+    // Multi-shard stores keep that active under `active/shard-00/`; legacy and
+    // single-shard stores retain `active/active.residiuum`.
+    let sharded = paths.active_segment_for_shard(0, 2);
+    let active = if sharded.is_file() {
+        sharded
+    } else {
+        paths.active_segment()
+    };
     if !active.is_file() {
         return Ok(());
     }
@@ -1390,6 +1402,16 @@ fn encode_checkpoint(
         body.extend_from_slice(heap_id.as_bytes());
         body.extend_from_slice(&next.to_be_bytes());
     }
+    body.extend_from_slice(&(catalog.order_frontiers.len() as u32).to_be_bytes());
+    for (id, frontiers) in &catalog.order_frontiers {
+        body.extend_from_slice(id.as_bytes());
+        body.extend_from_slice(&(frontiers.len() as u16).to_be_bytes());
+        for frontier in frontiers {
+            body.extend_from_slice(&frontier.shard.to_be_bytes());
+            body.extend_from_slice(&frontier.segment_id);
+            body.extend_from_slice(&frontier.next_writer_sequence.to_be_bytes());
+        }
+    }
     body.extend_from_slice(&(catalog.blocked.len() as u32).to_be_bytes());
     for id in &catalog.blocked {
         body.extend_from_slice(id.as_bytes());
@@ -1615,6 +1637,39 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
             return None;
         }
     }
+    let n_order_frontiers = read_u32(&mut cur)? as usize;
+    for _ in 0..n_order_frontiers {
+        if cur.len() < 34 {
+            return None;
+        }
+        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
+        cur = &cur[32..];
+        let count = read_u16(&mut cur)? as usize;
+        if count == 0 || cur.len() < count.saturating_mul(26) {
+            return None;
+        }
+        let mut frontiers = Vec::with_capacity(count);
+        for expected_shard in 0..count {
+            let shard = read_u16(&mut cur)?;
+            if usize::from(shard) != expected_shard || cur.len() < 24 {
+                return None;
+            }
+            let segment_id = cur[..16].try_into().ok()?;
+            cur = &cur[16..];
+            let next_writer_sequence = read_u64(&mut cur)?;
+            if segment_id == [0; 16] {
+                return None;
+            }
+            frontiers.push(AtomicShardFrontier {
+                shard,
+                segment_id,
+                next_writer_sequence,
+            });
+        }
+        if catalog.order_frontiers.insert(id, frontiers).is_some() {
+            return None;
+        }
+    }
     let n_blocked = read_u32(&mut cur)? as usize;
     for _ in 0..n_blocked {
         if cur.len() < 32 {
@@ -1776,7 +1831,7 @@ fn read_u64(cur: &mut &[u8]) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod checkpoint_v12_freeze {
+mod checkpoint_v13_freeze {
     use super::*;
     use crate::atomic_stage_media::{
         encode_stage_chunk_body, encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal,
@@ -1789,12 +1844,12 @@ mod checkpoint_v12_freeze {
     }
 
     #[test]
-    fn v12_empty_checkpoint_roundtrips() {
+    fn v13_empty_checkpoint_roundtrips() {
         let catalog = StageCatalog::default();
         let bytes = encode_checkpoint(&catalog, &[]).unwrap();
         assert!(bytes.starts_with(CHECKPOINT_MAGIC));
         assert_eq!(bytes[CHECKPOINT_MAGIC.len()], CHECKPOINT_VERSION);
-        let (decoded, covered) = decode_checkpoint(&bytes).expect("v12 empty");
+        let (decoded, covered) = decode_checkpoint(&bytes).expect("v13 empty");
         assert!(covered.is_empty());
         assert!(!decoded.has_outstanding_evidence());
     }

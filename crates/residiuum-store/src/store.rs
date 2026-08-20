@@ -2566,6 +2566,52 @@ impl Store {
         Ok(())
     }
 
+    /// Append derived Atomic control evidence without establishing a stable
+    /// boundary. A following durable decision append on shard zero flushes this
+    /// prefix and the decision together in order.
+    pub(crate) fn append_buffered_atomic_frame(
+        &mut self,
+        kind: residiuum_format::FrameKind,
+        envelope: &[u8],
+        body: &[u8],
+        event_id: [u8; 16],
+    ) -> Result<(), StoreError> {
+        if self.writer_lock.is_none() {
+            return Err(StoreError::AtomicStage(
+                "buffered atomic append requires the writer lock".into(),
+            ));
+        }
+        let writer = self
+            .active_mut(0)
+            .ok_or_else(|| StoreError::AtomicStage("no active segment".into()))?;
+        writer.segment.append(kind, envelope, body, event_id)?;
+        Ok(())
+    }
+
+    /// Capture the first writer sequence strictly after the current contents
+    /// of every active shard. The witness is meaningful only when durably
+    /// ordered before the corresponding Atomic decision.
+    pub(crate) fn atomic_order_frontier(
+        &self,
+    ) -> Result<Vec<crate::atomic_stage_media::AtomicShardFrontier>, StoreError> {
+        self.actives
+            .iter()
+            .enumerate()
+            .map(|(shard, active)| {
+                let active = active.as_ref().ok_or_else(|| {
+                    StoreError::AtomicStage("Atomic order frontier missing active shard".into())
+                })?;
+                Ok(crate::atomic_stage_media::AtomicShardFrontier {
+                    shard: u16::try_from(shard).map_err(|_| {
+                        StoreError::AtomicStage("Atomic writer shard overflow".into())
+                    })?,
+                    segment_id: active.segment_id,
+                    next_writer_sequence: active.segment.writer_sequence(),
+                })
+            })
+            .collect()
+    }
+
     /// Put opaque bytes under `subject` (OVERVIEW put event).
     ///
     /// Bodies larger than the chunk threshold are stored as chunked payloads
@@ -7128,6 +7174,7 @@ impl Store {
     pub(crate) fn publish_atomic_generation(
         &mut self,
         members: &[crate::atomic_stage_media::AtomicPublishMember],
+        respect_later_ordinary: bool,
     ) -> Result<(), StoreError> {
         let mut next_index = self.index.clone();
         let mut next_durable = self.durable_index.clone();
@@ -7136,6 +7183,39 @@ impl Store {
 
         for published in members {
             let event_id = published.member.event_id.to_bytes();
+            let current = next_index.get(&published.subject);
+            let current_event = current.map(|entry| match entry {
+                crate::index::IndexEntry::Live(value) => value.event_id,
+                crate::index::IndexEntry::Deleted { event_id, .. } => *event_id,
+            });
+            let current_segment = current.map(crate::index::IndexEntry::segment_id);
+            let current_sequence = current.map(|entry| match entry {
+                crate::index::IndexEntry::Live(value) => value.writer_sequence,
+                crate::index::IndexEntry::Deleted {
+                    writer_sequence, ..
+                } => *writer_sequence,
+            });
+            let already_published = current_event == Some(event_id);
+            let later_ordinary = respect_later_ordinary
+                && current_segment
+                    .zip(current_sequence)
+                    .is_some_and(|(segment, sequence)| {
+                        segment != [0; 16]
+                            && (segment_seq_from_id(&segment)
+                                > segment_seq_from_id(&published.order_frontier.segment_id)
+                                || (segment == published.order_frontier.segment_id
+                                    && sequence >= published.order_frontier.next_writer_sequence))
+                    });
+            if already_published {
+                if let Some(refer) = published.payload.clone() {
+                    next_refs.insert(event_id, refer);
+                }
+                continue;
+            }
+            if later_ordinary {
+                next_refs.remove(&event_id);
+                continue;
+            }
             if let Some(crate::index::IndexEntry::Live(previous)) =
                 next_index.get(&published.subject)
             {

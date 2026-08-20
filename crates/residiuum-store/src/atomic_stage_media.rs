@@ -17,6 +17,17 @@ const SEAL_MAGIC: &[u8] = b"ATSEAL1";
 const PREPARE_MAGIC: &[u8] = b"ATPREP1";
 const CHUNK_PLAN_MAGIC: &[u8] = b"ATMAP1";
 const CHUNK_BODY_MAGIC: &[u8] = b"ATCHK1";
+const ORDER_FRONTIER_MAGIC: &[u8] = b"ATORD1";
+
+/// One writer-shard position captured immediately before an Atomic decision.
+/// `next_writer_sequence` is the first sequence that is strictly after the
+/// witnessed frontier in `segment_id`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AtomicShardFrontier {
+    pub shard: u16,
+    pub segment_id: [u8; 16],
+    pub next_writer_sequence: u64,
+}
 
 /// Locator for staged payload/chunk bytes in store media (CR-ATMR6-004).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,6 +55,7 @@ pub(crate) struct AtomicPublishMember {
     pub member: AtomicMember,
     pub payload: Option<AtomicValueRef>,
     pub commit_position: u64,
+    pub order_frontier: AtomicShardFrontier,
 }
 
 /// Staging facts recovered from store media only.
@@ -70,6 +82,9 @@ pub(crate) struct StageCatalog {
     /// Next non-zero Heap commit position. Reconstructed above every admitted
     /// committed decision during recovery.
     pub commit_next: BTreeMap<HeapId, u64>,
+    /// Per-shard ordinary-write frontier durably covered by each committed
+    /// decision. The witness frame precedes the decision stable boundary.
+    pub order_frontiers: BTreeMap<AtomicId, Vec<AtomicShardFrontier>>,
     /// Identities that must not be installed or reused (CR-ATMR5-002).
     pub blocked: BTreeSet<AtomicId>,
     /// Prepares observed as format-admitted `BatchPrepare` (CR-ATMR5-006).
@@ -142,6 +157,7 @@ impl StageCatalog {
             || !self.seals.is_empty()
             || !self.decisions.is_empty()
             || !self.evidence_heaps.is_empty()
+            || !self.order_frontiers.is_empty()
             || !self.blocked.is_empty()
             || !self.prepare_batch.is_empty()
             || !self.coord_seq.is_empty()
@@ -168,6 +184,12 @@ impl StageCatalog {
             .saturating_add(self.decisions.len() as u64 * 192)
             .saturating_add(self.evidence_heaps.len() as u64 * 48)
             .saturating_add(self.commit_next.len() as u64 * 24)
+            .saturating_add(
+                self.order_frontiers
+                    .values()
+                    .map(|frontiers| 40u64.saturating_add(frontiers.len() as u64 * 26))
+                    .sum(),
+            )
             .saturating_add(self.blocked.len() as u64 * 32)
             .saturating_add(self.prepare_batch.len() as u64 * 32)
             .saturating_add(self.coord_seq.len() as u64 * 40)
@@ -301,6 +323,40 @@ mod commit_position_tests {
         assert_eq!(catalog.next_commit_position(heap_a).unwrap(), 8);
         assert_eq!(catalog.next_commit_position(heap_b).unwrap(), 3);
     }
+
+    #[test]
+    fn order_frontier_roundtrips_and_refuses_non_contiguous_shards() {
+        let id = atomic(7);
+        let frontiers = vec![
+            AtomicShardFrontier {
+                shard: 0,
+                segment_id: [1; 16],
+                next_writer_sequence: 9,
+            },
+            AtomicShardFrontier {
+                shard: 1,
+                segment_id: [2; 16],
+                next_writer_sequence: 4,
+            },
+        ];
+        let encoded = encode_order_frontier(id, &frontiers).unwrap();
+        match decode_stage_sidecar(&encoded) {
+            SidecarDecode::OrderFrontier {
+                atomic_id,
+                frontiers: decoded,
+            } => {
+                assert_eq!(atomic_id, id);
+                assert_eq!(decoded, frontiers);
+            }
+            other => panic!("unexpected order-frontier decode: {other:?}"),
+        }
+        let invalid = vec![AtomicShardFrontier {
+            shard: 1,
+            segment_id: [1; 16],
+            next_writer_sequence: 9,
+        }];
+        assert!(encode_order_frontier(id, &invalid).is_err());
+    }
 }
 
 pub(crate) fn encode_stage_payload(atomic_id: AtomicId, ordinal: u32, payload: &[u8]) -> Vec<u8> {
@@ -310,6 +366,35 @@ pub(crate) fn encode_stage_payload(atomic_id: AtomicId, ordinal: u32, payload: &
     out.extend_from_slice(&ordinal.to_be_bytes());
     out.extend_from_slice(payload);
     out
+}
+
+pub(crate) fn encode_order_frontier(
+    atomic_id: AtomicId,
+    frontiers: &[AtomicShardFrontier],
+) -> Result<Vec<u8>, StoreError> {
+    let count = u16::try_from(frontiers.len())
+        .map_err(|_| StoreError::AtomicStage("too many Atomic writer frontiers".into()))?;
+    let mut ordered = frontiers.to_vec();
+    ordered.sort_by_key(|frontier| frontier.shard);
+    if ordered
+        .iter()
+        .enumerate()
+        .any(|(expected, frontier)| usize::from(frontier.shard) != expected)
+    {
+        return Err(StoreError::AtomicStage(
+            "Atomic writer frontiers must cover contiguous shards".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(ORDER_FRONTIER_MAGIC.len() + 34 + ordered.len() * 26);
+    out.extend_from_slice(ORDER_FRONTIER_MAGIC);
+    out.extend_from_slice(atomic_id.as_bytes());
+    out.extend_from_slice(&count.to_be_bytes());
+    for frontier in ordered {
+        out.extend_from_slice(&frontier.shard.to_be_bytes());
+        out.extend_from_slice(&frontier.segment_id);
+        out.extend_from_slice(&frontier.next_writer_sequence.to_be_bytes());
+    }
+    Ok(out)
 }
 
 /// Legacy ATPREP1 writer. New prepares use `BatchPrepare` only (CR-ATMR5-006).
@@ -393,6 +478,16 @@ pub(crate) fn seal_event_id(atomic_id: AtomicId) -> [u8; 16] {
     id
 }
 
+pub(crate) fn order_frontier_event_id(atomic_id: AtomicId) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"residiuum.atomic-stage.order-frontier");
+    hasher.update(atomic_id.as_bytes());
+    let hash = hasher.finalize();
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hash.as_bytes()[..16]);
+    id
+}
+
 pub(crate) fn chunk_plan_event_id(atomic_id: AtomicId, ordinal: u32) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"residiuum.atomic-stage.chunk-plan");
@@ -424,6 +519,7 @@ pub(crate) enum SidecarKind {
     Seal,
     ChunkPlan,
     ChunkBody,
+    OrderFrontier,
 }
 
 /// Decode of an Atomic staging sidecar (`ATPREP1` / `ATPAY1` / `ATSEAL1`).
@@ -464,10 +560,75 @@ pub(crate) enum SidecarDecode {
         index: u32,
         body: Vec<u8>,
     },
+    /// Durable per-shard order witness covered by the decision boundary.
+    OrderFrontier {
+        atomic_id: AtomicId,
+        frontiers: Vec<AtomicShardFrontier>,
+    },
 }
 
 /// Classify a PayloadChunk body as a staging sidecar or not-ours.
 pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
+    if body.starts_with(ORDER_FRONTIER_MAGIC) {
+        let header = ORDER_FRONTIER_MAGIC.len() + 32 + 2;
+        if body.len() < header {
+            return SidecarDecode::Partial {
+                kind: SidecarKind::OrderFrontier,
+            };
+        }
+        let atomic_id = match AtomicId::from_bytes(
+            body[ORDER_FRONTIER_MAGIC.len()..ORDER_FRONTIER_MAGIC.len() + 32]
+                .try_into()
+                .unwrap_or([0; 32]),
+        ) {
+            Ok(id) => id,
+            Err(_) => {
+                return SidecarDecode::Corrupt {
+                    kind: SidecarKind::OrderFrontier,
+                    atomic_id: None,
+                };
+            }
+        };
+        let count_at = ORDER_FRONTIER_MAGIC.len() + 32;
+        let count =
+            u16::from_be_bytes(body[count_at..count_at + 2].try_into().unwrap_or([0; 2])) as usize;
+        let Some(expected) = header.checked_add(count.saturating_mul(26)) else {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::OrderFrontier,
+                atomic_id: Some(atomic_id),
+            };
+        };
+        if count == 0 || body.len() != expected {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::OrderFrontier,
+                atomic_id: Some(atomic_id),
+            };
+        }
+        let mut frontiers = Vec::with_capacity(count);
+        let mut offset = header;
+        for expected_shard in 0..count {
+            let shard = u16::from_be_bytes(body[offset..offset + 2].try_into().unwrap_or([0; 2]));
+            let segment_id = body[offset + 2..offset + 18].try_into().unwrap_or([0; 16]);
+            let next_writer_sequence =
+                u64::from_be_bytes(body[offset + 18..offset + 26].try_into().unwrap_or([0; 8]));
+            if usize::from(shard) != expected_shard || segment_id == [0; 16] {
+                return SidecarDecode::Corrupt {
+                    kind: SidecarKind::OrderFrontier,
+                    atomic_id: Some(atomic_id),
+                };
+            }
+            frontiers.push(AtomicShardFrontier {
+                shard,
+                segment_id,
+                next_writer_sequence,
+            });
+            offset += 26;
+        }
+        return SidecarDecode::OrderFrontier {
+            atomic_id,
+            frontiers,
+        };
+    }
     if body.starts_with(PREPARE_MAGIC) {
         return match decode_prepare(&body[PREPARE_MAGIC.len()..]) {
             Ok(prepare) => SidecarDecode::Prepare(Box::new(prepare)),

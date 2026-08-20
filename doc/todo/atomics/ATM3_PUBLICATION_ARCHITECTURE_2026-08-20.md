@@ -9,8 +9,26 @@ authenticated `ATPAY1` frame locators; payload bodies are not retained in the
 primary index. Multi-member publication and the decision-before-publish and
 publish-before-ack failpoint cases are covered. This is not yet ATM-3
 acceptance: history-generation publication, read-only inspection recovery,
-universal ordinary-write ordering, and the complete concurrent/crash proof
-remain open.
+the complete concurrent/crash proof, and grouped member-boundary optimization
+remain open. Universal ordinary-write ordering now has its first implemented
+and tested witness profile, described below.
+
+Universal-order amendment (2026-08-20): checkpoint profile v13 adds an
+`ATORD1` decision witness. Immediately before a committed decision, the Store
+captures `(shard, active segment id, next writer sequence)` for every physical
+writer shard and appends the witness on coordinator shard zero without a
+barrier. The following durable `BatchCommit` flushes both witness and decision
+in one ordered decision boundary. This is not a timestamp and does not add a
+third sync.
+
+During reconstruction, a current ordinary event whose segment/sequence is
+beyond the witnessed frontier for its subject's home shard outranks that
+Atomic member. Otherwise the committed member is applied. Atomics themselves
+are replayed in per-Heap commit-position order. Consequently Atomic → ordinary
+put, Atomic → ordinary delete, and overlapping Atomic → Atomic histories retain
+their order even after deleting the derived primary index. An `ATORD1` without
+a decision publishes nothing; a committed decision without its complete order
+witness is damaged evidence and cannot be guessed into visibility.
 
 This record satisfies the mandatory ATM-3 design review in
 `ATOMICS_IMPLEMENTATION_PLAN.md` section 9. It is deliberately narrower than
@@ -47,10 +65,13 @@ payload locators as a first-class durable locator class.
    None participates in ordinary indexes before a valid committed decision.
 3. `ATSEAL1` is appended after the complete member set and payload bytes. Its
    durable append is the member stable boundary. There is no per-member sync.
-4. `BatchCommit` carries canonical `AtomicDecision`. The store appends it only
+4. `ATORD1` captures every writer shard's ordinary-event frontier and is
+   appended without a separate stable boundary.
+5. `BatchCommit` carries canonical `AtomicDecision`. The store appends it only
    after revalidating the sealed evidence at the serialization frontier. Its
-   durable append is the decision stable boundary and linearization point.
-5. The catalogue checkpoint is an authenticated acceleration structure, never
+   durable append covers `ATORD1`, is the decision stable boundary, and is the
+   linearization point.
+6. The catalogue checkpoint is an authenticated acceleration structure, never
    authority. A crash before it is replaced is recovered from the segment
    tail.
 

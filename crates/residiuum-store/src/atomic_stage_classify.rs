@@ -238,7 +238,11 @@ pub fn finalize_catalog(catalog: &mut StageCatalog, findings: &mut StageFindings
                     && usize::try_from(decision.member_count)
                         .ok()
                         .is_some_and(|count| count == members.len())
-                    && catalog.seals.get(&id) == Some(&prepare.content_root));
+                    && catalog.seals.get(&id) == Some(&prepare.content_root)
+                    && catalog
+                        .order_frontiers
+                        .get(&id)
+                        .is_some_and(|frontiers| !frontiers.is_empty()));
             if !prepare_ok || !root_ok || !count_ok || !committed_material_ok {
                 catalog.blocked.insert(id);
                 findings.push(
@@ -463,6 +467,23 @@ fn ingest_sidecar(catalog: &mut StageCatalog, body: &[u8], findings: &mut StageF
             index,
             body,
         } => admit_chunk_body(catalog, atomic_id, ordinal, index, body, findings),
+        SidecarDecode::OrderFrontier {
+            atomic_id,
+            frontiers,
+        } => {
+            if let Some(existing) = catalog.order_frontiers.get(&atomic_id) {
+                if existing != &frontiers {
+                    block(catalog, Some(atomic_id));
+                    findings.push(
+                        StageEvidenceKind::Decision,
+                        StageEvidenceClass::Conflict,
+                        Some(atomic_id),
+                    );
+                }
+            } else {
+                catalog.order_frontiers.insert(atomic_id, frontiers);
+            }
+        }
     }
 }
 
@@ -779,6 +800,7 @@ fn sidecar_kind(kind: SidecarKind) -> StageEvidenceKind {
         SidecarKind::Seal => StageEvidenceKind::Seal,
         SidecarKind::ChunkPlan => StageEvidenceKind::ChunkPlan,
         SidecarKind::ChunkBody => StageEvidenceKind::ChunkBody,
+        SidecarKind::OrderFrontier => StageEvidenceKind::Decision,
     }
 }
 

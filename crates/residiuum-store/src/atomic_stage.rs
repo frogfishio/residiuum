@@ -10,9 +10,9 @@ use crate::atomic_stage_classify::{
     clear_coverage_loss, StageEvidenceClass, StageEvidenceKind, StageFindings,
 };
 use crate::atomic_stage_media::{
-    chunk_body_event_id, chunk_plan_event_id, encode_stage_chunk_body, encode_stage_chunk_plan,
-    encode_stage_payload, encode_stage_seal, payload_event_id, seal_event_id, AtomicPublishMember,
-    AtomicValueRef, BodyRef, StageCatalog,
+    chunk_body_event_id, chunk_plan_event_id, encode_order_frontier, encode_stage_chunk_body,
+    encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal, order_frontier_event_id,
+    payload_event_id, seal_event_id, AtomicPublishMember, AtomicValueRef, BodyRef, StageCatalog,
 };
 use crate::atomic_stage_recover::{
     checkpoint_encoded_len, open_catalog, persist_live_checkpoint, rel_path, resolve_chunk_body,
@@ -144,7 +144,7 @@ impl Store {
         });
         for (atomic_id, _, _) in committed {
             let delta = publication_delta(self.paths(), &opened.catalog, atomic_id)?;
-            self.publish_atomic_generation(&delta)?;
+            self.publish_atomic_generation(&delta, true)?;
         }
         Ok(())
     }
@@ -512,6 +512,24 @@ impl StoreAtomicStage<'_> {
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         let body =
             encode_decision(&decision).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        if !self.catalog.order_frontiers.contains_key(&atomic_id) {
+            let frontiers = self.store.atomic_order_frontier()?;
+            let witness = encode_order_frontier(atomic_id, &frontiers)?;
+            let mut candidate = self.catalog.clone();
+            candidate
+                .order_frontiers
+                .insert(atomic_id, frontiers.clone());
+            self.admit_catalog_change(&candidate, witness.len() as u64)?;
+            crate::failpoint::hit("store.atomic.before_order_frontier")?;
+            self.store.append_buffered_atomic_frame(
+                FrameKind::PayloadChunk,
+                EMPTY_ENVELOPE,
+                &witness,
+                order_frontier_event_id(atomic_id),
+            )?;
+            crate::failpoint::hit("store.atomic.after_order_frontier")?;
+            self.catalog.order_frontiers.insert(atomic_id, frontiers);
+        }
         let envelope = encode_atomic_commit_envelope(
             prepare.heap_id.as_bytes(),
             atomic_id.as_bytes(),
@@ -658,7 +676,7 @@ impl StoreAtomicStage<'_> {
 
     fn publish_decision(&mut self, atomic_id: AtomicId) -> Result<(), StoreError> {
         let delta = publication_delta(self.store.paths(), &self.catalog, atomic_id)?;
-        self.store.publish_atomic_generation(&delta)
+        self.store.publish_atomic_generation(&delta, false)
     }
 
     fn members_for_frontier(&self, plan: &AtomicPlan) -> Result<Vec<AtomicMember>, StoreError> {
@@ -998,9 +1016,15 @@ impl StoreAtomicStage<'_> {
     }
 
     fn active_len(&self) -> u64 {
-        fs::metadata(self.store.paths().active_segment())
+        fs::metadata(self.coordinator_active_path())
             .map(|m| m.len())
             .unwrap_or(0)
+    }
+
+    fn coordinator_active_path(&self) -> PathBuf {
+        self.store
+            .paths()
+            .active_segment_for_shard(0, self.store.writer_shards())
     }
 
     fn note_written_ref(&self, start: u64) -> Option<BodyRef> {
@@ -1008,7 +1032,7 @@ impl StoreAtomicStage<'_> {
         if end < start {
             return None;
         }
-        let path = self.store.paths().active_segment();
+        let path = self.coordinator_active_path();
         let mut file = fs::File::open(&path).ok()?;
         use std::io::{Read, Seek, SeekFrom};
         file.seek(SeekFrom::Start(start)).ok()?;
@@ -1212,7 +1236,7 @@ impl StoreAtomicStage<'_> {
 
     fn candidate_body_ref(&self, start: u64, body_len: usize) -> BodyRef {
         BodyRef {
-            rel_path: rel_path(self.store.paths(), &self.store.paths().active_segment()),
+            rel_path: rel_path(self.store.paths(), &self.coordinator_active_path()),
             offset: start,
             // The frame is larger than its body, but encoded checkpoint size
             // depends only on this fixed-width field, not its value.
@@ -1334,12 +1358,24 @@ fn publication_delta(
     }
 
     let mut delta = Vec::with_capacity(members.len());
+    let frontiers = catalog.order_frontiers.get(&atomic_id).ok_or_else(|| {
+        StoreError::AtomicStage("committed Atomic lacks its durable order frontier".into())
+    })?;
     for member in members {
         let subject = atomic_subject(
             prepare.heap_id,
             member.object_identity.collection_id,
             &member.object_identity.key,
         )?;
+        if frontiers.is_empty() {
+            return Err(StoreError::AtomicStage(
+                "Atomic order frontier has no writer shards".into(),
+            ));
+        }
+        let shard = crate::store::subject_writer_shard(&subject, frontiers.len());
+        let order_frontier = frontiers.get(shard).copied().ok_or_else(|| {
+            StoreError::AtomicStage("Atomic order frontier does not cover target shard".into())
+        })?;
         let payload = if member.member_kind == MutationKind::Delete {
             None
         } else {
@@ -1369,6 +1405,7 @@ fn publication_delta(
             member,
             payload,
             commit_position,
+            order_frontier,
         });
     }
     Ok(delta)
