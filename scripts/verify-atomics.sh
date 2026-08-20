@@ -44,7 +44,7 @@ TOOLCHAIN="$(rustc --version 2>/dev/null || echo rustc-missing)"
 CARGO_V="$(cargo --version 2>/dev/null || echo cargo-missing)"
 PLATFORM="$(uname -srm)"
 SEED="${ATOMICS_EVIDENCE_SEED:-0}"
-SUITE_VERSION="atm-1-atm-2-atmr5-2026-08-19"
+SUITE_VERSION="atm-1-atm-2-atmr6-2026-08-20"
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_UNIX="$(date +%s)"
 # Label is decided after the run from dirty + family coverage (CR-R2-007).
@@ -156,12 +156,25 @@ run_store_atmr5_full() {
   run_cmd ATM-CRS "store atomic_stage_prepare_authority" \
     cargo test -p residiuum-store --offline --test atomic_stage_prepare_authority \
     --features legacy-raw-store
+  run_cmd ATM-CRS "store atomic_stage_seal" \
+    cargo test -p residiuum-store --offline --test atomic_stage_seal \
+    --features legacy-raw-store
+  run_cmd ATM-CRS "store atomic_stage_status" \
+    cargo test -p residiuum-store --offline --test atomic_stage_status \
+    --features legacy-raw-store
+  run_cmd ATM-CRS "store atomic_stage_limits" \
+    cargo test -p residiuum-store --offline --test atomic_stage_limits \
+    --features legacy-raw-store
+  run_cmd ATM-CRS "store atomic_stage_maintenance" \
+    cargo test -p residiuum-store --offline --test atomic_stage_maintenance \
+    --features legacy-raw-store
   run_cmd ATM-ENC "store atomic_stage rustfmt --check" \
     rustfmt --check \
     crates/residiuum-store/src/atomic_stage.rs \
     crates/residiuum-store/src/atomic_stage_media.rs \
     crates/residiuum-store/src/atomic_stage_classify.rs \
     crates/residiuum-store/src/atomic_stage_recover.rs \
+    crates/residiuum-store/src/atomic_stage_status.rs \
     crates/residiuum-store/tests/atomic_stage_invisibility.rs \
     crates/residiuum-store/tests/atomic_stage_bounded.rs \
     crates/residiuum-store/tests/atomic_stage_classify.rs \
@@ -169,7 +182,11 @@ run_store_atmr5_full() {
     crates/residiuum-store/tests/atomic_stage_retry.rs \
     crates/residiuum-store/tests/atomic_stage_chunks.rs \
     crates/residiuum-store/tests/atomic_stage_prepare_authority.rs \
-    crates/residiuum-store/tests/atomic_stage_io_matrix.rs
+    crates/residiuum-store/tests/atomic_stage_io_matrix.rs \
+    crates/residiuum-store/tests/atomic_stage_seal.rs \
+    crates/residiuum-store/tests/atomic_stage_status.rs \
+    crates/residiuum-store/tests/atomic_stage_limits.rs \
+    crates/residiuum-store/tests/atomic_stage_maintenance.rs
 }
 
 case "$PROFILE" in
@@ -267,7 +284,7 @@ ENDED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ENDED_UNIX="$(date +%s)"
 DURATION_S="$((ENDED_UNIX - STARTED_UNIX))"
 
-HANDOFF="doc/todo/atomics/ATM1_ATM2_HANDOFF_ATMR5_2026-08-19.md"
+HANDOFF="doc/todo/atomics/ATM1_ATM2_HANDOFF_ATMR6_2026-08-20.md"
 [[ -f "$HANDOFF" ]] || fail "missing package handoff $HANDOFF"
 
 python3 - "$COMMANDS_JSONL" "$OUT_ROOT" "$PROFILE" "$COMMIT" "$DIRTY" \
@@ -331,9 +348,9 @@ if profile == "full" and not cmd_passed(cmds, "residiuum-format --offline --all-
 atm2_blockers = [
     "not_store=true; store staging is not an accepted ATM-2 durability contract",
     "ATM-3 must not consume StoreAtomicStage or the peer lane",
-    "RQL/watch/residiuum-examine/Recovery Shadow/backup-restore-clone remain untested store surfaces",
-    "store rotation/compaction/pending-seal transitions are not in the Atomic I/O matrix",
-    "omit-file-sync/omit-dir-sync mutants still check instrumentation visits, not media loss",
+    "RQL/watch/residiuum-examine remain untested store surfaces",
+    "Recovery Shadow of Atomic-bearing actives is fail-closed until ATM-4 copy-through (CR-ATMR6-006)",
+    "multiprocess crash_child Abort is not an Atomic staging cell (CR-ATMR6-007 uses in-process crash-media)",
     "store-wide clippy -D warnings is not an Atomics gate (pre-existing store warnings)",
 ]
 if profile in {"crash", "full"}:
@@ -364,7 +381,15 @@ if profile == "full":
         atm2_blockers.append("missing store durable coordinator sequence (CR-ATMR5-004)")
     if not cmd_passed(cmds, "atomic_stage_prepare_authority"):
         atm2_blockers.append("missing store single prepare authority (CR-ATMR5-006)")
-    if not cmd_passed(cmds, "atomic_stage rustfmt --check"):
+    if not cmd_passed(cmds, "atomic_stage_seal"):
+        atm2_blockers.append("missing store persist-before-apply seal (CR-ATMR6-003)")
+    if not cmd_passed(cmds, "atomic_stage_status"):
+        atm2_blockers.append("missing store surviving-prepare examination (CR-ATMR6-005)")
+    if not cmd_passed(cmds, "atomic_stage_limits"):
+        atm2_blockers.append("missing store operable limits (CR-ATMR6-004)")
+    if not cmd_passed(cmds, "atomic_stage_maintenance"):
+        atm2_blockers.append("missing store maintenance fence (CR-ATMR6-006)")
+    if not cmd_passed(cmds, "rustfmt --check crates/residiuum-store/src/atomic_stage.rs"):
         atm2_blockers.append("missing scoped store Atomic staging rustfmt --check")
 
 deferred = [
@@ -564,6 +589,7 @@ atm2 = merge_pack(out / "atm-2" / "manifest.json", {
         "crash prefixes before_prepare / after_prepare / after_member_n",
         "closed member set, one store authority, exclusive publish, sidecar limits, authenticated checkpoint, durable chunks, I/O + store invisibility (CR-ATMR4)",
         "store bounded catalogue, honest classifier, exact retry, durable chunks, coordinator seq, one prepare, exclusive no-prefix-guess, incremental frontier, store I/O matrix (CR-ATMR5 labor)",
+        "covered-prefix block verify, persist-before-apply seal, operable limits, examine projection, format freeze + fail-closed maintenance, crash-media I/O matrix (CR-ATMR6 labor)",
     ],
     "authoritative_files": [
         "coordinator.log (BatchPrepare frames, sync_all after append)",

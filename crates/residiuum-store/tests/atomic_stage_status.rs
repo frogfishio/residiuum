@@ -134,6 +134,7 @@ fn after_prepare_interrupt_is_prepared_not_absent() {
 
 #[test]
 fn after_members_without_payload_is_still_prepared() {
+    let _g = serial();
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::create(dir.path().join("s")).unwrap();
     let heap = HeapId::from_bytes(store.store_id()).unwrap();
@@ -194,6 +195,7 @@ fn incomplete_id_cannot_be_reused() {
 
 #[test]
 fn no_prepare_is_the_only_absence() {
+    let _g = serial();
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::create(dir.path().join("s")).unwrap();
     let stage = store.atomic_stage().unwrap();

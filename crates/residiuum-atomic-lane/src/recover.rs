@@ -728,7 +728,7 @@ pub fn persist_recovery_checkpoint(
         shard_offsets.push(read_log_ack(&shard_path(root, shard))?);
     }
     let prev = match load_checkpoint(root, RecoveryLimits::prototype())? {
-        CheckpointLoad::Ready(ck) => Some(ck),
+        CheckpointLoad::Ready(ck) => Some(*ck),
         _ => None,
     };
     let (coordinator_marks, coordinator_hash, _) = extend_log_frontier(

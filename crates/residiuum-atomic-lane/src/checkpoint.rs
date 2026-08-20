@@ -75,8 +75,8 @@ pub enum CheckpointLoad {
     Missing,
     /// v1 or unrecognized image: rebuild from logs; do not apply facts.
     Legacy,
-    /// Authenticated v3 body.
-    Ready(RecoveryCheckpoint),
+    /// Authenticated v3 body (boxed so the enum stays small).
+    Ready(Box<RecoveryCheckpoint>),
 }
 
 impl RecoveryCheckpoint {
@@ -567,7 +567,9 @@ pub fn load_checkpoint(root: &Path, limits: RecoveryLimits) -> Result<Checkpoint
     if bytes.len() < MAGIC.len() + 1 || !bytes.starts_with(MAGIC) || bytes[MAGIC.len()] != VERSION {
         return Ok(CheckpointLoad::Legacy);
     }
-    Ok(CheckpointLoad::Ready(decode_checkpoint(&bytes, limits)?))
+    Ok(CheckpointLoad::Ready(Box::new(decode_checkpoint(
+        &bytes, limits,
+    )?)))
 }
 
 /// Persist `checkpoint` atomically.
