@@ -235,8 +235,8 @@
     "maintenance": "fail-closed seal/compact/reclaim/identity-reassign while outstanding; Recovery Shadow gated via seal refuse; backup copies store-info sidecars",
     "ATCKP1": {
       "file": "store-info/atomic-stage.ckpt",
-      "version": 9,
-      "domain": "RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V9",
+      "version": 10,
+      "domain": "RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V10",
       "covered_block_bytes": 65536
     },
     "ATCRD1": {

@@ -7,7 +7,7 @@
 //! coverage transfer. Findings, blocked identities, and coverage degradation
 //! are persisted; ordinary reopen does not forget them.
 
-use crate::atomic_file::write_atomic;
+use crate::atomic_file::{write_atomic_with_failpoints, AtomicWriteFailpoints};
 use crate::atomic_stage_classify::{
     classify_coverage_loss, classify_hole, decode_finding_class, decode_finding_kind,
     encode_finding_class, encode_finding_kind, finalize_catalog, ingest_classified_frame,
@@ -28,14 +28,26 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 9;
-const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V9";
+const CHECKPOINT_VERSION: u8 = 10;
+const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V10";
 const BLOCK_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-BLK-V1";
 /// Fixed leaf size for the covered-prefix block frontier (CR-ATMR6-001).
 const FRONTIER_BLOCK: u64 = 64 * 1024;
 const COORD_MAGIC: &[u8] = b"ATCRD1";
 const COORD_VERSION: u8 = 1;
 const COORD_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-COORD-V1";
+const CHECKPOINT_WRITE_POINTS: AtomicWriteFailpoints = AtomicWriteFailpoints {
+    after_write: "store.atomic.checkpoint.after_write",
+    after_file_sync: "store.atomic.checkpoint.after_file_sync",
+    after_rename: "store.atomic.checkpoint.after_rename",
+    after_dir_sync: "store.atomic.checkpoint.after_dir_sync",
+};
+const COORD_WRITE_POINTS: AtomicWriteFailpoints = AtomicWriteFailpoints {
+    after_write: "store.atomic.coord.after_write",
+    after_file_sync: "store.atomic.coord.after_file_sync",
+    after_rename: "store.atomic.coord.after_rename",
+    after_dir_sync: "store.atomic.coord.after_dir_sync",
+};
 /// On-disk catalogue under `store-info/`.
 pub const ATOMIC_STAGE_CHECKPOINT_FILE: &str = "atomic-stage.ckpt";
 /// Durable coordinator sequence log (CR-ATMR5-004).
@@ -83,7 +95,9 @@ impl AtomicStageLimits {
         let payload = atomics as u64 * hard.total_proposed_value_bytes as u64;
         Self {
             max_segment_bytes: STORE_SEGMENT_BYTES,
-            max_scan_bytes: STORE_SEGMENT_BYTES,
+            // One unsettled Atomic prefix plus one newly discovered/tail
+            // segment. Both are charged; retained ordinary history is not.
+            max_scan_bytes: STORE_SEGMENT_BYTES.saturating_mul(2),
             max_atomics: atomics,
             max_members: atomics.saturating_mul(hard.total_generated_members),
             max_payload_bytes: payload,
@@ -167,6 +181,9 @@ pub struct AtomicStageOpenReport {
 #[derive(Clone, Debug)]
 pub(crate) struct CoveredFile {
     pub rel_path: String,
+    /// True when this file contains Atomic authority and therefore requires
+    /// authenticated full-prefix verification while unsettled.
+    pub atomic_evidence: bool,
     pub covered_len: u64,
     pub head: [u8; 32],
     pub tail: [u8; 32],
@@ -328,9 +345,7 @@ fn checkpoint_indicates_outstanding(paths: &StorePaths) -> Result<bool, StoreErr
     }
     let mut budget = Budget::new(AtomicStageLimits::operable());
     match load_checkpoint(paths, &mut budget) {
-        Ok(Some((catalog, covered))) => {
-            Ok(catalog.has_outstanding_evidence() || !covered.is_empty())
-        }
+        Ok(Some((catalog, _covered))) => Ok(catalog.has_outstanding_evidence()),
         Ok(None) => Ok(true),
         Err(_) => Ok(true),
     }
@@ -459,29 +474,41 @@ pub(crate) fn open_catalog(
         if let Some(idx) = unmatched.iter().position(|c| c.rel_path == rel) {
             let c = unmatched.swap_remove(idx);
             if size < c.covered_len {
-                budget.report.files_rebuilt = budget.report.files_rebuilt.saturating_add(1);
-                ingest_file_tail(
-                    &path,
-                    &rel,
-                    0,
-                    size,
-                    bound_heap,
-                    &mut catalog,
-                    &mut findings,
-                    &mut budget,
-                )?;
-                next_covered.push(cover_file(&path, rel, size)?);
+                if c.atomic_evidence {
+                    catalog.coverage_degraded = true;
+                    if !catalog.missing_covered.contains(&rel) {
+                        catalog.missing_covered.push(rel.clone());
+                    }
+                    classify_coverage_loss(&mut findings);
+                    next_covered.push(c);
+                } else {
+                    let atomic = ingest_file_tail(
+                        &path,
+                        &rel,
+                        0,
+                        size,
+                        bound_heap,
+                        &mut catalog,
+                        &mut findings,
+                        &mut budget,
+                    )?;
+                    next_covered.push(cover_file(&path, rel, size, atomic)?);
+                    budget.report.files_rebuilt = budget.report.files_rebuilt.saturating_add(1);
+                }
                 continue;
             }
-            let n = verify_covered_blocks(&path, &c)?;
-            budget.report.bytes_verified = budget.report.bytes_verified.saturating_add(n);
+            if c.atomic_evidence {
+                let n = verify_covered_blocks(&path, &c)?;
+                budget.charge_bytes(n)?;
+                budget.report.bytes_verified = budget.report.bytes_verified.saturating_add(n);
+            }
             if size == c.covered_len {
                 next_covered.push(CoveredFile { rel_path: rel, ..c });
                 budget.report.files_skipped = budget.report.files_skipped.saturating_add(1);
                 continue;
             }
             budget.report.files_tailed = budget.report.files_tailed.saturating_add(1);
-            ingest_file_tail(
+            let tail_atomic = ingest_file_tail(
                 &path,
                 &rel,
                 c.covered_len,
@@ -491,11 +518,16 @@ pub(crate) fn open_catalog(
                 &mut findings,
                 &mut budget,
             )?;
-            next_covered.push(extend_cover(&path, Some(&c), rel, size)?);
+            let atomic = c.atomic_evidence || tail_atomic;
+            next_covered.push(if atomic && !c.atomic_evidence {
+                cover_file(&path, rel, size, true)?
+            } else {
+                extend_cover(&path, Some(&c), rel, size, atomic)?
+            });
             continue;
         }
         budget.report.files_rebuilt = budget.report.files_rebuilt.saturating_add(1);
-        ingest_file_tail(
+        let atomic = ingest_file_tail(
             &path,
             &rel,
             0,
@@ -505,17 +537,23 @@ pub(crate) fn open_catalog(
             &mut findings,
             &mut budget,
         )?;
-        next_covered.push(cover_file(&path, rel, size)?);
+        next_covered.push(cover_file(&path, rel, size, atomic)?);
     }
 
     if !unmatched.is_empty() {
-        catalog.coverage_degraded = true;
-        for file in &unmatched {
-            if !catalog.missing_covered.iter().any(|p| p == &file.rel_path) {
-                catalog.missing_covered.push(file.rel_path.clone());
+        unmatched.retain(|file| file.atomic_evidence);
+        if !unmatched.is_empty() {
+            catalog.coverage_degraded = true;
+            for file in &unmatched {
+                if !catalog.missing_covered.iter().any(|p| p == &file.rel_path) {
+                    catalog.missing_covered.push(file.rel_path.clone());
+                }
             }
+            classify_coverage_loss(&mut findings);
+            // Keep the authenticated frontier: scrub must prove that the exact
+            // missing bytes returned, not merely that a path now exists.
+            next_covered.extend(unmatched);
         }
-        classify_coverage_loss(&mut findings);
     }
 
     load_coordinator(paths, &mut catalog)?;
@@ -535,7 +573,7 @@ pub(crate) fn open_catalog(
     budget.report.conflicts = findings.count(StageEvidenceClass::Conflict);
     budget.report.foreign = findings.count(StageEvidenceClass::ForeignHeap);
     covered = next_covered;
-    persist_checkpoint(paths, &catalog, &covered)?;
+    persist_checkpoint(paths, &catalog, &covered, limits.max_checkpoint_bytes)?;
     persist_coordinator(paths, &catalog)?;
     Ok(CatalogOpen {
         catalog,
@@ -550,10 +588,55 @@ pub(crate) fn persist_live_checkpoint(
     paths: &StorePaths,
     catalog: &StageCatalog,
     covered: &mut Vec<CoveredFile>,
+    limits: AtomicStageLimits,
 ) -> Result<(), StoreError> {
     cover_active(paths, covered)?;
-    persist_checkpoint(paths, catalog, covered)?;
+    persist_checkpoint(paths, catalog, covered, limits.max_checkpoint_bytes)?;
     persist_coordinator(paths, catalog)
+}
+
+/// Exact encoded size used for pre-append admission.
+pub(crate) fn checkpoint_encoded_len(
+    catalog: &StageCatalog,
+    covered: &[CoveredFile],
+) -> Result<u64, StoreError> {
+    Ok(encode_checkpoint(catalog, covered)?.len() as u64)
+}
+
+/// Authenticate every path retained as missing against its original frontier.
+pub(crate) fn verify_missing_coverage(
+    paths: &StorePaths,
+    catalog: &StageCatalog,
+    covered: &[CoveredFile],
+    limits: AtomicStageLimits,
+) -> Result<(), StoreError> {
+    let mut verified = 0u64;
+    for rel in &catalog.missing_covered {
+        let expected = covered
+            .iter()
+            .find(|file| &file.rel_path == rel)
+            .ok_or_else(|| {
+                StoreError::AtomicStage(
+                    "atomic stage scrub refused: missing authenticated frontier".into(),
+                )
+            })?;
+        let path = paths.root.join(rel);
+        let actual = fs::metadata(&path).map_err(|_| {
+            StoreError::AtomicStage(
+                "atomic stage scrub refused: covered media still missing".into(),
+            )
+        })?;
+        if !actual.is_file() || actual.len() != expected.covered_len {
+            return Err(StoreError::AtomicStage(
+                "atomic stage scrub refused: covered media length mismatch".into(),
+            ));
+        }
+        verified = verified.saturating_add(verify_covered_blocks(&path, expected)?);
+        if verified > limits.max_scan_bytes {
+            return Err(Budget::fail("scrub bytes", verified, limits.max_scan_bytes));
+        }
+    }
+    Ok(())
 }
 
 fn cover_active(paths: &StorePaths, covered: &mut Vec<CoveredFile>) -> Result<(), StoreError> {
@@ -564,7 +647,8 @@ fn cover_active(paths: &StorePaths, covered: &mut Vec<CoveredFile>) -> Result<()
     let size = fs::metadata(&active)?.len();
     let rel = rel_path(paths, &active);
     let prev = covered.iter().find(|c| c.rel_path == rel).cloned();
-    let next = extend_cover(&active, prev.as_ref(), rel.clone(), size)?;
+    // This path is called only after an Atomic append/catalogue change.
+    let next = extend_cover(&active, prev.as_ref(), rel.clone(), size, true)?;
     if let Some(slot) = covered.iter_mut().find(|c| c.rel_path == rel) {
         *slot = next;
     } else {
@@ -582,9 +666,9 @@ fn ingest_file_tail(
     catalog: &mut StageCatalog,
     findings: &mut StageFindings,
     budget: &mut Budget,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     if start > size {
-        return Ok(());
+        return Ok(false);
     }
     let want = size - start;
     if want > budget.limits.max_segment_bytes {
@@ -601,7 +685,14 @@ fn ingest_file_tail(
     }
     let mut bytes = vec![0u8; want as usize];
     file.read_exact(&mut bytes)?;
+    let atomic_related = contains_atomic_body_magic(&bytes)
+        || !read_atomic_evidence(&bytes, SafetyLimits::draft_defaults())
+            .examined
+            .is_empty();
     let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
+    if !atomic_related {
+        return Ok(false);
+    }
     for region in &report.regions {
         match region {
             ScanRegion::Hole { reason, .. } => classify_hole(findings, reason),
@@ -624,7 +715,16 @@ fn ingest_file_tail(
             }
         }
     }
-    Ok(())
+    if findings.records.iter().any(|finding| {
+        finding.atomic_id.is_none()
+            && matches!(
+                finding.class,
+                StageEvidenceClass::Corrupt | StageEvidenceClass::Partial
+            )
+    }) {
+        catalog.coverage_degraded = true;
+    }
+    Ok(true)
 }
 
 fn list_media_files(paths: &StorePaths, budget: &mut Budget) -> Result<Vec<PathBuf>, StoreError> {
@@ -705,6 +805,7 @@ fn leftover_hash(bytes: &[u8]) -> [u8; 32] {
 fn empty_coverage(rel_path: String) -> CoveredFile {
     CoveredFile {
         rel_path,
+        atomic_evidence: false,
         covered_len: 0,
         head: [0u8; 32],
         tail: [0u8; 32],
@@ -714,7 +815,7 @@ fn empty_coverage(rel_path: String) -> CoveredFile {
     }
 }
 
-fn coverage_from_bytes(rel_path: String, bytes: &[u8]) -> CoveredFile {
+fn coverage_from_bytes(rel_path: String, bytes: &[u8], atomic_evidence: bool) -> CoveredFile {
     let mut head = [0u8; 32];
     let mut tail = [0u8; 32];
     let head_n = bytes.len().min(32);
@@ -727,6 +828,18 @@ fn coverage_from_bytes(rel_path: String, bytes: &[u8]) -> CoveredFile {
         tail[..head_n].copy_from_slice(&bytes[..head_n]);
     }
     let mut block_hashes = Vec::new();
+    if !atomic_evidence {
+        return CoveredFile {
+            rel_path,
+            atomic_evidence,
+            covered_len: bytes.len() as u64,
+            head,
+            tail,
+            block_hashes,
+            leftover_len: 0,
+            leftover_hash: [0u8; 32],
+        };
+    }
     let mut off = 0usize;
     while off + FRONTIER_BLOCK as usize <= bytes.len() {
         let block = &bytes[off..off + FRONTIER_BLOCK as usize];
@@ -736,6 +849,7 @@ fn coverage_from_bytes(rel_path: String, bytes: &[u8]) -> CoveredFile {
     let leftover = &bytes[off..];
     CoveredFile {
         rel_path,
+        atomic_evidence,
         covered_len: bytes.len() as u64,
         head,
         tail,
@@ -745,14 +859,31 @@ fn coverage_from_bytes(rel_path: String, bytes: &[u8]) -> CoveredFile {
     }
 }
 
-fn cover_file(path: &Path, rel_path: String, covered_len: u64) -> Result<CoveredFile, StoreError> {
+fn cover_file(
+    path: &Path,
+    rel_path: String,
+    covered_len: u64,
+    atomic_evidence: bool,
+) -> Result<CoveredFile, StoreError> {
     if covered_len == 0 {
         return Ok(empty_coverage(rel_path));
+    }
+    if !atomic_evidence {
+        return Ok(CoveredFile {
+            rel_path,
+            atomic_evidence: false,
+            covered_len,
+            head: [0; 32],
+            tail: [0; 32],
+            block_hashes: Vec::new(),
+            leftover_len: 0,
+            leftover_hash: [0; 32],
+        });
     }
     let mut file = File::open(path)?;
     let mut bytes = vec![0u8; covered_len as usize];
     file.read_exact(&mut bytes)?;
-    Ok(coverage_from_bytes(rel_path, &bytes))
+    Ok(coverage_from_bytes(rel_path, &bytes, true))
 }
 
 fn extend_cover(
@@ -760,12 +891,19 @@ fn extend_cover(
     prev: Option<&CoveredFile>,
     rel_path: String,
     new_len: u64,
+    atomic_evidence: bool,
 ) -> Result<CoveredFile, StoreError> {
     let Some(prev) = prev else {
-        return cover_file(path, rel_path, new_len);
+        return cover_file(path, rel_path, new_len, atomic_evidence);
     };
+    if !atomic_evidence {
+        return cover_file(path, rel_path, new_len, false);
+    }
     if prev.covered_len == 0 || prev.covered_len > new_len {
-        return cover_file(path, rel_path, new_len);
+        return cover_file(path, rel_path, new_len, true);
+    }
+    if !prev.atomic_evidence {
+        return cover_file(path, rel_path, new_len, true);
     }
     if prev.covered_len == new_len {
         return Ok(CoveredFile {
@@ -1011,7 +1149,7 @@ fn persist_coordinator(paths: &StorePaths, catalog: &StageCatalog) -> Result<(),
     hasher.update(COORD_DOMAIN);
     hasher.update(&body);
     body.extend_from_slice(hasher.finalize().as_bytes());
-    write_atomic(&atomic_coord_path(paths), &body)?;
+    write_atomic_with_failpoints(&atomic_coord_path(paths), &body, COORD_WRITE_POINTS)?;
     crate::failpoint::hit("store.atomic.coord.after_persist")?;
     Ok(())
 }
@@ -1093,17 +1231,23 @@ fn persist_checkpoint(
     paths: &StorePaths,
     catalog: &StageCatalog,
     covered: &[CoveredFile],
+    max_checkpoint_bytes: u64,
 ) -> Result<(), StoreError> {
-    if crate::failpoint::hit("store.atomic.checkpoint.capacity").is_err() {
-        return Ok(());
-    }
+    crate::failpoint::hit("store.atomic.checkpoint.capacity")?;
     crate::failpoint::hit("store.atomic.checkpoint.before_persist")?;
     let bytes = encode_checkpoint(catalog, covered)?;
-    if bytes.len() as u64 > AtomicStageLimits::operable().max_checkpoint_bytes {
-        // Do not strand acknowledged media behind a sidecar ceiling.
-        return Ok(());
+    if bytes.len() as u64 > max_checkpoint_bytes {
+        return Err(Budget::fail(
+            "checkpoint bytes",
+            bytes.len() as u64,
+            max_checkpoint_bytes,
+        ));
     }
-    write_atomic(&atomic_stage_checkpoint_path(paths), &bytes)?;
+    write_atomic_with_failpoints(
+        &atomic_stage_checkpoint_path(paths),
+        &bytes,
+        CHECKPOINT_WRITE_POINTS,
+    )?;
     crate::failpoint::hit("store.atomic.checkpoint.after_persist")?;
     Ok(())
 }
@@ -1152,6 +1296,7 @@ fn encode_checkpoint(
         let rel = file.rel_path.as_bytes();
         body.extend_from_slice(&(rel.len() as u16).to_be_bytes());
         body.extend_from_slice(rel);
+        body.push(u8::from(file.atomic_evidence));
         body.extend_from_slice(&file.covered_len.to_be_bytes());
         body.extend_from_slice(&file.head);
         body.extend_from_slice(&file.tail);
@@ -1272,11 +1417,17 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
     let mut covered = Vec::with_capacity(n_files);
     for _ in 0..n_files {
         let n = read_u16(&mut cur)? as usize;
-        if cur.len() < n + 8 + 64 + 4 {
+        if cur.len() < n + 1 + 8 + 64 + 4 {
             return None;
         }
         let rel = String::from_utf8(cur[..n].to_vec()).ok()?;
         cur = &cur[n..];
+        let atomic_evidence = match cur[0] {
+            0 => false,
+            1 => true,
+            _ => return None,
+        };
+        cur = &cur[1..];
         let covered_len = read_u64(&mut cur)?;
         let mut head = [0u8; 32];
         let mut tail = [0u8; 32];
@@ -1301,11 +1452,17 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
         let mut leftover_hash = [0u8; 32];
         leftover_hash.copy_from_slice(&cur[..32]);
         cur = &cur[32..];
-        if n_blocks as u64 * FRONTIER_BLOCK + u64::from(leftover_len) != covered_len {
+        if atomic_evidence
+            && n_blocks as u64 * FRONTIER_BLOCK + u64::from(leftover_len) != covered_len
+        {
+            return None;
+        }
+        if !atomic_evidence && (n_blocks != 0 || leftover_len != 0) {
             return None;
         }
         covered.push(CoveredFile {
             rel_path: rel,
+            atomic_evidence,
             covered_len,
             head,
             tail,

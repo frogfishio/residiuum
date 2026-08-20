@@ -11,6 +11,11 @@
 //! - `RESIDIUUM_CRASH_KEY` — subject key (default `k`)
 //! - `RESIDIUUM_CRASH_VAL` — put payload (default `v-new`)
 
+use residiuum_atomics::{
+    AtomicId, AtomicMember, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CollectionId,
+    CoordinationScope, HeapId, MutationKind, ObjectIdentity, PlanMutation, ResourceLimits,
+    VersionId,
+};
 use residiuum_store::{
     arm_failpoint_once, clear_failpoints, DurabilityMode, FailpointAction, Store,
 };
@@ -113,6 +118,64 @@ fn main() -> ExitCode {
                 Ok(_) => ExitCode::SUCCESS,
                 Err(e) => {
                     eprintln!("delete: {e}");
+                    ExitCode::from(5)
+                }
+            }
+        }
+        "atomic_prepare" => {
+            let mut s = match Store::open(&store_path) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("open: {e}");
+                    return ExitCode::from(3);
+                }
+            };
+            let heap = HeapId::from_bytes(s.store_id()).expect("store id is heap id");
+            let mut id_bytes = [0u8; 32];
+            id_bytes[0] = 9;
+            let id = AtomicId::from_bytes(id_bytes).expect("atomic id");
+            let collection = CollectionId::from_bytes([2u8; 16]).expect("collection id");
+            let event = VersionId::from_bytes([3u8; 16]).expect("event id");
+            let member = AtomicMember {
+                atomic_id: id,
+                ordinal: 0,
+                object_identity: ObjectIdentity::new(collection, CanonicalKey::String("k".into())),
+                member_kind: MutationKind::Create,
+                before_version: None,
+                after_content_hash: Some(*blake3::hash(b"secret").as_bytes()),
+                event_id: event,
+            };
+            let plan = AtomicPlan::close(AtomicPlanParts {
+                profile: AtomicProfile::LocalHeapV1,
+                atomic_id: id,
+                heap_id: heap,
+                scope: CoordinationScope::LocalHeap,
+                read_frontier: None,
+                reads: vec![],
+                predicates: vec![],
+                mutations: vec![PlanMutation {
+                    kind: MutationKind::Create,
+                    collection_id: collection,
+                    key: CanonicalKey::String("k".into()),
+                    encoded_value: Some(b"secret".to_vec()),
+                    if_version: None,
+                }],
+                active_rule_revisions: vec![],
+                limits: ResourceLimits::hard_local_heap(),
+            })
+            .expect("closed plan");
+            if let Some(ref name) = fp {
+                let leaked: &'static str = Box::leak(name.clone().into_boxed_str());
+                arm_failpoint_once(leaked, FailpointAction::Abort);
+            }
+            match s.atomic_stage().and_then(|mut stage| {
+                stage
+                    .begin_prepare(&plan, [0xA1; 32], std::slice::from_ref(&member))
+                    .map(|_| ())
+            }) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("atomic prepare: {e}");
                     ExitCode::from(5)
                 }
             }

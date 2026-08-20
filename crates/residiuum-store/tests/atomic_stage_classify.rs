@@ -269,7 +269,7 @@ fn holes_are_reported_not_swallowed() {
     let mut store = Store::create(&path).unwrap();
     let segs = store.paths().segments_dir();
     fs::create_dir_all(&segs).unwrap();
-    fs::write(segs.join("garbage.residiuum"), [0u8; 64]).unwrap();
+    fs::write(segs.join("garbage.residiuum"), b"ATPAY1-damaged").unwrap();
     let _ = fs::remove_file(atomic_stage_checkpoint_path(store.paths()));
     let stage = store.atomic_stage().unwrap();
     assert!(
@@ -513,7 +513,7 @@ fn holes_remain_after_two_checkpoint_reopens() {
     let mut store = Store::create(&path).unwrap();
     let segs = store.paths().segments_dir();
     fs::create_dir_all(&segs).unwrap();
-    fs::write(segs.join("garbage.residiuum"), [0u8; 64]).unwrap();
+    fs::write(segs.join("garbage.residiuum"), b"ATPAY1-damaged").unwrap();
     let _ = fs::remove_file(atomic_stage_checkpoint_path(store.paths()));
     {
         let stage = store.atomic_stage().unwrap();
@@ -546,8 +546,12 @@ fn missing_covered_file_degrades_coverage() {
     let mut store = Store::create(&path).unwrap();
     let segs = store.paths().segments_dir();
     fs::create_dir_all(&segs).unwrap();
-    let bomb = segs.join("garbage.residiuum");
-    fs::write(&bomb, [0u8; 64]).unwrap();
+    let bomb = segs.join("atomic.residiuum");
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let p = prepare_from_closed_plan(&plan(heap, &[member()], b"secret"), FRONTIER, &[member()])
+        .unwrap();
+    write_prepare_file(&bomb, &p, 31);
+    let exact = fs::read(&bomb).unwrap();
     let _ = fs::remove_file(atomic_stage_checkpoint_path(store.paths()));
     {
         let stage = store.atomic_stage().unwrap();
@@ -564,7 +568,17 @@ fn missing_covered_file_degrades_coverage() {
             .findings()
             .records
             .iter()
-            .any(|f| f.kind == StageEvidenceKind::Hole));
+            .any(|f| f.kind == StageEvidenceKind::Coverage));
+        let mut other_member = member();
+        let mut other_id = [0u8; 32];
+        other_id[0] = 44;
+        other_member.atomic_id = AtomicId::from_bytes(other_id).unwrap();
+        let other = plan(heap, std::slice::from_ref(&other_member), b"secret");
+        match stage.begin_prepare(&other, FRONTIER, std::slice::from_ref(&other_member)) {
+            Err(StoreError::AtomicStage(msg)) => assert!(msg.contains("coverage")),
+            Ok(_) => panic!("new identity must be refused while coverage is incomplete"),
+            Err(other) => panic!("expected coverage refusal, got {other}"),
+        }
         match stage.scrub_coverage() {
             Err(StoreError::AtomicStage(msg)) => {
                 assert!(msg.contains("scrub"), "expected scrub refusal, got {msg}");
@@ -572,12 +586,17 @@ fn missing_covered_file_degrades_coverage() {
             Ok(()) => panic!("scrub must refuse while covered media is missing"),
             Err(other) => panic!("expected scrub refusal, got {other}"),
         }
+        fs::write(&bomb, vec![0xA5; exact.len()]).unwrap();
+        assert!(
+            stage.scrub_coverage().is_err(),
+            "arbitrary replacement must not authenticate"
+        );
+        fs::write(&bomb, &exact).unwrap();
+        stage.scrub_coverage().unwrap();
+        assert!(!stage.open_report().coverage_degraded);
     }
     {
         let stage = store.atomic_stage().unwrap();
-        assert!(
-            stage.open_report().coverage_degraded,
-            "ordinary reopen must not clear degradation"
-        );
+        assert!(!stage.open_report().coverage_degraded);
     }
 }

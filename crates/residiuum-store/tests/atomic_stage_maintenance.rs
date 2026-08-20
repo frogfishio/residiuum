@@ -144,6 +144,25 @@ fn empty_store_allows_seal_and_compact() {
 }
 
 #[test]
+fn empty_stage_checkpoint_remains_quiescent_for_maintenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    store
+        .put("ordinary", b"visible", DurabilityMode::Durable)
+        .unwrap();
+    drop(store.atomic_stage().unwrap());
+    assert!(!outstanding_atomic_evidence(store.paths()).unwrap());
+    drop(store);
+
+    let mut store = Store::open(&path).unwrap();
+    drop(store.atomic_stage().unwrap());
+    assert!(!outstanding_atomic_evidence(store.paths()).unwrap());
+    store.seal_active().unwrap();
+    store.compact_live().unwrap();
+}
+
+#[test]
 fn seal_compact_and_reclaim_refuse_while_outstanding() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");

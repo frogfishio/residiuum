@@ -27,7 +27,7 @@ pub(crate) struct BodyRef {
 }
 
 /// Staging facts recovered from store media only.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct StageCatalog {
     pub prepares: BTreeMap<AtomicId, AtomicPrepare>,
     pub members: BTreeMap<AtomicId, Vec<AtomicMember>>,

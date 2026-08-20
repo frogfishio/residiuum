@@ -1,9 +1,9 @@
 //! CR-ATMR6-004: operable limits, tail-only scan, incremental catalogue.
 
 use residiuum_atomics::{
-    AtomicId, AtomicMember, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CollectionId,
-    CoordinationScope, HeapId, MutationKind, ObjectIdentity, PlanMutation, ResourceLimits,
-    VersionId,
+    AtomicId, AtomicMember, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, ChunkPlan,
+    CollectionId, CoordinationScope, HeapId, MutationKind, ObjectIdentity, PlanMutation,
+    ResourceLimits, VersionId,
 };
 use residiuum_store::{
     arm_failpoint_once, atomic_stage_checkpoint_path, clear_failpoints, AtomicStageLimits,
@@ -91,6 +91,7 @@ fn operable_limits_are_derived_and_exposed() {
     let limits = AtomicStageLimits::operable();
     assert_eq!(limits.max_atomics, ADMISSION_OUTSTANDING_ATOMICS);
     assert_eq!(limits.max_segment_bytes, 64 * 1024 * 1024);
+    assert_eq!(limits.max_scan_bytes, 128 * 1024 * 1024);
     assert_eq!(
         limits.max_payload_bytes,
         u64::from(ADMISSION_OUTSTANDING_ATOMICS) * 8 * 1024 * 1024
@@ -181,30 +182,67 @@ fn checkpoint_does_not_grow_with_payload_history() {
 }
 
 #[test]
-fn checkpoint_capacity_failpoint_does_not_strand() {
-    let _g = serial();
+fn checkpoint_plan_capacity_refuses_before_media_append() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("s");
-    let mut store = Store::create(&path).unwrap();
-    stage_value(&mut store, aid(9), 3, b"secret");
-    arm_failpoint_once("store.atomic.checkpoint.capacity", FailpointAction::Error);
+    let mut store = Store::create(dir.path().join("s")).unwrap();
     let heap = HeapId::from_bytes(store.store_id()).unwrap();
-    let value = b"again";
-    let m = member(aid(10), 4, value);
-    let p = plan(heap, &m, value);
+    let m = member(aid(9), 3, b"secret");
+    let p = plan(heap, &m, b"secret");
     {
         let mut stage = store.atomic_stage().unwrap();
         stage
             .begin_prepare(&p, FRONTIER, std::slice::from_ref(&m))
             .unwrap();
-        stage.append_staged(m, value.to_vec()).unwrap();
+    }
+    let baseline = fs::metadata(atomic_stage_checkpoint_path(store.paths()))
+        .unwrap()
+        .len();
+    let before = fs::metadata(store.paths().active_segment()).unwrap().len();
+    let mut limits = AtomicStageLimits::operable();
+    limits.max_checkpoint_bytes = baseline + 32;
+    let mut stage = store.atomic_stage_with_limits(limits).unwrap();
+    let plan = ChunkPlan {
+        total: 2,
+        chunk_hashes: vec![
+            *blake3::hash(b"a").as_bytes(),
+            *blake3::hash(b"b").as_bytes(),
+        ],
+    };
+    match stage.commit_chunk_manifest(aid(9), 0, plan) {
+        Err(StoreError::AtomicStage(msg)) => assert!(msg.contains("admission checkpoint")),
+        Ok(()) => panic!("over-limit chunk plan must be refused"),
+        Err(other) => panic!("expected checkpoint admission refusal, got {other}"),
+    }
+    drop(stage);
+    assert_eq!(
+        fs::metadata(store.paths().active_segment()).unwrap().len(),
+        before
+    );
+}
+
+#[test]
+fn checkpoint_capacity_failure_is_visible_before_append() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    stage_value(&mut store, aid(9), 3, b"secret");
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let value = b"again";
+    let m = member(aid(10), 4, value);
+    let p = plan(heap, &m, value);
+    let before = fs::metadata(store.paths().active_segment()).unwrap().len();
+    {
+        let mut stage = store.atomic_stage().unwrap();
+        arm_failpoint_once("store.atomic.checkpoint.capacity", FailpointAction::Error);
+        assert!(stage
+            .begin_prepare(&p, FRONTIER, std::slice::from_ref(&m))
+            .is_err());
     }
     clear_failpoints();
-    drop(store);
-    let mut store = Store::open(&path).unwrap();
-    let stage = store.atomic_stage().unwrap();
-    assert!(
-        stage.kernel().placement(aid(9)).is_some() || stage.kernel().placement(aid(10)).is_some(),
-        "acknowledged evidence must survive a skipped checkpoint rewrite"
+    assert_eq!(
+        fs::metadata(store.paths().active_segment()).unwrap().len(),
+        before,
+        "checkpoint capacity refusal must precede Atomic media append"
     );
 }

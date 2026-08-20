@@ -309,7 +309,8 @@ Outstanding evidence is any of:
 
 - `store-info/atomic-stage.ckpt` that authenticates and names prepares,
   members, seals, payload/chunk locators, blocked identities, findings,
-  intended members, coverage degradation, or covered media;
+  intended members, or coverage degradation; an acceleration-only frontier
+  over ordinary media is not outstanding Atomic evidence;
 - that checkpoint file present but unreadable;
 - `store-info/atomic-coord.ckpt` that authenticates with one or more issued
   sequences;
@@ -329,16 +330,16 @@ Backup profile `residiuum-backup-v1` copies `store-info/` (including
 Identity-reassign clone MUST refuse while outstanding staging exists: prepare
 `heap_id` is the source store id and becomes foreign after reassignment.
 
-#### Checkpoint `ATCKP1` version 9
+#### Checkpoint `ATCKP1` version 10
 
 File: `store-info/atomic-stage.ckpt`. Domain separator
-`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V9`. Layout, all integers big-endian:
+`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V10`. Layout, all integers big-endian:
 
 | Field | Encoding |
 |---|---|
 | magic | `ATCKP1` |
-| version | `u8` = 9 |
-| covered files | `u32` count; each: `u16` path len, path UTF-8, `u64` covered_len, head `[32]`, tail `[32]`, `u32` block count, block hashes `[32]*`, leftover `u32` + hash `[32]` |
+| version | `u8` = 10 |
+| covered files | `u32` count; each: `u16` path len, path UTF-8, `u8` atomic_evidence, `u64` covered_len, head `[32]`, tail `[32]`, `u32` block count, block hashes `[32]*`, leftover `u32` + hash `[32]`. Ordinary (`atomic_evidence=0`) entries carry no block hashes and are metadata-only; Atomic entries authenticate every byte. |
 | prepares | `u32` count; each: `u32` len + `encode_prepare` bytes |
 | members | `u32` count; each: `u32` len + `encode_member` bytes |
 | payload refs | `u32` count; each: atomic_id `[32]`, ordinal `u32`, `BodyRef` |
@@ -356,9 +357,9 @@ File: `store-info/atomic-stage.ckpt`. Domain separator
 | digest | BLAKE3-256(`domain` \\| body) |
 
 `BodyRef` is `u16` path len, path UTF-8, `u64` offset, `u32` len, hash `[32]`.
-Covered block size is 64 KiB. Version ≠ 9 or domain mismatch MUST NOT be
-interpreted; recovery rebuilds from media. Older checkpoint versions are not
-readable by a v9 decoder.
+Covered block size is 64 KiB. Finding kind 8 is global `Coverage` loss.
+Version ≠ 10 or domain mismatch MUST NOT be interpreted; recovery rebuilds
+from media. Older checkpoint versions are not readable by a v10 decoder.
 
 #### Coordinator `ATCRD1` version 1
 

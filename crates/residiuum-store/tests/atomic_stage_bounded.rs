@@ -143,6 +143,45 @@ fn ordinary_growth_is_tailed_not_fully_rescanned() {
 }
 
 #[test]
+fn settled_ordinary_history_adds_no_reopen_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    store
+        .put(
+            "ordinary-a",
+            &vec![0x31; 4 * 1024 * 1024],
+            DurabilityMode::Durable,
+        )
+        .unwrap();
+    store.seal_active().unwrap();
+    drop(store.atomic_stage().unwrap());
+    let first = store.atomic_stage().unwrap().open_report();
+
+    store
+        .put(
+            "ordinary-b",
+            &vec![0x32; 4 * 1024 * 1024],
+            DurabilityMode::Durable,
+        )
+        .unwrap();
+    store.seal_active().unwrap();
+    drop(store.atomic_stage().unwrap());
+    let second = store.atomic_stage().unwrap().open_report();
+
+    assert_eq!(
+        first.bytes_scanned, 0,
+        "settled ordinary history is metadata-only"
+    );
+    assert_eq!(first.bytes_verified, 0);
+    assert_eq!(
+        second.bytes_scanned, 0,
+        "doubling settled history must add no reads"
+    );
+    assert_eq!(second.bytes_verified, 0);
+}
+
+#[test]
 fn per_operation_does_not_reload_catalogue() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");

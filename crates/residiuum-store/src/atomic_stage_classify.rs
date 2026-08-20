@@ -17,6 +17,8 @@ use residiuum_format::{
 /// Physical or logical Atomic evidence kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StageEvidenceKind {
+    /// Authenticated Atomic coverage is incomplete.
+    Coverage,
     /// `scan_forward` hole (unclassified or corrupt candidate).
     Hole,
     /// Prepare (BatchPrepare or ATPREP1).
@@ -100,7 +102,18 @@ pub fn classify_hole(findings: &mut StageFindings, _reason: &HoleReason) {
 
 /// Covered checkpoint media is missing or replaced (CR-ATMR6-002).
 pub fn classify_coverage_loss(findings: &mut StageFindings) {
-    findings.push(StageEvidenceKind::Hole, StageEvidenceClass::Corrupt, None);
+    findings.push(
+        StageEvidenceKind::Coverage,
+        StageEvidenceClass::Corrupt,
+        None,
+    );
+}
+
+/// Remove the global coverage-loss marker after an authenticated scrub.
+pub(crate) fn clear_coverage_loss(findings: &mut StageFindings) {
+    findings
+        .records
+        .retain(|finding| finding.kind != StageEvidenceKind::Coverage);
 }
 
 /// Classify and fold one verified frame. Shared with independent examination.
@@ -614,6 +627,7 @@ fn sidecar_kind(kind: SidecarKind) -> StageEvidenceKind {
 
 pub(crate) fn encode_finding_kind(kind: StageEvidenceKind) -> u8 {
     match kind {
+        StageEvidenceKind::Coverage => 8,
         StageEvidenceKind::Hole => 0,
         StageEvidenceKind::Prepare => 1,
         StageEvidenceKind::Member => 2,
@@ -627,6 +641,7 @@ pub(crate) fn encode_finding_kind(kind: StageEvidenceKind) -> u8 {
 
 pub(crate) fn decode_finding_kind(byte: u8) -> Option<StageEvidenceKind> {
     Some(match byte {
+        8 => StageEvidenceKind::Coverage,
         0 => StageEvidenceKind::Hole,
         1 => StageEvidenceKind::Prepare,
         2 => StageEvidenceKind::Member,

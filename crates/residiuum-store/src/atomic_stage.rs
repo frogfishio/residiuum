@@ -6,15 +6,18 @@
 //! opened, created, or consulted. Ordinary `get` / scan / history stay empty.
 //! The live catalogue is opened once from a store-owned checkpoint plus tails.
 
-use crate::atomic_stage_classify::StageFindings;
+use crate::atomic_stage_classify::{
+    clear_coverage_loss, StageEvidenceClass, StageEvidenceKind, StageFindings,
+};
 use crate::atomic_stage_media::{
     chunk_body_event_id, chunk_plan_event_id, encode_stage_chunk_body, encode_stage_chunk_plan,
     encode_stage_payload, encode_stage_seal, payload_event_id, seal_event_id, BodyRef,
     StageCatalog,
 };
 use crate::atomic_stage_recover::{
-    open_catalog, persist_live_checkpoint, rel_path, resolve_chunk_body, resolve_payload_body,
-    AtomicStageLimits, AtomicStageOpenReport, CoveredFile,
+    checkpoint_encoded_len, open_catalog, persist_live_checkpoint, rel_path, resolve_chunk_body,
+    resolve_payload_body, verify_missing_coverage, AtomicStageLimits, AtomicStageOpenReport,
+    CoveredFile,
 };
 use crate::error::StoreError;
 use crate::store::Store;
@@ -102,22 +105,38 @@ impl StoreAtomicStage<'_> {
         crate::atomic_stage_status::project_atomic(&self.catalog, atomic_id)
     }
 
-    /// Operator-only repair. Clears persisted coverage degradation when every
-    /// covered path still exists. Does not unblock Atomic identities. Ordinary
-    /// reopen and retry must not call this (CR-ATMR6-002).
+    /// Operator-only authenticated repair. Ordinary reopen and retry must not
+    /// call this (CR-ATMR6-002 / CR-ATMR7-002).
     pub fn scrub_coverage(&mut self) -> Result<(), StoreError> {
-        for rel in &self.catalog.missing_covered {
-            let path = self.store.paths().root.join(rel);
-            if !path.is_file() {
-                return Err(StoreError::AtomicStage(
-                    "atomic stage scrub refused: covered media still missing".into(),
-                ));
-            }
+        if self.catalog.findings.records.iter().any(|finding| {
+            finding.kind != StageEvidenceKind::Coverage
+                && finding.atomic_id.is_none()
+                && matches!(
+                    finding.class,
+                    StageEvidenceClass::Corrupt | StageEvidenceClass::Partial
+                )
+        }) {
+            return Err(StoreError::AtomicStage(
+                "atomic stage scrub refused: unbound damaged Atomic evidence remains".into(),
+            ));
         }
+        verify_missing_coverage(
+            self.store.paths(),
+            &self.catalog,
+            &self.covered,
+            self.limits,
+        )?;
         self.catalog.coverage_degraded = false;
         self.catalog.missing_covered.clear();
+        clear_coverage_loss(&mut self.catalog.findings);
+        clear_coverage_loss(&mut self.findings);
         self.report.coverage_degraded = false;
-        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)
+        persist_live_checkpoint(
+            self.store.paths(),
+            &self.catalog,
+            &mut self.covered,
+            self.limits,
+        )
     }
 
     /// Validate a closed plan, persist it on the store segment, then apply.
@@ -132,6 +151,12 @@ impl StoreAtomicStage<'_> {
         if self.catalog.blocked.contains(&prepare.atomic_id) {
             return Err(StoreError::AtomicStage(
                 "atomic identity is blocked by conflicting or damaged evidence".into(),
+            ));
+        }
+        if self.catalog.coverage_degraded && !self.catalog.prepares.contains_key(&prepare.atomic_id)
+        {
+            return Err(StoreError::AtomicStage(
+                "atomic prepare refused: authenticated Atomic coverage is incomplete".into(),
             ));
         }
         if let Some(stored) = self.catalog.prepares.get(&prepare.atomic_id) {
@@ -401,6 +426,12 @@ impl StoreAtomicStage<'_> {
         ordinal: u32,
         plan: &ChunkPlan,
     ) -> Result<(), StoreError> {
+        let mut candidate = self.catalog.clone();
+        candidate
+            .chunk_plans
+            .insert((atomic_id, ordinal), plan.clone());
+        let body_len = encode_stage_chunk_plan(atomic_id, ordinal, plan).len() as u64;
+        self.admit_catalog_change(&candidate, body_len)?;
         crate::failpoint::hit("store.atomic.chunk_plan.before_append")?;
         let body = encode_stage_chunk_plan(atomic_id, ordinal, plan);
         self.store.append_unindexed_atomic_frame(
@@ -413,7 +444,12 @@ impl StoreAtomicStage<'_> {
         self.catalog
             .chunk_plans
             .insert((atomic_id, ordinal), plan.clone());
-        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        persist_live_checkpoint(
+            self.store.paths(),
+            &self.catalog,
+            &mut self.covered,
+            self.limits,
+        )?;
         crate::failpoint::hit("store.atomic.chunk_plan.after_checkpoint")?;
         Ok(())
     }
@@ -430,9 +466,18 @@ impl StoreAtomicStage<'_> {
         {
             self.admit_payload_bytes(body.len() as u64)?;
         }
-        crate::failpoint::hit("store.atomic.chunk_body.before_append")?;
         let start = self.active_len();
         let encoded = encode_stage_chunk_body(member.atomic_id, member.ordinal, index, body);
+        let mut candidate = self.catalog.clone();
+        candidate
+            .chunks
+            .insert((member.atomic_id, member.ordinal, index), body.to_vec());
+        candidate.chunk_refs.insert(
+            (member.atomic_id, member.ordinal, index),
+            self.candidate_body_ref(start, encoded.len()),
+        );
+        self.admit_catalog_change(&candidate, encoded.len() as u64)?;
+        crate::failpoint::hit("store.atomic.chunk_body.before_append")?;
         self.store.append_unindexed_atomic_frame(
             FrameKind::PayloadChunk,
             EMPTY_ENVELOPE,
@@ -444,7 +489,12 @@ impl StoreAtomicStage<'_> {
             .chunks
             .insert((member.atomic_id, member.ordinal, index), body.to_vec());
         self.note_chunk_ref(member.atomic_id, member.ordinal, index, start, &encoded);
-        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        persist_live_checkpoint(
+            self.store.paths(),
+            &self.catalog,
+            &mut self.covered,
+            self.limits,
+        )?;
         crate::failpoint::hit("store.atomic.chunk_body.after_checkpoint")?;
         Ok(())
     }
@@ -531,7 +581,23 @@ impl StoreAtomicStage<'_> {
         intended_members: u32,
     ) -> Result<(), StoreError> {
         let _seq = self.catalog.assign_coord(prepare.atomic_id)?;
-        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        let mut candidate = self.catalog.clone();
+        candidate
+            .prepares
+            .insert(prepare.atomic_id, prepare.clone());
+        candidate.prepare_batch.insert(prepare.atomic_id);
+        candidate
+            .intended_members
+            .insert(prepare.atomic_id, intended_members);
+        let encoded_prepare =
+            encode_prepare(prepare).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        self.admit_catalog_change(&candidate, encoded_prepare.len() as u64)?;
+        persist_live_checkpoint(
+            self.store.paths(),
+            &self.catalog,
+            &mut self.covered,
+            self.limits,
+        )?;
         crate::failpoint::hit("store.atomic.prepare.before_append")?;
         let envelope = encode_atomic_prepare_envelope(
             prepare.heap_id.as_bytes(),
@@ -539,7 +605,7 @@ impl StoreAtomicStage<'_> {
             prepare.content_root.as_bytes(),
         )
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        let body = encode_prepare(prepare).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let body = encoded_prepare;
         let mut event_id = [0u8; 16];
         event_id.copy_from_slice(&prepare.atomic_id.as_bytes()[..16]);
         self.store.append_unindexed_atomic_frame(
@@ -556,7 +622,12 @@ impl StoreAtomicStage<'_> {
         self.catalog
             .intended_members
             .insert(prepare.atomic_id, intended_members);
-        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        persist_live_checkpoint(
+            self.store.paths(),
+            &self.catalog,
+            &mut self.covered,
+            self.limits,
+        )?;
         crate::failpoint::hit("store.atomic.prepare.after_checkpoint")?;
         Ok(())
     }
@@ -575,6 +646,15 @@ impl StoreAtomicStage<'_> {
         )
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         let body = encode_member(member).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let mut candidate = self.catalog.clone();
+        let slot = candidate.members.entry(member.atomic_id).or_default();
+        if !slot
+            .iter()
+            .any(|existing| existing.ordinal == member.ordinal)
+        {
+            slot.push(member.clone());
+        }
+        self.admit_catalog_change(&candidate, body.len() as u64)?;
         crate::failpoint::hit("store.atomic.member.before_append")?;
         self.store.append_unindexed_atomic_frame(
             FrameKind::ItemEvent,
@@ -587,7 +667,12 @@ impl StoreAtomicStage<'_> {
         if !slot.iter().any(|m| m.ordinal == member.ordinal) {
             slot.push(member.clone());
         }
-        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        persist_live_checkpoint(
+            self.store.paths(),
+            &self.catalog,
+            &mut self.covered,
+            self.limits,
+        )?;
         crate::failpoint::hit("store.atomic.member.after_checkpoint")?;
         Ok(())
     }
@@ -596,9 +681,18 @@ impl StoreAtomicStage<'_> {
         if !self.catalog.has_payload(member.atomic_id, member.ordinal) {
             self.admit_payload_bytes(payload.len() as u64)?;
         }
-        crate::failpoint::hit("store.atomic.payload.before_append")?;
         let start = self.active_len();
         let body = encode_stage_payload(member.atomic_id, member.ordinal, payload);
+        let mut candidate = self.catalog.clone();
+        candidate
+            .payloads
+            .insert((member.atomic_id, member.ordinal), payload.to_vec());
+        candidate.payload_refs.insert(
+            (member.atomic_id, member.ordinal),
+            self.candidate_body_ref(start, body.len()),
+        );
+        self.admit_catalog_change(&candidate, body.len() as u64)?;
+        crate::failpoint::hit("store.atomic.payload.before_append")?;
         self.store.append_unindexed_atomic_frame(
             FrameKind::PayloadChunk,
             EMPTY_ENVELOPE,
@@ -610,7 +704,12 @@ impl StoreAtomicStage<'_> {
             .payloads
             .insert((member.atomic_id, member.ordinal), payload.to_vec());
         self.note_payload_ref(member.atomic_id, member.ordinal, start, &body);
-        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        persist_live_checkpoint(
+            self.store.paths(),
+            &self.catalog,
+            &mut self.covered,
+            self.limits,
+        )?;
         crate::failpoint::hit("store.atomic.payload.after_checkpoint")?;
         Ok(())
     }
@@ -623,8 +722,11 @@ impl StoreAtomicStage<'_> {
         if self.catalog.is_sealed(atomic_id) {
             return Ok(());
         }
-        crate::failpoint::hit("store.atomic.seal.before_append")?;
         let body = encode_stage_seal(atomic_id, content_root);
+        let mut candidate = self.catalog.clone();
+        candidate.seals.insert(atomic_id, content_root);
+        self.admit_catalog_change(&candidate, body.len() as u64)?;
+        crate::failpoint::hit("store.atomic.seal.before_append")?;
         self.store.append_unindexed_atomic_frame(
             FrameKind::PayloadChunk,
             EMPTY_ENVELOPE,
@@ -633,8 +735,51 @@ impl StoreAtomicStage<'_> {
         )?;
         self.catalog.seals.insert(atomic_id, content_root);
         crate::failpoint::hit("store.atomic.seal.after_append")?;
-        persist_live_checkpoint(self.store.paths(), &self.catalog, &mut self.covered)?;
+        persist_live_checkpoint(
+            self.store.paths(),
+            &self.catalog,
+            &mut self.covered,
+            self.limits,
+        )?;
         crate::failpoint::hit("store.atomic.seal.after_checkpoint")?;
+        Ok(())
+    }
+
+    fn candidate_body_ref(&self, start: u64, body_len: usize) -> BodyRef {
+        BodyRef {
+            rel_path: rel_path(self.store.paths(), &self.store.paths().active_segment()),
+            offset: start,
+            // The frame is larger than its body, but encoded checkpoint size
+            // depends only on this fixed-width field, not its value.
+            len: u32::try_from(body_len).unwrap_or(u32::MAX),
+            hash: [0; 32],
+        }
+    }
+
+    fn admit_catalog_change(
+        &self,
+        candidate: &StageCatalog,
+        append_body_bytes: u64,
+    ) -> Result<(), StoreError> {
+        let checkpoint = checkpoint_encoded_len(candidate, &self.covered)?;
+        // A store frame adds a bounded header/envelope around the body. The
+        // frontier needs one hash per crossed 64-KiB block plus the remainder.
+        let frontier_growth =
+            (append_body_bytes.saturating_add(512) / (64 * 1024) + 2).saturating_mul(32);
+        let durable = checkpoint.saturating_add(frontier_growth);
+        if durable > self.limits.max_checkpoint_bytes {
+            return Err(StoreError::AtomicStage(format!(
+                "atomic stage admission checkpoint bytes {durable} exceeds limit {}",
+                self.limits.max_checkpoint_bytes
+            )));
+        }
+        let work = candidate.work_bytes();
+        if work > self.limits.max_work_bytes {
+            return Err(StoreError::AtomicStage(format!(
+                "atomic stage admission work bytes {work} exceeds limit {}",
+                self.limits.max_work_bytes
+            )));
+        }
         Ok(())
     }
 }

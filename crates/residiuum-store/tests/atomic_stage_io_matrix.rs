@@ -22,6 +22,7 @@ use residiuum_store::{
 };
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::process::Command;
 use std::sync::Mutex;
 
 static SERIAL: Mutex<()> = Mutex::new(());
@@ -190,50 +191,45 @@ fn chunks() -> (ChunkPlan, &'static [u8], &'static [u8]) {
 fn fp_name(scenario: Scenario, boundary: Boundary) -> &'static str {
     match (scenario, boundary) {
         (Scenario::Prepare, Boundary::BeforeWrite) => "store.atomic.prepare.before_append",
-        (Scenario::Prepare, Boundary::AfterWrite | Boundary::AfterFileSync) => {
-            "store.atomic.prepare.after_append"
-        }
+        (Scenario::Prepare, Boundary::AfterWrite) => "store.active.write_tail.after_write",
+        (Scenario::Prepare, Boundary::AfterFileSync) => "store.active.write_tail.after_sync",
         (Scenario::Prepare, Boundary::AfterCheckpoint) => "store.atomic.prepare.after_checkpoint",
         (Scenario::Member, Boundary::BeforeWrite) => "store.atomic.member.before_append",
-        (Scenario::Member, Boundary::AfterWrite | Boundary::AfterFileSync) => {
-            "store.atomic.member.after_append"
-        }
+        (Scenario::Member, Boundary::AfterWrite) => "store.active.write_tail.after_write",
+        (Scenario::Member, Boundary::AfterFileSync) => "store.active.write_tail.after_sync",
         (Scenario::Member, Boundary::AfterCheckpoint) => "store.atomic.member.after_checkpoint",
         (Scenario::Payload, Boundary::BeforeWrite) => "store.atomic.payload.before_append",
         (Scenario::Payload, Boundary::AfterWrite) => "store.active.write_tail.after_write",
-        (Scenario::Payload, Boundary::AfterFileSync) => "store.atomic.payload.after_append",
+        (Scenario::Payload, Boundary::AfterFileSync) => "store.active.write_tail.after_sync",
         (Scenario::Payload, Boundary::AfterCheckpoint) => "store.atomic.payload.after_checkpoint",
         (Scenario::ChunkPlan, Boundary::BeforeWrite) => "store.atomic.chunk_plan.before_append",
-        (Scenario::ChunkPlan, Boundary::AfterWrite | Boundary::AfterFileSync) => {
-            "store.atomic.chunk_plan.after_append"
-        }
+        (Scenario::ChunkPlan, Boundary::AfterWrite) => "store.active.write_tail.after_write",
+        (Scenario::ChunkPlan, Boundary::AfterFileSync) => "store.active.write_tail.after_sync",
         (Scenario::ChunkPlan, Boundary::AfterCheckpoint) => {
             "store.atomic.chunk_plan.after_checkpoint"
         }
         (Scenario::ChunkBody, Boundary::BeforeWrite) => "store.atomic.chunk_body.before_append",
-        (Scenario::ChunkBody, Boundary::AfterWrite | Boundary::AfterFileSync) => {
-            "store.atomic.chunk_body.after_append"
-        }
+        (Scenario::ChunkBody, Boundary::AfterWrite) => "store.active.write_tail.after_write",
+        (Scenario::ChunkBody, Boundary::AfterFileSync) => "store.active.write_tail.after_sync",
         (Scenario::ChunkBody, Boundary::AfterCheckpoint) => {
             "store.atomic.chunk_body.after_checkpoint"
         }
         (Scenario::Seal, Boundary::BeforeWrite) => "store.atomic.seal.before_append",
-        (Scenario::Seal, Boundary::AfterWrite | Boundary::AfterFileSync) => {
-            "store.atomic.seal.after_append"
-        }
+        (Scenario::Seal, Boundary::AfterWrite) => "store.active.write_tail.after_write",
+        (Scenario::Seal, Boundary::AfterFileSync) => "store.active.write_tail.after_sync",
         (Scenario::Seal, Boundary::AfterCheckpoint) => "store.atomic.seal.after_checkpoint",
         (Scenario::Checkpoint, Boundary::BeforeWrite) => "store.atomic.checkpoint.before_persist",
-        (Scenario::Checkpoint, Boundary::AfterWrite | Boundary::AfterFileSync) => {
-            "store.atomic.checkpoint.after_persist"
+        (Scenario::Checkpoint, Boundary::AfterWrite) => "store.atomic.checkpoint.after_write",
+        (Scenario::Checkpoint, Boundary::AfterFileSync) => {
+            "store.atomic.checkpoint.after_file_sync"
         }
         (Scenario::Checkpoint, Boundary::AfterCheckpoint) => {
-            "store.atomic.checkpoint.after_persist"
+            "store.atomic.checkpoint.after_dir_sync"
         }
         (Scenario::Coordinator, Boundary::BeforeWrite) => "store.atomic.coord.before_persist",
-        (Scenario::Coordinator, Boundary::AfterWrite | Boundary::AfterFileSync) => {
-            "store.atomic.coord.after_persist"
-        }
-        (Scenario::Coordinator, Boundary::AfterCheckpoint) => "store.atomic.coord.after_persist",
+        (Scenario::Coordinator, Boundary::AfterWrite) => "store.atomic.coord.after_write",
+        (Scenario::Coordinator, Boundary::AfterFileSync) => "store.atomic.coord.after_file_sync",
+        (Scenario::Coordinator, Boundary::AfterCheckpoint) => "store.atomic.coord.after_dir_sync",
     }
 }
 
@@ -498,6 +494,14 @@ fn prefix_cells() -> Vec<(Scenario, Boundary, Mutant)> {
             Boundary::AfterFileSync,
             Boundary::AfterCheckpoint,
         ] {
+            // begin_prepare emits Prepare and Member in one API call. There is
+            // no member-scoped lower-level write hook, so do not mislabel the
+            // prepare write as a member write/sync boundary.
+            if matches!(scenario, Scenario::Member)
+                && matches!(boundary, Boundary::AfterWrite | Boundary::AfterFileSync)
+            {
+                continue;
+            }
             out.push((scenario, boundary, Mutant::Keep));
         }
     }
@@ -520,7 +524,7 @@ fn crash_media_prefix_matrix_has_exact_projections() {
 fn crash_media_matrix_is_deterministic_on_repeat() {
     for (scenario, boundary, mutant) in [
         (Scenario::Prepare, Boundary::AfterFileSync, Mutant::Keep),
-        (Scenario::Member, Boundary::AfterFileSync, Mutant::Keep),
+        (Scenario::Member, Boundary::AfterCheckpoint, Mutant::Keep),
         (Scenario::Payload, Boundary::AfterFileSync, Mutant::Keep),
         (Scenario::Seal, Boundary::AfterCheckpoint, Mutant::Keep),
     ] {
@@ -638,15 +642,46 @@ fn compaction_stays_refused_and_does_not_leak() {
 #[test]
 fn member_frame_is_not_the_payload_sidecar() {
     assert_eq!(
-        fp_name(Scenario::Member, Boundary::AfterFileSync),
-        "store.atomic.member.after_append"
+        fp_name(Scenario::Member, Boundary::AfterCheckpoint),
+        "store.atomic.member.after_checkpoint"
     );
     assert_eq!(
         fp_name(Scenario::Payload, Boundary::AfterFileSync),
-        "store.atomic.payload.after_append"
+        "store.active.write_tail.after_sync"
     );
     assert_eq!(
-        drive(Scenario::Member, Boundary::AfterFileSync, Mutant::Keep),
+        drive(Scenario::Member, Boundary::AfterCheckpoint, Mutant::Keep),
         Expect::prepared(1, 0)
     );
+}
+
+#[test]
+fn subprocess_abort_matches_synced_prepare_projection() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    drop(Store::create(&path).unwrap());
+
+    let bin = std::env::var_os("CARGO_BIN_EXE_residiuum_store_crash_child")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let mut bin = std::env::current_exe().unwrap();
+            bin.pop();
+            if bin.file_name().and_then(|name| name.to_str()) == Some("deps") {
+                bin.pop();
+            }
+            bin.push("residiuum-store-crash-child");
+            bin
+        });
+    assert!(bin.is_file(), "crash child missing at {}", bin.display());
+    let status = Command::new(&bin)
+        .env("RESIDIUUM_CRASH_STORE", &path)
+        .env("RESIDIUUM_CRASH_OP", "atomic_prepare")
+        .env("RESIDIUUM_CRASH_FP", "store.active.write_tail.after_sync")
+        .status()
+        .unwrap();
+    assert!(!status.success(), "abort failpoint must kill child");
+
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(classify(&mut store), Expect::prepared(0, 0));
 }

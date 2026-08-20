@@ -56,6 +56,15 @@ pub struct AtomicWriteTiming {
     pub dir_sync_ns: u64,
 }
 
+/// Role-specific crash boundaries for one authoritative control document.
+#[derive(Clone, Copy)]
+pub(crate) struct AtomicWriteFailpoints {
+    pub after_write: &'static str,
+    pub after_file_sync: &'static str,
+    pub after_rename: &'static str,
+    pub after_dir_sync: &'static str,
+}
+
 /// Atomically replace `path` with `bytes` (no previous generation retained).
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     write_atomic_with(path, bytes, AtomicWriteOptions::default())
@@ -107,6 +116,31 @@ pub fn write_atomic_with_timed_ex(
     opts: AtomicWriteOptions,
     data_sync_only: bool,
 ) -> Result<AtomicWriteTiming, StoreError> {
+    write_atomic_with_timed_ex_inner(path, bytes, opts, data_sync_only, None)
+}
+
+pub(crate) fn write_atomic_with_failpoints(
+    path: &Path,
+    bytes: &[u8],
+    failpoints: AtomicWriteFailpoints,
+) -> Result<(), StoreError> {
+    write_atomic_with_timed_ex_inner(
+        path,
+        bytes,
+        AtomicWriteOptions::default(),
+        false,
+        Some(failpoints),
+    )
+    .map(|_| ())
+}
+
+fn write_atomic_with_timed_ex_inner(
+    path: &Path,
+    bytes: &[u8],
+    opts: AtomicWriteOptions,
+    data_sync_only: bool,
+    role_failpoints: Option<AtomicWriteFailpoints>,
+) -> Result<AtomicWriteTiming, StoreError> {
     use std::time::Instant;
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -136,6 +170,9 @@ pub fn write_atomic_with_timed_ex(
         let t_write = Instant::now();
         f.write_all(bytes)?;
         timing.sequential_write_ns = t_write.elapsed().as_nanos() as u64;
+        if let Some(points) = role_failpoints {
+            crate::failpoint::hit(points.after_write)?;
+        }
         let t_sync = Instant::now();
         if data_sync_only {
             f.sync_data()?;
@@ -143,6 +180,9 @@ pub fn write_atomic_with_timed_ex(
             f.sync_all()?;
         }
         timing.file_sync_ns = t_sync.elapsed().as_nanos() as u64;
+        if let Some(points) = role_failpoints {
+            crate::failpoint::hit(points.after_file_sync)?;
+        }
     }
 
     crate::failpoint::hit("atomic.after_tmp_sync")?;
@@ -158,11 +198,17 @@ pub fn write_atomic_with_timed_ex(
 
     crate::failpoint::hit("atomic.before_rename")?;
     fs::rename(&tmp, path)?;
+    if let Some(points) = role_failpoints {
+        crate::failpoint::hit(points.after_rename)?;
+    }
     crate::failpoint::hit("atomic.after_rename")?;
     timing.rename_ns = t_rename.elapsed().as_nanos() as u64;
 
     let t_dir = Instant::now();
     sync_dir(parent)?;
+    if let Some(points) = role_failpoints {
+        crate::failpoint::hit(points.after_dir_sync)?;
+    }
     timing.dir_sync_ns = t_dir.elapsed().as_nanos() as u64;
     crate::failpoint::hit("atomic.after_dir_sync")?;
     Ok(timing)
