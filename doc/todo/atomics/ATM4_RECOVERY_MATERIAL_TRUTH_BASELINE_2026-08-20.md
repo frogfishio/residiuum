@@ -179,11 +179,20 @@ media permits and are never interpreted as the new composite-key format.
 
 ### ATM-4D — serial histories and predicates
 
-- exact version, absence and bounded exact-range predicates;
-- read-your-plan construction overlay;
-- randomized concurrent history recorder plus independent serial checker;
-- lost update, write skew, ABA, phantom, uniqueness, ordinary/Atomic,
-  authority-change and disjoint/overlapping Atomic anomaly corpus.
+- **Delivered in ATM-4D.1:** an independent bounded serial-order checker which
+  consumes initial versions, frozen plans and returned outcomes without calling
+  the production validator or assuming submission order. Point histories cover
+  lost update, declared-read write skew, delete/recreate ABA, point
+  absence/uniqueness, ordinary-write-versus-Atomic invalidation, and
+  disjoint/overlapping cohorts. Twenty-four deterministic randomized campaigns
+  are checked, and witness omission is an executed mutation-sensitive negative
+  control.
+- **Remaining:** read-your-plan construction overlay; exact scalar predicate;
+  bounded exact-range presence/absence and phantom proof; rule/lifecycle
+  predicates; broader randomized concurrent/restart histories and two-Heap
+  noninterference.
+- Detailed contract and delivery order:
+  `ATM4D_SERIAL_HISTORIES_AND_PREDICATES_SPEC_2026-08-20.md`.
 
 ### ATM-4E — Heap-qualified identity key — delivered
 

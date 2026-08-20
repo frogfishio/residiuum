@@ -193,7 +193,8 @@ run_store_atmr5_full() {
     crates/residiuum-store/tests/atomic_stage_status.rs \
     crates/residiuum-store/tests/atomic_stage_damage_truth.rs \
     crates/residiuum-store/tests/atomic_stage_limits.rs \
-    crates/residiuum-store/tests/atomic_stage_maintenance.rs
+    crates/residiuum-store/tests/atomic_stage_maintenance.rs \
+    crates/residiuum-store/tests/atomic_serial_histories.rs
 }
 
 run_atm3_store() {
@@ -207,6 +208,12 @@ run_atm3_sdk() {
     cargo test -p residiuum-sdk --offline --test atomic_rql_generation
 }
 
+run_atm4d_point() {
+  run_cmd ATM-SER "point serial checker rejects witness-omission negative control" \
+    cargo test -p residiuum-store --offline --test atomic_serial_histories \
+    --features legacy-raw-store
+}
+
 case "$PROFILE" in
   quick)
     run_enc
@@ -216,6 +223,7 @@ case "$PROFILE" in
     run_fmt
     run_atm3_store
     run_atm3_sdk
+    run_atm4d_point
     ;;
   crash)
     run_crs
@@ -237,6 +245,7 @@ case "$PROFILE" in
   model)
     run_model_kernel
     run_iso
+    run_atm4d_point
     ;;
   full)
     run_enc
@@ -255,6 +264,7 @@ case "$PROFILE" in
     run_store_atmr5_full
     run_atm3_store
     run_atm3_sdk
+    run_atm4d_point
     run_cmd ATM-RES "raised_limits_are_refused" \
       cargo test -p residiuum-atomics --offline --all-targets
     run_cmd ATM-CRS "residiuum-atomic-lane --all-targets" \
