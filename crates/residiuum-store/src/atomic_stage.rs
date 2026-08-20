@@ -56,14 +56,33 @@ impl Store {
         &mut self,
         limits: AtomicStageLimits,
     ) -> Result<StoreAtomicStage<'_>, StoreError> {
+        let heap_id = HeapId::from_bytes(self.store_id())
+            .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        self.atomic_stage_for_heap_with_limits(heap_id, limits)
+    }
+
+    /// Open the deployment-wide Atomic catalogue with execution bound to one
+    /// named Heap. Physical ownership remains shared; plans for another Heap
+    /// cannot be installed through the returned handle.
+    pub fn atomic_stage_for_heap(
+        &mut self,
+        heap_id: HeapId,
+    ) -> Result<StoreAtomicStage<'_>, StoreError> {
+        self.atomic_stage_for_heap_with_limits(heap_id, AtomicStageLimits::operable())
+    }
+
+    /// Named-Heap Atomic stage with explicit operable/test limits.
+    pub fn atomic_stage_for_heap_with_limits(
+        &mut self,
+        heap_id: HeapId,
+        limits: AtomicStageLimits,
+    ) -> Result<StoreAtomicStage<'_>, StoreError> {
         if !self.holds_writer_lock() {
             return Err(StoreError::AtomicStage(
                 "atomic stage requires the store writer lock".into(),
             ));
         }
-        let heap_id = HeapId::from_bytes(self.store_id())
-            .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        let opened = open_catalog(self.paths(), limits, heap_id)?;
+        let opened = open_catalog(self.paths(), limits)?;
         let heap = rebuild_heap(self.paths(), heap_id, &opened.catalog)?;
         self.record_atomic_stage_open(opened.report);
         Ok(StoreAtomicStage {
@@ -104,6 +123,9 @@ impl StoreAtomicStage<'_> {
     /// A durable prepare with incomplete members is [`AtomicStageClass::Prepared`],
     /// never absence (CR-ATMR6-005).
     pub fn examine(&self, atomic_id: AtomicId) -> crate::AtomicStageStatus {
+        if self.catalog.evidence_heaps.get(&atomic_id).copied() != Some(self.heap.heap_id()) {
+            return crate::atomic_stage_status::project_atomic(&StageCatalog::default(), atomic_id);
+        }
         crate::atomic_stage_status::project_atomic(&self.catalog, atomic_id)
     }
 
@@ -148,6 +170,11 @@ impl StoreAtomicStage<'_> {
         frontier: [u8; 32],
         members: &[AtomicMember],
     ) -> Result<(CoordinatorSeq, PlacementManifest), StoreError> {
+        if plan.heap_id() != self.heap.heap_id() {
+            return Err(StoreError::AtomicStage(
+                "atomic plan Heap does not match the capability-bound stage".into(),
+            ));
+        }
         let prepare = prepare_from_closed_plan(plan, frontier, members)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         if self.catalog.blocked.contains(&prepare.atomic_id) {
@@ -429,7 +456,7 @@ impl StoreAtomicStage<'_> {
         )?;
         crate::failpoint::hit("store.atomic.after_decision")?;
         self.catalog
-            .decision_heaps
+            .evidence_heaps
             .insert(atomic_id, prepare.heap_id);
         self.catalog.decisions.insert(atomic_id, decision.clone());
         self.catalog
@@ -685,6 +712,9 @@ impl StoreAtomicStage<'_> {
         candidate
             .prepares
             .insert(prepare.atomic_id, prepare.clone());
+        candidate
+            .evidence_heaps
+            .insert(prepare.atomic_id, prepare.heap_id);
         candidate.prepare_batch.insert(prepare.atomic_id);
         candidate
             .intended_members
@@ -718,6 +748,9 @@ impl StoreAtomicStage<'_> {
         self.catalog
             .prepares
             .insert(prepare.atomic_id, prepare.clone());
+        self.catalog
+            .evidence_heaps
+            .insert(prepare.atomic_id, prepare.heap_id);
         self.catalog.prepare_batch.insert(prepare.atomic_id);
         self.catalog
             .intended_members

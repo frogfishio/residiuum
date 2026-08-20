@@ -47,7 +47,7 @@ pub(crate) struct StageCatalog {
     pub decisions: BTreeMap<AtomicId, AtomicDecision>,
     /// Heap ownership authenticated by each decision envelope. Retained even
     /// when its prepare is damaged so a named commit position is never reused.
-    pub decision_heaps: BTreeMap<AtomicId, HeapId>,
+    pub evidence_heaps: BTreeMap<AtomicId, HeapId>,
     /// Next non-zero Heap commit position. Reconstructed above every admitted
     /// committed decision during recovery.
     pub commit_next: BTreeMap<HeapId, u64>,
@@ -122,7 +122,7 @@ impl StageCatalog {
             || !self.chunk_refs.is_empty()
             || !self.seals.is_empty()
             || !self.decisions.is_empty()
-            || !self.decision_heaps.is_empty()
+            || !self.evidence_heaps.is_empty()
             || !self.blocked.is_empty()
             || !self.prepare_batch.is_empty()
             || !self.coord_seq.is_empty()
@@ -147,7 +147,7 @@ impl StageCatalog {
             .saturating_add(members.saturating_mul(256))
             .saturating_add(self.seals.len() as u64 * 64)
             .saturating_add(self.decisions.len() as u64 * 192)
-            .saturating_add(self.decision_heaps.len() as u64 * 48)
+            .saturating_add(self.evidence_heaps.len() as u64 * 48)
             .saturating_add(self.commit_next.len() as u64 * 24)
             .saturating_add(self.blocked.len() as u64 * 32)
             .saturating_add(self.prepare_batch.len() as u64 * 32)
@@ -166,7 +166,7 @@ impl StageCatalog {
             .decisions
             .iter()
             .filter(|(id, _)| {
-                self.decision_heaps
+                self.evidence_heaps
                     .get(id)
                     .copied()
                     .or_else(|| self.prepares.get(id).map(|prepare| prepare.heap_id))
@@ -190,7 +190,7 @@ impl StageCatalog {
                 continue;
             };
             let Some(heap_id) = self
-                .decision_heaps
+                .evidence_heaps
                 .get(id)
                 .copied()
                 .or_else(|| self.prepares.get(id).map(|prepare| prepare.heap_id))
@@ -274,8 +274,8 @@ mod commit_position_tests {
             atomic_b,
             AtomicDecision::committed(atomic_b, [3; 32], [4; 32], 1, 2).unwrap(),
         );
-        catalog.decision_heaps.insert(atomic_a, heap_a);
-        catalog.decision_heaps.insert(atomic_b, heap_b);
+        catalog.evidence_heaps.insert(atomic_a, heap_a);
+        catalog.evidence_heaps.insert(atomic_b, heap_b);
 
         catalog.reconstruct_commit_next();
 

@@ -447,7 +447,6 @@ pub(crate) struct CatalogOpen {
 pub(crate) fn open_catalog(
     paths: &StorePaths,
     limits: AtomicStageLimits,
-    bound_heap: HeapId,
 ) -> Result<CatalogOpen, StoreError> {
     let mut budget = Budget::new(limits);
     let (mut catalog, mut covered, disposition) = match load_checkpoint(paths, &mut budget)? {
@@ -487,7 +486,6 @@ pub(crate) fn open_catalog(
                         &rel,
                         0,
                         size,
-                        bound_heap,
                         &mut catalog,
                         &mut findings,
                         &mut budget,
@@ -513,7 +511,6 @@ pub(crate) fn open_catalog(
                 &rel,
                 c.covered_len,
                 size,
-                bound_heap,
                 &mut catalog,
                 &mut findings,
                 &mut budget,
@@ -532,7 +529,6 @@ pub(crate) fn open_catalog(
             &rel,
             0,
             size,
-            bound_heap,
             &mut catalog,
             &mut findings,
             &mut budget,
@@ -557,7 +553,7 @@ pub(crate) fn open_catalog(
     }
 
     load_coordinator(paths, &mut catalog)?;
-    finalize_catalog(&mut catalog, bound_heap, &mut findings);
+    finalize_catalog(&mut catalog, &mut findings);
     catalog.assign_missing_coord_seqs();
     catalog.findings = findings.clone();
     budget.charge_catalog(&catalog)?;
@@ -662,7 +658,6 @@ fn ingest_file_tail(
     rel: &str,
     start: u64,
     size: u64,
-    bound_heap: HeapId,
     catalog: &mut StageCatalog,
     findings: &mut StageFindings,
     budget: &mut Budget,
@@ -698,7 +693,7 @@ fn ingest_file_tail(
             ScanRegion::Hole { reason, .. } => classify_hole(findings, reason),
             ScanRegion::VerifiedFrame { frame, range } => {
                 budget.report.frames = budget.report.frames.saturating_add(1);
-                ingest_classified_frame(catalog, bound_heap, frame, findings);
+                ingest_classified_frame(catalog, frame, findings);
                 let lo = range.start as usize;
                 let hi = (range.end as usize).min(bytes.len());
                 if lo < hi {
@@ -1342,8 +1337,8 @@ fn encode_checkpoint(
         body.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
         body.extend_from_slice(&encoded);
     }
-    body.extend_from_slice(&(catalog.decision_heaps.len() as u32).to_be_bytes());
-    for (id, heap_id) in &catalog.decision_heaps {
+    body.extend_from_slice(&(catalog.evidence_heaps.len() as u32).to_be_bytes());
+    for (id, heap_id) in &catalog.evidence_heaps {
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(heap_id.as_bytes());
     }
@@ -1550,17 +1545,18 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
             return None;
         }
     }
-    let n_decision_heaps = read_u32(&mut cur)? as usize;
-    for _ in 0..n_decision_heaps {
+    let n_evidence_heaps = read_u32(&mut cur)? as usize;
+    for _ in 0..n_evidence_heaps {
         if cur.len() < 48 {
             return None;
         }
         let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
         let heap_id = HeapId::from_bytes(cur[32..48].try_into().ok()?).ok()?;
         cur = &cur[48..];
-        if !catalog.decisions.contains_key(&id)
-            || catalog.decision_heaps.insert(id, heap_id).is_some()
-        {
+        let known = catalog.prepares.contains_key(&id)
+            || catalog.members.contains_key(&id)
+            || catalog.decisions.contains_key(&id);
+        if !known || catalog.evidence_heaps.insert(id, heap_id).is_some() {
             return None;
         }
     }

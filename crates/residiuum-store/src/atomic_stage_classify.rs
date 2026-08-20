@@ -122,7 +122,6 @@ pub(crate) fn clear_coverage_loss(findings: &mut StageFindings) {
 /// Classify and fold one verified frame. Shared with independent examination.
 pub fn ingest_classified_frame(
     catalog: &mut StageCatalog,
-    bound_heap: HeapId,
     frame: &DecodedFrame,
     findings: &mut StageFindings,
 ) {
@@ -130,7 +129,7 @@ pub fn ingest_classified_frame(
         Some(AtomicEvidenceClass::Valid(link)) => match link.role {
             AtomicFrameRole::Prepare => {
                 if let Ok(prepare) = residiuum_atomics::decode_prepare(&frame.body) {
-                    admit_prepare(catalog, bound_heap, prepare, true, findings);
+                    admit_prepare(catalog, prepare, true, findings);
                 } else {
                     let id = AtomicId::from_bytes(link.atomic_id).ok();
                     block(catalog, id);
@@ -139,7 +138,7 @@ pub fn ingest_classified_frame(
             }
             AtomicFrameRole::Member => {
                 if let Ok(member) = residiuum_atomics::decode_member(&frame.body) {
-                    admit_member(catalog, bound_heap, link.heap_id, member, findings);
+                    admit_member(catalog, link.heap_id, member, findings);
                 } else {
                     let id = AtomicId::from_bytes(link.atomic_id).ok();
                     block(catalog, id);
@@ -148,14 +147,7 @@ pub fn ingest_classified_frame(
             }
             AtomicFrameRole::Commit => {
                 if let Ok(decision) = residiuum_atomics::decode_decision(&frame.body) {
-                    admit_decision(
-                        catalog,
-                        bound_heap,
-                        link.heap_id,
-                        link.content_root,
-                        decision,
-                        findings,
-                    );
+                    admit_decision(catalog, link.heap_id, link.content_root, decision, findings);
                 } else {
                     let id = AtomicId::from_bytes(link.atomic_id).ok();
                     block(catalog, id);
@@ -184,17 +176,13 @@ pub fn ingest_classified_frame(
                 None,
             );
         }
-        None => ingest_sidecar(catalog, bound_heap, &frame.body, findings),
+        None => ingest_sidecar(catalog, &frame.body, findings),
     }
 }
 
 /// After all frames: members/seal must agree with prepare; mismatches are not
 /// installed as guessed truth.
-pub fn finalize_catalog(
-    catalog: &mut StageCatalog,
-    bound_heap: HeapId,
-    findings: &mut StageFindings,
-) {
+pub fn finalize_catalog(catalog: &mut StageCatalog, findings: &mut StageFindings) {
     let ids: Vec<AtomicId> = catalog.prepares.keys().copied().collect();
     for id in ids {
         if catalog.blocked.contains(&id) {
@@ -203,15 +191,6 @@ pub fn finalize_catalog(
         let Some(prepare) = catalog.prepares.get(&id).cloned() else {
             continue;
         };
-        if prepare.heap_id != bound_heap {
-            catalog.blocked.insert(id);
-            findings.push(
-                StageEvidenceKind::Prepare,
-                StageEvidenceClass::ForeignHeap,
-                Some(id),
-            );
-            continue;
-        }
         let members = catalog.members.get(&id).cloned().unwrap_or_default();
         if members.is_empty() {
             findings.push(
@@ -249,7 +228,7 @@ pub fn finalize_catalog(
                 .copied()
                 .is_some_and(|count| count == decision.member_count);
             let committed_material_ok = decision.decision != DecisionCode::Committed
-                || (ordered_member_manifest_root(bound_heap, &members)
+                || (ordered_member_manifest_root(prepare.heap_id, &members)
                     .ok()
                     .is_some_and(|root| root == decision.member_root)
                     && usize::try_from(decision.member_count)
@@ -272,7 +251,16 @@ pub fn finalize_catalog(
             continue;
         }
         if let Some(position) = decision.commit_position {
-            if let Some(other) = positions.insert(position, *id) {
+            let Some(heap_id) = catalog.evidence_heaps.get(id).copied() else {
+                catalog.blocked.insert(*id);
+                findings.push(
+                    StageEvidenceKind::Decision,
+                    StageEvidenceClass::Corrupt,
+                    Some(*id),
+                );
+                continue;
+            };
+            if let Some(other) = positions.insert((heap_id, position), *id) {
                 catalog.blocked.insert(other);
                 catalog.blocked.insert(*id);
                 findings.push(
@@ -294,24 +282,23 @@ pub fn finalize_catalog(
 
 fn admit_decision(
     catalog: &mut StageCatalog,
-    bound_heap: HeapId,
     envelope_heap: Option<[u8; 16]>,
     envelope_content_root: [u8; 32],
     decision: AtomicDecision,
     findings: &mut StageFindings,
 ) {
     let id = decision.atomic_id;
-    if envelope_heap != Some(bound_heap.to_bytes()) {
+    let Some(envelope_heap) = envelope_heap.and_then(|bytes| HeapId::from_bytes(bytes).ok()) else {
+        block(catalog, Some(id));
         findings.push(
             StageEvidenceKind::Decision,
-            StageEvidenceClass::ForeignHeap,
+            StageEvidenceClass::Corrupt,
             Some(id),
         );
         return;
-    }
-    let envelope_heap = bound_heap;
+    };
     if catalog
-        .decision_heaps
+        .evidence_heaps
         .get(&id)
         .is_some_and(|stored| *stored != envelope_heap)
     {
@@ -344,13 +331,13 @@ fn admit_decision(
         );
         return;
     }
+    catalog.evidence_heaps.entry(id).or_insert(envelope_heap);
     match catalog.decisions.get(&id) {
         None => {
             catalog
                 .intended_members
                 .entry(id)
                 .or_insert(decision.member_count);
-            catalog.decision_heaps.insert(id, envelope_heap);
             catalog.decisions.insert(id, decision);
             findings.push(
                 StageEvidenceKind::Decision,
@@ -439,12 +426,7 @@ fn sweep_orphans(catalog: &mut StageCatalog, findings: &mut StageFindings) {
     }
 }
 
-fn ingest_sidecar(
-    catalog: &mut StageCatalog,
-    bound_heap: HeapId,
-    body: &[u8],
-    findings: &mut StageFindings,
-) {
+fn ingest_sidecar(catalog: &mut StageCatalog, body: &[u8], findings: &mut StageFindings) {
     match decode_stage_sidecar(body) {
         SidecarDecode::NotSidecar => {}
         SidecarDecode::Partial { kind } => {
@@ -455,7 +437,7 @@ fn ingest_sidecar(
             findings.push(sidecar_kind(kind), StageEvidenceClass::Corrupt, atomic_id);
         }
         SidecarDecode::Prepare(prepare) => {
-            admit_prepare(catalog, bound_heap, *prepare, false, findings);
+            admit_prepare(catalog, *prepare, false, findings);
         }
         SidecarDecode::Payload {
             atomic_id,
@@ -482,16 +464,20 @@ fn ingest_sidecar(
 
 fn admit_prepare(
     catalog: &mut StageCatalog,
-    bound_heap: HeapId,
     prepare: AtomicPrepare,
     from_batch: bool,
     findings: &mut StageFindings,
 ) {
     let id = prepare.atomic_id;
-    if prepare.heap_id != bound_heap {
+    if catalog
+        .evidence_heaps
+        .get(&id)
+        .is_some_and(|stored| *stored != prepare.heap_id)
+    {
+        catalog.blocked.insert(id);
         findings.push(
             StageEvidenceKind::Prepare,
-            StageEvidenceClass::ForeignHeap,
+            StageEvidenceClass::Conflict,
             Some(id),
         );
         return;
@@ -504,6 +490,7 @@ fn admit_prepare(
         );
         return;
     }
+    catalog.evidence_heaps.entry(id).or_insert(prepare.heap_id);
     match catalog.prepares.get(&id) {
         None => {
             catalog.prepares.insert(id, prepare);
@@ -542,22 +529,34 @@ fn admit_prepare(
 
 fn admit_member(
     catalog: &mut StageCatalog,
-    bound_heap: HeapId,
     frame_heap: Option<[u8; 16]>,
     member: AtomicMember,
     findings: &mut StageFindings,
 ) {
     let id = member.atomic_id;
-    if let Some(h) = frame_heap {
-        if h != *bound_heap.as_bytes() {
-            findings.push(
-                StageEvidenceKind::Member,
-                StageEvidenceClass::ForeignHeap,
-                Some(id),
-            );
-            return;
-        }
+    let Some(frame_heap) = frame_heap.and_then(|bytes| HeapId::from_bytes(bytes).ok()) else {
+        block(catalog, Some(id));
+        findings.push(
+            StageEvidenceKind::Member,
+            StageEvidenceClass::Corrupt,
+            Some(id),
+        );
+        return;
+    };
+    if catalog
+        .evidence_heaps
+        .get(&id)
+        .is_some_and(|stored| *stored != frame_heap)
+    {
+        catalog.blocked.insert(id);
+        findings.push(
+            StageEvidenceKind::Member,
+            StageEvidenceClass::Conflict,
+            Some(id),
+        );
+        return;
     }
+    catalog.evidence_heaps.entry(id).or_insert(frame_heap);
     if catalog.blocked.contains(&id) {
         findings.push(
             StageEvidenceKind::Member,

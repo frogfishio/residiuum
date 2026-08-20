@@ -77,9 +77,20 @@ fn stage_one(
     event: u8,
 ) -> residiuum_atomics::AtomicDecision {
     let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    stage_one_for_heap(store, heap, atomic_id, key, value, event)
+}
+
+fn stage_one_for_heap(
+    store: &mut Store,
+    heap: HeapId,
+    atomic_id: AtomicId,
+    key: &str,
+    value: &[u8],
+    event: u8,
+) -> residiuum_atomics::AtomicDecision {
     let member = member(atomic_id, key, value, event);
     let plan = plan(heap, &member, value);
-    let mut stage = store.atomic_stage().unwrap();
+    let mut stage = store.atomic_stage_for_heap(heap).unwrap();
     stage
         .begin_prepare(&plan, FRONTIER, std::slice::from_ref(&member))
         .unwrap();
@@ -88,8 +99,16 @@ fn stage_one(
     stage.persist_committed_decision(atomic_id).unwrap()
 }
 
+fn heap(first: u8) -> HeapId {
+    let mut bytes = [0u8; 16];
+    bytes[0] = first;
+    HeapId::from_bytes(bytes).unwrap()
+}
+
 #[test]
 fn decision_requires_seal_and_exact_retry_is_stable() {
+    let _serial = FAILPOINT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    clear_failpoints();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
     let mut store = Store::create(&path).unwrap();
@@ -126,6 +145,8 @@ fn decision_requires_seal_and_exact_retry_is_stable() {
 
 #[test]
 fn reopen_recovers_decision_and_advances_heap_position() {
+    let _serial = FAILPOINT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    clear_failpoints();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
     let first_id = id(7);
@@ -153,6 +174,8 @@ fn reopen_recovers_decision_and_advances_heap_position() {
 
 #[test]
 fn segment_rebuild_recovers_decision_without_checkpoint() {
+    let _serial = FAILPOINT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    clear_failpoints();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
     let atomic_id = id(7);
@@ -234,4 +257,39 @@ fn failpoint_after_durable_decision_recovers_commit() {
     let status = stage.examine(atomic_id);
     assert_eq!(status.class, AtomicStageClass::Committed);
     assert_eq!(status.commit_position, Some(1));
+}
+
+#[test]
+fn named_heaps_share_media_but_not_commit_order_or_status() {
+    let _serial = FAILPOINT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let heap_a = heap(0xA1);
+    let heap_b = heap(0xB1);
+    let atomic_a = id(7);
+    let atomic_b = id(8);
+    {
+        let mut store = Store::create(&path).unwrap();
+        let first_a = stage_one_for_heap(&mut store, heap_a, atomic_a, "a", b"one", 3);
+        let first_b = stage_one_for_heap(&mut store, heap_b, atomic_b, "b", b"two", 4);
+        assert_eq!(first_a.commit_position, Some(1));
+        assert_eq!(first_b.commit_position, Some(1));
+    }
+
+    let mut store = Store::open(&path).unwrap();
+    {
+        let stage_a = store.atomic_stage_for_heap(heap_a).unwrap();
+        assert_eq!(stage_a.examine(atomic_a).class, AtomicStageClass::Committed);
+        assert_eq!(stage_a.examine(atomic_b).class, AtomicStageClass::Absent);
+    }
+    {
+        let stage_b = store.atomic_stage_for_heap(heap_b).unwrap();
+        assert_eq!(stage_b.examine(atomic_b).class, AtomicStageClass::Committed);
+        assert_eq!(stage_b.examine(atomic_a).class, AtomicStageClass::Absent);
+    }
+    let second_a = stage_one_for_heap(&mut store, heap_a, id(9), "c", b"three", 5);
+    let second_b = stage_one_for_heap(&mut store, heap_b, id(10), "d", b"four", 6);
+    assert_eq!(second_a.commit_position, Some(2));
+    assert_eq!(second_b.commit_position, Some(2));
 }

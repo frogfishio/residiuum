@@ -11,7 +11,8 @@ use residiuum_format::{
     encode_frame, FrameHeader, FrameKind, FrameParts, EMPTY_ENVELOPE,
 };
 use residiuum_store::{
-    atomic_stage_checkpoint_path, StageEvidenceClass, StageEvidenceKind, Store, StoreError,
+    atomic_stage_checkpoint_path, AtomicStageClass, StageEvidenceClass, StageEvidenceKind, Store,
+    StoreError,
 };
 use std::fs;
 use std::path::Path;
@@ -197,7 +198,7 @@ fn mutated_prepare_sidecar_is_corrupt_not_absent() {
 }
 
 #[test]
-fn foreign_heap_prepare_is_not_resolved_locally() {
+fn other_heap_prepare_is_catalogued_but_capability_isolated() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
     let mut store = Store::create(&path).unwrap();
@@ -211,13 +212,18 @@ fn foreign_heap_prepare_is_not_resolved_locally() {
     fs::create_dir_all(&segs).unwrap();
     write_prepare_file(&segs.join("foreign.residiuum"), &prepare, 3);
     let _ = fs::remove_file(atomic_stage_checkpoint_path(store.paths()));
-    let stage = store.atomic_stage().unwrap();
-    assert!(stage.kernel().placement(aid()).is_none());
-    assert!(stage
-        .findings()
-        .records
-        .iter()
-        .any(|f| f.class == StageEvidenceClass::ForeignHeap && f.atomic_id == Some(aid())));
+    {
+        let stage = store.atomic_stage().unwrap();
+        assert!(stage.kernel().placement(aid()).is_none());
+        assert_eq!(stage.examine(aid()).class, AtomicStageClass::Absent);
+        assert!(!stage
+            .findings()
+            .records
+            .iter()
+            .any(|f| f.class == StageEvidenceClass::ForeignHeap && f.atomic_id == Some(aid())));
+    }
+    let stage = store.atomic_stage_for_heap(foreign_heap).unwrap();
+    assert_eq!(stage.examine(aid()).class, AtomicStageClass::Prepared);
 }
 
 #[test]
