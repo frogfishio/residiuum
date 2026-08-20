@@ -992,16 +992,16 @@ fn concurrent_point_scan_and_history_readers_never_observe_half_a_batch() {
 }
 
 #[test]
-fn whole_plan_commit_uses_two_authoritative_boundaries_not_one_per_member() {
+fn whole_plan_commit_uses_two_gathered_writes_and_two_boundaries() {
     let _guard = test_guard();
     clear_failpoints();
 
-    let syncs_for = |members: usize, id: u8| {
+    let io_for = |members: usize, id: u8| {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s");
         let mut store = Store::create_with_shards(&path, 4).unwrap();
         let heap = HeapId::from_bytes(store.store_id()).unwrap();
-        let before = store.write_path_stats().authoritative_io.sync_operations;
+        let before = store.write_path_stats().authoritative_io;
         let atomic_plan = if members > 1 {
             create_n_plan(heap, atomic(id), members)
         } else {
@@ -1019,15 +1019,17 @@ fn whole_plan_commit_uses_two_authoritative_boundaries_not_one_per_member() {
             .unwrap()
             .decide_plan_evidence(&atomic_plan)
             .unwrap();
-        store
-            .write_path_stats()
-            .authoritative_io
-            .sync_operations
-            .saturating_sub(before)
+        let after = store.write_path_stats().authoritative_io;
+        (
+            after
+                .write_operations
+                .saturating_sub(before.write_operations),
+            after.sync_operations.saturating_sub(before.sync_operations),
+        )
     };
 
-    assert_eq!(syncs_for(1, 40), 2, "one-member Atomic boundaries");
-    assert_eq!(syncs_for(256, 41), 2, "256-member Atomic boundaries");
+    assert_eq!(io_for(1, 40), (2, 2), "one-member Atomic I/O");
+    assert_eq!(io_for(256, 41), (2, 2), "256-member Atomic I/O");
 }
 
 #[test]

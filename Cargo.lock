@@ -1334,7 +1334,10 @@ version = "0.2.2"
 dependencies = [
  "clap",
  "getrandom 0.3.4",
+ "residiuum-atomics",
  "residiuum-format",
+ "residiuum-heap",
+ "residiuum-sdk",
  "residiuum-store",
  "rusqlite",
  "serde",

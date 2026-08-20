@@ -571,9 +571,14 @@ pub(super) async fn commit(heap: &HeapClient, plan: AtomicPlan) -> Result<Atomic
                 let outcome = match bound.decide_atomic_plan_outcome(&inner) {
                     Ok(outcome) => outcome,
                     Err(error) if definitely_before_atomic_acceptance(&error) => return Err(error),
-                    Err(_) => AtomicOutcome::Unknown {
-                        atomic_id,
-                        resolution: AtomicResolutionHandle { atomic_id },
+                    Err(error) => match bound.atomic_status(atomic_id) {
+                        Ok(status) if status_proves_not_accepted(&status) => {
+                            return Err(error);
+                        }
+                        _ => AtomicOutcome::Unknown {
+                            atomic_id,
+                            resolution: AtomicResolutionHandle { atomic_id },
+                        },
                     },
                 };
                 let elapsed = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
@@ -613,6 +618,10 @@ pub(super) async fn commit(heap: &HeapClient, plan: AtomicPlan) -> Result<Atomic
         }
     }
     result
+}
+
+fn status_proves_not_accepted(status: &AtomicStatus) -> bool {
+    status.logical == LogicalStatus::NotFound && status.material == MaterialStatus::Complete
 }
 
 pub(super) async fn status(heap: &HeapClient, atomic_id: AtomicId) -> Result<AtomicStatus, Error> {
@@ -793,6 +802,11 @@ mod tests {
             Some(AtomicCode::AtomicCoverageIncomplete)
         );
         assert_eq!(AtomicCode::from_status(&AtomicStatus::not_found()), None);
+        assert!(status_proves_not_accepted(&AtomicStatus::not_found()));
+        assert!(!status_proves_not_accepted(
+            &AtomicStatus::incomplete_coverage()
+        ));
+        assert!(!status_proves_not_accepted(&conflicting));
     }
 
     #[test]

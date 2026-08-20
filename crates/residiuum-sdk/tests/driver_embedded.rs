@@ -573,6 +573,57 @@ fn atomic_submission_deadline_before_dispatch_issues_nothing_and_plan_can_be_ren
     assert!(inspection.submitted_plan_bytes >= inspection.max_plan_bytes as u64);
 }
 
+#[test]
+fn terminal_atomics_do_not_consume_the_eight_outstanding_slots() {
+    let (directory, capability) = prepared_deployment();
+    let reopen_capability = capability.clone();
+    let connection = block_on(Client::open_embedded(EmbeddedOptions::new(
+        directory.path(),
+    )))
+    .unwrap();
+    let heap = block_on(connection.open_heap(capability)).unwrap();
+    let records: Collection<Value> = block_on(
+        heap.create_collection("terminal-slot-records", CreateCollectionOptions::default()),
+    )
+    .unwrap();
+    let mut ids = Vec::new();
+    for index in 0..12 {
+        let atomic_id = AtomicId::random().unwrap();
+        let mut atomic = heap.atomic(AtomicOptions::new(atomic_id)).unwrap();
+        atomic
+            .create(
+                &records,
+                format!("record-{index}"),
+                &json!({"index": index}),
+            )
+            .unwrap();
+        assert!(matches!(
+            block_on(heap.commit_atomic(atomic.build().unwrap())).unwrap(),
+            AtomicOutcome::Committed(_)
+        ));
+        ids.push(atomic_id);
+    }
+    let stats = connection.inspect().atomics.store.unwrap();
+    assert_eq!(stats.executions, 12);
+    assert_eq!(stats.durability_cohorts, 12);
+    assert_eq!(stats.authoritative_sync_operations, 24);
+    block_on(connection.close()).unwrap();
+    drop(records);
+    drop(heap);
+    drop(connection);
+
+    let reopened = block_on(Client::open_embedded(EmbeddedOptions::new(
+        directory.path(),
+    )))
+    .unwrap();
+    let heap = block_on(reopened.open_heap(reopen_capability)).unwrap();
+    for atomic_id in ids {
+        let status = block_on(heap.atomic_status(atomic_id)).unwrap();
+        assert_eq!(status.logical, residiuum_atomics::LogicalStatus::Committed);
+        assert!(status.receipt.is_some());
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn atomic_external_sigkill_after_decision_before_ack_resolves_and_replays() {

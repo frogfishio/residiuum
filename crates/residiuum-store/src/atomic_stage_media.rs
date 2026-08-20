@@ -136,6 +136,77 @@ pub(crate) struct StageCatalog {
 }
 
 impl StageCatalog {
+    pub(crate) fn is_outstanding(&self, key: StageAtomicKey) -> bool {
+        self.prepares.contains_key(&key) && !self.decisions.contains_key(&key)
+    }
+
+    pub(crate) fn outstanding_atomics(&self) -> u32 {
+        self.prepares
+            .keys()
+            .filter(|key| self.is_outstanding(**key))
+            .count()
+            .min(u32::MAX as usize) as u32
+    }
+
+    pub(crate) fn outstanding_members(&self) -> u32 {
+        self.members
+            .iter()
+            .filter(|(key, _)| self.is_outstanding(**key))
+            .map(|(_, members)| members.len() as u64)
+            .sum::<u64>()
+            .min(u64::from(u32::MAX)) as u32
+    }
+
+    pub(crate) fn outstanding_payload_bytes(&self) -> u64 {
+        let inline = self
+            .payloads
+            .iter()
+            .filter(|((heap, atomic, _), _)| self.is_outstanding((*heap, *atomic)))
+            .map(|(_, payload)| payload.len() as u64)
+            .sum::<u64>()
+            .saturating_add(
+                self.chunks
+                    .iter()
+                    .filter(|((heap, atomic, _, _), _)| self.is_outstanding((*heap, *atomic)))
+                    .map(|(_, payload)| payload.len() as u64)
+                    .sum(),
+            );
+        let referenced = self
+            .payload_refs
+            .iter()
+            .filter(|((heap, atomic, _), _)| self.is_outstanding((*heap, *atomic)))
+            .map(|(_, refer)| u64::from(refer.len))
+            .sum::<u64>()
+            .saturating_add(
+                self.chunk_refs
+                    .iter()
+                    .filter(|((heap, atomic, _, _), _)| self.is_outstanding((*heap, *atomic)))
+                    .map(|(_, refer)| u64::from(refer.len))
+                    .sum(),
+            );
+        inline.max(referenced)
+    }
+
+    pub(crate) fn outstanding_work_bytes(&self) -> u64 {
+        let atomics = u64::from(self.outstanding_atomics());
+        let members = u64::from(self.outstanding_members());
+        let references = self
+            .payload_refs
+            .keys()
+            .filter(|(heap, atomic, _)| self.is_outstanding((*heap, *atomic)))
+            .count()
+            .saturating_add(
+                self.chunk_refs
+                    .keys()
+                    .filter(|(heap, atomic, _, _)| self.is_outstanding((*heap, *atomic)))
+                    .count(),
+            ) as u64;
+        self.outstanding_payload_bytes()
+            .saturating_add(atomics.saturating_mul(1024))
+            .saturating_add(members.saturating_mul(256))
+            .saturating_add(references.saturating_mul(80))
+    }
+
     /// Rebind physical locators after an authenticated byte-identical media
     /// relocation. Logical Atomic identity is never derived from this path.
     pub(crate) fn relocate_body_refs(&mut self, from: &str, to: &str) {

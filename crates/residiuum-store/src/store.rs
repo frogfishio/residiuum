@@ -1006,6 +1006,10 @@ pub struct Store {
     /// lock. Frames stay in the active-segment buffer until one gathered tail
     /// write crosses the cohort boundary.
     operation_cohort_gathering: bool,
+    /// The Atomic coordinator is appending one proof cohort. Buffered Atomic
+    /// frames remain independently checksummed segment frames, but their
+    /// contiguous tail is submitted by the next durable Atomic boundary.
+    atomic_frame_cohort_gathering: bool,
     /// Ordered exact product reservations cooking outside the store lock.
     /// V1 permits at most two; direct mutation refuses while non-empty.
     operation_reservation_chain: Vec<[u8; 16]>,
@@ -1347,6 +1351,7 @@ impl Store {
             write_dedup_recovery_segments_examined: 0,
             write_dedup_recovery_scan_bytes: 0,
             operation_cohort_gathering: false,
+            atomic_frame_cohort_gathering: false,
             operation_reservation_chain: Vec::new(),
             last_operation_parallel_cooked: 0,
             last_operation_cohort_timing: OperationCohortTiming::default(),
@@ -1502,6 +1507,7 @@ impl Store {
             write_dedup_recovery_segments_examined: 0,
             write_dedup_recovery_scan_bytes: 0,
             operation_cohort_gathering: false,
+            atomic_frame_cohort_gathering: false,
             operation_reservation_chain: Vec::new(),
             last_operation_parallel_cooked: 0,
             last_operation_cohort_timing: OperationCohortTiming::default(),
@@ -1817,6 +1823,7 @@ impl Store {
             write_dedup_recovery_segments_examined: 0,
             write_dedup_recovery_scan_bytes: 0,
             operation_cohort_gathering: false,
+            atomic_frame_cohort_gathering: false,
             operation_reservation_chain: Vec::new(),
             last_operation_parallel_cooked: 0,
             last_operation_cohort_timing: OperationCohortTiming::default(),
@@ -2668,9 +2675,52 @@ impl Store {
             append?;
             return Ok(());
         }
+        if self.atomic_frame_cohort_gathering {
+            self.set_active(0, Some(writer));
+            return Ok(());
+        }
         let flush = self.flush_active_file(&mut writer, DurabilityMode::Buffered, 0);
         self.set_active(0, Some(writer));
         flush
+    }
+
+    /// Gather buffered Atomic frames until the next durable Atomic append.
+    /// This changes syscall granularity only: frame checksums, ordering and the
+    /// two proof boundaries remain unchanged.
+    pub(crate) fn begin_atomic_frame_cohort(&mut self) -> Result<(), StoreError> {
+        if self.atomic_frame_cohort_gathering {
+            return Err(StoreError::AtomicStage(
+                "nested atomic frame cohort is not supported".into(),
+            ));
+        }
+        self.atomic_frame_cohort_gathering = true;
+        Ok(())
+    }
+
+    pub(crate) fn end_atomic_frame_cohort(&mut self) {
+        self.atomic_frame_cohort_gathering = false;
+    }
+
+    /// Logical coordinator tail, including frames gathered in RAM but not yet
+    /// submitted to the active file.
+    pub(crate) fn atomic_coordinator_len(&self) -> u64 {
+        self.active_ref(0)
+            .map(|writer| writer.segment.len())
+            .unwrap_or(0)
+    }
+
+    /// Length and digest of a retained coordinator suffix. Atomic locators are
+    /// established when a frame is encoded, before a gathered tail is written.
+    pub(crate) fn atomic_retained_suffix_digest(&self, start: u64) -> Option<(u64, [u8; 32])> {
+        let writer = self.active_ref(0)?;
+        let base = writer.segment.base_offset();
+        let end = writer.segment.len();
+        if start < base || start > end {
+            return None;
+        }
+        let offset = usize::try_from(start - base).ok()?;
+        let bytes = writer.segment.as_bytes().get(offset..)?;
+        Some((end - start, *blake3::hash(bytes).as_bytes()))
     }
 
     /// Establish one durable boundary for the complete Atomic prefix already

@@ -11,6 +11,10 @@ Execution authority:
 
 Current continuation point:
 
+- [ATM5F_QUALIFICATION_DIPSTICK_BASELINE_2026-08-21.md](./ATM5F_QUALIFICATION_DIPSTICK_BASELINE_2026-08-21.md)
+  — reproducible public-driver matrix, admission correctness fixes, gathered
+  two-write/two-sync Atomic commits and the first measured optimization
+  baseline; catalogue reconstruction is the next dominant target.
 - [ATM5E_STORE_TELEMETRY_BASELINE_2026-08-20.md](./ATM5E_STORE_TELEMETRY_BASELINE_2026-08-20.md)
   — store-derived physical I/O/sync/cohort, recovery and bounded phase
   telemetry exposed through the smart client.

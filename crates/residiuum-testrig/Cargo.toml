@@ -18,9 +18,17 @@ name = "residiuum-testrig"
 path = "src/main.rs"
 doc = false
 
+[[bin]]
+name = "residiuum-atomic-qual"
+path = "src/bin/residiuum-atomic-qual.rs"
+doc = false
+
 [dependencies]
 residiuum-store = { workspace = true, features = ["legacy-raw-store"] }
 residiuum-format = { workspace = true }
+residiuum-sdk.workspace = true
+residiuum-heap.workspace = true
+residiuum-atomics.workspace = true
 clap.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true

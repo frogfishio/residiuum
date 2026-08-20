@@ -1412,6 +1412,16 @@ impl StoreAtomicStage<'_> {
         &mut self,
         plan: &AtomicPlan,
     ) -> Result<AtomicDecision, StoreError> {
+        self.store.begin_atomic_frame_cohort()?;
+        let result = self.decide_plan_evidence_gathered(plan);
+        self.store.end_atomic_frame_cohort();
+        result
+    }
+
+    fn decide_plan_evidence_gathered(
+        &mut self,
+        plan: &AtomicPlan,
+    ) -> Result<AtomicDecision, StoreError> {
         let validation_started = Instant::now();
         if plan.heap_id() != self.heap.heap_id() {
             return Err(StoreError::AtomicStage(
@@ -1471,6 +1481,7 @@ impl StoreAtomicStage<'_> {
         self.phase_timing.validation_ns = elapsed_ns(validation_started);
 
         let member_started = Instant::now();
+        self.admit_plan_material_batch(&prepare, &members, plan)?;
         self.install_prepared_members(&prepare, &members, mode)?;
         for (member, mutation) in members.iter().zip(plan.mutations()) {
             let payload = mutation.encoded_value.clone().unwrap_or_default();
@@ -2604,10 +2615,10 @@ impl StoreAtomicStage<'_> {
     }
 
     fn admit_new_atomic(&self) -> Result<(), StoreError> {
-        let next = self.catalog.prepares.len().saturating_add(1) as u32;
+        let next = self.catalog.outstanding_atomics().saturating_add(1);
         if next > self.limits.max_atomics {
             return Err(StoreError::AtomicStage(format!(
-                "atomic stage admission atomics {next} exceeds limit {}",
+                "atomic stage outstanding admission {next} exceeds limit {}",
                 self.limits.max_atomics
             )));
         }
@@ -2615,7 +2626,10 @@ impl StoreAtomicStage<'_> {
     }
 
     fn admit_payload_bytes(&self, extra: u64) -> Result<(), StoreError> {
-        let next = self.catalog.retained_payload_bytes().saturating_add(extra);
+        let next = self
+            .catalog
+            .outstanding_payload_bytes()
+            .saturating_add(extra);
         if next > self.limits.max_payload_bytes {
             return Err(StoreError::AtomicStage(format!(
                 "atomic stage admission payload bytes {next} exceeds limit {}",
@@ -2626,9 +2640,7 @@ impl StoreAtomicStage<'_> {
     }
 
     fn active_len(&self) -> u64 {
-        fs::metadata(self.coordinator_active_path())
-            .map(|m| m.len())
-            .unwrap_or(0)
+        self.store.atomic_coordinator_len()
     }
 
     fn coordinator_active_path(&self) -> PathBuf {
@@ -2638,6 +2650,14 @@ impl StoreAtomicStage<'_> {
     }
 
     fn note_written_ref(&self, start: u64) -> Option<BodyRef> {
+        if let Some((len, hash)) = self.store.atomic_retained_suffix_digest(start) {
+            return Some(BodyRef {
+                rel_path: rel_path(self.store.paths(), &self.coordinator_active_path()),
+                offset: start,
+                len: u32::try_from(len).ok()?,
+                hash,
+            });
+        }
         let end = self.active_len();
         if end < start {
             return None;
@@ -2756,16 +2776,18 @@ impl StoreAtomicStage<'_> {
         )
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         let body = encode_member(member).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        let mut candidate = self.catalog.clone();
         let key = stage_key(prepare.heap_id, member.atomic_id);
-        let slot = candidate.members.entry(key).or_default();
-        if !slot
-            .iter()
-            .any(|existing| existing.ordinal == member.ordinal)
-        {
-            slot.push(member.clone());
+        if mode != StagePersistMode::BufferedCohort {
+            let mut candidate = self.catalog.clone();
+            let slot = candidate.members.entry(key).or_default();
+            if !slot
+                .iter()
+                .any(|existing| existing.ordinal == member.ordinal)
+            {
+                slot.push(member.clone());
+            }
+            self.admit_catalog_change(&candidate, body.len() as u64)?;
         }
-        self.admit_catalog_change(&candidate, body.len() as u64)?;
         crate::failpoint::hit("store.atomic.member.before_append")?;
         match mode {
             StagePersistMode::StableCheckpointed => self.store.append_unindexed_atomic_frame(
@@ -2807,20 +2829,24 @@ impl StoreAtomicStage<'_> {
         mode: StagePersistMode,
     ) -> Result<(), StoreError> {
         let key = self.key(member.atomic_id);
-        if !self.catalog.has_payload(key, member.ordinal) {
+        if mode != StagePersistMode::BufferedCohort
+            && !self.catalog.has_payload(key, member.ordinal)
+        {
             self.admit_payload_bytes(payload.len() as u64)?;
         }
         let start = self.active_len();
         let body = encode_stage_payload(key.0, member.atomic_id, member.ordinal, payload);
-        let mut candidate = self.catalog.clone();
-        candidate
-            .payloads
-            .insert((key.0, key.1, member.ordinal), payload.to_vec());
-        candidate.payload_refs.insert(
-            (key.0, key.1, member.ordinal),
-            self.candidate_body_ref(start, body.len()),
-        );
-        self.admit_catalog_change(&candidate, body.len() as u64)?;
+        if mode != StagePersistMode::BufferedCohort {
+            let mut candidate = self.catalog.clone();
+            candidate
+                .payloads
+                .insert((key.0, key.1, member.ordinal), payload.to_vec());
+            candidate.payload_refs.insert(
+                (key.0, key.1, member.ordinal),
+                self.candidate_body_ref(start, body.len()),
+            );
+            self.admit_catalog_change(&candidate, body.len() as u64)?;
+        }
         crate::failpoint::hit("store.atomic.payload.before_append")?;
         match mode {
             StagePersistMode::StableCheckpointed => self.store.append_unindexed_atomic_frame(
@@ -2911,6 +2937,53 @@ impl StoreAtomicStage<'_> {
         }
     }
 
+    /// Admit the complete single-plan member phase once. The product path has
+    /// already frozen every member and payload, so repeating a full catalogue
+    /// clone and checkpoint encoding for each frame adds no safety and turns a
+    /// bounded N-member plan into quadratic work.
+    fn admit_plan_material_batch(
+        &self,
+        prepare: &AtomicPrepare,
+        members: &[AtomicMember],
+        plan: &AtomicPlan,
+    ) -> Result<(), StoreError> {
+        let key = stage_key(prepare.heap_id, prepare.atomic_id);
+        let mut candidate = self.catalog.clone();
+        let mut append_body_bytes = 0u64;
+        for (member, mutation) in members.iter().zip(plan.mutations()) {
+            let slot = candidate.members.entry(key).or_default();
+            if !slot
+                .iter()
+                .any(|existing| existing.ordinal == member.ordinal)
+            {
+                slot.push(member.clone());
+            }
+            append_body_bytes = append_body_bytes.saturating_add(
+                encode_member(member)
+                    .map_err(|error| StoreError::AtomicStage(error.to_string()))?
+                    .len() as u64,
+            );
+            let payload = mutation.encoded_value.as_deref().unwrap_or_default();
+            let body = encode_stage_payload(key.0, member.atomic_id, member.ordinal, payload);
+            candidate
+                .payloads
+                .insert((key.0, key.1, member.ordinal), payload.to_vec());
+            candidate.payload_refs.insert(
+                (key.0, key.1, member.ordinal),
+                self.candidate_body_ref(0, body.len()),
+            );
+            append_body_bytes = append_body_bytes.saturating_add(body.len() as u64);
+        }
+        if candidate.outstanding_payload_bytes() > self.limits.max_payload_bytes {
+            return Err(StoreError::AtomicStage(format!(
+                "atomic stage admission payload bytes {} exceeds limit {}",
+                candidate.outstanding_payload_bytes(),
+                self.limits.max_payload_bytes
+            )));
+        }
+        self.admit_catalog_change(&candidate, append_body_bytes)
+    }
+
     fn admit_catalog_change(
         &self,
         candidate: &StageCatalog,
@@ -2928,7 +3001,7 @@ impl StoreAtomicStage<'_> {
                 self.limits.max_checkpoint_bytes
             )));
         }
-        let work = candidate.work_bytes();
+        let work = candidate.outstanding_work_bytes();
         if work > self.limits.max_work_bytes {
             return Err(StoreError::AtomicStage(format!(
                 "atomic stage admission work bytes {work} exceeds limit {}",

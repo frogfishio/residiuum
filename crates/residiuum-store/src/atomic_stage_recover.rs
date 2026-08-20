@@ -82,20 +82,28 @@ pub struct AtomicStageLimits {
     pub max_segment_bytes: u64,
     /// Maximum aggregate dirty-tail / rebuild bytes actually ingested.
     pub max_scan_bytes: u64,
-    /// Maximum reconstructed Atomics.
+    /// Maximum reconstructed non-terminal/outstanding Atomics.
     pub max_atomics: u32,
-    /// Maximum reconstructed members.
+    /// Maximum reconstructed members belonging to outstanding Atomics.
     pub max_members: u32,
-    /// Maximum retained payload bytes.
+    /// Maximum retained payload bytes belonging to outstanding Atomics.
     pub max_payload_bytes: u64,
+    /// Independent ceiling for historical and outstanding Atomic identities.
+    pub max_retained_atomics: u32,
+    /// Independent ceiling for historical and outstanding members.
+    pub max_retained_members: u32,
+    /// Independent ceiling for all reconstructed inline/referenced payloads.
+    pub max_retained_payload_bytes: u64,
     /// Maximum directory entries visited.
     pub max_dirents: u32,
     /// Maximum walk depth from each media root.
     pub max_depth: u32,
     /// Maximum media files considered.
     pub max_files: u32,
-    /// Maximum retained catalogue work memory.
+    /// Maximum catalogue work memory belonging to outstanding Atomics.
     pub max_work_bytes: u64,
+    /// Independent ceiling for total reconstructed catalogue work memory.
+    pub max_retained_work_bytes: u64,
     /// Maximum checkpoint sidecar bytes.
     pub max_checkpoint_bytes: u64,
 }
@@ -118,10 +126,16 @@ impl AtomicStageLimits {
             max_atomics: atomics,
             max_members: atomics.saturating_mul(hard.total_generated_members),
             max_payload_bytes: payload,
+            // Terminal authority remains bounded independently of the small
+            // in-flight window until it is moved into a persistent paged index.
+            max_retained_atomics: 65_536,
+            max_retained_members: 1_048_576,
+            max_retained_payload_bytes: STORE_SEGMENT_BYTES.saturating_mul(2),
             max_dirents: 8192,
             max_depth: 8,
             max_files: 4096,
             max_work_bytes: payload.saturating_add(16 * 1024 * 1024),
+            max_retained_work_bytes: STORE_SEGMENT_BYTES.saturating_mul(4),
             max_checkpoint_bytes: 16 * 1024 * 1024,
         }
     }
@@ -280,10 +294,18 @@ impl Budget {
 
     fn charge_catalog(&mut self, catalog: &StageCatalog) -> Result<(), StoreError> {
         let atomics = catalog.prepares.len() as u32;
-        if atomics > self.limits.max_atomics {
+        if atomics > self.limits.max_retained_atomics {
             return Err(Self::fail(
-                "atomics",
+                "retained atomics",
                 u64::from(atomics),
+                u64::from(self.limits.max_retained_atomics),
+            ));
+        }
+        let outstanding_atomics = catalog.outstanding_atomics();
+        if outstanding_atomics > self.limits.max_atomics {
+            return Err(Self::fail(
+                "outstanding atomics",
+                u64::from(outstanding_atomics),
                 u64::from(self.limits.max_atomics),
             ));
         }
@@ -292,24 +314,52 @@ impl Budget {
             .values()
             .map(|ms| ms.len() as u32)
             .sum::<u32>();
-        if members > self.limits.max_members {
+        if members > self.limits.max_retained_members {
             return Err(Self::fail(
-                "members",
+                "retained members",
                 u64::from(members),
+                u64::from(self.limits.max_retained_members),
+            ));
+        }
+        let outstanding_members = catalog.outstanding_members();
+        if outstanding_members > self.limits.max_members {
+            return Err(Self::fail(
+                "outstanding members",
+                u64::from(outstanding_members),
                 u64::from(self.limits.max_members),
             ));
         }
-        let payload = catalog.retained_payload_bytes();
-        if payload > self.limits.max_payload_bytes {
+        let outstanding_payload = catalog.outstanding_payload_bytes();
+        if outstanding_payload > self.limits.max_payload_bytes {
             return Err(Self::fail(
-                "payload bytes",
-                payload,
+                "outstanding payload bytes",
+                outstanding_payload,
                 self.limits.max_payload_bytes,
             ));
         }
-        let work = catalog.work_bytes();
-        if work > self.limits.max_work_bytes {
-            return Err(Self::fail("work bytes", work, self.limits.max_work_bytes));
+        let retained_payload = catalog.retained_payload_bytes();
+        if retained_payload > self.limits.max_retained_payload_bytes {
+            return Err(Self::fail(
+                "retained payload bytes",
+                retained_payload,
+                self.limits.max_retained_payload_bytes,
+            ));
+        }
+        let outstanding_work = catalog.outstanding_work_bytes();
+        if outstanding_work > self.limits.max_work_bytes {
+            return Err(Self::fail(
+                "outstanding work bytes",
+                outstanding_work,
+                self.limits.max_work_bytes,
+            ));
+        }
+        let retained_work = catalog.work_bytes();
+        if retained_work > self.limits.max_retained_work_bytes {
+            return Err(Self::fail(
+                "retained work bytes",
+                retained_work,
+                self.limits.max_retained_work_bytes,
+            ));
         }
         self.report.atomics = atomics;
         self.report.members = members;
@@ -317,8 +367,8 @@ impl Budget {
             .tombstone_index
             .map_or(catalog.tombstones.len() as u64, |index| index.record_count)
             .min(u64::from(u32::MAX)) as u32;
-        self.report.payload_bytes = payload;
-        self.report.work_bytes = work;
+        self.report.payload_bytes = retained_payload;
+        self.report.work_bytes = retained_work;
         Ok(())
     }
 }
