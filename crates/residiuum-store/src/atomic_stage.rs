@@ -11,9 +11,10 @@ use crate::atomic_stage_classify::{
 };
 use crate::atomic_stage_media::{
     chunk_body_event_id, chunk_plan_event_id, encode_order_frontier, encode_stage_chunk_body,
-    encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal, order_frontier_event_id,
-    payload_event_id, seal_event_id, stage_key, AtomicPublishMember, AtomicValueRef, BodyRef,
-    StageAtomicKey, StageCatalog,
+    encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal, encode_stage_tombstone,
+    order_frontier_event_id, payload_event_id, seal_event_id, stage_key, tombstone_event_id,
+    AtomicPublishMember, AtomicValueRef, BodyRef, RetainedDecisionTombstone, StageAtomicKey,
+    StageCatalog,
 };
 use crate::atomic_stage_recover::{
     checkpoint_encoded_len, open_catalog, open_catalog_readonly, persist_live_checkpoint, rel_path,
@@ -38,6 +39,9 @@ use residiuum_format::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const DEFAULT_ATOMIC_DETAIL_RETENTION_SECS: u64 = 90 * 24 * 60 * 60;
 
 /// Store-owned handle to staged Atomic evidence.
 pub struct StoreAtomicStage<'a> {
@@ -65,6 +69,61 @@ enum StagePersistMode {
     /// executor establishes one explicit member boundary and one explicit
     /// decision boundary after every independent record in that phase exists.
     BufferedDeferredBoundary,
+}
+
+/// Retention obligations applied before detailed Atomic evidence may be
+/// retired. A tombstone is never governed by this horizon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AtomicDetailRetentionPolicy {
+    /// Configured detail window. Values below 90 days are clamped to the
+    /// product minimum unless a stronger obligation already dominates.
+    pub configured_secs: u64,
+    /// Heap-history obligation, as an absolute Unix-second horizon.
+    pub heap_history_until_unix_s: u64,
+    /// RRE/evidence obligation, as an absolute Unix-second horizon.
+    pub rre_evidence_until_unix_s: u64,
+    /// Backup-contract obligation, as an absolute Unix-second horizon.
+    pub backup_until_unix_s: u64,
+    /// Active legal hold. While true, detail retirement is forbidden.
+    pub legal_hold: bool,
+}
+
+impl Default for AtomicDetailRetentionPolicy {
+    fn default() -> Self {
+        Self {
+            configured_secs: DEFAULT_ATOMIC_DETAIL_RETENTION_SECS,
+            heap_history_until_unix_s: 0,
+            rre_evidence_until_unix_s: 0,
+            backup_until_unix_s: 0,
+            legal_hold: false,
+        }
+    }
+}
+
+impl AtomicDetailRetentionPolicy {
+    /// Exact earliest time at which detailed evidence may be retired.
+    pub fn retain_until(self, decided_at_unix_s: u64) -> Option<u64> {
+        if self.legal_hold {
+            return None;
+        }
+        let configured = self
+            .configured_secs
+            .max(DEFAULT_ATOMIC_DETAIL_RETENTION_SECS);
+        Some(
+            decided_at_unix_s
+                .saturating_add(configured)
+                .max(self.heap_history_until_unix_s)
+                .max(self.rre_evidence_until_unix_s)
+                .max(self.backup_until_unix_s),
+        )
+    }
+}
+
+fn now_unix_s() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 impl Store {
@@ -190,6 +249,12 @@ impl Store {
         }
 
         if !readonly {
+            recover_missing_decision_tombstones(
+                self,
+                &mut opened.catalog,
+                &mut opened.covered,
+                AtomicStageLimits::operable(),
+            )?;
             opened.report.recovery_aborts = recover_prepared_without_decision(
                 self,
                 &mut opened.catalog,
@@ -246,6 +311,8 @@ fn recover_prepared_without_decision(
         );
         let body = encode_decision(&decision)
             .map_err(|error| StoreError::AtomicStage(error.to_string()))?;
+        let retained = retained_tombstone(&prepare, &decision, now_unix_s())?;
+        let tombstone_body = encode_stage_tombstone(key.0, retained)?;
         let envelope = encode_atomic_commit_envelope(
             prepare.heap_id.as_bytes(),
             atomic_id.as_bytes(),
@@ -254,20 +321,64 @@ fn recover_prepared_without_decision(
         )
         .map_err(|error| StoreError::AtomicStage(error.to_string()))?;
         crate::failpoint::hit("store.atomic.recovery.before_decision")?;
-        store.append_unindexed_atomic_frame(
+        store.append_buffered_atomic_frame(
             FrameKind::BatchCommit,
             &envelope,
             &body,
             decision_event_id(key.0, atomic_id),
         )?;
+        store.append_unindexed_atomic_frame(
+            FrameKind::PayloadChunk,
+            EMPTY_ENVELOPE,
+            &tombstone_body,
+            tombstone_event_id(key.0, atomic_id),
+        )?;
         crate::failpoint::hit("store.atomic.recovery.after_decision")?;
         catalog.decisions.insert(key, decision);
+        catalog.tombstones.insert(key, retained);
         resolved = resolved.saturating_add(1);
     }
     if resolved != 0 {
         persist_live_checkpoint(store.paths(), catalog, covered, limits)?;
     }
     Ok(resolved)
+}
+
+/// Backfill the lifetime authority for a terminal decision left by an older
+/// experimental writer or by a crash in the narrow decision/tombstone window.
+fn recover_missing_decision_tombstones(
+    store: &mut Store,
+    catalog: &mut StageCatalog,
+    covered: &mut Vec<CoveredFile>,
+    limits: AtomicStageLimits,
+) -> Result<(), StoreError> {
+    let missing = catalog
+        .decisions
+        .iter()
+        .filter_map(|(key, decision)| {
+            (!catalog.tombstones.contains_key(key) && !catalog.blocked.contains(key))
+                .then_some((*key, decision.clone()))
+        })
+        .collect::<Vec<_>>();
+    let changed = !missing.is_empty();
+    for (key, decision) in missing {
+        let prepare = catalog.prepares.get(&key).ok_or_else(|| {
+            StoreError::AtomicStage("decision tombstone recovery missing prepare".into())
+        })?;
+        let retained = retained_tombstone(prepare, &decision, now_unix_s())?;
+        let body = encode_stage_tombstone(key.0, retained)?;
+        store.append_unindexed_atomic_frame(
+            FrameKind::PayloadChunk,
+            EMPTY_ENVELOPE,
+            &body,
+            tombstone_event_id(key.0, key.1),
+        )?;
+        catalog.tombstones.insert(key, retained);
+    }
+    if changed {
+        persist_live_checkpoint(store.paths(), catalog, covered, limits)?;
+    }
+    Ok(())
 }
 
 impl StoreAtomicStage<'_> {
@@ -314,7 +425,17 @@ impl StoreAtomicStage<'_> {
         }
         let key = self.key(atomic_id);
         let projected = crate::atomic_stage_status::project_atomic(&self.catalog, key.0, atomic_id);
-        let content_root = self.catalog.prepares.get(&key).map(|p| p.content_root);
+        let content_root = self
+            .catalog
+            .prepares
+            .get(&key)
+            .map(|p| p.content_root)
+            .or_else(|| {
+                self.catalog
+                    .tombstones
+                    .get(&key)
+                    .map(|t| t.tombstone.content_root)
+            });
         if projected.blocked
             && self.findings.records.iter().any(|finding| {
                 finding.atomic_id == Some(atomic_id)
@@ -338,6 +459,21 @@ impl StoreAtomicStage<'_> {
             });
         }
         let Some(decision) = self.catalog.decisions.get(&key) else {
+            if let Some(retained) = self.catalog.tombstones.get(&key) {
+                return Ok(AtomicStatus {
+                    logical: match retained.tombstone.decision {
+                        DecisionCode::Committed => LogicalStatus::Committed,
+                        DecisionCode::NotCommitted => LogicalStatus::NotCommitted,
+                    },
+                    material: if retained.tombstone.decision == DecisionCode::Committed {
+                        MaterialStatus::Missing
+                    } else {
+                        MaterialStatus::Complete
+                    },
+                    content_root: Some(retained.tombstone.content_root),
+                    receipt: None,
+                });
+            }
             if self.catalog.prepares.contains_key(&key) {
                 let material = if projected.present_members == 0 && projected.intended_members != 0
                 {
@@ -385,6 +521,79 @@ impl StoreAtomicStage<'_> {
             content_root,
             receipt,
         })
+    }
+
+    /// Lawfully retire detailed evidence for a terminal not-committed Atomic.
+    /// The lifetime tombstone remains authoritative until complete Heap purge.
+    ///
+    /// Committed detail is not reclaimed here: its members/payload locators are
+    /// still live database material until ATM-4C supplies a qualified
+    /// maintenance representation.
+    #[doc(hidden)]
+    pub fn retire_not_committed_detail_at(
+        &mut self,
+        atomic_id: AtomicId,
+        now_unix_s: u64,
+        policy: AtomicDetailRetentionPolicy,
+    ) -> Result<bool, StoreError> {
+        let key = self.key(atomic_id);
+        let retained = self.catalog.tombstones.get(&key).copied().ok_or_else(|| {
+            StoreError::AtomicStage("detail retirement requires a durable tombstone".into())
+        })?;
+        if retained.tombstone.decision != DecisionCode::NotCommitted {
+            return Err(StoreError::AtomicStage(
+                "committed detail retirement awaits qualified ATM-4C material migration".into(),
+            ));
+        }
+        let Some(retain_until) = policy.retain_until(retained.decided_at_unix_s) else {
+            return Err(StoreError::AtomicStage(
+                "atomic detail retirement blocked by legal hold".into(),
+            ));
+        };
+        if now_unix_s < retain_until {
+            return Err(StoreError::AtomicStage(format!(
+                "atomic detail retained until unix second {retain_until}"
+            )));
+        }
+        if !self.catalog.decisions.contains_key(&key) && !self.catalog.prepares.contains_key(&key) {
+            return Ok(false);
+        }
+        self.catalog.decisions.remove(&key);
+        self.catalog.prepares.remove(&key);
+        self.catalog.members.remove(&key);
+        self.catalog.seals.remove(&key);
+        self.catalog.order_frontiers.remove(&key);
+        self.catalog.prepare_batch.remove(&key);
+        self.catalog.coord_seq.remove(&key);
+        self.catalog
+            .prepare_seen
+            .retain(|candidate| *candidate != key);
+        self.catalog.intended_members.remove(&key);
+        // The exact tombstone supersedes incomplete-detail classifications;
+        // no conflict finding is erased by this operation.
+        self.catalog.blocked.remove(&key);
+        self.catalog
+            .payloads
+            .retain(|(heap, id, _), _| (*heap, *id) != key);
+        self.catalog
+            .payload_refs
+            .retain(|(heap, id, _), _| (*heap, *id) != key);
+        self.catalog
+            .chunk_plans
+            .retain(|(heap, id, _), _| (*heap, *id) != key);
+        self.catalog
+            .chunks
+            .retain(|(heap, id, _, _), _| (*heap, *id) != key);
+        self.catalog
+            .chunk_refs
+            .retain(|(heap, id, _, _), _| (*heap, *id) != key);
+        persist_live_checkpoint(
+            self.store.paths(),
+            &self.catalog,
+            &mut self.covered,
+            self.limits,
+        )?;
+        Ok(true)
     }
 
     /// Operator-only authenticated repair. Ordinary reopen and retry must not
@@ -454,6 +663,16 @@ impl StoreAtomicStage<'_> {
             return Err(StoreError::AtomicStage(
                 "atomic identity is blocked by conflicting or damaged evidence".into(),
             ));
+        }
+        if let Some(retained) = self.catalog.tombstones.get(&key) {
+            if retained.tombstone.content_root != prepare.content_root {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
+            }
+            if !self.catalog.prepares.contains_key(&key) {
+                return Err(StoreError::AtomicStage(
+                    "atomic identity already has a retained terminal decision".into(),
+                ));
+            }
         }
         if self.catalog.coverage_degraded && !self.catalog.prepares.contains_key(&key) {
             return Err(StoreError::AtomicStage(
@@ -755,6 +974,8 @@ impl StoreAtomicStage<'_> {
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         let body =
             encode_decision(&decision).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let retained = retained_tombstone(&prepare, &decision, now_unix_s())?;
+        let tombstone_body = encode_stage_tombstone(key.0, retained)?;
         if !self.catalog.order_frontiers.contains_key(&key) {
             let frontiers = self.store.atomic_order_frontier()?;
             let witness = encode_order_frontier(key.0, atomic_id, &frontiers)?;
@@ -778,26 +999,54 @@ impl StoreAtomicStage<'_> {
             Some(position),
         )
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        self.admit_catalog_change(&self.catalog.clone(), body.len() as u64)?;
+        let mut candidate = self.catalog.clone();
+        candidate.decisions.insert(key, decision.clone());
+        candidate.tombstones.insert(key, retained);
+        candidate
+            .commit_next
+            .insert(prepare.heap_id, position.saturating_add(1));
+        self.admit_catalog_change(
+            &candidate,
+            body.len().saturating_add(tombstone_body.len()) as u64,
+        )?;
         crate::failpoint::hit("store.atomic.before_decision")?;
         match mode {
-            StagePersistMode::BufferedDeferredBoundary => self.store.append_buffered_atomic_frame(
-                FrameKind::BatchCommit,
-                &envelope,
-                &body,
-                decision_event_id(key.0, atomic_id),
-            )?,
-            StagePersistMode::StableCheckpointed | StagePersistMode::BufferedCohort => {
-                self.store.append_unindexed_atomic_frame(
+            StagePersistMode::BufferedDeferredBoundary | StagePersistMode::BufferedCohort => {
+                self.store.append_buffered_atomic_frame(
                     FrameKind::BatchCommit,
                     &envelope,
                     &body,
                     decision_event_id(key.0, atomic_id),
                 )?
             }
+            StagePersistMode::StableCheckpointed => self.store.append_buffered_atomic_frame(
+                FrameKind::BatchCommit,
+                &envelope,
+                &body,
+                decision_event_id(key.0, atomic_id),
+            )?,
         }
+        crate::failpoint::hit("store.atomic.before_tombstone")?;
+        match mode {
+            StagePersistMode::StableCheckpointed | StagePersistMode::BufferedCohort => {
+                self.store.append_unindexed_atomic_frame(
+                    FrameKind::PayloadChunk,
+                    EMPTY_ENVELOPE,
+                    &tombstone_body,
+                    tombstone_event_id(key.0, atomic_id),
+                )?
+            }
+            StagePersistMode::BufferedDeferredBoundary => self.store.append_buffered_atomic_frame(
+                FrameKind::PayloadChunk,
+                EMPTY_ENVELOPE,
+                &tombstone_body,
+                tombstone_event_id(key.0, atomic_id),
+            )?,
+        }
+        crate::failpoint::hit("store.atomic.after_tombstone")?;
         crate::failpoint::hit("store.atomic.after_decision")?;
         self.catalog.decisions.insert(key, decision.clone());
+        self.catalog.tombstones.insert(key, retained);
         self.catalog
             .commit_next
             .insert(prepare.heap_id, position.saturating_add(1));
@@ -858,6 +1107,8 @@ impl StoreAtomicStage<'_> {
         );
         let body =
             encode_decision(&decision).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let retained = retained_tombstone(&prepare, &decision, now_unix_s())?;
+        let tombstone_body = encode_stage_tombstone(key.0, retained)?;
         let envelope = encode_atomic_commit_envelope(
             prepare.heap_id.as_bytes(),
             atomic_id.as_bytes(),
@@ -865,25 +1116,51 @@ impl StoreAtomicStage<'_> {
             None,
         )
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let mut candidate = self.catalog.clone();
+        candidate.decisions.insert(key, decision.clone());
+        candidate.tombstones.insert(key, retained);
+        self.admit_catalog_change(
+            &candidate,
+            body.len().saturating_add(tombstone_body.len()) as u64,
+        )?;
         crate::failpoint::hit("store.atomic.before_decision")?;
         match mode {
-            StagePersistMode::BufferedDeferredBoundary => self.store.append_buffered_atomic_frame(
-                FrameKind::BatchCommit,
-                &envelope,
-                &body,
-                decision_event_id(key.0, atomic_id),
-            )?,
-            StagePersistMode::StableCheckpointed | StagePersistMode::BufferedCohort => {
-                self.store.append_unindexed_atomic_frame(
+            StagePersistMode::BufferedDeferredBoundary | StagePersistMode::BufferedCohort => {
+                self.store.append_buffered_atomic_frame(
                     FrameKind::BatchCommit,
                     &envelope,
                     &body,
                     decision_event_id(key.0, atomic_id),
                 )?
             }
+            StagePersistMode::StableCheckpointed => self.store.append_buffered_atomic_frame(
+                FrameKind::BatchCommit,
+                &envelope,
+                &body,
+                decision_event_id(key.0, atomic_id),
+            )?,
         }
+        crate::failpoint::hit("store.atomic.before_tombstone")?;
+        match mode {
+            StagePersistMode::StableCheckpointed | StagePersistMode::BufferedCohort => {
+                self.store.append_unindexed_atomic_frame(
+                    FrameKind::PayloadChunk,
+                    EMPTY_ENVELOPE,
+                    &tombstone_body,
+                    tombstone_event_id(key.0, atomic_id),
+                )?
+            }
+            StagePersistMode::BufferedDeferredBoundary => self.store.append_buffered_atomic_frame(
+                FrameKind::PayloadChunk,
+                EMPTY_ENVELOPE,
+                &tombstone_body,
+                tombstone_event_id(key.0, atomic_id),
+            )?,
+        }
+        crate::failpoint::hit("store.atomic.after_tombstone")?;
         crate::failpoint::hit("store.atomic.after_decision")?;
         self.catalog.decisions.insert(key, decision.clone());
+        self.catalog.tombstones.insert(key, retained);
         if mode == StagePersistMode::StableCheckpointed {
             persist_live_checkpoint(
                 self.store.paths(),
@@ -914,6 +1191,19 @@ impl StoreAtomicStage<'_> {
         validate_closed_plan(plan, self.heap.heap_id())?;
         let root = plan_content_root(plan).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         let key = self.key(plan.atomic_id());
+        if let Some(retained) = self
+            .catalog
+            .tombstones
+            .get(&key)
+            .filter(|_| !self.catalog.decisions.contains_key(&key))
+        {
+            if retained.tombstone.content_root != root {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
+            }
+            return Err(StoreError::AtomicStage(
+                "Atomic detail was lawfully retired; use outcome/status summary".into(),
+            ));
+        }
         if let Some(stored) = self.catalog.prepares.get(&key) {
             if stored.content_root != root {
                 return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
@@ -958,6 +1248,16 @@ impl StoreAtomicStage<'_> {
     /// without rereading every committed member.
     #[doc(hidden)]
     pub fn decide_plan_outcome(&mut self, plan: &AtomicPlan) -> Result<AtomicOutcome, StoreError> {
+        validate_closed_plan(plan, self.heap.heap_id())?;
+        let key = self.key(plan.atomic_id());
+        if let Some(retained) = self
+            .catalog
+            .tombstones
+            .get(&key)
+            .filter(|_| !self.catalog.decisions.contains_key(&key))
+        {
+            return self.outcome_for_tombstone(plan, retained);
+        }
         let replayed = self
             .catalog
             .decisions
@@ -1022,6 +1322,19 @@ impl StoreAtomicStage<'_> {
             owners.insert(plan.atomic_id(), (root, index));
 
             let key = self.key(plan.atomic_id());
+            if let Some(retained) = self
+                .catalog
+                .tombstones
+                .get(&key)
+                .filter(|_| !self.catalog.decisions.contains_key(&key))
+            {
+                if retained.tombstone.content_root != root {
+                    results[index] = Some(Err(AtomicRefuseReason::AtomicIdConflict));
+                } else {
+                    results[index] = Some(Ok(self.outcome_for_tombstone(plan, retained)?));
+                }
+                continue;
+            }
             if let Some(stored) = self.catalog.prepares.get(&key) {
                 if stored.content_root != root {
                     results[index] = Some(Err(AtomicRefuseReason::AtomicIdConflict));
@@ -1145,6 +1458,27 @@ impl StoreAtomicStage<'_> {
             decision,
             replayed,
         )?))
+    }
+
+    fn outcome_for_tombstone(
+        &self,
+        plan: &AtomicPlan,
+        retained: &RetainedDecisionTombstone,
+    ) -> Result<AtomicOutcome, StoreError> {
+        let root = plan_content_root(plan).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let stone = retained.tombstone;
+        if stone.content_root != root {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
+        }
+        match stone.decision {
+            DecisionCode::NotCommitted => stone
+                .not_committed_outcome()
+                .map_err(StoreError::from),
+            DecisionCode::Committed => Err(StoreError::AtomicStage(
+                "committed decision is known but detailed member receipt is unavailable; use atomic_status"
+                    .into(),
+            )),
+        }
     }
 
     fn receipt_for_decision(
@@ -1889,6 +2223,19 @@ fn decision_event_id(heap_id: HeapId, atomic_id: AtomicId) -> [u8; 16] {
     let mut event_id = [0u8; 16];
     event_id.copy_from_slice(&hash.as_bytes()[..16]);
     event_id
+}
+
+fn retained_tombstone(
+    prepare: &AtomicPrepare,
+    decision: &AtomicDecision,
+    decided_at_unix_s: u64,
+) -> Result<RetainedDecisionTombstone, StoreError> {
+    let hash =
+        decision_hash(decision).map_err(|error| StoreError::AtomicStage(error.to_string()))?;
+    Ok(RetainedDecisionTombstone {
+        decided_at_unix_s,
+        tombstone: decision.tombstone(prepare.content_root, hash),
+    })
 }
 
 fn prepare_event_id(heap_id: HeapId, atomic_id: AtomicId) -> [u8; 16] {

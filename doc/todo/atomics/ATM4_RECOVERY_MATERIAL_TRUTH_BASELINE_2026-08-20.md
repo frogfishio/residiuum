@@ -40,6 +40,15 @@ never be inferred from a decision.
    same caller-selected Atomic ID independently across restart. Conflicting
    material in one Heap blocks only that composite identity and does not poison
    the same Atomic ID in another Heap.
+7. Every new terminal decision now carries an `ATTOMB1` lifetime tombstone in
+   the same durable prefix. Recovery backfills a missing tombstone from an
+   exact surviving decision, and the authenticated v15 checkpoint retains the
+   composite-key summary. Tombstone-only status and same-root replay work after
+   detailed not-committed evidence is lawfully retired and after restart.
+8. `AtomicDetailRetentionPolicy` freezes the 90-day minimum and computes the
+   maximum of configured detail, Heap-history, RRE-evidence and backup-contract
+   horizons. Active legal hold refuses retirement. Tombstone deletion is not
+   exposed outside complete Heap purge.
 
 ## Format amendment
 
@@ -48,20 +57,26 @@ profile. The product capability is still false, so no released SDK could have
 created supported Atomic data. New prepares require CBOR field 11
 `member_count: uint`; old experimental prepares that omit it are not silently
 upgraded because their exact intended cardinality is unknowable. The same
-pre-publication rule applies to `ATCKP1` v14, `ATCRD1` v2 and the heap-qualified
+pre-publication rule applies to `ATCKP1` v15, `ATCRD1` v2 and the heap-qualified
 sidecars: older experimental private layouts are rebuilt where authoritative
 media permits and are never interpreted as the new composite-key format.
 
 ## Remaining delivery blocks
 
-### ATM-4A — lifetime identity and detail retention
+### ATM-4A — lifetime identity and detail retention — in progress
 
-- persist the compact decision tombstone beside every terminal decision;
-- rebuild status and same-ID replay from tombstone after detailed evidence is
-  lawfully retired;
-- enforce the 90-day minimum/detail-policy/legal-hold calculation;
-- remove tombstones only during complete Heap purge;
-- prove bounded status checkpoint and tail recovery.
+- **Delivered:** compact Heap-qualified tombstone beside every terminal
+  decision; recovery backfill; tombstone-only status/replay; 90-day and
+  stronger-obligation calculation; legal-hold refusal; restart proof for
+  lawfully retired not-committed detail.
+- **Remaining:** committed-detail reclamation must wait for ATM-4C to provide a
+  qualified material/publication representation. The current staging
+  payload/member locators are still live database material and MUST NOT be
+  deleted merely because decision detail expires.
+- **Remaining:** replace the monolithic checkpoint tombstone table with a
+  bounded/paged lifetime status index before claiming unbounded Heap-lifetime
+  status scale. Tail recovery is bounded today; lifetime cardinality is not
+  yet a completed scale proof.
 
 ### ATM-4B — material truth and damage
 
@@ -90,7 +105,7 @@ media permits and are never interpreted as the new composite-key format.
 ### ATM-4E — Heap-qualified identity key — delivered
 
 The catalogue and all dependent physical keys use the exact composite
-`(HeapId, AtomicId)`. `ATCKP1` v14, `ATCRD1` v2 and every non-prepare staging
+`(HeapId, AtomicId)`. `ATCKP1` v15, `ATCRD1` v2 and every non-prepare staging
 sidecar carry the Heap component. No hash-derived naming convention is used as
 an isolation boundary. Tombstones introduced by ATM-4A MUST use the same
 composite key.

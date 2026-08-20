@@ -260,6 +260,41 @@ fn failpoint_after_durable_decision_recovers_commit() {
 }
 
 #[test]
+fn decision_without_tombstone_is_backfilled_before_reuse() {
+    let _serial = FAILPOINT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let atomic_id = id(7);
+    let mut store = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let value = b"one";
+    let member = member(atomic_id, "a", value, 3);
+    let plan = plan(heap, &member, value);
+    {
+        let mut stage = store.atomic_stage().unwrap();
+        stage
+            .begin_prepare(&plan, FRONTIER, std::slice::from_ref(&member))
+            .unwrap();
+        stage.append_staged(member, value.to_vec()).unwrap();
+        stage.seal_member_boundary(atomic_id).unwrap();
+        arm_failpoint_once("store.atomic.before_tombstone", FailpointAction::Error);
+        assert!(matches!(
+            stage.persist_committed_decision(atomic_id),
+            Err(StoreError::Failpoint("store.atomic.before_tombstone"))
+        ));
+    }
+    clear_failpoints();
+    store.abandon_for_crash_test();
+    drop(store);
+
+    let mut store = Store::open(&path).unwrap();
+    let stage = store.atomic_stage().unwrap();
+    assert_eq!(stage.examine(atomic_id).class, AtomicStageClass::Committed);
+    assert_eq!(stage.examine(atomic_id).commit_position, Some(1));
+}
+
+#[test]
 fn identical_atomic_ids_are_independent_across_named_heaps_and_restart() {
     let _serial = FAILPOINT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     clear_failpoints();

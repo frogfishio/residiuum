@@ -10,8 +10,8 @@ use crate::atomic_stage_media::{
     decode_stage_sidecar, stage_key, SidecarDecode, SidecarKind, StageAtomicKey, StageCatalog,
 };
 use residiuum_atomics::{
-    members_match_prepare, ordered_member_manifest_root, prepare_hash, AtomicDecision, AtomicId,
-    AtomicMember, AtomicPrepare, ChunkPlan, DecisionCode, HeapId,
+    decision_hash, members_match_prepare, ordered_member_manifest_root, prepare_hash,
+    AtomicDecision, AtomicId, AtomicMember, AtomicPrepare, ChunkPlan, DecisionCode, HeapId,
 };
 use residiuum_format::{
     examine_atomic_frame, AtomicEvidenceClass, AtomicFrameRole, DecodedFrame, HoleReason,
@@ -276,6 +276,23 @@ pub fn finalize_catalog(catalog: &mut StageCatalog, findings: &mut StageFindings
                     StageEvidenceClass::Conflict,
                     Some(id),
                 );
+            } else if let Some(retained) = catalog.tombstones.get(&key) {
+                let hash_ok = decision_hash(&decision)
+                    .ok()
+                    .is_some_and(|hash| hash == retained.tombstone.decision_hash);
+                let summary_ok = retained.tombstone.atomic_id == decision.atomic_id
+                    && retained.tombstone.content_root == prepare.content_root
+                    && retained.tombstone.decision == decision.decision
+                    && retained.tombstone.commit_position == decision.commit_position
+                    && retained.tombstone.abort_reason == decision.abort_reason;
+                if !hash_ok || !summary_ok {
+                    catalog.blocked.insert(key);
+                    findings.push(
+                        StageEvidenceKind::Decision,
+                        StageEvidenceClass::Conflict,
+                        Some(id),
+                    );
+                }
             }
         }
     }
@@ -382,11 +399,16 @@ fn sweep_orphans(catalog: &mut StageCatalog, findings: &mut StageFindings) {
     orphans.extend(catalog.chunk_plans.keys().map(|(heap, id, _)| (*heap, *id)));
     orphans.extend(catalog.chunks.keys().map(|(heap, id, _, _)| (*heap, *id)));
     orphans.extend(catalog.decisions.keys().copied());
+    orphans.extend(catalog.tombstones.keys().copied());
     orphans.sort();
     orphans.dedup();
     for key in orphans {
         let id = key.1;
         if catalog.prepares.contains_key(&key) || catalog.blocked.contains(&key) {
+            continue;
+        }
+        // A lone tombstone is valid after lawful detail retirement.
+        if catalog.tombstones.contains_key(&key) {
             continue;
         }
         catalog.blocked.insert(key);
@@ -514,6 +536,40 @@ fn ingest_sidecar(catalog: &mut StageCatalog, body: &[u8], findings: &mut StageF
                 catalog.order_frontiers.insert(key, frontiers);
             }
         }
+        SidecarDecode::Tombstone { heap_id, retained } => {
+            let id = retained.tombstone.atomic_id;
+            let key = stage_key(heap_id, id);
+            match catalog.tombstones.get(&key) {
+                None => {
+                    catalog.tombstones.insert(key, retained);
+                    findings.push(
+                        StageEvidenceKind::Decision,
+                        StageEvidenceClass::Valid,
+                        Some(id),
+                    );
+                }
+                Some(existing) if existing.tombstone == retained.tombstone => {
+                    // The first authenticated decision time wins. Re-emission
+                    // may refresh a physical copy but cannot extend retention.
+                    if retained.decided_at_unix_s < existing.decided_at_unix_s {
+                        catalog.tombstones.insert(key, retained);
+                    }
+                    findings.push(
+                        StageEvidenceKind::Decision,
+                        StageEvidenceClass::Valid,
+                        Some(id),
+                    );
+                }
+                Some(_) => {
+                    catalog.blocked.insert(key);
+                    findings.push(
+                        StageEvidenceKind::Decision,
+                        StageEvidenceClass::Conflict,
+                        Some(id),
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -524,6 +580,7 @@ fn sidecar_heap_id(body: &[u8]) -> Option<HeapId> {
         b"ATMAP1",
         b"ATCHK1",
         b"ATORD1",
+        b"ATTOMB1",
     ] {
         if body.starts_with(magic) && body.len() >= magic.len() + 16 {
             return HeapId::from_bytes(body[magic.len()..magic.len() + 16].try_into().ok()?).ok();
@@ -833,6 +890,7 @@ fn sidecar_kind(kind: SidecarKind) -> StageEvidenceKind {
         SidecarKind::ChunkPlan => StageEvidenceKind::ChunkPlan,
         SidecarKind::ChunkBody => StageEvidenceKind::ChunkBody,
         SidecarKind::OrderFrontier => StageEvidenceKind::Decision,
+        SidecarKind::Tombstone => StageEvidenceKind::Decision,
     }
 }
 

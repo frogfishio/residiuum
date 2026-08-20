@@ -2,14 +2,15 @@
 
 use residiuum_atomics::{
     AtomicId, AtomicMember, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CollectionId,
-    CoordinationScope, HeapId, MutationKind, ObjectIdentity, PlanMutation, ResourceLimits,
-    VersionId,
+    CoordinationScope, HeapId, LogicalStatus, MutationKind, ObjectIdentity, PlanMutation,
+    ResourceLimits, VersionId,
 };
 use residiuum_format::{
     examine_atomic_frame, scan_forward, AtomicEvidenceClass, AtomicFrameRole, SafetyLimits,
 };
 use residiuum_store::{
-    arm_failpoint_once, clear_failpoints, AtomicStageClass, FailpointAction, Store, StoreError,
+    arm_failpoint_once, clear_failpoints, AtomicDetailRetentionPolicy, AtomicStageClass,
+    FailpointAction, Store, StoreError,
 };
 use std::fs;
 use std::sync::Mutex;
@@ -201,4 +202,146 @@ fn no_prepare_is_the_only_absence() {
     let stage = store.atomic_stage().unwrap();
     assert_eq!(stage.examine(aid()).class, AtomicStageClass::Absent);
     assert!(!media_has_prepare(&store));
+}
+
+#[test]
+fn tombstone_survives_lawful_detail_retirement_restart_and_replay() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let m = member(0, 3, b"secret");
+    let p = plan(heap, std::slice::from_ref(&m), &[b"secret"]);
+    arm_failpoint_once(
+        "store.atomic.prepare.after_checkpoint",
+        FailpointAction::Error,
+    );
+    {
+        let mut stage = store.atomic_stage().unwrap();
+        let _ = stage.begin_prepare(&p, FRONTIER, std::slice::from_ref(&m));
+    }
+    clear_failpoints();
+    drop(store);
+
+    let mut store = Store::open(&path).unwrap();
+    {
+        let mut stage = store.atomic_stage().unwrap();
+        assert_eq!(
+            stage.atomic_status(aid()).unwrap().logical,
+            LogicalStatus::NotCommitted
+        );
+        assert!(
+            stage
+                .retire_not_committed_detail_at(
+                    aid(),
+                    u64::MAX,
+                    AtomicDetailRetentionPolicy::default(),
+                )
+                .unwrap()
+        );
+        assert_eq!(stage.examine(aid()).class, AtomicStageClass::NotCommitted);
+        assert_eq!(
+            stage.atomic_status(aid()).unwrap().logical,
+            LogicalStatus::NotCommitted
+        );
+        assert!(matches!(
+            stage.decide_plan_outcome(&p).unwrap(),
+            residiuum_atomics::AtomicOutcome::NotCommitted { .. }
+        ));
+    }
+    drop(store);
+
+    let mut store = Store::open(&path).unwrap();
+    let mut stage = store.atomic_stage().unwrap();
+    assert_eq!(
+        stage.examine(aid()).class,
+        AtomicStageClass::NotCommitted,
+        "findings={:?}",
+        stage.findings()
+    );
+    assert_eq!(
+        stage.atomic_status(aid()).unwrap().logical,
+        LogicalStatus::NotCommitted
+    );
+    assert!(matches!(
+        stage.decide_plan_outcome(&p).unwrap(),
+        residiuum_atomics::AtomicOutcome::NotCommitted { .. }
+    ));
+    assert!(
+        stage
+            .begin_prepare(&p, FRONTIER, std::slice::from_ref(&m))
+            .is_err(),
+        "the low-level prepare surface must not reissue a tombstoned identity"
+    );
+    let changed_member = member(0, 4, b"changed");
+    let changed = plan(heap, std::slice::from_ref(&changed_member), &[b"changed"]);
+    assert!(
+        stage.decide_plan_outcome(&changed).is_err(),
+        "same ID with a different root must conflict after detail retirement"
+    );
+}
+
+#[test]
+fn detail_retirement_obeys_minimum_window_and_legal_hold() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let m = member(0, 3, b"secret");
+    let p = plan(heap, std::slice::from_ref(&m), &[b"secret"]);
+    arm_failpoint_once(
+        "store.atomic.prepare.after_checkpoint",
+        FailpointAction::Error,
+    );
+    {
+        let mut stage = store.atomic_stage().unwrap();
+        let _ = stage.begin_prepare(&p, FRONTIER, std::slice::from_ref(&m));
+    }
+    clear_failpoints();
+    drop(store);
+
+    let mut store = Store::open(&path).unwrap();
+    let mut stage = store.atomic_stage().unwrap();
+    assert!(stage
+        .retire_not_committed_detail_at(aid(), 0, AtomicDetailRetentionPolicy::default())
+        .is_err());
+    assert!(stage
+        .retire_not_committed_detail_at(
+            aid(),
+            u64::MAX,
+            AtomicDetailRetentionPolicy {
+                legal_hold: true,
+                ..AtomicDetailRetentionPolicy::default()
+            },
+        )
+        .is_err());
+    assert_eq!(stage.examine(aid()).class, AtomicStageClass::NotCommitted);
+}
+
+#[test]
+fn detail_retention_uses_the_strongest_obligation() {
+    let policy = AtomicDetailRetentionPolicy {
+        configured_secs: 1,
+        heap_history_until_unix_s: 50,
+        rre_evidence_until_unix_s: 80,
+        backup_until_unix_s: 70,
+        legal_hold: false,
+    };
+    assert_eq!(policy.retain_until(10), Some(10 + 90 * 24 * 60 * 60));
+
+    let stronger = AtomicDetailRetentionPolicy {
+        rre_evidence_until_unix_s: 20_000_000,
+        ..policy
+    };
+    assert_eq!(stronger.retain_until(10), Some(20_000_000));
+    assert_eq!(
+        AtomicDetailRetentionPolicy {
+            legal_hold: true,
+            ..stronger
+        }
+        .retain_until(10),
+        None
+    );
 }

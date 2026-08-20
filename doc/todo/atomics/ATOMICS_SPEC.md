@@ -656,6 +656,27 @@ history policy requires the evidence.
 After detail removal, same-ID/same-root retry returns the retained decision
 summary. It does not execute again.
 
+The LocalHeap private store representation is `ATTOMB1`:
+
+```text
+ATTOMB1 || heap_id[16] || decided_at_unix_s:u64be ||
+    encoded_len:u32be || canonical DecisionTombstone CBOR
+```
+
+The outer Heap ID makes the physical identity `(HeapId, AtomicId)`. The Unix
+time is retention metadata and is not part of the canonical decision hash.
+Duplicate exact tombstones retain the earliest authenticated decision time;
+they cannot extend their own detail-retention window. The decision and
+tombstone are ordered in one durable prefix. If a prior experimental writer or
+a crash leaves an exact decision without its tombstone, writable recovery
+backfills the tombstone before allowing retirement.
+
+Detailed committed member/payload material MUST NOT be reclaimed merely
+because the decision-detail horizon elapsed. It remains live database material
+until a qualified maintenance representation preserves ordinary reads, index
+rebuild, recovery and same-identity restore. Until that ATM-4C journey exists,
+committed-detail reclamation fails closed.
+
 ## 13. Resource limits
 
 V1 hard ceilings:

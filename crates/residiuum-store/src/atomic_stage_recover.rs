@@ -14,14 +14,14 @@ use crate::atomic_stage_classify::{
     StageEvidenceClass, StageFinding, StageFindings,
 };
 use crate::atomic_stage_media::{
-    decode_stage_sidecar, stage_key, AtomicShardFrontier, BodyRef, SidecarDecode, StageAtomicKey,
-    StageCatalog,
+    decode_stage_sidecar, stage_key, AtomicShardFrontier, BodyRef, RetainedDecisionTombstone,
+    SidecarDecode, StageAtomicKey, StageCatalog,
 };
 use crate::error::StoreError;
 use crate::layout::StorePaths;
 use residiuum_atomics::{
-    decode_decision, decode_member, decode_prepare, encode_decision, encode_member, encode_prepare,
-    AtomicId, ChunkPlan, ContentRoot, HeapId,
+    decode_decision, decode_member, decode_prepare, decode_tombstone, encode_decision,
+    encode_member, encode_prepare, encode_tombstone, AtomicId, ChunkPlan, ContentRoot, HeapId,
 };
 use residiuum_format::{
     read_atomic_evidence, scan_forward, AtomicEvidenceClass, SafetyLimits, ScanRegion,
@@ -31,8 +31,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 14;
-const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V14";
+const CHECKPOINT_VERSION: u8 = 15;
+const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V15";
 const BLOCK_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-BLK-V1";
 /// Fixed leaf size for the covered-prefix block frontier (CR-ATMR6-001).
 const FRONTIER_BLOCK: u64 = 64 * 1024;
@@ -159,6 +159,8 @@ pub struct AtomicStageOpenReport {
     pub atomics: u32,
     /// Members in the reconstructed catalogue.
     pub members: u32,
+    /// Lifetime decision tombstones in the reconstructed catalogue.
+    pub tombstones: u32,
     /// Retained payload bytes.
     pub payload_bytes: u64,
     /// Approximate retained catalogue memory.
@@ -293,6 +295,7 @@ impl Budget {
         }
         self.report.atomics = atomics;
         self.report.members = members;
+        self.report.tombstones = catalog.tombstones.len() as u32;
         self.report.payload_bytes = payload;
         self.report.work_bytes = work;
         Ok(())
@@ -309,8 +312,8 @@ pub fn atomic_coord_path(paths: &StorePaths) -> PathBuf {
     paths.store_info().join(ATOMIC_COORD_FILE)
 }
 
-const ATOMIC_BODY_MAGICS: [&[u8]; 6] = [
-    b"ATPAY1", b"ATSEAL1", b"ATPREP1", b"ATMAP1", b"ATCHK1", b"ATORD1",
+const ATOMIC_BODY_MAGICS: [&[u8]; 7] = [
+    b"ATPAY1", b"ATSEAL1", b"ATPREP1", b"ATMAP1", b"ATCHK1", b"ATORD1", b"ATTOMB1",
 ];
 
 /// True when durable Atomic staging evidence exists that seal, compact,
@@ -1440,6 +1443,15 @@ fn encode_checkpoint(
         body.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
         body.extend_from_slice(&encoded);
     }
+    body.extend_from_slice(&(catalog.tombstones.len() as u32).to_be_bytes());
+    for ((heap_id, _), retained) in &catalog.tombstones {
+        body.extend_from_slice(heap_id.as_bytes());
+        body.extend_from_slice(&retained.decided_at_unix_s.to_be_bytes());
+        let encoded = encode_tombstone(&retained.tombstone)
+            .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        body.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+        body.extend_from_slice(&encoded);
+    }
     body.extend_from_slice(&(catalog.commit_next.len() as u32).to_be_bytes());
     for (heap_id, next) in &catalog.commit_next {
         body.extend_from_slice(heap_id.as_bytes());
@@ -1674,6 +1686,35 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
             return None;
         }
     }
+    let n_tombstones = read_u32(&mut cur)? as usize;
+    for _ in 0..n_tombstones {
+        if cur.len() < 16 + 8 + 4 {
+            return None;
+        }
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        cur = &cur[16..];
+        let decided_at_unix_s = read_u64(&mut cur)?;
+        let n = read_u32(&mut cur)? as usize;
+        if cur.len() < n {
+            return None;
+        }
+        let tombstone = decode_tombstone(&cur[..n]).ok()?;
+        cur = &cur[n..];
+        let key = stage_key(heap_id, tombstone.atomic_id);
+        if catalog
+            .tombstones
+            .insert(
+                key,
+                RetainedDecisionTombstone {
+                    decided_at_unix_s,
+                    tombstone,
+                },
+            )
+            .is_some()
+        {
+            return None;
+        }
+    }
     let n_commit_heaps = read_u32(&mut cur)? as usize;
     for _ in 0..n_commit_heaps {
         if cur.len() < 24 {
@@ -1893,11 +1934,13 @@ fn read_u64(cur: &mut &[u8]) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod checkpoint_v14_freeze {
+mod checkpoint_v15_freeze {
     use super::*;
     use crate::atomic_stage_media::{
         encode_stage_chunk_body, encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal,
+        encode_stage_tombstone, RetainedDecisionTombstone,
     };
+    use residiuum_atomics::{decision_hash, AtomicAbortReason, AtomicDecision};
 
     fn aid() -> AtomicId {
         let mut b = [0u8; 32];
@@ -1906,12 +1949,12 @@ mod checkpoint_v14_freeze {
     }
 
     #[test]
-    fn v14_empty_checkpoint_roundtrips() {
+    fn v15_empty_checkpoint_roundtrips() {
         let catalog = StageCatalog::default();
         let bytes = encode_checkpoint(&catalog, &[]).unwrap();
         assert!(bytes.starts_with(CHECKPOINT_MAGIC));
         assert_eq!(bytes[CHECKPOINT_MAGIC.len()], CHECKPOINT_VERSION);
-        let (decoded, covered) = decode_checkpoint(&bytes).expect("v14 empty");
+        let (decoded, covered) = decode_checkpoint(&bytes).expect("v15 empty");
         assert!(covered.is_empty());
         assert!(!decoded.has_outstanding_evidence());
     }
@@ -1934,5 +1977,23 @@ mod checkpoint_v14_freeze {
         )
         .starts_with(b"ATMAP1"));
         assert!(encode_stage_chunk_body(heap_id, id, 0, 0, b"c").starts_with(b"ATCHK1"));
+        let decision = AtomicDecision::not_committed(
+            id,
+            [0x31; 32],
+            [0x32; 32],
+            1,
+            AtomicAbortReason::RecoveryAbort,
+        );
+        let retained = RetainedDecisionTombstone {
+            decided_at_unix_s: 7,
+            tombstone: decision.tombstone(root, decision_hash(&decision).unwrap()),
+        };
+        let encoded = encode_stage_tombstone(heap_id, retained).unwrap();
+        assert!(encoded.starts_with(b"ATTOMB1"));
+        assert!(matches!(
+            decode_stage_sidecar(&encoded),
+            SidecarDecode::Tombstone { heap_id: got_heap, retained: got }
+                if got_heap == heap_id && got == retained
+        ));
     }
 }

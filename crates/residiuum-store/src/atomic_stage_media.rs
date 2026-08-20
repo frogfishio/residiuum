@@ -7,8 +7,8 @@
 
 use crate::error::StoreError;
 use residiuum_atomics::{
-    decode_prepare, encode_prepare, AtomicDecision, AtomicId, AtomicMember, AtomicPrepare,
-    ChunkPlan, ContentRoot, HeapId,
+    decode_prepare, decode_tombstone, encode_prepare, encode_tombstone, AtomicDecision, AtomicId,
+    AtomicMember, AtomicPrepare, ChunkPlan, ContentRoot, DecisionTombstone, HeapId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,6 +18,7 @@ const PREPARE_MAGIC: &[u8] = b"ATPREP1";
 const CHUNK_PLAN_MAGIC: &[u8] = b"ATMAP1";
 const CHUNK_BODY_MAGIC: &[u8] = b"ATCHK1";
 const ORDER_FRONTIER_MAGIC: &[u8] = b"ATORD1";
+const TOMBSTONE_MAGIC: &[u8] = b"ATTOMB1";
 
 /// Physical Atomic identity. Caller-chosen Atomic IDs are scoped to a Heap;
 /// neither component alone is a store-wide identity.
@@ -67,6 +68,14 @@ pub(crate) struct AtomicPublishMember {
     pub order_frontier: AtomicShardFrontier,
 }
 
+/// Store-owned lifetime authority. `decided_at_unix_s` is retention metadata;
+/// the canonical tombstone remains the exact logical decision summary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RetainedDecisionTombstone {
+    pub decided_at_unix_s: u64,
+    pub tombstone: DecisionTombstone,
+}
+
 /// Staging facts recovered from store media only.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StageCatalog {
@@ -85,6 +94,8 @@ pub(crate) struct StageCatalog {
     /// Durable terminal decisions. A committed decision is the ATM-3
     /// linearization point; the checkpoint is only a rebuild accelerator.
     pub decisions: BTreeMap<StageAtomicKey, AtomicDecision>,
+    /// Compact terminal authority retained until complete Heap purge.
+    pub tombstones: BTreeMap<StageAtomicKey, RetainedDecisionTombstone>,
     /// Next non-zero Heap commit position. Reconstructed above every admitted
     /// committed decision during recovery.
     pub commit_next: BTreeMap<HeapId, u64>,
@@ -162,6 +173,7 @@ impl StageCatalog {
             || !self.chunk_refs.is_empty()
             || !self.seals.is_empty()
             || !self.decisions.is_empty()
+            || !self.tombstones.is_empty()
             || !self.order_frontiers.is_empty()
             || !self.blocked.is_empty()
             || !self.prepare_batch.is_empty()
@@ -187,6 +199,7 @@ impl StageCatalog {
             .saturating_add(members.saturating_mul(256))
             .saturating_add(self.seals.len() as u64 * 64)
             .saturating_add(self.decisions.len() as u64 * 192)
+            .saturating_add(self.tombstones.len() as u64 * 160)
             .saturating_add(self.commit_next.len() as u64 * 24)
             .saturating_add(
                 self.order_frontiers
@@ -454,6 +467,31 @@ pub(crate) fn encode_stage_chunk_body(
     out
 }
 
+pub(crate) fn encode_stage_tombstone(
+    heap_id: HeapId,
+    retained: RetainedDecisionTombstone,
+) -> Result<Vec<u8>, StoreError> {
+    let encoded = encode_tombstone(&retained.tombstone)
+        .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+    let mut out = Vec::with_capacity(TOMBSTONE_MAGIC.len() + 16 + 8 + 4 + encoded.len());
+    out.extend_from_slice(TOMBSTONE_MAGIC);
+    out.extend_from_slice(heap_id.as_bytes());
+    out.extend_from_slice(&retained.decided_at_unix_s.to_be_bytes());
+    out.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+    out.extend_from_slice(&encoded);
+    Ok(out)
+}
+
+pub(crate) fn tombstone_event_id(heap_id: HeapId, atomic_id: AtomicId) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"residiuum.atomic-stage.tombstone");
+    hasher.update(heap_id.as_bytes());
+    hasher.update(atomic_id.as_bytes());
+    let mut id = [0u8; 16];
+    id.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    id
+}
+
 pub(crate) fn payload_event_id(heap_id: HeapId, atomic_id: AtomicId, ordinal: u32) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"residiuum.atomic-stage.payload");
@@ -539,6 +577,7 @@ pub(crate) enum SidecarKind {
     ChunkPlan,
     ChunkBody,
     OrderFrontier,
+    Tombstone,
 }
 
 /// Decode of an Atomic staging sidecar (`ATPREP1` / `ATPAY1` / `ATSEAL1`).
@@ -589,10 +628,58 @@ pub(crate) enum SidecarDecode {
         atomic_id: AtomicId,
         frontiers: Vec<AtomicShardFrontier>,
     },
+    /// Heap-qualified lifetime decision summary.
+    Tombstone {
+        heap_id: HeapId,
+        retained: RetainedDecisionTombstone,
+    },
 }
 
 /// Classify a PayloadChunk body as a staging sidecar or not-ours.
 pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
+    if body.starts_with(TOMBSTONE_MAGIC) {
+        let header = TOMBSTONE_MAGIC.len() + 16 + 8 + 4;
+        if body.len() < header {
+            return SidecarDecode::Partial {
+                kind: SidecarKind::Tombstone,
+            };
+        }
+        let heap_at = TOMBSTONE_MAGIC.len();
+        let Some(heap_id) = decode_heap_id(&body[heap_at..heap_at + 16]) else {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::Tombstone,
+                atomic_id: None,
+            };
+        };
+        let time_at = heap_at + 16;
+        let decided_at_unix_s =
+            u64::from_be_bytes(body[time_at..time_at + 8].try_into().unwrap_or([0; 8]));
+        let len_at = time_at + 8;
+        let encoded_len =
+            u32::from_be_bytes(body[len_at..len_at + 4].try_into().unwrap_or([0; 4])) as usize;
+        if body.len() != header.saturating_add(encoded_len) {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::Tombstone,
+                atomic_id: None,
+            };
+        }
+        let tombstone = match decode_tombstone(&body[header..]) {
+            Ok(value) => value,
+            Err(_) => {
+                return SidecarDecode::Corrupt {
+                    kind: SidecarKind::Tombstone,
+                    atomic_id: None,
+                }
+            }
+        };
+        return SidecarDecode::Tombstone {
+            heap_id,
+            retained: RetainedDecisionTombstone {
+                decided_at_unix_s,
+                tombstone,
+            },
+        };
+    }
     if body.starts_with(ORDER_FRONTIER_MAGIC) {
         let header = ORDER_FRONTIER_MAGIC.len() + 16 + 32 + 2;
         if body.len() < header {

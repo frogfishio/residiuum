@@ -309,7 +309,7 @@ Outstanding evidence is any of:
 
 - `store-info/atomic-stage.ckpt` that authenticates and names prepares,
   members, seals, payload/chunk locators, blocked identities, findings,
-  intended members, or coverage degradation; an acceleration-only frontier
+  intended members, lifetime decision tombstones, or coverage degradation; an acceleration-only frontier
   over ordinary media is not outstanding Atomic evidence;
 - that checkpoint file present but unreadable;
 - `store-info/atomic-coord.ckpt` that authenticates with one or more issued
@@ -330,21 +330,22 @@ Backup profile `residiuum-backup-v1` copies `store-info/` (including
 Identity-reassign clone MUST refuse while outstanding staging exists: prepare
 `heap_id` is the source store id and becomes foreign after reassignment.
 
-#### Checkpoint `ATCKP1` version 14
+#### Checkpoint `ATCKP1` version 15
 
 File: `store-info/atomic-stage.ckpt`. Domain separator
-`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V14`. Layout, all integers big-endian:
+`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V15`. Layout, all integers big-endian:
 
 | Field | Encoding |
 |---|---|
 | magic | `ATCKP1` |
-| version | `u8` = 14 |
+| version | `u8` = 15 |
 | covered files | `u32` count; each: `u16` path len, path UTF-8, `u8` atomic_evidence, `u64` covered_len, head `[32]`, tail `[32]`, `u32` block count, block hashes `[32]*`, leftover `u32` + hash `[32]`. Ordinary (`atomic_evidence=0`) entries carry no block hashes and are metadata-only; Atomic entries authenticate every byte. |
 | prepares | `u32` count; each: `u32` len + `encode_prepare` bytes |
 | members | `u32` count; each: heap_id `[16]` + `u32` len + `encode_member` bytes |
 | payload refs | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, ordinal `u32`, `BodyRef` |
 | seals | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, content_root `[32]` |
 | decisions | `u32` count; each: heap_id `[16]` + `u32` len + `encode_decision` bytes |
+| lifetime tombstones | `u32` count; each: heap_id `[16]`, decided_at Unix seconds `u64`, `u32` len + canonical `encode_tombstone` bytes |
 | commit high-water | `u32` count; each: heap_id `[16]`, next `u64` |
 | order frontiers | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, shard count `u16`, then `(shard u16, segment_id [16], next_writer_sequence u64)*` |
 | blocked | `u32` count; each: heap_id `[16]`, atomic_id `[32]` |
@@ -361,8 +362,8 @@ File: `store-info/atomic-stage.ckpt`. Domain separator
 
 `BodyRef` is `u16` path len, path UTF-8, `u64` offset, `u32` len, hash `[32]`.
 Covered block size is 64 KiB. Finding kind 8 is global `Coverage` loss.
-Version ≠ 14 or domain mismatch MUST NOT be interpreted; recovery rebuilds
-from media. Older checkpoint versions are not readable by a v14 decoder.
+Version ≠ 15 or domain mismatch MUST NOT be interpreted; recovery rebuilds
+from media. Older checkpoint versions are not readable by a v15 decoder.
 
 #### Coordinator `ATCRD1` version 2
 
@@ -385,7 +386,14 @@ prepares are `BatchPrepare` frames, not `ATPREP1`.
 | `ATMAP1` | heap_id `[16]` + atomic_id `[32]` + ordinal `u32` + total `u32` + hashes `[32]*total` |
 | `ATCHK1` | heap_id `[16]` + atomic_id `[32]` + ordinal `u32` + index `u32` + chunk bytes |
 | `ATORD1` | heap_id `[16]` + atomic_id `[32]` + shard count `u16` + shard frontier rows |
+| `ATTOMB1` | heap_id `[16]` + decided_at Unix seconds `u64` + encoded length `u32` + canonical `encode_tombstone` bytes |
 | `ATPREP1` | legacy `encode_prepare` bytes only; writers MUST NOT emit it |
+
+`ATTOMB1` is lifetime decision authority, not a derived acceleration record.
+It is appended in the same durable prefix as its terminal decision, uses the
+composite `(heap_id, atomic_id)` physical identity, and is removed only by a
+complete Heap purge. The timestamp controls detail retention only and does not
+alter the canonical decision summary or extend when a duplicate copy appears.
 
 ## 5. Frame validity
 

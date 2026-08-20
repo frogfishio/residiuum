@@ -92,6 +92,7 @@ pub fn project_atomic(
         .len() as u32;
     let sealed = catalog.seals.contains_key(&key);
     let decision = catalog.decisions.get(&key);
+    let tombstone = catalog.tombstones.get(&key);
     let members_complete = prepare.is_some_and(|p| {
         let ms = members.cloned().unwrap_or_default();
         intended_members > 0 && present_members >= intended_members && members_match_prepare(p, &ms)
@@ -99,9 +100,13 @@ pub fn project_atomic(
     let material_complete = material_complete(catalog, key);
     let class = if blocked {
         AtomicStageClass::Blocked
-    } else if decision.is_some_and(|d| d.decision == DecisionCode::Committed) {
+    } else if decision.is_some_and(|d| d.decision == DecisionCode::Committed)
+        || tombstone.is_some_and(|t| t.tombstone.decision == DecisionCode::Committed)
+    {
         AtomicStageClass::Committed
-    } else if decision.is_some_and(|d| d.decision == DecisionCode::NotCommitted) {
+    } else if decision.is_some_and(|d| d.decision == DecisionCode::NotCommitted)
+        || tombstone.is_some_and(|t| t.tombstone.decision == DecisionCode::NotCommitted)
+    {
         AtomicStageClass::NotCommitted
     } else if prepare.is_none() {
         AtomicStageClass::Absent
@@ -121,8 +126,12 @@ pub fn project_atomic(
         present_chunk_plans,
         present_chunk_bodies,
         sealed,
-        decision: decision.map(|d| d.decision),
-        commit_position: decision.and_then(|d| d.commit_position),
+        decision: decision
+            .map(|d| d.decision)
+            .or_else(|| tombstone.map(|t| t.tombstone.decision)),
+        commit_position: decision
+            .and_then(|d| d.commit_position)
+            .or_else(|| tombstone.and_then(|t| t.tombstone.commit_position)),
         blocked,
         coverage_degraded: catalog.coverage_degraded,
     }
