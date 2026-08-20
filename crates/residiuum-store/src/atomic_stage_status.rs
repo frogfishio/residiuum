@@ -4,7 +4,9 @@
 //! complete member set. A durable prepare with missing members is `Prepared`,
 //! never absence.
 
-use crate::atomic_stage_media::{stage_key, StageAtomicKey, StageCatalog};
+use crate::atomic_stage_media::{
+    stage_key, RetainedDecisionTombstone, StageAtomicKey, StageCatalog,
+};
 use residiuum_atomics::{members_match_prepare, AtomicId, DecisionCode, HeapId};
 use std::collections::BTreeSet;
 
@@ -64,6 +66,15 @@ pub fn project_atomic(
     atomic_id: AtomicId,
 ) -> AtomicStageStatus {
     let key = stage_key(heap_id, atomic_id);
+    project_atomic_with_tombstone(catalog, key, atomic_id, catalog.tombstones.get(&key))
+}
+
+pub(crate) fn project_atomic_with_tombstone(
+    catalog: &StageCatalog,
+    key: StageAtomicKey,
+    atomic_id: AtomicId,
+    tombstone: Option<&RetainedDecisionTombstone>,
+) -> AtomicStageStatus {
     let blocked = catalog.blocked.contains(&key);
     let prepare = catalog.prepares.get(&key);
     let members = catalog.members.get(&key);
@@ -92,7 +103,6 @@ pub fn project_atomic(
         .len() as u32;
     let sealed = catalog.seals.contains_key(&key);
     let decision = catalog.decisions.get(&key);
-    let tombstone = catalog.tombstones.get(&key);
     let members_complete = prepare.is_some_and(|p| {
         let ms = members.cloned().unwrap_or_default();
         intended_members > 0 && present_members >= intended_members && members_match_prepare(p, &ms)

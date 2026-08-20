@@ -542,6 +542,7 @@ fn ingest_sidecar(catalog: &mut StageCatalog, body: &[u8], findings: &mut StageF
             match catalog.tombstones.get(&key) {
                 None => {
                     catalog.tombstones.insert(key, retained);
+                    catalog.tombstone_index_dirty = true;
                     findings.push(
                         StageEvidenceKind::Decision,
                         StageEvidenceClass::Valid,
@@ -553,6 +554,7 @@ fn ingest_sidecar(catalog: &mut StageCatalog, body: &[u8], findings: &mut StageF
                     // may refresh a physical copy but cannot extend retention.
                     if retained.decided_at_unix_s < existing.decided_at_unix_s {
                         catalog.tombstones.insert(key, retained);
+                        catalog.tombstone_index_dirty = true;
                     }
                     findings.push(
                         StageEvidenceKind::Decision,

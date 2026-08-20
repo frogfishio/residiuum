@@ -336,6 +336,7 @@ fn recover_prepared_without_decision(
         crate::failpoint::hit("store.atomic.recovery.after_decision")?;
         catalog.decisions.insert(key, decision);
         catalog.tombstones.insert(key, retained);
+        catalog.tombstone_index_dirty = true;
         resolved = resolved.saturating_add(1);
     }
     if resolved != 0 {
@@ -352,14 +353,21 @@ fn recover_missing_decision_tombstones(
     covered: &mut Vec<CoveredFile>,
     limits: AtomicStageLimits,
 ) -> Result<(), StoreError> {
-    let missing = catalog
-        .decisions
-        .iter()
-        .filter_map(|(key, decision)| {
-            (!catalog.tombstones.contains_key(key) && !catalog.blocked.contains(key))
-                .then_some((*key, decision.clone()))
-        })
-        .collect::<Vec<_>>();
+    let mut missing = Vec::new();
+    for (key, decision) in &catalog.decisions {
+        if catalog.blocked.contains(key) || catalog.tombstones.contains_key(key) {
+            continue;
+        }
+        let indexed = match catalog.tombstone_index {
+            Some(index) => {
+                crate::atomic_tombstone_index::lookup(store.paths(), index, *key)?.is_some()
+            }
+            None => false,
+        };
+        if !indexed {
+            missing.push((*key, decision.clone()));
+        }
+    }
     let changed = !missing.is_empty();
     for (key, decision) in missing {
         let prepare = catalog.prepares.get(&key).ok_or_else(|| {
@@ -374,6 +382,7 @@ fn recover_missing_decision_tombstones(
             tombstone_event_id(key.0, key.1),
         )?;
         catalog.tombstones.insert(key, retained);
+        catalog.tombstone_index_dirty = true;
     }
     if changed {
         persist_live_checkpoint(store.paths(), catalog, covered, limits)?;
@@ -382,6 +391,18 @@ fn recover_missing_decision_tombstones(
 }
 
 impl StoreAtomicStage<'_> {
+    fn retained_tombstone(
+        &self,
+        key: StageAtomicKey,
+    ) -> Result<Option<RetainedDecisionTombstone>, StoreError> {
+        if let Some(retained) = self.catalog.tombstones.get(&key) {
+            return Ok(Some(*retained));
+        }
+        match self.catalog.tombstone_index {
+            Some(index) => crate::atomic_tombstone_index::lookup(self.store.paths(), index, key),
+            None => Ok(None),
+        }
+    }
     fn key(&self, atomic_id: AtomicId) -> StageAtomicKey {
         stage_key(self.heap.heap_id(), atomic_id)
     }
@@ -411,7 +432,26 @@ impl StoreAtomicStage<'_> {
     /// A durable prepare with incomplete members is [`AtomicStageClass::Prepared`],
     /// never absence (CR-ATMR6-005).
     pub fn examine(&self, atomic_id: AtomicId) -> crate::AtomicStageStatus {
-        crate::atomic_stage_status::project_atomic(&self.catalog, self.heap.heap_id(), atomic_id)
+        let key = self.key(atomic_id);
+        match self.retained_tombstone(key) {
+            Ok(retained) => crate::atomic_stage_status::project_atomic_with_tombstone(
+                &self.catalog,
+                key,
+                atomic_id,
+                retained.as_ref(),
+            ),
+            Err(_) => {
+                let mut status = crate::atomic_stage_status::project_atomic(
+                    &self.catalog,
+                    self.heap.heap_id(),
+                    atomic_id,
+                );
+                status.blocked = true;
+                status.coverage_degraded = true;
+                status.class = crate::AtomicStageClass::Blocked;
+                status
+            }
+        }
     }
 
     /// ATM-4 logical/material status projection from authoritative evidence.
@@ -424,18 +464,19 @@ impl StoreAtomicStage<'_> {
             return Ok(AtomicStatus::incomplete_coverage());
         }
         let key = self.key(atomic_id);
-        let projected = crate::atomic_stage_status::project_atomic(&self.catalog, key.0, atomic_id);
+        let retained = self.retained_tombstone(key)?;
+        let projected = crate::atomic_stage_status::project_atomic_with_tombstone(
+            &self.catalog,
+            key,
+            atomic_id,
+            retained.as_ref(),
+        );
         let content_root = self
             .catalog
             .prepares
             .get(&key)
             .map(|p| p.content_root)
-            .or_else(|| {
-                self.catalog
-                    .tombstones
-                    .get(&key)
-                    .map(|t| t.tombstone.content_root)
-            });
+            .or_else(|| retained.as_ref().map(|t| t.tombstone.content_root));
         if projected.blocked
             && self.findings.records.iter().any(|finding| {
                 finding.atomic_id == Some(atomic_id)
@@ -459,7 +500,7 @@ impl StoreAtomicStage<'_> {
             });
         }
         let Some(decision) = self.catalog.decisions.get(&key) else {
-            if let Some(retained) = self.catalog.tombstones.get(&key) {
+            if let Some(retained) = retained.as_ref() {
                 return Ok(AtomicStatus {
                     logical: match retained.tombstone.decision {
                         DecisionCode::Committed => LogicalStatus::Committed,
@@ -537,7 +578,7 @@ impl StoreAtomicStage<'_> {
         policy: AtomicDetailRetentionPolicy,
     ) -> Result<bool, StoreError> {
         let key = self.key(atomic_id);
-        let retained = self.catalog.tombstones.get(&key).copied().ok_or_else(|| {
+        let retained = self.retained_tombstone(key)?.ok_or_else(|| {
             StoreError::AtomicStage("detail retirement requires a durable tombstone".into())
         })?;
         if retained.tombstone.decision != DecisionCode::NotCommitted {
@@ -558,6 +599,26 @@ impl StoreAtomicStage<'_> {
         if !self.catalog.decisions.contains_key(&key) && !self.catalog.prepares.contains_key(&key) {
             return Ok(false);
         }
+        // Establish and authenticate the bounded lifetime authority before
+        // removing the checkpoint-resident detail or tombstone copy.
+        persist_live_checkpoint(
+            self.store.paths(),
+            &mut self.catalog,
+            &mut self.covered,
+            self.limits,
+        )?;
+        let indexed = self
+            .catalog
+            .tombstone_index
+            .ok_or_else(|| StoreError::AtomicStage("tombstone index was not established".into()))
+            .and_then(|index| {
+                crate::atomic_tombstone_index::lookup(self.store.paths(), index, key)
+            })?;
+        if indexed != Some(retained) {
+            return Err(StoreError::AtomicStage(
+                "tombstone index did not preserve the retiring decision".into(),
+            ));
+        }
         self.catalog.decisions.remove(&key);
         self.catalog.prepares.remove(&key);
         self.catalog.members.remove(&key);
@@ -569,6 +630,7 @@ impl StoreAtomicStage<'_> {
             .prepare_seen
             .retain(|candidate| *candidate != key);
         self.catalog.intended_members.remove(&key);
+        self.catalog.tombstones.remove(&key);
         // The exact tombstone supersedes incomplete-detail classifications;
         // no conflict finding is erased by this operation.
         self.catalog.blocked.remove(&key);
@@ -589,7 +651,7 @@ impl StoreAtomicStage<'_> {
             .retain(|(heap, id, _, _), _| (*heap, *id) != key);
         persist_live_checkpoint(
             self.store.paths(),
-            &self.catalog,
+            &mut self.catalog,
             &mut self.covered,
             self.limits,
         )?;
@@ -624,7 +686,7 @@ impl StoreAtomicStage<'_> {
         self.report.coverage_degraded = false;
         persist_live_checkpoint(
             self.store.paths(),
-            &self.catalog,
+            &mut self.catalog,
             &mut self.covered,
             self.limits,
         )
@@ -664,7 +726,7 @@ impl StoreAtomicStage<'_> {
                 "atomic identity is blocked by conflicting or damaged evidence".into(),
             ));
         }
-        if let Some(retained) = self.catalog.tombstones.get(&key) {
+        if let Some(retained) = self.retained_tombstone(key)? {
             if retained.tombstone.content_root != prepare.content_root {
                 return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
             }
@@ -1002,6 +1064,7 @@ impl StoreAtomicStage<'_> {
         let mut candidate = self.catalog.clone();
         candidate.decisions.insert(key, decision.clone());
         candidate.tombstones.insert(key, retained);
+        candidate.tombstone_index_dirty = true;
         candidate
             .commit_next
             .insert(prepare.heap_id, position.saturating_add(1));
@@ -1047,13 +1110,14 @@ impl StoreAtomicStage<'_> {
         crate::failpoint::hit("store.atomic.after_decision")?;
         self.catalog.decisions.insert(key, decision.clone());
         self.catalog.tombstones.insert(key, retained);
+        self.catalog.tombstone_index_dirty = true;
         self.catalog
             .commit_next
             .insert(prepare.heap_id, position.saturating_add(1));
         if mode == StagePersistMode::StableCheckpointed {
             persist_live_checkpoint(
                 self.store.paths(),
-                &self.catalog,
+                &mut self.catalog,
                 &mut self.covered,
                 self.limits,
             )?;
@@ -1119,6 +1183,7 @@ impl StoreAtomicStage<'_> {
         let mut candidate = self.catalog.clone();
         candidate.decisions.insert(key, decision.clone());
         candidate.tombstones.insert(key, retained);
+        candidate.tombstone_index_dirty = true;
         self.admit_catalog_change(
             &candidate,
             body.len().saturating_add(tombstone_body.len()) as u64,
@@ -1161,10 +1226,11 @@ impl StoreAtomicStage<'_> {
         crate::failpoint::hit("store.atomic.after_decision")?;
         self.catalog.decisions.insert(key, decision.clone());
         self.catalog.tombstones.insert(key, retained);
+        self.catalog.tombstone_index_dirty = true;
         if mode == StagePersistMode::StableCheckpointed {
             persist_live_checkpoint(
                 self.store.paths(),
-                &self.catalog,
+                &mut self.catalog,
                 &mut self.covered,
                 self.limits,
             )?;
@@ -1191,10 +1257,9 @@ impl StoreAtomicStage<'_> {
         validate_closed_plan(plan, self.heap.heap_id())?;
         let root = plan_content_root(plan).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         let key = self.key(plan.atomic_id());
-        if let Some(retained) = self
-            .catalog
-            .tombstones
-            .get(&key)
+        let retained = self.retained_tombstone(key)?;
+        if let Some(retained) = retained
+            .as_ref()
             .filter(|_| !self.catalog.decisions.contains_key(&key))
         {
             if retained.tombstone.content_root != root {
@@ -1250,10 +1315,9 @@ impl StoreAtomicStage<'_> {
     pub fn decide_plan_outcome(&mut self, plan: &AtomicPlan) -> Result<AtomicOutcome, StoreError> {
         validate_closed_plan(plan, self.heap.heap_id())?;
         let key = self.key(plan.atomic_id());
-        if let Some(retained) = self
-            .catalog
-            .tombstones
-            .get(&key)
+        let retained = self.retained_tombstone(key)?;
+        if let Some(retained) = retained
+            .as_ref()
             .filter(|_| !self.catalog.decisions.contains_key(&key))
         {
             return self.outcome_for_tombstone(plan, retained);
@@ -1322,10 +1386,9 @@ impl StoreAtomicStage<'_> {
             owners.insert(plan.atomic_id(), (root, index));
 
             let key = self.key(plan.atomic_id());
-            if let Some(retained) = self
-                .catalog
-                .tombstones
-                .get(&key)
+            let retained = self.retained_tombstone(key)?;
+            if let Some(retained) = retained
+                .as_ref()
                 .filter(|_| !self.catalog.decisions.contains_key(&key))
             {
                 if retained.tombstone.content_root != root {
@@ -1807,7 +1870,7 @@ impl StoreAtomicStage<'_> {
             .insert((key.0, key.1, ordinal), plan.clone());
         persist_live_checkpoint(
             self.store.paths(),
-            &self.catalog,
+            &mut self.catalog,
             &mut self.covered,
             self.limits,
         )?;
@@ -1850,7 +1913,7 @@ impl StoreAtomicStage<'_> {
         self.note_chunk_ref(member.atomic_id, member.ordinal, index, start, &encoded);
         persist_live_checkpoint(
             self.store.paths(),
-            &self.catalog,
+            &mut self.catalog,
             &mut self.covered,
             self.limits,
         )?;
@@ -1970,7 +2033,7 @@ impl StoreAtomicStage<'_> {
         if mode == StagePersistMode::StableCheckpointed {
             persist_live_checkpoint(
                 self.store.paths(),
-                &self.catalog,
+                &mut self.catalog,
                 &mut self.covered,
                 self.limits,
             )?;
@@ -2007,7 +2070,7 @@ impl StoreAtomicStage<'_> {
         if mode == StagePersistMode::StableCheckpointed {
             persist_live_checkpoint(
                 self.store.paths(),
-                &self.catalog,
+                &mut self.catalog,
                 &mut self.covered,
                 self.limits,
             )?;
@@ -2066,7 +2129,7 @@ impl StoreAtomicStage<'_> {
         if mode == StagePersistMode::StableCheckpointed {
             persist_live_checkpoint(
                 self.store.paths(),
-                &self.catalog,
+                &mut self.catalog,
                 &mut self.covered,
                 self.limits,
             )?;
@@ -2121,7 +2184,7 @@ impl StoreAtomicStage<'_> {
         if mode == StagePersistMode::StableCheckpointed {
             persist_live_checkpoint(
                 self.store.paths(),
-                &self.catalog,
+                &mut self.catalog,
                 &mut self.covered,
                 self.limits,
             )?;
@@ -2166,7 +2229,7 @@ impl StoreAtomicStage<'_> {
         if mode == StagePersistMode::StableCheckpointed {
             persist_live_checkpoint(
                 self.store.paths(),
-                &self.catalog,
+                &mut self.catalog,
                 &mut self.covered,
                 self.limits,
             )?;

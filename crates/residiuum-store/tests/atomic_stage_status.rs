@@ -280,6 +280,23 @@ fn tombstone_survives_lawful_detail_retirement_restart_and_replay() {
         stage.decide_plan_outcome(&changed).is_err(),
         "same ID with a different root must conflict after detail retirement"
     );
+    drop(stage);
+    drop(store);
+
+    // The index is derived. Corruption invalidates the checkpoint and forces
+    // reconstruction from ATTOMB1 media; it must never turn the decision into
+    // absence.
+    let index_path = path.join("store-info/atomic-tombstones.idx");
+    let mut bytes = fs::read(&index_path).unwrap();
+    bytes[10] ^= 0x80;
+    fs::write(&index_path, bytes).unwrap();
+    let mut store = Store::open(&path).unwrap();
+    let stage = store.atomic_stage().unwrap();
+    assert_eq!(
+        stage.atomic_status(aid()).unwrap().logical,
+        LogicalStatus::NotCommitted
+    );
+    assert_ne!(stage.examine(aid()).class, AtomicStageClass::Absent);
 }
 
 #[test]

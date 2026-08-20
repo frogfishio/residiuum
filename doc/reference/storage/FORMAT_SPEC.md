@@ -330,15 +330,15 @@ Backup profile `residiuum-backup-v1` copies `store-info/` (including
 Identity-reassign clone MUST refuse while outstanding staging exists: prepare
 `heap_id` is the source store id and becomes foreign after reassignment.
 
-#### Checkpoint `ATCKP1` version 15
+#### Checkpoint `ATCKP1` version 16
 
 File: `store-info/atomic-stage.ckpt`. Domain separator
-`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V15`. Layout, all integers big-endian:
+`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V16`. Layout, all integers big-endian:
 
 | Field | Encoding |
 |---|---|
 | magic | `ATCKP1` |
-| version | `u8` = 15 |
+| version | `u8` = 16 |
 | covered files | `u32` count; each: `u16` path len, path UTF-8, `u8` atomic_evidence, `u64` covered_len, head `[32]`, tail `[32]`, `u32` block count, block hashes `[32]*`, leftover `u32` + hash `[32]`. Ordinary (`atomic_evidence=0`) entries carry no block hashes and are metadata-only; Atomic entries authenticate every byte. |
 | prepares | `u32` count; each: `u32` len + `encode_prepare` bytes |
 | members | `u32` count; each: heap_id `[16]` + `u32` len + `encode_member` bytes |
@@ -346,6 +346,7 @@ File: `store-info/atomic-stage.ckpt`. Domain separator
 | seals | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, content_root `[32]` |
 | decisions | `u32` count; each: heap_id `[16]` + `u32` len + `encode_decision` bytes |
 | lifetime tombstones | `u32` count; each: heap_id `[16]`, decided_at Unix seconds `u64`, `u32` len + canonical `encode_tombstone` bytes |
+| lifetime index | presence `u8`; when present: record count `u64`, exact file length `u64`, Merkle root `[32]` |
 | commit high-water | `u32` count; each: heap_id `[16]`, next `u64` |
 | order frontiers | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, shard count `u16`, then `(shard u16, segment_id [16], next_writer_sequence u64)*` |
 | blocked | `u32` count; each: heap_id `[16]`, atomic_id `[32]` |
@@ -361,9 +362,34 @@ File: `store-info/atomic-stage.ckpt`. Domain separator
 | digest | BLAKE3-256(`domain` \\| body) |
 
 `BodyRef` is `u16` path len, path UTF-8, `u64` offset, `u32` len, hash `[32]`.
+Version 16 writers emit a zero checkpoint tombstone count after merging those
+rows into the bound lifetime index; the table remains decodable only for
+pre-publication transition/rebuild tolerance.
 Covered block size is 64 KiB. Finding kind 8 is global `Coverage` loss.
-Version ≠ 15 or domain mismatch MUST NOT be interpreted; recovery rebuilds
-from media. Older checkpoint versions are not readable by a v15 decoder.
+Version ≠ 16 or domain mismatch MUST NOT be interpreted; recovery rebuilds
+from media. Older checkpoint versions are not readable by a v16 decoder.
+
+#### Lifetime tombstone index `ATTSI1` version 1
+
+File: `store-info/atomic-tombstones.idx`. This is a derived accelerator;
+`ATTOMB1` records remain authority. The checkpoint binds its exact length,
+record count and Merkle root. Missing or invalid index media invalidates the
+checkpoint and triggers bounded media reconstruction; it never proves
+`NotFound`.
+
+The 96-byte header contains magic `ATTSI1`, version `1`, record count `u64`,
+records per page `u32` (496), page count `u32`, Merkle leaf power `u32`, root
+`[32]`, and a domain-separated header digest `[32]`. It is followed by fixed
+64-KiB pages and then a complete breadth-first binary Merkle tree of `[32]`
+nodes. Each page contains `ATPG1`, its page number and row count, sorted
+fixed-width rows, zero padding and a domain-separated page digest. A row is
+`heap_id [16]`, `atomic_id [32]`, decision time `u64`, content root `[32]`,
+decision `u8`, abort reason `u8`, reserved zero `[2]`, commit position `u64`
+(`0` means absent), and decision hash `[32]`.
+
+Point lookup binary-searches the global sorted row order and authenticates
+each visited page against the checkpoint-bound Merkle root. It does not load
+the lifetime set into memory.
 
 #### Coordinator `ATCRD1` version 2
 

@@ -38,6 +38,7 @@ mod atomic_stage_classify;
 mod atomic_stage_media;
 mod atomic_stage_recover;
 mod atomic_stage_status;
+mod atomic_tombstone_index;
 mod backup;
 mod boundary_probe;
 mod catalog;

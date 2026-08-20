@@ -61,6 +61,7 @@ fn prepare() -> AtomicPrepare {
         scope: CoordinationScope::LocalHeap,
         content_root: root(),
         frontier: [1u8; 32],
+        member_count: 1,
         ordered_member_manifest_root: manifest,
         read_set_root: [3u8; 32],
         predicate_set_root: [4u8; 32],

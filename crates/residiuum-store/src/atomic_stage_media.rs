@@ -5,6 +5,7 @@
 //! (`decode_piece_body` / `decode_item_envelope` fail closed). The peer lane
 //! is not a second authority.
 
+use crate::atomic_tombstone_index::TombstoneIndexMeta;
 use crate::error::StoreError;
 use residiuum_atomics::{
     decode_prepare, decode_tombstone, encode_prepare, encode_tombstone, AtomicDecision, AtomicId,
@@ -96,6 +97,12 @@ pub(crate) struct StageCatalog {
     pub decisions: BTreeMap<StageAtomicKey, AtomicDecision>,
     /// Compact terminal authority retained until complete Heap purge.
     pub tombstones: BTreeMap<StageAtomicKey, RetainedDecisionTombstone>,
+    /// Authenticated, paged lifetime tombstone accelerator. The checkpoint
+    /// binds this descriptor; ATTOMB1 media remains the rebuild authority.
+    pub tombstone_index: Option<TombstoneIndexMeta>,
+    /// Runtime-only: new authoritative tombstones must be merged before the
+    /// next checkpoint can bind the index. Never encoded in the checkpoint.
+    pub tombstone_index_dirty: bool,
     /// Next non-zero Heap commit position. Reconstructed above every admitted
     /// committed decision during recovery.
     pub commit_next: BTreeMap<HeapId, u64>,
@@ -174,6 +181,9 @@ impl StageCatalog {
             || !self.seals.is_empty()
             || !self.decisions.is_empty()
             || !self.tombstones.is_empty()
+            || self
+                .tombstone_index
+                .is_some_and(|index| index.record_count != 0)
             || !self.order_frontiers.is_empty()
             || !self.blocked.is_empty()
             || !self.prepare_batch.is_empty()

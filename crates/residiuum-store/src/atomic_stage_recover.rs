@@ -17,6 +17,7 @@ use crate::atomic_stage_media::{
     decode_stage_sidecar, stage_key, AtomicShardFrontier, BodyRef, RetainedDecisionTombstone,
     SidecarDecode, StageAtomicKey, StageCatalog,
 };
+use crate::atomic_tombstone_index::{refresh_index, validate_index, TombstoneIndexMeta};
 use crate::error::StoreError;
 use crate::layout::StorePaths;
 use residiuum_atomics::{
@@ -31,8 +32,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 15;
-const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V15";
+const CHECKPOINT_VERSION: u8 = 16;
+const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V16";
 const BLOCK_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-BLK-V1";
 /// Fixed leaf size for the covered-prefix block frontier (CR-ATMR6-001).
 const FRONTIER_BLOCK: u64 = 64 * 1024;
@@ -295,7 +296,10 @@ impl Budget {
         }
         self.report.atomics = atomics;
         self.report.members = members;
-        self.report.tombstones = catalog.tombstones.len() as u32;
+        self.report.tombstones = catalog
+            .tombstone_index
+            .map_or(catalog.tombstones.len() as u64, |index| index.record_count)
+            .min(u64::from(u32::MAX)) as u32;
         self.report.payload_bytes = payload;
         self.report.work_bytes = work;
         Ok(())
@@ -599,7 +603,7 @@ fn open_catalog_inner(
     budget.report.foreign = findings.count(StageEvidenceClass::ForeignHeap);
     covered = next_covered;
     if persist {
-        persist_checkpoint(paths, &catalog, &covered, limits.max_checkpoint_bytes)?;
+        persist_checkpoint(paths, &mut catalog, &covered, limits.max_checkpoint_bytes)?;
         persist_coordinator(paths, &catalog)?;
     }
     Ok(CatalogOpen {
@@ -613,7 +617,7 @@ fn open_catalog_inner(
 /// Rewrite the checkpoint after a durable staging append (no media rescan).
 pub(crate) fn persist_live_checkpoint(
     paths: &StorePaths,
-    catalog: &StageCatalog,
+    catalog: &mut StageCatalog,
     covered: &mut Vec<CoveredFile>,
     limits: AtomicStageLimits,
 ) -> Result<(), StoreError> {
@@ -1218,7 +1222,15 @@ fn load_checkpoint(
     }
     budget.report.checkpoint_bytes = len;
     let bytes = fs::read(&path)?;
-    Ok(decode_checkpoint(&bytes))
+    let decoded = decode_checkpoint(&bytes);
+    if let Some((catalog, _)) = &decoded {
+        if let Some(index) = catalog.tombstone_index {
+            if validate_index(paths, index).is_err() {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(decoded)
 }
 
 fn persist_coordinator(paths: &StorePaths, catalog: &StageCatalog) -> Result<(), StoreError> {
@@ -1326,12 +1338,21 @@ fn load_coordinator(paths: &StorePaths, catalog: &mut StageCatalog) -> Result<()
 
 fn persist_checkpoint(
     paths: &StorePaths,
-    catalog: &StageCatalog,
+    catalog: &mut StageCatalog,
     covered: &[CoveredFile],
     max_checkpoint_bytes: u64,
 ) -> Result<(), StoreError> {
     crate::failpoint::hit("store.atomic.checkpoint.capacity")?;
     crate::failpoint::hit("store.atomic.checkpoint.before_persist")?;
+    if catalog.tombstone_index_dirty || catalog.tombstone_index.is_none() {
+        catalog.tombstone_index =
+            refresh_index(paths, catalog.tombstone_index, &catalog.tombstones)?;
+        catalog.tombstone_index_dirty = false;
+    }
+    // The index is the bounded checkpoint representation. Detailed decisions
+    // remain catalogued separately; retaining a second tombstone table here
+    // would reintroduce checkpoint growth with decision cardinality.
+    catalog.tombstones.clear();
     let bytes = encode_checkpoint(catalog, covered)?;
     if bytes.len() as u64 > max_checkpoint_bytes {
         return Err(Budget::fail(
@@ -1451,6 +1472,15 @@ fn encode_checkpoint(
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         body.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
         body.extend_from_slice(&encoded);
+    }
+    match catalog.tombstone_index {
+        Some(index) => {
+            body.push(1);
+            body.extend_from_slice(&index.record_count.to_be_bytes());
+            body.extend_from_slice(&index.file_len.to_be_bytes());
+            body.extend_from_slice(&index.root);
+        }
+        None => body.push(0),
     }
     body.extend_from_slice(&(catalog.commit_next.len() as u32).to_be_bytes());
     for (heap_id, next) in &catalog.commit_next {
@@ -1715,6 +1745,27 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
             return None;
         }
     }
+    let has_tombstone_index = *cur.first()?;
+    cur = &cur[1..];
+    catalog.tombstone_index = match has_tombstone_index {
+        0 => None,
+        1 => {
+            let record_count = read_u64(&mut cur)?;
+            let file_len = read_u64(&mut cur)?;
+            if cur.len() < 32 {
+                return None;
+            }
+            let mut root = [0u8; 32];
+            root.copy_from_slice(&cur[..32]);
+            cur = &cur[32..];
+            Some(TombstoneIndexMeta {
+                record_count,
+                file_len,
+                root,
+            })
+        }
+        _ => return None,
+    };
     let n_commit_heaps = read_u32(&mut cur)? as usize;
     for _ in 0..n_commit_heaps {
         if cur.len() < 24 {
@@ -1934,13 +1985,13 @@ fn read_u64(cur: &mut &[u8]) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod checkpoint_v15_freeze {
+mod checkpoint_v16_freeze {
     use super::*;
     use crate::atomic_stage_media::{
         encode_stage_chunk_body, encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal,
         encode_stage_tombstone, RetainedDecisionTombstone,
     };
-    use residiuum_atomics::{decision_hash, AtomicAbortReason, AtomicDecision};
+    use residiuum_atomics::{decision_hash, AtomicAbortReason, AtomicDecision, DecisionCode};
 
     fn aid() -> AtomicId {
         let mut b = [0u8; 32];
@@ -1949,14 +2000,56 @@ mod checkpoint_v15_freeze {
     }
 
     #[test]
-    fn v15_empty_checkpoint_roundtrips() {
+    fn v16_empty_checkpoint_roundtrips() {
         let catalog = StageCatalog::default();
         let bytes = encode_checkpoint(&catalog, &[]).unwrap();
         assert!(bytes.starts_with(CHECKPOINT_MAGIC));
         assert_eq!(bytes[CHECKPOINT_MAGIC.len()], CHECKPOINT_VERSION);
-        let (decoded, covered) = decode_checkpoint(&bytes).expect("v15 empty");
+        let (decoded, covered) = decode_checkpoint(&bytes).expect("v16 empty");
         assert!(covered.is_empty());
         assert!(!decoded.has_outstanding_evidence());
+    }
+
+    #[test]
+    fn paged_tombstones_do_not_grow_the_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StorePaths::new(dir.path());
+        fs::create_dir_all(paths.store_info()).unwrap();
+        let heap_id = HeapId::from_bytes([0x44; 16]).unwrap();
+        let mut catalog = StageCatalog::default();
+        for n in 1u32..=1_500 {
+            let mut id_bytes = [0u8; 32];
+            id_bytes[..4].copy_from_slice(&n.to_be_bytes());
+            let atomic_id = AtomicId::from_bytes(id_bytes).unwrap();
+            let mut root_bytes = [0u8; 32];
+            root_bytes[..4].copy_from_slice(&n.to_be_bytes());
+            catalog.tombstones.insert(
+                stage_key(heap_id, atomic_id),
+                RetainedDecisionTombstone {
+                    decided_at_unix_s: u64::from(n),
+                    tombstone: residiuum_atomics::DecisionTombstone {
+                        atomic_id,
+                        content_root: ContentRoot::from_bytes(root_bytes).unwrap(),
+                        decision: DecisionCode::NotCommitted,
+                        commit_position: None,
+                        decision_hash: *blake3::hash(&n.to_be_bytes()).as_bytes(),
+                        abort_reason: Some(AtomicAbortReason::RecoveryAbort),
+                    },
+                },
+            );
+        }
+        catalog.tombstone_index_dirty = true;
+        persist_checkpoint(&paths, &mut catalog, &[], u64::MAX).unwrap();
+
+        let checkpoint = fs::read(atomic_stage_checkpoint_path(&paths)).unwrap();
+        assert!(
+            checkpoint.len() < 256,
+            "checkpoint was {} bytes",
+            checkpoint.len()
+        );
+        let (decoded, _) = decode_checkpoint(&checkpoint).unwrap();
+        assert!(decoded.tombstones.is_empty());
+        assert_eq!(decoded.tombstone_index.unwrap().record_count, 1_500);
     }
 
     #[test]

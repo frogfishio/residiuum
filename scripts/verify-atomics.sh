@@ -170,6 +170,7 @@ run_store_atmr5_full() {
   run_cmd ATM-ENC "store atomic_stage rustfmt --check" \
     rustfmt --check \
     crates/residiuum-store/src/atomic_stage.rs \
+    crates/residiuum-store/src/atomic_tombstone_index.rs \
     crates/residiuum-store/src/atomic_stage_media.rs \
     crates/residiuum-store/src/atomic_stage_classify.rs \
     crates/residiuum-store/src/atomic_stage_recover.rs \
@@ -544,10 +545,12 @@ artifacts = [
     hash_existing("crates/residiuum-format/src/envelope_keys.rs"),
     hash_existing("crates/residiuum-atomic-lane/src/lane.rs"),
     hash_existing("crates/residiuum-store/src/atomic_stage.rs"),
+    hash_existing("crates/residiuum-store/src/atomic_tombstone_index.rs"),
     hash_existing("crates/residiuum-atomics/src/outcome.rs"),
     hash_existing("crates/residiuum-store/src/heap/heap_store.rs"),
     hash_existing("crates/residiuum-sdk/tests/atomic_rql_generation.rs"),
     hash_existing("doc/todo/atomics/ATM3_PUBLICATION_ARCHITECTURE_2026-08-20.md"),
+    hash_existing("doc/todo/atomics/ATM4_RECOVERY_MATERIAL_TRUTH_BASELINE_2026-08-20.md"),
     hash_existing("crates/residiuum-atomics/src/builder.rs"),
     hash_existing("crates/residiuum-atomics/src/validate.rs"),
 ]
