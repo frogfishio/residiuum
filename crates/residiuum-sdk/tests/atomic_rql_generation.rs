@@ -192,4 +192,99 @@ fn concurrent_rql_never_mixes_before_and_after_members() {
     for join in joins {
         assert_eq!(join.join().unwrap(), (true, true));
     }
+
+    let replacement = |id: u8, key: &str, version: VersionId| {
+        let mut atomic_id = [0; 32];
+        atomic_id[0] = id;
+        AtomicPlan::close(AtomicPlanParts {
+            profile: AtomicProfile::LocalHeapV1,
+            atomic_id: AtomicId::from_bytes(atomic_id).unwrap(),
+            heap_id: atomic_heap,
+            scope: CoordinationScope::LocalHeap,
+            read_frontier: None,
+            reads: vec![],
+            predicates: vec![],
+            mutations: vec![PlanMutation {
+                kind: MutationKind::Replace,
+                collection_id: atomic_collection,
+                key: CanonicalKey::string(key),
+                encoded_value: Some(encode_json(&serde_json::json!({"n": 2})).unwrap()),
+                if_version: Some(version),
+            }],
+            active_rule_revisions: vec![],
+            limits: ResourceLimits::hard_local_heap(),
+        })
+        .unwrap()
+    };
+    let cohort = vec![
+        replacement(2, "left", receipt.members[0].event_id),
+        replacement(3, "right", receipt.members[1].event_id),
+    ];
+    let mut cohort_reader = client.open_collection("docs").unwrap();
+    let cohort_start = Arc::new(Barrier::new(2));
+    let cohort_sampled = Arc::new(Barrier::new(2));
+    let cohort_published = Arc::new(Barrier::new(2));
+    let reader_start = Arc::clone(&cohort_start);
+    let reader_sampled = Arc::clone(&cohort_sampled);
+    let reader_published = Arc::clone(&cohort_published);
+    let cohort_join = std::thread::spawn(move || {
+        reader_start.wait();
+        let mut saw_old = false;
+        let mut saw_new = false;
+        for sample in 0..10_000 {
+            let page = cohort_reader
+                .rql(
+                    "from docs page size 10",
+                    &Parameters::default(),
+                    QueryRunOptions::default(),
+                )
+                .unwrap();
+            let values = page
+                .rows
+                .iter()
+                .map(|row| row.value["n"].as_u64().unwrap())
+                .collect::<Vec<_>>();
+            match values.as_slice() {
+                [1, 1] => saw_old = true,
+                [2, 2] => saw_new = true,
+                mixed => panic!("RQL observed a partial multi-Atomic cohort: {mixed:?}"),
+            }
+            if sample == 0 {
+                reader_sampled.wait();
+                reader_published.wait();
+            }
+            if saw_old && saw_new {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        (saw_old, saw_new)
+    });
+    cohort_start.wait();
+    cohort_sampled.wait();
+    let outcomes = client.decide_atomic_plan_cohort_outcomes(&cohort).unwrap();
+    cohort_published.wait();
+    for (offset, outcome) in outcomes.iter().enumerate() {
+        let AtomicOutcome::Committed(receipt) = outcome.as_ref().unwrap() else {
+            panic!("SDK cohort member did not commit")
+        };
+        assert_eq!(receipt.commit_position, 2 + offset as u64);
+        assert!(!receipt.replayed);
+    }
+    assert_eq!(cohort_join.join().unwrap(), (true, true));
+    let mut reader = client.open_collection("docs").unwrap();
+    let page = reader
+        .rql(
+            "from docs page size 10",
+            &Parameters::default(),
+            QueryRunOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|row| row.value["n"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![2, 2]
+    );
 }

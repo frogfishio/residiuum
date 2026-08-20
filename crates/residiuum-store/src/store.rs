@@ -2603,6 +2603,22 @@ impl Store {
         flush
     }
 
+    /// Establish one durable boundary for the complete Atomic prefix already
+    /// submitted to coordinator shard zero, without appending a semantic frame.
+    pub(crate) fn stabilize_atomic_prefix(&mut self) -> Result<(), StoreError> {
+        if self.writer_lock.is_none() {
+            return Err(StoreError::AtomicStage(
+                "atomic prefix stabilization requires the writer lock".into(),
+            ));
+        }
+        let mut writer = self
+            .take_active(0)
+            .ok_or_else(|| StoreError::AtomicStage("no active segment".into()))?;
+        let flush = self.flush_active_file(&mut writer, DurabilityMode::Durable, 0);
+        self.set_active(0, Some(writer));
+        flush
+    }
+
     /// Capture the first writer sequence strictly after the current contents
     /// of every active shard. The witness is meaningful only when durably
     /// ordered before the corresponding Atomic decision.

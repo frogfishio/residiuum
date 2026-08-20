@@ -583,6 +583,23 @@ impl HeapClient {
         }
     }
 
+    /// Qualification-only ATM-3D independent-outcome durability cohort.
+    #[doc(hidden)]
+    pub fn decide_atomic_plan_cohort_outcomes(
+        &self,
+        plans: &[residiuum_atomics::AtomicPlan],
+    ) -> Result<Vec<residiuum_atomics::AtomicCohortOutcome>, Error> {
+        match &self.backend {
+            HeapBackend::Embedded(heap) => heap.decide_atomic_plan_cohort_outcomes(plans),
+            HeapBackend::Remote(_) => Err(Error::RemoteUnsupported(
+                "Atomic qualification cohort (embedded only)",
+            )),
+            HeapBackend::Unbound => Err(Error::Internal(
+                "HeapClient unbound; Atomic qualification cohort unavailable".into(),
+            )),
+        }
+    }
+
     /// Open a stable bounded read view (APB-6).
     ///
     /// **Embedded:** pins `authoritative_frontier` to the store segment

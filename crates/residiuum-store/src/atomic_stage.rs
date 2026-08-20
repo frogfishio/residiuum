@@ -24,8 +24,8 @@ use crate::store::Store;
 use residiuum_atomics::{
     decision_hash, encode_decision, encode_member, encode_prepare, members_match_prepare,
     ordered_member_manifest_root, plan_content_root, prepare_from_closed_plan, prepare_hash,
-    validate_closed_plan, AtomicAbortReason, AtomicDecision, AtomicId, AtomicMember,
-    AtomicMemberReceipt, AtomicOutcome, AtomicPlan, AtomicPrepare, AtomicReceipt,
+    validate_closed_plan, AtomicAbortReason, AtomicCohortOutcome, AtomicDecision, AtomicId,
+    AtomicMember, AtomicMemberReceipt, AtomicOutcome, AtomicPlan, AtomicPrepare, AtomicReceipt,
     AtomicRefuseReason, AtomicsError, ChunkPlan, CoordinatorSeq, DecisionCode, HeapId, MemberPhase,
     MutationKind, ObjectIdentity, PlacementManifest, PredicateKind, StagingHeap, VersionId,
 };
@@ -33,6 +33,7 @@ use residiuum_format::{
     encode_atomic_commit_envelope, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
     encode_subject_v2, FrameKind, SubjectObjectKind, EMPTY_ENVELOPE,
 };
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -55,6 +56,10 @@ enum StagePersistMode {
     /// Whole-plan commit: submit member bytes without sync; the seal and
     /// decision establish the only two authoritative durability boundaries.
     BufferedCohort,
+    /// Multi-Atomic cohort: append the record without syncing. The cohort
+    /// executor establishes one explicit member boundary and one explicit
+    /// decision boundary after every independent record in that phase exists.
+    BufferedDeferredBoundary,
 }
 
 impl Store {
@@ -609,12 +614,22 @@ impl StoreAtomicStage<'_> {
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         self.admit_catalog_change(&self.catalog.clone(), body.len() as u64)?;
         crate::failpoint::hit("store.atomic.before_decision")?;
-        self.store.append_unindexed_atomic_frame(
-            FrameKind::BatchCommit,
-            &envelope,
-            &body,
-            decision_event_id(atomic_id),
-        )?;
+        match mode {
+            StagePersistMode::BufferedDeferredBoundary => self.store.append_buffered_atomic_frame(
+                FrameKind::BatchCommit,
+                &envelope,
+                &body,
+                decision_event_id(atomic_id),
+            )?,
+            StagePersistMode::StableCheckpointed | StagePersistMode::BufferedCohort => {
+                self.store.append_unindexed_atomic_frame(
+                    FrameKind::BatchCommit,
+                    &envelope,
+                    &body,
+                    decision_event_id(atomic_id),
+                )?
+            }
+        }
         crate::failpoint::hit("store.atomic.after_decision")?;
         self.catalog
             .evidence_heaps
@@ -692,12 +707,22 @@ impl StoreAtomicStage<'_> {
         )
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         crate::failpoint::hit("store.atomic.before_decision")?;
-        self.store.append_unindexed_atomic_frame(
-            FrameKind::BatchCommit,
-            &envelope,
-            &body,
-            decision_event_id(atomic_id),
-        )?;
+        match mode {
+            StagePersistMode::BufferedDeferredBoundary => self.store.append_buffered_atomic_frame(
+                FrameKind::BatchCommit,
+                &envelope,
+                &body,
+                decision_event_id(atomic_id),
+            )?,
+            StagePersistMode::StableCheckpointed | StagePersistMode::BufferedCohort => {
+                self.store.append_unindexed_atomic_frame(
+                    FrameKind::BatchCommit,
+                    &envelope,
+                    &body,
+                    decision_event_id(atomic_id),
+                )?
+            }
+        }
         crate::failpoint::hit("store.atomic.after_decision")?;
         self.catalog
             .evidence_heaps
@@ -778,6 +803,178 @@ impl StoreAtomicStage<'_> {
     pub fn decide_plan_outcome(&mut self, plan: &AtomicPlan) -> Result<AtomicOutcome, StoreError> {
         let replayed = self.catalog.decisions.contains_key(&plan.atomic_id());
         let decision = self.decide_plan_evidence(plan)?;
+        self.outcome_for_decision(plan, &decision, replayed)
+    }
+
+    /// ATM-3D qualification path for independent plans sharing physical
+    /// durability boundaries.
+    ///
+    /// Plans serialize in input order against a private version overlay. Each
+    /// plan retains its own structural refusal, durable decision, commit
+    /// position and receipt. Newly committed plans share one member-stable
+    /// boundary and all newly issued decisions share one decision boundary.
+    #[doc(hidden)]
+    pub fn decide_plan_cohort_outcomes(
+        &mut self,
+        plans: &[AtomicPlan],
+    ) -> Result<Vec<AtomicCohortOutcome>, StoreError> {
+        #[derive(Clone, Copy)]
+        enum PendingDecision {
+            Commit,
+            Abort(AtomicAbortReason),
+        }
+
+        if plans.len() > self.limits.max_atomics as usize {
+            return Err(StoreError::AtomicStage(format!(
+                "atomic cohort admission exceeds {} plans",
+                self.limits.max_atomics
+            )));
+        }
+
+        let mode = StagePersistMode::BufferedDeferredBoundary;
+        let mut results = vec![None; plans.len()];
+        let mut aliases = vec![None; plans.len()];
+        let mut owners = HashMap::new();
+        let mut overlay = HashMap::new();
+        let mut pending = Vec::new();
+        let mut pending_commits = Vec::new();
+
+        for (index, plan) in plans.iter().enumerate() {
+            if let Err(error) = validate_closed_plan(plan, self.heap.heap_id()) {
+                match error {
+                    AtomicsError::Refused(reason) => {
+                        results[index] = Some(Err(reason));
+                        continue;
+                    }
+                    other => return Err(other.into()),
+                }
+            }
+            let root = plan_content_root(plan)
+                .map_err(|error| StoreError::AtomicStage(error.to_string()))?;
+            if let Some((owner_root, owner_index)) = owners.get(&plan.atomic_id()).copied() {
+                if owner_root == root {
+                    aliases[index] = Some(owner_index);
+                } else {
+                    results[index] = Some(Err(AtomicRefuseReason::AtomicIdConflict));
+                }
+                continue;
+            }
+            owners.insert(plan.atomic_id(), (root, index));
+
+            if let Some(stored) = self.catalog.prepares.get(&plan.atomic_id()) {
+                if stored.content_root != root {
+                    results[index] = Some(Err(AtomicRefuseReason::AtomicIdConflict));
+                    continue;
+                }
+                if let Some(decision) = self.catalog.decisions.get(&plan.atomic_id()).cloned() {
+                    if decision.decision == DecisionCode::Committed {
+                        self.publish_decision(plan.atomic_id())?;
+                    }
+                    results[index] = Some(Ok(self.outcome_for_decision(plan, &decision, true)?));
+                    continue;
+                }
+            }
+
+            let members = self.members_for_frontier_with_overlay(plan, &overlay)?;
+            let frontier = self.frontier_for_plan_with_overlay(plan, &overlay)?;
+            let prepare = self.ensure_prepare_record(plan, frontier, &members, mode)?;
+            if let Some(reason) = self.validate_at_frontier_with_overlay(plan, &overlay)? {
+                pending.push((index, PendingDecision::Abort(reason)));
+                continue;
+            }
+
+            self.install_prepared_members(&prepare, &members, mode)?;
+            for (member, mutation) in members.iter().zip(plan.mutations()) {
+                self.append_staged_inner(
+                    member.clone(),
+                    mutation.encoded_value.clone().unwrap_or_default(),
+                    mode,
+                )?;
+            }
+            self.persist_seal(prepare.atomic_id, prepare.content_root, mode)?;
+            for member in &members {
+                let subject = atomic_subject(
+                    plan.heap_id(),
+                    member.object_identity.collection_id,
+                    &member.object_identity.key,
+                )?;
+                let after = (member.member_kind != MutationKind::Delete).then_some(member.event_id);
+                overlay.insert(subject, after);
+            }
+            pending.push((index, PendingDecision::Commit));
+            pending_commits.push(prepare.atomic_id);
+        }
+
+        if !pending_commits.is_empty() {
+            crate::failpoint::hit("store.atomic.cohort.before_member_boundary")?;
+            self.store.stabilize_atomic_prefix()?;
+            crate::failpoint::hit("store.atomic.cohort.after_member_boundary")?;
+            for atomic_id in &pending_commits {
+                self.seal_member_boundary_inner(*atomic_id, mode)?;
+            }
+        }
+
+        let mut decisions = HashMap::new();
+        for (index, disposition) in &pending {
+            let atomic_id = plans[*index].atomic_id();
+            let decision = match disposition {
+                PendingDecision::Commit => {
+                    self.persist_committed_decision_inner(atomic_id, mode)?
+                }
+                PendingDecision::Abort(reason) => {
+                    self.persist_not_committed_decision_inner(atomic_id, *reason, mode)?
+                }
+            };
+            decisions.insert(*index, decision);
+        }
+
+        if !pending.is_empty() {
+            crate::failpoint::hit("store.atomic.cohort.before_decision_boundary")?;
+            self.store.stabilize_atomic_prefix()?;
+            crate::failpoint::hit("store.atomic.cohort.after_decision_boundary")?;
+        }
+
+        for (index, disposition) in &pending {
+            if matches!(disposition, PendingDecision::Commit) {
+                self.publish_decision(plans[*index].atomic_id())?;
+            }
+            let decision = decisions.get(index).ok_or_else(|| {
+                StoreError::AtomicStage("atomic cohort omitted a decision".into())
+            })?;
+            results[*index] = Some(Ok(self.outcome_for_decision(
+                &plans[*index],
+                decision,
+                false,
+            )?));
+        }
+
+        for (index, owner) in aliases.into_iter().enumerate() {
+            let Some(owner) = owner else { continue };
+            let mut replay = results[owner].clone().ok_or_else(|| {
+                StoreError::AtomicStage("atomic cohort alias owner omitted an outcome".into())
+            })?;
+            if let Ok(AtomicOutcome::Committed(receipt)) = &mut replay {
+                receipt.replayed = true;
+            }
+            results[index] = Some(replay);
+        }
+
+        results
+            .into_iter()
+            .map(|result| {
+                result.ok_or_else(|| {
+                    StoreError::AtomicStage("atomic cohort omitted an individual outcome".into())
+                })
+            })
+            .collect()
+    }
+
+    fn outcome_for_decision(
+        &self,
+        plan: &AtomicPlan,
+        decision: &AtomicDecision,
+        replayed: bool,
+    ) -> Result<AtomicOutcome, StoreError> {
         if decision.decision == DecisionCode::NotCommitted {
             return decision.not_committed_outcome().map_err(StoreError::from);
         }
@@ -806,13 +1003,13 @@ impl StoreAtomicStage<'_> {
             StoreError::AtomicStage("committed receipt missing commit position".into())
         })?;
         Ok(AtomicOutcome::Committed(AtomicReceipt {
-            atomic_id: decision.atomic_id,
+            atomic_id: plan.atomic_id(),
             heap_id: prepare.heap_id,
             content_root: prepare.content_root,
             commit_position,
             durability: decision.durability,
             members,
-            decision_hash: decision_hash(&decision)
+            decision_hash: decision_hash(decision)
                 .map_err(|error| StoreError::AtomicStage(error.to_string()))?,
             replayed,
         }))
@@ -824,6 +1021,14 @@ impl StoreAtomicStage<'_> {
     }
 
     fn members_for_frontier(&self, plan: &AtomicPlan) -> Result<Vec<AtomicMember>, StoreError> {
+        self.members_for_frontier_with_overlay(plan, &HashMap::new())
+    }
+
+    fn members_for_frontier_with_overlay(
+        &self,
+        plan: &AtomicPlan,
+        overlay: &HashMap<Vec<u8>, Option<VersionId>>,
+    ) -> Result<Vec<AtomicMember>, StoreError> {
         plan.mutations()
             .iter()
             .enumerate()
@@ -833,10 +1038,7 @@ impl StoreAtomicStage<'_> {
                 })?;
                 let subject =
                     atomic_subject(plan.heap_id(), mutation.collection_id, &mutation.key)?;
-                let observed = self
-                    .store
-                    .live_event_id(&subject)
-                    .and_then(|bytes| VersionId::from_bytes(bytes).ok());
+                let observed = self.observed_version(&subject, overlay);
                 let before_version = match mutation.kind {
                     MutationKind::Put => observed,
                     MutationKind::Create => None,
@@ -863,6 +1065,14 @@ impl StoreAtomicStage<'_> {
     }
 
     fn frontier_for_plan(&self, plan: &AtomicPlan) -> Result<[u8; 32], StoreError> {
+        self.frontier_for_plan_with_overlay(plan, &HashMap::new())
+    }
+
+    fn frontier_for_plan_with_overlay(
+        &self,
+        plan: &AtomicPlan,
+        overlay: &HashMap<Vec<u8>, Option<VersionId>>,
+    ) -> Result<[u8; 32], StoreError> {
         let mut targets = Vec::new();
         for read in plan.reads() {
             targets.push(atomic_subject(
@@ -891,10 +1101,10 @@ impl StoreAtomicStage<'_> {
         for subject in targets {
             hasher.update(&(subject.len() as u32).to_be_bytes());
             hasher.update(&subject);
-            match self.store.live_event_id(&subject) {
+            match self.observed_version(&subject, overlay) {
                 Some(version) => {
                     hasher.update(&[1]);
-                    hasher.update(&version);
+                    hasher.update(version.as_bytes());
                 }
                 None => {
                     hasher.update(&[0]);
@@ -908,12 +1118,17 @@ impl StoreAtomicStage<'_> {
         &self,
         plan: &AtomicPlan,
     ) -> Result<Option<AtomicAbortReason>, StoreError> {
+        self.validate_at_frontier_with_overlay(plan, &HashMap::new())
+    }
+
+    fn validate_at_frontier_with_overlay(
+        &self,
+        plan: &AtomicPlan,
+        overlay: &HashMap<Vec<u8>, Option<VersionId>>,
+    ) -> Result<Option<AtomicAbortReason>, StoreError> {
         for read in plan.reads() {
             let subject = atomic_subject(plan.heap_id(), read.collection_id, &read.key)?;
-            let observed = self
-                .store
-                .live_event_id(&subject)
-                .and_then(|bytes| VersionId::from_bytes(bytes).ok());
+            let observed = self.observed_version(&subject, overlay);
             if observed != read.observed_version {
                 return Ok(Some(AtomicAbortReason::PreconditionConflict));
             }
@@ -933,10 +1148,7 @@ impl StoreAtomicStage<'_> {
                 return Ok(Some(AtomicAbortReason::PreconditionConflict));
             };
             let subject = atomic_subject(plan.heap_id(), collection, key)?;
-            let observed = self
-                .store
-                .live_event_id(&subject)
-                .and_then(|bytes| VersionId::from_bytes(bytes).ok());
+            let observed = self.observed_version(&subject, overlay);
             let valid = match predicate.kind {
                 PredicateKind::AssertAbsent => observed.is_none(),
                 PredicateKind::AssertPresent => observed.is_some(),
@@ -949,10 +1161,7 @@ impl StoreAtomicStage<'_> {
         }
         for mutation in plan.mutations() {
             let subject = atomic_subject(plan.heap_id(), mutation.collection_id, &mutation.key)?;
-            let observed = self
-                .store
-                .live_event_id(&subject)
-                .and_then(|bytes| VersionId::from_bytes(bytes).ok());
+            let observed = self.observed_version(&subject, overlay);
             let valid = match mutation.kind {
                 MutationKind::Create => observed.is_none(),
                 MutationKind::Put => true,
@@ -966,6 +1175,18 @@ impl StoreAtomicStage<'_> {
             return Ok(Some(AtomicAbortReason::RuleRejected));
         }
         Ok(None)
+    }
+
+    fn observed_version(
+        &self,
+        subject: &[u8],
+        overlay: &HashMap<Vec<u8>, Option<VersionId>>,
+    ) -> Option<VersionId> {
+        overlay.get(subject).copied().unwrap_or_else(|| {
+            self.store
+                .live_event_id(subject)
+                .and_then(|bytes| VersionId::from_bytes(bytes).ok())
+        })
     }
 
     fn duplicate_target() -> StoreError {
@@ -1251,12 +1472,14 @@ impl StoreAtomicStage<'_> {
                 &body,
                 event_id,
             )?,
-            StagePersistMode::BufferedCohort => self.store.append_buffered_atomic_frame(
-                FrameKind::BatchPrepare,
-                &envelope,
-                &body,
-                event_id,
-            )?,
+            StagePersistMode::BufferedCohort | StagePersistMode::BufferedDeferredBoundary => {
+                self.store.append_buffered_atomic_frame(
+                    FrameKind::BatchPrepare,
+                    &envelope,
+                    &body,
+                    event_id,
+                )?
+            }
         }
         crate::failpoint::hit("store.atomic.prepare.after_append")?;
         self.catalog
@@ -1313,12 +1536,14 @@ impl StoreAtomicStage<'_> {
                 &body,
                 member.event_id.to_bytes(),
             )?,
-            StagePersistMode::BufferedCohort => self.store.append_buffered_atomic_frame(
-                FrameKind::ItemEvent,
-                &envelope,
-                &body,
-                member.event_id.to_bytes(),
-            )?,
+            StagePersistMode::BufferedCohort | StagePersistMode::BufferedDeferredBoundary => {
+                self.store.append_buffered_atomic_frame(
+                    FrameKind::ItemEvent,
+                    &envelope,
+                    &body,
+                    member.event_id.to_bytes(),
+                )?
+            }
         }
         crate::failpoint::hit("store.atomic.member.after_append")?;
         let slot = self.catalog.members.entry(member.atomic_id).or_default();
@@ -1365,12 +1590,14 @@ impl StoreAtomicStage<'_> {
                 &body,
                 payload_event_id(member.atomic_id, member.ordinal),
             )?,
-            StagePersistMode::BufferedCohort => self.store.append_buffered_atomic_frame(
-                FrameKind::PayloadChunk,
-                EMPTY_ENVELOPE,
-                &body,
-                payload_event_id(member.atomic_id, member.ordinal),
-            )?,
+            StagePersistMode::BufferedCohort | StagePersistMode::BufferedDeferredBoundary => {
+                self.store.append_buffered_atomic_frame(
+                    FrameKind::PayloadChunk,
+                    EMPTY_ENVELOPE,
+                    &body,
+                    payload_event_id(member.atomic_id, member.ordinal),
+                )?
+            }
         }
         crate::failpoint::hit("store.atomic.payload.after_append")?;
         self.catalog
@@ -1403,12 +1630,22 @@ impl StoreAtomicStage<'_> {
         candidate.seals.insert(atomic_id, content_root);
         self.admit_catalog_change(&candidate, body.len() as u64)?;
         crate::failpoint::hit("store.atomic.seal.before_append")?;
-        self.store.append_unindexed_atomic_frame(
-            FrameKind::PayloadChunk,
-            EMPTY_ENVELOPE,
-            &body,
-            seal_event_id(atomic_id),
-        )?;
+        match mode {
+            StagePersistMode::BufferedDeferredBoundary => self.store.append_buffered_atomic_frame(
+                FrameKind::PayloadChunk,
+                EMPTY_ENVELOPE,
+                &body,
+                seal_event_id(atomic_id),
+            )?,
+            StagePersistMode::StableCheckpointed | StagePersistMode::BufferedCohort => {
+                self.store.append_unindexed_atomic_frame(
+                    FrameKind::PayloadChunk,
+                    EMPTY_ENVELOPE,
+                    &body,
+                    seal_event_id(atomic_id),
+                )?
+            }
+        }
         self.catalog.seals.insert(atomic_id, content_root);
         crate::failpoint::hit("store.atomic.seal.after_append")?;
         if mode == StagePersistMode::StableCheckpointed {

@@ -1015,3 +1015,329 @@ fn one_over_maximum_caller_plan_is_refused_before_media_append() {
         "structural refusal must not append Atomic evidence"
     );
 }
+
+#[test]
+fn independent_atomic_cohort_shares_exactly_two_boundaries_and_replays_receipts() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create_with_shards(&path, 4).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let plans = vec![
+        plan(
+            heap,
+            atomic(50),
+            MutationKind::Create,
+            CanonicalKey::string("cohort-a"),
+            Some(b"A"),
+            None,
+        ),
+        plan(
+            heap,
+            atomic(51),
+            MutationKind::Create,
+            CanonicalKey::string("cohort-b"),
+            Some(b"B"),
+            None,
+        ),
+    ];
+    let before = store.write_path_stats().authoritative_io.sync_operations;
+    let outcomes = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_cohort_outcomes(&plans)
+        .unwrap();
+    assert_eq!(
+        store
+            .write_path_stats()
+            .authoritative_io
+            .sync_operations
+            .saturating_sub(before),
+        2
+    );
+    let receipts = outcomes
+        .iter()
+        .map(|outcome| match outcome.as_ref().unwrap() {
+            AtomicOutcome::Committed(receipt) => receipt,
+            other => panic!("expected committed cohort member, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(receipts[0].commit_position, 1);
+    assert_eq!(receipts[1].commit_position, 2);
+    assert!(!receipts[0].replayed && !receipts[1].replayed);
+    let original = receipts
+        .iter()
+        .map(|receipt| (*receipt).clone())
+        .collect::<Vec<_>>();
+    drop(store);
+
+    let mut reopened = Store::open(&path).unwrap();
+    assert_eq!(
+        reopened
+            .get_subject_bytes(&subject(heap, &CanonicalKey::string("cohort-a")))
+            .unwrap(),
+        Some(b"A".to_vec())
+    );
+    assert_eq!(
+        reopened
+            .get_subject_bytes(&subject(heap, &CanonicalKey::string("cohort-b")))
+            .unwrap(),
+        Some(b"B".to_vec())
+    );
+    let before_replay = reopened.write_path_stats().authoritative_io.sync_operations;
+    let replay = reopened
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_cohort_outcomes(&plans)
+        .unwrap();
+    assert_eq!(
+        reopened.write_path_stats().authoritative_io.sync_operations,
+        before_replay,
+        "terminal replay must not add a durability boundary"
+    );
+    for (outcome, mut expected) in replay.into_iter().zip(original) {
+        let AtomicOutcome::Committed(receipt) = outcome.unwrap() else {
+            panic!("committed cohort retry changed outcome")
+        };
+        assert!(receipt.replayed);
+        expected.replayed = true;
+        assert_eq!(receipt, expected);
+    }
+}
+
+#[test]
+fn atomic_cohort_serializes_conflicts_and_keeps_refusals_independent() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create_with_shards(&path, 4).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let first = plan(
+        heap,
+        atomic(52),
+        MutationKind::Create,
+        CanonicalKey::string("same"),
+        Some(b"first"),
+        None,
+    );
+    let conflicting = plan(
+        heap,
+        atomic(53),
+        MutationKind::Create,
+        CanonicalKey::string("same"),
+        Some(b"second"),
+        None,
+    );
+    let over_limit = create_n_plan(heap, atomic(54), 257);
+    let last = plan(
+        heap,
+        atomic(55),
+        MutationKind::Create,
+        CanonicalKey::string("other"),
+        Some(b"last"),
+        None,
+    );
+    let plans = vec![first.clone(), first, conflicting, over_limit, last];
+    let before = store.write_path_stats().authoritative_io.sync_operations;
+    let outcomes = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_cohort_outcomes(&plans)
+        .unwrap();
+    assert_eq!(
+        store
+            .write_path_stats()
+            .authoritative_io
+            .sync_operations
+            .saturating_sub(before),
+        2
+    );
+
+    let AtomicOutcome::Committed(first_receipt) = outcomes[0].as_ref().unwrap() else {
+        panic!("first plan did not commit")
+    };
+    assert_eq!(first_receipt.commit_position, 1);
+    assert!(!first_receipt.replayed);
+    let AtomicOutcome::Committed(duplicate_receipt) = outcomes[1].as_ref().unwrap() else {
+        panic!("exact duplicate did not replay")
+    };
+    assert!(duplicate_receipt.replayed);
+    let mut duplicate_without_flag = duplicate_receipt.clone();
+    duplicate_without_flag.replayed = false;
+    assert_eq!(&duplicate_without_flag, first_receipt);
+    assert_eq!(
+        outcomes[2],
+        Ok(AtomicOutcome::NotCommitted {
+            atomic_id: atomic(53),
+            reason: AtomicAbortReason::PreconditionConflict,
+        })
+    );
+    assert_eq!(
+        outcomes[3],
+        Err(residiuum_atomics::AtomicRefuseReason::LimitExceeded)
+    );
+    let AtomicOutcome::Committed(last_receipt) = outcomes[4].as_ref().unwrap() else {
+        panic!("independent trailing plan did not commit")
+    };
+    assert_eq!(last_receipt.commit_position, 2);
+    assert_eq!(
+        store
+            .get_subject_bytes(&subject(heap, &CanonicalKey::string("same")))
+            .unwrap(),
+        Some(b"first".to_vec())
+    );
+    assert_eq!(
+        store
+            .get_subject_bytes(&subject(heap, &CanonicalKey::string("other")))
+            .unwrap(),
+        Some(b"last".to_vec())
+    );
+}
+
+#[test]
+fn atomic_cohort_crash_cuts_recover_only_legal_whole_decisions() {
+    let _guard = test_guard();
+    clear_failpoints();
+    for (case, (cut, committed)) in [
+        ("store.atomic.cohort.after_member_boundary", false),
+        ("store.atomic.cohort.after_decision_boundary", true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let mut store = Store::create_with_shards(&path, 4).unwrap();
+        let heap = HeapId::from_bytes(store.store_id()).unwrap();
+        let plans = vec![
+            plan(
+                heap,
+                atomic(60 + case as u8 * 2),
+                MutationKind::Create,
+                CanonicalKey::string("left"),
+                Some(b"L"),
+                None,
+            ),
+            plan(
+                heap,
+                atomic(61 + case as u8 * 2),
+                MutationKind::Create,
+                CanonicalKey::string("right"),
+                Some(b"R"),
+                None,
+            ),
+        ];
+        arm_failpoint_once(cut, FailpointAction::Error);
+        let result = store
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_cohort_outcomes(&plans);
+        assert!(matches!(result, Err(StoreError::Failpoint(name)) if name == cut));
+        clear_failpoints();
+        drop(store);
+
+        let mut reopened = Store::open(&path).unwrap();
+        let observed = (
+            reopened
+                .get_subject_bytes(&subject(heap, &CanonicalKey::string("left")))
+                .unwrap(),
+            reopened
+                .get_subject_bytes(&subject(heap, &CanonicalKey::string("right")))
+                .unwrap(),
+        );
+        assert_eq!(
+            observed,
+            if committed {
+                (Some(b"L".to_vec()), Some(b"R".to_vec()))
+            } else {
+                (None, None)
+            },
+            "illegal cohort state after {cut}"
+        );
+        let retry = reopened
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_cohort_outcomes(&plans)
+            .unwrap();
+        assert!(retry
+            .iter()
+            .all(|outcome| matches!(outcome, Ok(AtomicOutcome::Committed(_)))));
+    }
+}
+
+#[test]
+fn decision_only_atomic_cohort_uses_one_boundary_and_no_positions() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    for key in ["occupied-a", "occupied-b"] {
+        store
+            .put_subject_bytes(
+                &subject(heap, &CanonicalKey::string(key)),
+                b"old",
+                DurabilityMode::Durable,
+            )
+            .unwrap();
+    }
+    let plans = vec![
+        plan(
+            heap,
+            atomic(70),
+            MutationKind::Create,
+            CanonicalKey::string("occupied-a"),
+            Some(b"new"),
+            None,
+        ),
+        plan(
+            heap,
+            atomic(71),
+            MutationKind::Create,
+            CanonicalKey::string("occupied-b"),
+            Some(b"new"),
+            None,
+        ),
+    ];
+    let before = store.write_path_stats().authoritative_io.sync_operations;
+    let outcomes = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_cohort_outcomes(&plans)
+        .unwrap();
+    assert_eq!(
+        store
+            .write_path_stats()
+            .authoritative_io
+            .sync_operations
+            .saturating_sub(before),
+        1,
+        "not-committed decisions need no member-stable boundary"
+    );
+    assert!(outcomes.iter().all(|outcome| matches!(
+        outcome,
+        Ok(AtomicOutcome::NotCommitted {
+            reason: AtomicAbortReason::PreconditionConflict,
+            ..
+        })
+    )));
+    let success = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_outcome(&plan(
+            heap,
+            atomic(72),
+            MutationKind::Create,
+            CanonicalKey::string("free"),
+            Some(b"value"),
+            None,
+        ))
+        .unwrap();
+    let AtomicOutcome::Committed(receipt) = success else {
+        panic!("later independent Atomic did not commit")
+    };
+    assert_eq!(receipt.commit_position, 1);
+}

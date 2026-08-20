@@ -530,6 +530,15 @@ impl Heap {
         Ok(self.store.decide_atomic_plan_outcome(plan)?)
     }
 
+    /// Qualification-only ATM-3D independent-outcome durability cohort.
+    #[doc(hidden)]
+    pub fn decide_atomic_plan_cohort_outcomes(
+        &self,
+        plans: &[residiuum_atomics::AtomicPlan],
+    ) -> Result<Vec<residiuum_atomics::AtomicCohortOutcome>, Error> {
+        Ok(self.store.decide_atomic_plan_cohort_outcomes(plans)?)
+    }
+
     /// Whether `other` is the same capability instance (pointer identity).
     pub fn same_capability(&self, other: &Heap) -> bool {
         self.cap.same_instance(&other.cap)

@@ -281,6 +281,12 @@ pub enum AtomicOutcome {
     },
 }
 
+/// One independently resolved entry in a physical Atomic durability cohort.
+///
+/// Structural refusal remains outside the issued Atomic outcome axis and does
+/// not poison neighboring plans that share the physical boundaries.
+pub type AtomicCohortOutcome = Result<AtomicOutcome, AtomicRefuseReason>;
+
 #[cfg(test)]
 mod tests {
     use super::*;

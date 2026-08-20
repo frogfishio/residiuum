@@ -12,10 +12,9 @@ payload locators, and excludes prepared, aborted, and decision-less evidence.
 Multi-member publication, decision-before-publish, publish-before-ack, ordered
 history across reopen, and inspection-without-checkpoint-write cases are
 covered. Concurrent/crash/resource qualification is now assembled by
-`scripts/verify-atomics.sh`; ATM-3 acceptance remains blocked by grouped
-independent outcomes and lifecycle/authority-frontier integration. Universal
-ordinary-write ordering has an implemented and tested witness profile,
-described below.
+`scripts/verify-atomics.sh`; ATM-3 acceptance remains blocked only by
+lifecycle/authority-frontier integration. Universal ordinary-write ordering
+has an implemented and tested witness profile, described below.
 
 The guarded-reader proof now runs point, full logical scan, and history readers
 concurrently with a two-member commit. Every sampled view is either the prior
@@ -165,9 +164,20 @@ Canonical plan construction, value cooking, compression, rule compilation,
 and application/network waits occur before entering the store publication
 guard. Under the guard the engine performs bounded current-state validation,
 commit-position allocation, ordered durable appends, complete-delta preflight,
-and guarded O(member-count) publication. Group commit may share the member and decision
-stable boundaries across independent outcomes, but each decision and receipt
-remains independently authenticated.
+and guarded O(member-count) publication. Group commit shares the member and
+decision stable boundaries across independent outcomes, but each decision and
+receipt remains independently authenticated.
+
+The cohort executor evaluates plans in input order against a private version
+overlay while holding that same guard. Earlier successful plans therefore
+participate in later predicates and CAS checks even though publication waits
+until the shared decision boundary. Structural refusals remain request-local;
+data conflicts become their own durable `NotCommitted` decisions; exact
+same-ID/same-root duplicates reuse the owner's decision and return replay-
+marked receipts. A cohort with committed members crosses one member boundary
+and one decision boundary regardless of plan/member count. A decision-only
+cohort may use only the decision boundary. After the latter boundary, complete
+deltas publish in commit-position order before individual results are returned.
 
 ## Delivery slices
 
@@ -190,8 +200,8 @@ two authoritative syncs, proving sync count is independent of member count.
 
 ATM-3 is not yet accepted. The remaining delivery delta is explicit:
 
-1. implement grouped independent outcomes that can share the two physical
-   boundaries without sharing validation, decision, or acknowledgement;
+1. ~~implement grouped independent outcomes that can share the two physical
+   boundaries without sharing validation, decision, or acknowledgement~~;
 2. integrate Heap lifecycle/authority mutations and predicates into the same
    serial frontier (until then `HeapAuthorityRevision` fails closed as
    `RuleRejected` rather than being silently accepted);
@@ -204,12 +214,15 @@ ATM-3 is not yet accepted. The remaining delivery delta is explicit:
    assembler~~. The publication algorithm itself is now O(member count), and
    existing hard admission ceilings remain enforced before media append.
 
-Items 3 and 4 are closed. The verifier now emits a distinct ATM-3 manifest and
+Items 1, 3 and 4 are closed. The verifier now emits a distinct ATM-3 manifest and
 runs publication/crash/receipt/resource (`ATM-PUB`) plus capability-bound RQL
 reader (`ATM-RDR`) evidence. The maximum 256-caller-member plan commits with
 two authoritative syncs; a 257-member negative control is refused before any
 authoritative write. That control exposed and fixed a missing executor call to
-the frozen closed-plan validator. Only items 1 and 2 remain open.
+the frozen closed-plan validator. Cohort qualification additionally proves two
+shared syncs, serial overlapping conflicts, independent refusals, exact replay,
+capability-bound SDK use, and legal recovery on both sides of the shared
+decision boundary. Only item 2 remains open.
 
 `Capabilities::atomics` remains `false` until all slices and the ATM-3 exit gate
 are green.

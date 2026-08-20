@@ -82,8 +82,8 @@ pub use lifecycle::{
 pub use limits::{ChunkLimits, ResourceLimits};
 pub use oracle::{OracleCell, OracleHistoryKind, OracleHistoryRecord, SerialOracle};
 pub use outcome::{
-    AtomicAbortReason, AtomicMemberReceipt, AtomicOutcome, AtomicReceipt, AtomicRefuseReason,
-    AtomicResolutionHandle, AtomicStatus, LogicalStatus, MaterialStatus,
+    AtomicAbortReason, AtomicCohortOutcome, AtomicMemberReceipt, AtomicOutcome, AtomicReceipt,
+    AtomicRefuseReason, AtomicResolutionHandle, AtomicStatus, LogicalStatus, MaterialStatus,
 };
 pub use plan::{
     AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CanonicalKeyKind, CoordinationScope,

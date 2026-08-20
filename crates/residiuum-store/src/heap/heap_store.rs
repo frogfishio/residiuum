@@ -339,6 +339,26 @@ impl HeapStore {
             .decide_plan_outcome(plan)
     }
 
+    /// Qualification-only ATM-3D cohort. Independent plan outcomes share the
+    /// physical member and decision boundaries under this Heap's store guard.
+    #[doc(hidden)]
+    pub fn decide_atomic_plan_cohort_outcomes(
+        &self,
+        plans: &[residiuum_atomics::AtomicPlan],
+    ) -> Result<Vec<residiuum_atomics::AtomicCohortOutcome>, StoreError> {
+        self.gate()?;
+        self.require_right(Rights::WRITE)?;
+        let atomic_heap = residiuum_atomics::HeapId::from_bytes(*self.cap.heap_id().as_bytes())
+            .map_err(|error| StoreError::HeapCapability(error.to_string()))?;
+        let mut guard = self
+            .physical
+            .lock()
+            .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
+        guard
+            .atomic_stage_for_heap(atomic_heap)?
+            .decide_plan_cohort_outcomes(plans)
+    }
+
     /// Decode and validate a SubjectV2 buffer for this bound heap.
     ///
     /// Qualified heap data paths require SubjectV2 (version byte `0x02`). Legacy

@@ -9,7 +9,7 @@
 # <commit12>-<profile>.json plus a detached .sha256 sidecar (CR-R2-007).
 # Labels are package-specific (CR-ATMR4-010). A clean full matrix may make a
 # completed package an acceptance candidate. ATM-3 remains partial while its
-# grouped-boundary and lifecycle/authority-frontier deliverables are open.
+# lifecycle/authority-frontier deliverable is open.
 # Run-level label is the worst package label.
 # Dirty or failing runs are diagnostic. Capabilities::atomics must stay false.
 set -euo pipefail
@@ -303,6 +303,14 @@ run_negatives() {
         cargo test -p residiuum-store --offline --test atomic_frontier_decision \
         --features legacy-raw-store -- \
         unbound_heap_authority_predicate_fails_closed_and_replays_after_restart --exact
+      run_cmd ATM-PUB "executed:atomic_cohort_serializes_conflicts_and_keeps_refusals_independent" \
+        cargo test -p residiuum-store --offline --test atomic_frontier_decision \
+        --features legacy-raw-store -- \
+        atomic_cohort_serializes_conflicts_and_keeps_refusals_independent --exact
+      run_cmd ATM-PUB "executed:atomic_cohort_crash_cuts_recover_only_legal_whole_decisions" \
+        cargo test -p residiuum-store --offline --test atomic_frontier_decision \
+        --features legacy-raw-store -- \
+        atomic_cohort_crash_cuts_recover_only_legal_whole_decisions --exact
       ;;
   esac
 }
@@ -419,7 +427,6 @@ if profile == "full":
         atm2_blockers.append("missing scoped store Atomic staging rustfmt --check")
 
 atm3_blockers = [
-    "grouped independent outcomes do not yet share physical stable boundaries",
     "Heap lifecycle/authority mutations and authority predicates are not yet integrated into the universal serialization frontier",
 ]
 if not cmd_passed(cmds, "atomic_frontier_decision"):
@@ -504,7 +511,7 @@ run = {
         "Package-specific (CR-ATMR4-010). diagnostic = dirty or failing; "
         "ATM-1 acceptance_candidate = clean full ENC/ORA/AUT/RES + format all-targets; "
         "ATM-2 acceptance_candidate = clean full store/lane matrix; "
-        "ATM-3 stays partial while grouped boundaries or lifecycle/authority integration remain; "
+        "ATM-3 stays partial while lifecycle/authority integration remains; "
         "run-level label is the worst of the three packages. "
         "Run payload is hashed in a sidecar; this file never contains its own digest."
     ),
@@ -539,6 +546,7 @@ artifacts = [
     hash_existing("crates/residiuum-format/src/envelope_keys.rs"),
     hash_existing("crates/residiuum-atomic-lane/src/lane.rs"),
     hash_existing("crates/residiuum-store/src/atomic_stage.rs"),
+    hash_existing("crates/residiuum-atomics/src/outcome.rs"),
     hash_existing("crates/residiuum-store/src/heap/heap_store.rs"),
     hash_existing("crates/residiuum-sdk/tests/atomic_rql_generation.rs"),
     hash_existing("doc/todo/atomics/ATM3_PUBLICATION_ARCHITECTURE_2026-08-20.md"),
@@ -679,6 +687,7 @@ atm3 = merge_pack(out / "atm-3" / "manifest.json", {
         "universal ATORD1 ordering with later ordinary writes and deletes",
         "O(member-count) primary/history/locator publication",
         "exact committed/not-committed outcomes and per-member CAS versions",
+        "serial independent-outcome cohorts sharing one member and one decision boundary",
         "maximum 256-caller-member execution plus one-over pre-media refusal",
     ],
     "negative_controls": [
@@ -686,6 +695,8 @@ atm3 = merge_pack(out / "atm-3" / "manifest.json", {
         and n["name"].split(":", 1)[-1] in {
             "one_over_maximum_caller_plan_is_refused_before_media_append",
             "unbound_heap_authority_predicate_fails_closed_and_replays_after_restart",
+            "atomic_cohort_serializes_conflicts_and_keeps_refusals_independent",
+            "atomic_cohort_crash_cuts_recover_only_legal_whole_decisions",
         }
     ],
     "verify_profile": profile,
