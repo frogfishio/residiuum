@@ -347,9 +347,13 @@ impl HeapStore {
             .physical
             .lock()
             .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
-        guard
-            .atomic_stage_for_heap_with_authority(atomic_heap, authority_revision)?
-            .decide_plan_evidence(plan)
+        let mut stage =
+            guard.atomic_stage_for_heap_with_authority(atomic_heap, authority_revision)?;
+        let result = stage.decide_plan_evidence(plan);
+        if result.is_ok() {
+            stage.return_to_store_cache();
+        }
+        result
     }
 
     /// Qualification-only ATM-3 product outcome and exact member receipts.
@@ -383,11 +387,16 @@ impl HeapStore {
         let open_started = Instant::now();
         let mut stage =
             guard.atomic_stage_for_heap_with_authority(atomic_heap, authority_revision)?;
-        self.atomics.record_catalog_open(open_started.elapsed());
+        self.atomics.record_catalog_open(
+            open_started.elapsed(),
+            stage.open_report().catalog_loads == 0,
+        );
         let execution_started = Instant::now();
         let result = stage.decide_plan_outcome(plan);
         let phases = stage.phase_timing();
-        drop(stage);
+        if result.is_ok() {
+            stage.return_to_store_cache();
+        }
         let after = guard.write_path_stats().authoritative_io;
         self.atomics.record_execution(
             plan.mutations().len(),
@@ -413,9 +422,12 @@ impl HeapStore {
             .physical
             .lock()
             .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
-        guard
-            .atomic_stage_for_heap(atomic_heap)?
-            .atomic_status(atomic_id)
+        let stage = guard.atomic_stage_for_heap(atomic_heap)?;
+        let result = stage.atomic_status(atomic_id);
+        if result.is_ok() {
+            stage.return_to_store_cache();
+        }
+        result
     }
 
     /// Qualification-only ATM-3D cohort. Independent plan outcomes share the
@@ -439,9 +451,13 @@ impl HeapStore {
             .physical
             .lock()
             .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
-        guard
-            .atomic_stage_for_heap_with_authority(atomic_heap, authority_revision)?
-            .decide_plan_cohort_outcomes(plans)
+        let mut stage =
+            guard.atomic_stage_for_heap_with_authority(atomic_heap, authority_revision)?;
+        let result = stage.decide_plan_cohort_outcomes(plans);
+        if result.is_ok() {
+            stage.return_to_store_cache();
+        }
+        result
     }
 
     /// Decode and validate a SubjectV2 buffer for this bound heap.

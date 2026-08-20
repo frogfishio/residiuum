@@ -85,6 +85,8 @@ struct CellReport {
     authoritative_write_operations: u64,
     authoritative_sync_operations: u64,
     durability_cohorts: u64,
+    catalog_cache_hits: u64,
+    catalog_cache_misses: u64,
     commits_per_second: f64,
     member_mutations_per_second: f64,
     end_to_end_ns: Percentiles,
@@ -238,6 +240,8 @@ fn run_case(
     let mut writes = 0u64;
     let mut syncs = 0u64;
     let mut cohorts = 0u64;
+    let mut catalog_cache_hits = 0u64;
+    let mut catalog_cache_misses = 0u64;
     let mut elapsed_total = Duration::ZERO;
 
     for iteration in 0..iterations {
@@ -307,6 +311,12 @@ fn run_case(
         ));
         cohorts =
             cohorts.saturating_add(delta(after.durability_cohorts, before.durability_cohorts));
+        catalog_cache_hits = catalog_cache_hits
+            .saturating_add(delta(after.catalog_cache_hits, before.catalog_cache_hits));
+        catalog_cache_misses = catalog_cache_misses.saturating_add(delta(
+            after.catalog_cache_misses,
+            before.catalog_cache_misses,
+        ));
         elapsed_total = elapsed_total.saturating_add(elapsed);
         samples.end_to_end.push(nanos(elapsed));
         samples
@@ -343,6 +353,8 @@ fn run_case(
         authoritative_write_operations: writes,
         authoritative_sync_operations: syncs,
         durability_cohorts: cohorts,
+        catalog_cache_hits,
+        catalog_cache_misses,
         commits_per_second: completed as f64 / seconds,
         member_mutations_per_second: (completed * case.members) as f64 / seconds,
         end_to_end_ns: percentiles(samples.end_to_end),
@@ -368,6 +380,8 @@ fn skipped(case: Case, detail: String) -> CellReport {
         authoritative_write_operations: 0,
         authoritative_sync_operations: 0,
         durability_cohorts: 0,
+        catalog_cache_hits: 0,
+        catalog_cache_misses: 0,
         commits_per_second: 0.0,
         member_mutations_per_second: 0.0,
         end_to_end_ns: Percentiles::default(),

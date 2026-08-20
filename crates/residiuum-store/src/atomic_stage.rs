@@ -54,6 +54,7 @@ const DEFAULT_ATOMIC_DETAIL_RETENTION_SECS: u64 = 90 * 24 * 60 * 60;
 pub struct StoreAtomicStage<'a> {
     store: &'a mut Store,
     heap: StagingHeap,
+    cached_heaps: HashMap<HeapId, StagingHeap>,
     catalog: StageCatalog,
     covered: Vec<CoveredFile>,
     report: AtomicStageOpenReport,
@@ -63,6 +64,34 @@ pub struct StoreAtomicStage<'a> {
     /// Raw Store callers intentionally have no trusted authority binding.
     authority_revision: Option<[u8; 32]>,
     phase_timing: AtomicPhaseTiming,
+}
+
+/// Store-handle resident Atomic authority. Durable segment/checkpoint media is
+/// still authoritative; this cache prevents reopening the same authenticated
+/// catalogue and rebuilding every Heap kernel for each commit.
+pub(crate) struct AtomicStageCache {
+    catalog: StageCatalog,
+    covered: Vec<CoveredFile>,
+    report: AtomicStageOpenReport,
+    findings: StageFindings,
+    heaps: HashMap<HeapId, StagingHeap>,
+}
+
+impl StoreAtomicStage<'_> {
+    /// Return authenticated live state to the owning Store after one product
+    /// operation. Manual/raw stage handles retain their historical drop
+    /// semantics and therefore cannot change downstream borrow ergonomics.
+    pub(crate) fn return_to_store_cache(mut self) {
+        let heap_id = self.heap.heap_id();
+        self.cached_heaps.insert(heap_id, self.heap);
+        self.store.atomic_stage_cache = Some(AtomicStageCache {
+            catalog: self.catalog,
+            covered: self.covered,
+            report: self.report,
+            findings: self.findings,
+            heaps: self.cached_heaps,
+        });
+    }
 }
 
 /// Per-execution timings transferred into constant-space host counters.
@@ -246,16 +275,63 @@ impl Store {
                 "atomic stage requires the store writer lock".into(),
             ));
         }
-        let opened = open_catalog(self.paths(), limits)?;
-        let heap = rebuild_heap(self.paths(), heap_id, &opened.catalog)?;
-        self.record_atomic_stage_open(opened.report);
+        let cached = if limits == AtomicStageLimits::operable() {
+            self.atomic_stage_cache.take()
+        } else {
+            self.atomic_stage_cache = None;
+            None
+        };
+        let (heap, cached_heaps, catalog, covered, report, findings) =
+            if let Some(mut cache) = cached {
+                let heap = match cache.heaps.remove(&heap_id) {
+                    Some(heap) => heap,
+                    None => match rebuild_heap(self.paths(), heap_id, &cache.catalog) {
+                        Ok(heap) => heap,
+                        Err(error) => {
+                            self.atomic_stage_cache = Some(cache);
+                            return Err(error);
+                        }
+                    },
+                };
+                let mut report = cache.report;
+                report.disposition = crate::AtomicStageDisposition::NotRun;
+                report.bytes_scanned = 0;
+                report.checkpoint_bytes = 0;
+                report.frames = 0;
+                report.dirents = 0;
+                report.files_skipped = 0;
+                report.files_tailed = 0;
+                report.files_rebuilt = 0;
+                report.catalog_loads = 0;
+                (
+                    heap,
+                    cache.heaps,
+                    cache.catalog,
+                    cache.covered,
+                    report,
+                    cache.findings,
+                )
+            } else {
+                let opened = open_catalog(self.paths(), limits)?;
+                let heap = rebuild_heap(self.paths(), heap_id, &opened.catalog)?;
+                (
+                    heap,
+                    HashMap::new(),
+                    opened.catalog,
+                    opened.covered,
+                    opened.report,
+                    opened.findings,
+                )
+            };
+        self.record_atomic_stage_open(report);
         Ok(StoreAtomicStage {
             store: self,
             heap,
-            catalog: opened.catalog,
-            covered: opened.covered,
-            report: opened.report,
-            findings: opened.findings,
+            cached_heaps,
+            catalog,
+            covered,
+            report,
+            findings,
             limits,
             authority_revision,
             phase_timing: AtomicPhaseTiming::default(),
@@ -301,6 +377,15 @@ impl Store {
                 .filter(|decision| decision.decision == DecisionCode::Committed)
                 .count() as u32;
             self.record_atomic_stage_open(opened.report);
+            if !readonly {
+                self.atomic_stage_cache = Some(AtomicStageCache {
+                    catalog: opened.catalog,
+                    covered: opened.covered,
+                    report: opened.report,
+                    findings: opened.findings,
+                    heaps: HashMap::new(),
+                });
+            }
             return Ok(());
         }
 
@@ -349,6 +434,15 @@ impl Store {
             self.publish_atomic_generation(&delta, true)?;
         }
         self.record_atomic_stage_open(opened.report);
+        if !readonly {
+            self.atomic_stage_cache = Some(AtomicStageCache {
+                catalog: opened.catalog,
+                covered: opened.covered,
+                report: opened.report,
+                findings: opened.findings,
+                heaps: HashMap::new(),
+            });
+        }
         Ok(())
     }
 }

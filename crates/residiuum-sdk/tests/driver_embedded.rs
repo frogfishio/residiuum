@@ -304,6 +304,8 @@ fn atomic_driver_runs_gremlin_three_record_journey_and_restart_resolution() {
     assert!(first_store_stats.member_boundary_ns > 0);
     assert!(first_store_stats.decision_boundary_ns > 0);
     assert!(first_store_stats.publication_ns > 0);
+    assert_eq!(first_store_stats.catalog_cache_misses, 1);
+    assert_eq!(first_store_stats.catalog_cache_hits, 0);
 
     let AtomicOutcome::Committed(replayed) = block_on(heap.commit_atomic(plan.clone())).unwrap()
     else {
@@ -315,12 +317,68 @@ fn atomic_driver_runs_gremlin_three_record_journey_and_restart_resolution() {
     assert_eq!(replay_store_stats.executions, 2);
     assert_eq!(replay_store_stats.committed, 2);
     assert_eq!(replay_store_stats.replayed, 1);
+    assert_eq!(replay_store_stats.catalog_cache_misses, 1);
+    assert_eq!(replay_store_stats.catalog_cache_hits, 1);
     assert_eq!(replay_store_stats.members, 6);
     assert_eq!(replay_store_stats.durability_cohorts, 1);
     assert_eq!(
         replay_store_stats.authoritative_sync_operations,
         first_store_stats.authoritative_sync_operations,
         "durable replay must not create another physical sync"
+    );
+
+    // An ordinary write between Atomic executions invalidates the hot
+    // projection. The following stale Atomic must observe the newer ordinary
+    // version after the catalogue tails current media, never commit against
+    // the cached pre-write kernel.
+    let ordinary = block_on(states.put("ordinary-interleave", &json!({"turn": 0}))).unwrap();
+    let mut establish = heap
+        .atomic(AtomicOptions::new(AtomicId::random().unwrap()))
+        .unwrap();
+    establish
+        .replace(
+            &states,
+            "ordinary-interleave",
+            ordinary.storage.event_id,
+            &json!({"turn": 1}),
+        )
+        .unwrap();
+    let AtomicOutcome::Committed(established_atomic) =
+        block_on(heap.commit_atomic(establish.build().unwrap())).unwrap()
+    else {
+        panic!("ordinary-to-Atomic interleave did not commit")
+    };
+    let atomic_version = established_atomic.members[0]
+        .after_version
+        .expect("replace must establish a version")
+        .to_bytes();
+    block_on(states.replace(
+        "ordinary-interleave",
+        &json!({"turn": 2}),
+        ReplaceOptions {
+            if_version: atomic_version,
+            context: OperationContext::default(),
+        },
+    ))
+    .unwrap();
+    let mut stale_after_ordinary = heap
+        .atomic(AtomicOptions::new(AtomicId::random().unwrap()))
+        .unwrap();
+    stale_after_ordinary
+        .replace(
+            &states,
+            "ordinary-interleave",
+            atomic_version,
+            &json!({"turn": 3, "stale": true}),
+        )
+        .unwrap();
+    assert!(matches!(
+        block_on(heap.commit_atomic(stale_after_ordinary.build().unwrap())).unwrap(),
+        AtomicOutcome::NotCommitted { .. }
+    ));
+    assert_eq!(
+        block_on(states.get("ordinary-interleave")).unwrap(),
+        Some(json!({"turn": 2}))
     );
     assert_eq!(
         block_on(heap.atomic_status(atomic_id)).unwrap().logical,
@@ -864,6 +922,60 @@ fn one_physical_connection_serves_multiple_authorized_heaps() {
         Some(json!({ "owner": "gremlin" }))
     );
 
+    // Alternate Atomic execution across both Heap bindings, then return to the
+    // first Heap. The physical connection may cache authority, but never merge
+    // Heap-local staging kernels or identity spaces.
+    let mut tinker_atomic = tinker
+        .atomic(AtomicOptions::new(AtomicId::random().unwrap()))
+        .unwrap();
+    tinker_atomic
+        .create(
+            &tinker_sessions,
+            "atomic-shared",
+            &json!({"heap": "tinker"}),
+        )
+        .unwrap();
+    assert!(matches!(
+        block_on(tinker.commit_atomic(tinker_atomic.build().unwrap())).unwrap(),
+        AtomicOutcome::Committed(_)
+    ));
+    let mut gremlin_atomic = gremlin
+        .atomic(AtomicOptions::new(AtomicId::random().unwrap()))
+        .unwrap();
+    gremlin_atomic
+        .create(
+            &gremlin_sessions,
+            "atomic-shared",
+            &json!({"heap": "gremlin"}),
+        )
+        .unwrap();
+    assert!(matches!(
+        block_on(gremlin.commit_atomic(gremlin_atomic.build().unwrap())).unwrap(),
+        AtomicOutcome::Committed(_)
+    ));
+    let mut tinker_again = tinker
+        .atomic(AtomicOptions::new(AtomicId::random().unwrap()))
+        .unwrap();
+    tinker_again
+        .create(
+            &tinker_sessions,
+            "atomic-return",
+            &json!({"heap": "tinker"}),
+        )
+        .unwrap();
+    assert!(matches!(
+        block_on(tinker.commit_atomic(tinker_again.build().unwrap())).unwrap(),
+        AtomicOutcome::Committed(_)
+    ));
+    assert_eq!(
+        block_on(tinker_sessions.get("atomic-shared")).unwrap(),
+        Some(json!({"heap": "tinker"}))
+    );
+    assert_eq!(
+        block_on(gremlin_sessions.get("atomic-shared")).unwrap(),
+        Some(json!({"heap": "gremlin"}))
+    );
+
     let tinker_page = block_on(tinker_sessions.scan_page(ScanOptions {
         page_size: 1,
         ..ScanOptions::default()
@@ -879,6 +991,9 @@ fn one_physical_connection_serves_multiple_authorized_heaps() {
     assert_eq!(cursor_error.code, ErrorCode::PermissionDenied);
 
     assert_eq!(tinker.inspect(), gremlin.inspect());
+    let atomic_cache = connection.inspect().atomics.store.unwrap();
+    assert_eq!(atomic_cache.catalog_cache_misses, 1);
+    assert_eq!(atomic_cache.catalog_cache_hits, 2);
     block_on(connection.close()).unwrap();
     assert_eq!(
         block_on(tinker_sessions.get("shared-key"))

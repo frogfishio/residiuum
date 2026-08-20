@@ -11,10 +11,14 @@ Execution authority:
 
 Current continuation point:
 
+- [ATM5G_HOT_AUTHORITY_CACHE_BASELINE_2026-08-21.md](./ATM5G_HOT_AUTHORITY_CACHE_BASELINE_2026-08-21.md)
+  — authenticated store-handle authority reuse, per-Heap kernel isolation,
+  ordinary-write invalidation, exact hit/miss telemetry and the current
+  two-write/two-sync performance baseline.
 - [ATM5F_QUALIFICATION_DIPSTICK_BASELINE_2026-08-21.md](./ATM5F_QUALIFICATION_DIPSTICK_BASELINE_2026-08-21.md)
   — reproducible public-driver matrix, admission correctness fixes, gathered
-  two-write/two-sync Atomic commits and the first measured optimization
-  baseline; catalogue reconstruction is the next dominant target.
+  two-write/two-sync Atomic commits and the predecessor measured optimization
+  baseline.
 - [ATM5E_STORE_TELEMETRY_BASELINE_2026-08-20.md](./ATM5E_STORE_TELEMETRY_BASELINE_2026-08-20.md)
   — store-derived physical I/O/sync/cohort, recovery and bounded phase
   telemetry exposed through the smart client.

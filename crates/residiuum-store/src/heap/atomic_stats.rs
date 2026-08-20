@@ -33,6 +33,10 @@ pub struct AtomicStoreStats {
     pub catalog_open_ns: u64,
     /// Largest Atomic catalogue open/reconstruction time.
     pub max_catalog_open_ns: u64,
+    /// Executions served from the authenticated store-handle catalogue cache.
+    pub catalog_cache_hits: u64,
+    /// Executions that had to open/reconstruct catalogue authority from media.
+    pub catalog_cache_misses: u64,
     /// Aggregate decision/publication execution time after catalogue open.
     pub decision_publish_ns: u64,
     /// Largest decision/publication execution time.
@@ -91,6 +95,8 @@ pub(super) struct AtomicStoreCounters {
     max_store_lock_wait_ns: AtomicU64,
     catalog_open_ns: AtomicU64,
     max_catalog_open_ns: AtomicU64,
+    catalog_cache_hits: AtomicU64,
+    catalog_cache_misses: AtomicU64,
     decision_publish_ns: AtomicU64,
     max_decision_publish_ns: AtomicU64,
     validation_ns: AtomicU64,
@@ -117,8 +123,13 @@ impl AtomicStoreCounters {
         );
     }
 
-    pub(super) fn record_catalog_open(&self, elapsed: Duration) {
+    pub(super) fn record_catalog_open(&self, elapsed: Duration, cache_hit: bool) {
         record_duration(&self.catalog_open_ns, &self.max_catalog_open_ns, elapsed);
+        if cache_hit {
+            self.catalog_cache_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.catalog_cache_misses.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub(super) fn record_execution(
@@ -215,6 +226,8 @@ impl AtomicStoreCounters {
             max_store_lock_wait_ns: self.max_store_lock_wait_ns.load(Ordering::Relaxed),
             catalog_open_ns: self.catalog_open_ns.load(Ordering::Relaxed),
             max_catalog_open_ns: self.max_catalog_open_ns.load(Ordering::Relaxed),
+            catalog_cache_hits: self.catalog_cache_hits.load(Ordering::Relaxed),
+            catalog_cache_misses: self.catalog_cache_misses.load(Ordering::Relaxed),
             decision_publish_ns: self.decision_publish_ns.load(Ordering::Relaxed),
             max_decision_publish_ns: self.max_decision_publish_ns.load(Ordering::Relaxed),
             validation_ns: self.validation_ns.load(Ordering::Relaxed),

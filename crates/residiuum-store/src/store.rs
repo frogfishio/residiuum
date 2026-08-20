@@ -1010,6 +1010,9 @@ pub struct Store {
     /// frames remain independently checksummed segment frames, but their
     /// contiguous tail is submitted by the next durable Atomic boundary.
     atomic_frame_cohort_gathering: bool,
+    /// Authenticated Atomic catalogue and per-Heap kernels retained for the
+    /// life of this writer handle. Media remains the recovery authority.
+    pub(crate) atomic_stage_cache: Option<crate::atomic_stage::AtomicStageCache>,
     /// Ordered exact product reservations cooking outside the store lock.
     /// V1 permits at most two; direct mutation refuses while non-empty.
     operation_reservation_chain: Vec<[u8; 16]>,
@@ -1352,6 +1355,7 @@ impl Store {
             write_dedup_recovery_scan_bytes: 0,
             operation_cohort_gathering: false,
             atomic_frame_cohort_gathering: false,
+            atomic_stage_cache: None,
             operation_reservation_chain: Vec::new(),
             last_operation_parallel_cooked: 0,
             last_operation_cohort_timing: OperationCohortTiming::default(),
@@ -1508,6 +1512,7 @@ impl Store {
             write_dedup_recovery_scan_bytes: 0,
             operation_cohort_gathering: false,
             atomic_frame_cohort_gathering: false,
+            atomic_stage_cache: None,
             operation_reservation_chain: Vec::new(),
             last_operation_parallel_cooked: 0,
             last_operation_cohort_timing: OperationCohortTiming::default(),
@@ -1824,6 +1829,7 @@ impl Store {
             write_dedup_recovery_scan_bytes: 0,
             operation_cohort_gathering: false,
             atomic_frame_cohort_gathering: false,
+            atomic_stage_cache: None,
             operation_reservation_chain: Vec::new(),
             last_operation_parallel_cooked: 0,
             last_operation_cohort_timing: OperationCohortTiming::default(),
@@ -2839,6 +2845,11 @@ impl Store {
             return Err(StoreError::PayloadTooLarge);
         }
         let admit = self.large_value_policy.admit(value.len())?;
+        // The store-resident Atomic kernel is a projection of ordinary and
+        // Atomic history at the instant it was returned. Any ordinary
+        // mutation must force the next Atomic operation to authenticate and
+        // tail current media before evaluating conditions.
+        self.atomic_stage_cache = None;
         // Memory mode is visibility-only: keep the full body in the index and
         // never append frames (avoids later durable flushes contaminating disk).
         if mode == DurabilityMode::Memory {
@@ -3056,6 +3067,7 @@ impl Store {
         if items.is_empty() {
             return Ok(Vec::new());
         }
+        self.atomic_stage_cache = None;
         // DEF-103: fail closed before any parallel work if any item is over limit.
         let effective_max = self
             .large_value_policy
@@ -3101,6 +3113,7 @@ impl Store {
         if items.is_empty() {
             return Ok(Vec::new());
         }
+        self.atomic_stage_cache = None;
         let effective_max = self
             .large_value_policy
             .effective_with(self.limits.max_body_len);
@@ -4306,6 +4319,7 @@ impl Store {
         if items.is_empty() {
             return Ok(Vec::new());
         }
+        self.atomic_stage_cache = None;
         self.ensure_write_dedup_reconciled()?;
 
         let mut outcomes: Vec<Option<Result<OperationPutOutcome, StoreError>>> =
@@ -5831,6 +5845,7 @@ impl Store {
             return Err(StoreError::AdaptiveWriterPoisoned);
         }
         self.check_write_condition(subject, condition)?;
+        self.atomic_stage_cache = None;
         let result = self.write_event(subject, EventKind::Delete, &[], mode, identity);
         if result.is_err() && mode != DurabilityMode::Memory {
             self.awo_writer_poisoned = true;
@@ -6311,6 +6326,10 @@ impl Store {
                 refer.body.rel_path = to.clone();
             }
         }
+        // Covered-file authentication changes across rotation/relocation. Do
+        // not retain a catalogue whose coverage frontier names the old path;
+        // the next Atomic open heals and reauthenticates it from media.
+        self.atomic_stage_cache = None;
     }
 
     /// Release the writer without seal/flush. Crash-media tests only (CR-ATMR6-007).
