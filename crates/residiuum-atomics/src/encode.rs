@@ -176,6 +176,21 @@ pub fn encode_assert_version(
     }
 }
 
+/// Encode an RQL/RRE-compiled exact-scalar equality predicate.
+pub fn encode_exact_scalar_equality(
+    collection_id: CollectionId,
+    key: CanonicalKey,
+    predicate: &crate::predicate::ExactScalarEquality,
+) -> Result<PlanPredicate, AtomicsError> {
+    Ok(PlanPredicate {
+        kind: PredicateKind::ExactScalarEquality,
+        collection_id: Some(collection_id),
+        key: Some(key),
+        version: None,
+        encoded: Some(crate::predicate::encode_exact_scalar_payload(predicate)?),
+    })
+}
+
 /// Encode heap authority/security revision (`ATOMICS_SPEC` §7).
 ///
 /// This is not an active RRE rule revision. The payload is the 32-byte

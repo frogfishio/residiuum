@@ -229,6 +229,14 @@ fn validate_predicate_shapes(predicates: &[PlanPredicate]) -> Result<(), Atomics
                     && p.version.is_none()
                     && p.encoded.as_ref().is_some_and(|e| e.len() == 32)
             }
+            PredicateKind::ExactScalarEquality => {
+                p.collection_id.is_some()
+                    && p.key.is_some()
+                    && p.version.is_none()
+                    && p.encoded.as_deref().is_some_and(|bytes| {
+                        crate::predicate::decode_exact_scalar_payload(bytes).is_ok()
+                    })
+            }
             _ => true,
         };
         if !ok {

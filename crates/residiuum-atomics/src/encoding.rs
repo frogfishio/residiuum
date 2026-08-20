@@ -24,6 +24,39 @@ pub enum ValueEncoding {
 }
 
 impl ValueEncoding {
+    /// Stable wire code used inside compiled Atomic predicate payloads.
+    pub const fn wire_code(self) -> u8 {
+        match self {
+            Self::Bytes => 1,
+            Self::Utf8 => 2,
+            Self::Integer => 3,
+            Self::Decimal => 4,
+        }
+    }
+
+    /// Decode a known compiled-predicate wire code.
+    pub const fn from_wire_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Bytes),
+            2 => Some(Self::Utf8),
+            3 => Some(Self::Integer),
+            4 => Some(Self::Decimal),
+            _ => None,
+        }
+    }
+
+    /// Refuse bytes that are not canonical under this scalar encoding.
+    pub fn admit_bytes(self, bytes: &[u8]) -> Result<(), AtomicsError> {
+        match self {
+            Self::Bytes => Ok(()),
+            Self::Utf8 => std::str::from_utf8(bytes)
+                .map(|_| ())
+                .map_err(|_| invalid_err()),
+            Self::Integer => verify_signed_integer(bytes),
+            Self::Decimal => verify_decimal_value(bytes).map(|_| ()),
+        }
+    }
+
     /// Wire-adjacent name for tests and later SDK mapping.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -92,14 +125,7 @@ impl EncodingProfile {
 
     /// Refuse a value payload that fails this profile.
     pub fn admit_value_bytes(self, bytes: &[u8]) -> Result<(), AtomicsError> {
-        match self.value {
-            ValueEncoding::Bytes => Ok(()),
-            ValueEncoding::Utf8 => std::str::from_utf8(bytes)
-                .map(|_| ())
-                .map_err(|_| invalid_err()),
-            ValueEncoding::Integer => verify_signed_integer(bytes),
-            ValueEncoding::Decimal => verify_decimal_value(bytes).map(|_| ()),
-        }
+        self.value.admit_bytes(bytes)
     }
 }
 

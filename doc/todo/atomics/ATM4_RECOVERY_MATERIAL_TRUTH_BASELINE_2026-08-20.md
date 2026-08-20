@@ -191,8 +191,12 @@ media permits and are never interpreted as the new composite-key format.
   planned create/put/replace/delete from a canonical bounded overlay and emits
   no false external dependency witness. The host version-bearing read bridge
   remains deliberately behind the ATM-5 capability composition boundary.
-- **Remaining:** host construction-session bridge; exact scalar predicate;
-  bounded exact-range presence/absence and phantom proof; rule/lifecycle
+- **Delivered in ATM-4D.3 execution core:** deterministic typed exact-scalar
+  payload, canonical validation, serialization-frontier and cohort-overlay
+  execution, and independent serial-history negative control. The canonical
+  RQL/RRE compiler bridge and heterogeneous query differential remain open.
+- **Remaining:** host construction-session bridge; bounded exact-range
+  presence/absence and phantom proof; rule/lifecycle
   predicates; broader randomized concurrent/restart histories and two-Heap
   noninterference.
 - Detailed contract and delivery order:

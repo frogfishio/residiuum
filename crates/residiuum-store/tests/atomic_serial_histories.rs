@@ -3,16 +3,24 @@
 #![cfg(feature = "legacy-raw-store")]
 
 use residiuum_atomics::{
-    AtomicAbortReason, AtomicCohortOutcome, AtomicId, AtomicOutcome, AtomicPlan, AtomicPlanParts,
-    AtomicProfile, CanonicalKey, CollectionId, CoordinationScope, HeapId, MutationKind,
-    PlanMutation, PlanPredicate, PredicateKind, ReadWitness, ResourceLimits, VersionId,
+    decode_exact_scalar_payload, encode_exact_scalar_equality, AtomicAbortReason,
+    AtomicCohortOutcome, AtomicId, AtomicOutcome, AtomicPlan, AtomicPlanParts, AtomicProfile,
+    CanonicalKey, CollectionId, CoordinationScope, ExactScalarEquality, HeapId, MutationKind,
+    PlanMutation, PlanPredicate, PredicateKind, ReadWitness, ResourceLimits, ValueEncoding,
+    VersionId,
 };
 use residiuum_format::{encode_subject_v2, SubjectObjectKind};
 use residiuum_store::{DurabilityMode, Store};
 use std::collections::BTreeMap;
 
 type CellKey = (CollectionId, Vec<u8>);
-type SerialState = BTreeMap<CellKey, VersionId>;
+#[derive(Clone)]
+struct SerialCell {
+    version: VersionId,
+    value: Vec<u8>,
+}
+
+type SerialState = BTreeMap<CellKey, SerialCell>;
 
 fn atomic(first: u8) -> AtomicId {
     let mut bytes = [0u8; 32];
@@ -115,9 +123,22 @@ fn assert_absent(name: &str) -> PlanPredicate {
     }
 }
 
+fn exact_scalar(name: &str, expected: &[u8]) -> PlanPredicate {
+    encode_exact_scalar_equality(
+        collection(),
+        key(name),
+        &ExactScalarEquality::new(ValueEncoding::Bytes, expected).unwrap(),
+    )
+    .unwrap()
+}
+
 fn plan_is_valid(plan: &AtomicPlan, state: &SerialState) -> bool {
     for read in plan.reads() {
-        if state.get(&cell_key(read.collection_id, &read.key)).copied() != read.observed_version {
+        if state
+            .get(&cell_key(read.collection_id, &read.key))
+            .map(|cell| cell.version)
+            != read.observed_version
+        {
             return false;
         }
     }
@@ -129,11 +150,18 @@ fn plan_is_valid(plan: &AtomicPlan, state: &SerialState) -> bool {
         else {
             return false;
         };
-        let observed = state.get(&cell_key(collection_id, key)).copied();
+        let observed = state.get(&cell_key(collection_id, key));
         let valid = match predicate.kind {
             PredicateKind::AssertAbsent => observed.is_none(),
             PredicateKind::AssertPresent => observed.is_some(),
-            PredicateKind::AssertVersion => observed == predicate.version,
+            PredicateKind::AssertVersion => observed.map(|cell| cell.version) == predicate.version,
+            PredicateKind::ExactScalarEquality => predicate
+                .encoded
+                .as_deref()
+                .and_then(|bytes| decode_exact_scalar_payload(bytes).ok())
+                .is_some_and(|compiled| {
+                    compiled.evaluate(observed.map(|cell| cell.value.as_slice()))
+                }),
             _ => false,
         };
         if !valid {
@@ -143,7 +171,7 @@ fn plan_is_valid(plan: &AtomicPlan, state: &SerialState) -> bool {
     plan.mutations().iter().all(|mutation| {
         let observed = state
             .get(&cell_key(mutation.collection_id, &mutation.key))
-            .copied();
+            .map(|cell| cell.version);
         match mutation.kind {
             MutationKind::Create => observed.is_none(),
             MutationKind::Put => true,
@@ -174,7 +202,13 @@ fn apply_committed(
                 state.remove(&identity);
             }
             _ => {
-                state.insert(identity, member.after_version?);
+                state.insert(
+                    identity,
+                    SerialCell {
+                        version: member.after_version?,
+                        value: mutation.encoded_value.clone()?,
+                    },
+                );
             }
         }
     }
@@ -241,11 +275,14 @@ fn find_serial_order(
     search(initial, plans, outcomes, &mut used, &mut order, 0).then_some(order)
 }
 
-fn seed(store: &mut Store, heap: HeapId, name: &str, value: &[u8]) -> VersionId {
+fn seed(store: &mut Store, heap: HeapId, name: &str, value: &[u8]) -> SerialCell {
     let receipt = store
         .put_subject_bytes(&subject(heap, &key(name)), value, DurabilityMode::Durable)
         .unwrap();
-    VersionId::from_bytes(receipt.event_id).unwrap()
+    SerialCell {
+        version: VersionId::from_bytes(receipt.event_id).unwrap(),
+        value: value.to_vec(),
+    }
 }
 
 fn run_cohort(store: &mut Store, heap: HeapId, plans: &[AtomicPlan]) -> Vec<AtomicCohortOutcome> {
@@ -269,21 +306,21 @@ fn lost_update_has_one_commit_and_an_independent_serial_order() {
     let mut store = Store::create(dir.path().join("s")).unwrap();
     let heap = HeapId::from_bytes(store.store_id()).unwrap();
     let version = seed(&mut store, heap, "counter", b"0");
-    let initial = BTreeMap::from([(cell_key(collection(), &key("counter")), version)]);
+    let initial = BTreeMap::from([(cell_key(collection(), &key("counter")), version.clone())]);
     let plans = vec![
         close_plan(
             heap,
             atomic(1),
             vec![],
             vec![],
-            vec![replace("counter", version, b"1")],
+            vec![replace("counter", version.version, b"1")],
         ),
         close_plan(
             heap,
             atomic(2),
             vec![],
             vec![],
-            vec![replace("counter", version, b"2")],
+            vec![replace("counter", version.version, b"2")],
         ),
     ];
     let outcomes = run_cohort(&mut store, heap, &plans);
@@ -299,23 +336,23 @@ fn write_skew_is_rejected_by_declared_read_witnesses() {
     let left = seed(&mut store, heap, "doctor-a", b"on");
     let right = seed(&mut store, heap, "doctor-b", b"on");
     let initial = BTreeMap::from([
-        (cell_key(collection(), &key("doctor-a")), left),
-        (cell_key(collection(), &key("doctor-b")), right),
+        (cell_key(collection(), &key("doctor-a")), left.clone()),
+        (cell_key(collection(), &key("doctor-b")), right.clone()),
     ]);
     let plans = vec![
         close_plan(
             heap,
             atomic(3),
-            vec![witness("doctor-b", Some(right))],
+            vec![witness("doctor-b", Some(right.version))],
             vec![],
-            vec![replace("doctor-a", left, b"off")],
+            vec![replace("doctor-a", left.version, b"off")],
         ),
         close_plan(
             heap,
             atomic(4),
-            vec![witness("doctor-a", Some(left))],
+            vec![witness("doctor-a", Some(left.version))],
             vec![],
-            vec![replace("doctor-b", right, b"off")],
+            vec![replace("doctor-b", right.version, b"off")],
         ),
     ];
     let outcomes = run_cohort(&mut store, heap, &plans);
@@ -328,14 +365,14 @@ fn write_skew_is_rejected_by_declared_read_witnesses() {
             atomic(3),
             vec![],
             vec![],
-            vec![replace("doctor-a", left, b"off")],
+            vec![replace("doctor-a", left.version, b"off")],
         ),
         close_plan(
             heap,
             atomic(4),
             vec![],
             vec![],
-            vec![replace("doctor-b", right, b"off")],
+            vec![replace("doctor-b", right.version, b"off")],
         ),
     ];
     assert!(
@@ -350,16 +387,22 @@ fn delete_recreate_never_accepts_the_pre_delete_version() {
     let mut store = Store::create(dir.path().join("s")).unwrap();
     let heap = HeapId::from_bytes(store.store_id()).unwrap();
     let old = seed(&mut store, heap, "aba", b"old");
-    let initial = BTreeMap::from([(cell_key(collection(), &key("aba")), old)]);
+    let initial = BTreeMap::from([(cell_key(collection(), &key("aba")), old.clone())]);
     let plans = vec![
-        close_plan(heap, atomic(5), vec![], vec![], vec![delete("aba", old)]),
+        close_plan(
+            heap,
+            atomic(5),
+            vec![],
+            vec![],
+            vec![delete("aba", old.version)],
+        ),
         close_plan(heap, atomic(6), vec![], vec![], vec![create("aba", b"new")]),
         close_plan(
             heap,
             atomic(7),
             vec![],
             vec![],
-            vec![replace("aba", old, b"stale")],
+            vec![replace("aba", old.version, b"stale")],
         ),
     ];
     let outcomes = run_cohort(&mut store, heap, &plans);
@@ -408,8 +451,8 @@ fn disjoint_updates_both_commit_while_still_forming_one_serial_history() {
     let left = seed(&mut store, heap, "left", b"0");
     let right = seed(&mut store, heap, "right", b"0");
     let initial = BTreeMap::from([
-        (cell_key(collection(), &key("left")), left),
-        (cell_key(collection(), &key("right")), right),
+        (cell_key(collection(), &key("left")), left.clone()),
+        (cell_key(collection(), &key("right")), right.clone()),
     ]);
     let plans = vec![
         close_plan(
@@ -417,14 +460,14 @@ fn disjoint_updates_both_commit_while_still_forming_one_serial_history() {
             atomic(10),
             vec![],
             vec![],
-            vec![replace("left", left, b"1")],
+            vec![replace("left", left.version, b"1")],
         ),
         close_plan(
             heap,
             atomic(11),
             vec![],
             vec![],
-            vec![replace("right", right, b"1")],
+            vec![replace("right", right.version, b"1")],
         ),
     ];
     let outcomes = run_cohort(&mut store, heap, &plans);
@@ -441,9 +484,9 @@ fn ordinary_write_before_atomic_serialization_invalidates_the_stale_version() {
     let plan = close_plan(
         heap,
         atomic(12),
-        vec![witness("mixed", Some(stale))],
+        vec![witness("mixed", Some(stale.version))],
         vec![],
-        vec![replace("mixed", stale, b"atomic")],
+        vec![replace("mixed", stale.version, b"atomic")],
     );
     let current = seed(&mut store, heap, "mixed", b"ordinary-1");
     let initial = BTreeMap::from([(cell_key(collection(), &key("mixed")), current)]);
@@ -460,6 +503,48 @@ fn ordinary_write_before_atomic_serialization_invalidates_the_stale_version() {
 }
 
 #[test]
+fn exact_scalar_dependency_has_an_independent_serial_explanation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::create(dir.path().join("s")).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let initial = SerialState::new();
+    let plans = vec![
+        close_plan(
+            heap,
+            atomic(13),
+            vec![],
+            vec![],
+            vec![create("scalar-source", b"ready")],
+        ),
+        close_plan(
+            heap,
+            atomic(14),
+            vec![],
+            vec![exact_scalar("scalar-source", b"ready")],
+            vec![create("scalar-result", b"accepted")],
+        ),
+    ];
+    let outcomes = run_cohort(&mut store, heap, &plans);
+    assert_eq!(committed_count(&outcomes), 2);
+    assert!(find_serial_order(&initial, &plans, &outcomes).is_some());
+
+    let impossible = vec![
+        plans[0].clone(),
+        close_plan(
+            heap,
+            atomic(14),
+            vec![],
+            vec![exact_scalar("scalar-source", b"different")],
+            vec![create("scalar-result", b"accepted")],
+        ),
+    ];
+    assert!(
+        find_serial_order(&initial, &impossible, &outcomes).is_none(),
+        "negative control: changing the scalar dependency must invalidate the recorded history"
+    );
+}
+
+#[test]
 fn deterministic_randomized_point_histories_all_have_a_checked_serial_order() {
     for campaign in 1u8..=24 {
         let dir = tempfile::tempdir().unwrap();
@@ -470,7 +555,7 @@ fn deterministic_randomized_point_histories_all_have_a_checked_serial_order() {
         let mut versions = Vec::new();
         for name in names {
             let version = seed(&mut store, heap, name, b"initial");
-            initial.insert(cell_key(collection(), &key(name)), version);
+            initial.insert(cell_key(collection(), &key(name)), version.clone());
             versions.push(version);
         }
 
@@ -488,7 +573,7 @@ fn deterministic_randomized_point_histories_all_have_a_checked_serial_order() {
                 vec![],
                 vec![replace(
                     names[target],
-                    versions[target],
+                    versions[target].version,
                     &[campaign, ordinal],
                 )],
             ));

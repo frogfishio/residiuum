@@ -96,9 +96,20 @@ Index and forced-scan execution must agree on the same canonical predicate.
 
 ### ATM-4D.3 — exact scalar predicate
 
-- freeze canonical payload and evaluator;
-- compile from the canonical RQL/RRE predicate representation;
-- scan/index differential proof and heterogeneous-value negative controls.
+- **Delivered execution core:** `predicates-v1.json` freezes a deterministic,
+  typed exact-scalar payload. Canonical byte, UTF-8, signed-integer and decimal
+  encodings are validated before prepare; absence is false. The store evaluates
+  at the serialization frontier and the cohort overlay carries both version and
+  value, so an earlier plan's mutation participates exactly.
+- **Delivered proof:** match, mismatch, absence, ordinary-write invalidation,
+  same-cohort planned-value visibility, canonical hostile payloads, rights and
+  encoding checks, plus an independent serial-checker negative control.
+- **Open compiler bridge:** canonical RQL/RRE lowering must call the typed
+  `compiled_exact_scalar_equality` hook. There is no host closure or arbitrary
+  executor bytecode path.
+- **Open query differential:** heterogeneous SDA/JSON query equality remains a
+  query-engine differential task; this scalar predicate deliberately covers
+  collections whose frozen value contract is scalar.
 
 ### ATM-4D.4 — bounded exact ranges
 

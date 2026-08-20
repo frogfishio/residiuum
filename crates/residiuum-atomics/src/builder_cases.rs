@@ -578,3 +578,71 @@ fn handle_carries_frozen_encoding_profile() {
     assert_eq!(handle.encoding().key_kind(), CanonicalKeyKind::Integer);
     assert_eq!(handle.encoding().value_encoding(), ValueEncoding::Integer);
 }
+
+#[test]
+fn compiled_exact_scalar_is_typed_authorized_and_canonical() {
+    let ints = coll_encoding(
+        1,
+        1,
+        CollectionRights::ordinary(),
+        1,
+        EncodingProfile::INTEGER,
+    );
+    let mut b = builder(1, 57);
+    b.compiled_exact_scalar_equality(
+        &ints,
+        CanonicalKey::integer(7),
+        CanonicalValue::from_integer(42),
+    )
+    .unwrap();
+    let plan = b.build().unwrap();
+    let predicate = plan
+        .predicates()
+        .iter()
+        .find(|predicate| predicate.kind == PredicateKind::ExactScalarEquality)
+        .unwrap();
+    let compiled =
+        crate::decode_exact_scalar_payload(predicate.encoded.as_deref().unwrap()).unwrap();
+    assert_eq!(compiled.encoding(), ValueEncoding::Integer);
+    assert_eq!(compiled.expected(), &[42]);
+
+    let readless = coll_encoding(1, 2, CollectionRights::CREATE, 1, EncodingProfile::INTEGER);
+    let mut denied = builder(1, 58);
+    assert_eq!(
+        denied
+            .compiled_exact_scalar_equality(
+                &readless,
+                CanonicalKey::integer(7),
+                CanonicalValue::from_integer(42),
+            )
+            .unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::AuthorizationFailure)
+    );
+
+    let bytes = coll_encoding(
+        1,
+        3,
+        CollectionRights::ordinary(),
+        1,
+        EncodingProfile::STRING_BYTES,
+    );
+    let mut forged = builder(1, 59);
+    forged
+        .compiled_exact_scalar_equality(
+            &bytes,
+            CanonicalKey::string("k"),
+            CanonicalValue::from_bytes(b"bytes"),
+        )
+        .unwrap();
+    let forged = forged.build().unwrap();
+    let mut integer_authority = view(1, 1);
+    integer_authority.grant_with_encoding(
+        cid(3),
+        CollectionRights::ordinary(),
+        EncodingProfile::new(CanonicalKeyKind::String, ValueEncoding::Integer),
+    );
+    assert_eq!(
+        admit_closed_plan(&forged, &integer_authority).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
+    );
+}

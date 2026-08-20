@@ -1,0 +1,31 @@
+{
+  "profile": "residiuum-atomic-predicates-v1",
+  "canonical_encoding": "deterministic_cbor_integer_keyed_map",
+  "exact_scalar_equality": {
+    "outer_predicate_kind": 4,
+    "outer_fields": {
+      "collection_id": "required",
+      "key": "required",
+      "version": "absent",
+      "encoded": "required"
+    },
+    "payload_fields": {
+      "1": { "name": "profile", "type": "uint", "required": true, "value": 1 },
+      "2": { "name": "value_encoding", "type": "uint", "required": true },
+      "3": { "name": "expected", "type": "bstr", "required": true }
+    },
+    "value_encoding_codes": {
+      "1": "bytes",
+      "2": "utf8",
+      "3": "canonical_signed_integer",
+      "4": "canonical_exact_decimal"
+    },
+    "semantics": {
+      "present": "true iff observed canonical scalar bytes equal expected bytes",
+      "absent": false,
+      "encoding_mismatch": "refuse before prepare",
+      "noncanonical_expected": "refuse before prepare",
+      "host_closures": "forbidden"
+    }
+  }
+}

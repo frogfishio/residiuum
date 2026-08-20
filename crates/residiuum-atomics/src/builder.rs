@@ -9,7 +9,8 @@
 use crate::canonical::key_order_bytes;
 use crate::encode::{
     encode_assert_absent, encode_assert_present, encode_assert_version, encode_create,
-    encode_delete, encode_heap_authority_revision, encode_put, encode_replace, CanonicalValue,
+    encode_delete, encode_exact_scalar_equality, encode_heap_authority_revision, encode_put,
+    encode_replace, CanonicalValue,
 };
 use crate::encoding::EncodingProfile;
 use crate::error::AtomicsError;
@@ -462,6 +463,32 @@ impl AtomicBuilder {
         Ok(self)
     }
 
+    /// Add an exact-scalar predicate produced by the canonical RQL/RRE compiler.
+    ///
+    /// This execution-level hook is typed and deterministic; it does not admit
+    /// a host closure or an unvalidated bytecode blob.
+    pub fn compiled_exact_scalar_equality(
+        &mut self,
+        collection: &BoundCollection,
+        key: CanonicalKey,
+        expected: CanonicalValue,
+    ) -> Result<&mut Self, AtomicsError> {
+        let id = self.admit(
+            collection,
+            CollectionRights::READ,
+            &key,
+            Some(&expected),
+            false,
+        )?;
+        let compiled = crate::predicate::ExactScalarEquality::new(
+            collection.encoding.value_encoding(),
+            expected.as_bytes(),
+        )?;
+        self.predicates
+            .push(encode_exact_scalar_equality(id, key, &compiled)?);
+        Ok(self)
+    }
+
     /// Record an exact-version prior read (`ATOMICS_SPEC` §7).
     pub fn witness_version(
         &mut self,
@@ -639,6 +666,28 @@ pub fn admit_closed_plan(
             if let Some(key) = &predicate.key {
                 require_encoding(trusted, cid, key, None)?;
             }
+            if predicate.kind == PredicateKind::ExactScalarEquality {
+                let compiled = predicate
+                    .encoded
+                    .as_deref()
+                    .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))
+                    .and_then(crate::predicate::decode_exact_scalar_payload)?;
+                let encoding = trusted.encoding(cid).ok_or(AtomicsError::Refused(
+                    AtomicRefuseReason::AuthorizationFailure,
+                ))?;
+                if compiled.encoding() != encoding.value_encoding() {
+                    return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+                }
+                require_encoding(
+                    trusted,
+                    cid,
+                    predicate
+                        .key
+                        .as_ref()
+                        .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?,
+                    Some(compiled.expected()),
+                )?;
+            }
         }
     }
     for read in plan.reads() {
@@ -682,7 +731,9 @@ fn right_for_mutation(mutation: &PlanMutation) -> CollectionRights {
 }
 
 fn right_for_predicate(predicate: &PlanPredicate) -> Option<(CollectionId, CollectionRights)> {
-    if !predicate.kind.is_public_builder_assert() {
+    if !predicate.kind.is_public_builder_assert()
+        && predicate.kind != PredicateKind::ExactScalarEquality
+    {
         return None;
     }
     predicate

@@ -40,6 +40,7 @@ pub mod limits;
 pub mod oracle;
 pub mod outcome;
 pub mod plan;
+pub mod predicate;
 pub mod prepare;
 pub mod staging;
 pub mod validate;
@@ -57,8 +58,8 @@ pub use canonical::{
 pub use cbor::MAX_CBOR_DEPTH;
 pub use encode::{
     account_closed_plan, encode_assert_absent, encode_assert_present, encode_assert_version,
-    encode_create, encode_delete, encode_heap_authority_revision, encode_put, encode_replace,
-    serialize_canonical_value, CanonicalValue, PlanAccounting,
+    encode_create, encode_delete, encode_exact_scalar_equality, encode_heap_authority_revision,
+    encode_put, encode_replace, serialize_canonical_value, CanonicalValue, PlanAccounting,
 };
 pub use encoding::{
     encode_decimal_value, encode_signed_integer, validate_canonical_key, verify_decimal_value,
@@ -88,6 +89,9 @@ pub use outcome::{
 pub use plan::{
     AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CanonicalKeyKind, CoordinationScope,
     MutationKind, PlanMutation, PlanPredicate, PredicateKind, ReadWitness, UnknownProfile,
+};
+pub use predicate::{
+    decode_exact_scalar_payload, encode_exact_scalar_payload, ExactScalarEquality,
 };
 pub use prepare::{
     members_match_prepare, plan_predicate_set_root, plan_read_set_root, plan_rule_revision_root,

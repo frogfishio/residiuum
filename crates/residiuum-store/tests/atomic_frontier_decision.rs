@@ -3,10 +3,10 @@
 #![cfg(feature = "legacy-raw-store")]
 
 use residiuum_atomics::{
-    AtomicAbortReason, AtomicId, AtomicOutcome, AtomicPlan, AtomicPlanParts, AtomicProfile,
-    CanonicalKey, CollectionId, CoordinationScope, DecisionCode, HeapId, LogicalStatus,
-    MaterialStatus, MutationKind, PlanMutation, PlanPredicate, PredicateKind, ResourceLimits,
-    VersionId,
+    encode_exact_scalar_equality, AtomicAbortReason, AtomicId, AtomicOutcome, AtomicPlan,
+    AtomicPlanParts, AtomicProfile, CanonicalKey, CollectionId, CoordinationScope, DecisionCode,
+    ExactScalarEquality, HeapId, LogicalStatus, MaterialStatus, MutationKind, PlanMutation,
+    PlanPredicate, PredicateKind, ResourceLimits, ValueEncoding, VersionId,
 };
 use residiuum_format::{encode_subject_v2, SubjectObjectKind};
 use residiuum_store::{
@@ -77,6 +77,31 @@ fn plan(
 
 fn create_two_plan(heap: HeapId, atomic_id: AtomicId) -> AtomicPlan {
     create_n_plan(heap, atomic_id, 2)
+}
+
+fn exact_scalar_plan(
+    heap: HeapId,
+    atomic_id: AtomicId,
+    predicate_key: CanonicalKey,
+    expected: &[u8],
+    mutation: Option<PlanMutation>,
+) -> AtomicPlan {
+    let compiled = ExactScalarEquality::new(ValueEncoding::Bytes, expected).unwrap();
+    AtomicPlan::close(AtomicPlanParts {
+        profile: AtomicProfile::LocalHeapV1,
+        atomic_id,
+        heap_id: heap,
+        scope: CoordinationScope::LocalHeap,
+        read_frontier: None,
+        reads: vec![],
+        predicates: vec![
+            encode_exact_scalar_equality(collection(), predicate_key, &compiled).unwrap(),
+        ],
+        mutations: mutation.into_iter().collect(),
+        active_rule_revisions: vec![],
+        limits: ResourceLimits::hard_local_heap(),
+    })
+    .unwrap()
 }
 
 fn create_n_plan(heap: HeapId, atomic_id: AtomicId, count: usize) -> AtomicPlan {
@@ -1208,6 +1233,155 @@ fn atomic_cohort_serializes_conflicts_and_keeps_refusals_independent() {
             .get_subject_bytes(&subject(heap, &CanonicalKey::string("other")))
             .unwrap(),
         Some(b"last".to_vec())
+    );
+}
+
+#[test]
+fn exact_scalar_equality_is_checked_at_the_serialization_frontier() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::create(dir.path().join("s")).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let guarded = CanonicalKey::string("guarded");
+    store
+        .put_subject_bytes(
+            &subject(heap, &guarded),
+            b"original",
+            DurabilityMode::Durable,
+        )
+        .unwrap();
+
+    let matching = exact_scalar_plan(
+        heap,
+        atomic(90),
+        guarded.clone(),
+        b"original",
+        Some(PlanMutation {
+            kind: MutationKind::Create,
+            collection_id: collection(),
+            key: CanonicalKey::string("match-result"),
+            encoded_value: Some(b"committed".to_vec()),
+            if_version: None,
+        }),
+    );
+    assert!(matches!(
+        store
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_outcome(&matching)
+            .unwrap(),
+        AtomicOutcome::Committed(_)
+    ));
+
+    let stale = exact_scalar_plan(
+        heap,
+        atomic(91),
+        guarded.clone(),
+        b"original",
+        Some(PlanMutation {
+            kind: MutationKind::Create,
+            collection_id: collection(),
+            key: CanonicalKey::string("stale-result"),
+            encoded_value: Some(b"must-not-publish".to_vec()),
+            if_version: None,
+        }),
+    );
+    store
+        .put_subject_bytes(
+            &subject(heap, &guarded),
+            b"ordinary-update",
+            DurabilityMode::Durable,
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_outcome(&stale)
+            .unwrap(),
+        AtomicOutcome::NotCommitted {
+            atomic_id: atomic(91),
+            reason: AtomicAbortReason::PreconditionConflict,
+        }
+    );
+    assert_eq!(
+        store
+            .get_subject_bytes(&subject(heap, &CanonicalKey::string("stale-result")))
+            .unwrap(),
+        None
+    );
+
+    let absent = exact_scalar_plan(
+        heap,
+        atomic(92),
+        CanonicalKey::string("missing"),
+        b"x",
+        None,
+    );
+    assert_eq!(
+        store
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_outcome(&absent)
+            .unwrap(),
+        AtomicOutcome::NotCommitted {
+            atomic_id: atomic(92),
+            reason: AtomicAbortReason::PreconditionConflict,
+        }
+    );
+}
+
+#[test]
+fn exact_scalar_predicate_reads_earlier_value_in_same_cohort() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::create(dir.path().join("s")).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let guarded = CanonicalKey::string("cohort-scalar");
+    let writer = plan(
+        heap,
+        atomic(93),
+        MutationKind::Create,
+        guarded.clone(),
+        Some(b"planned"),
+        None,
+    );
+    let sees_planned = exact_scalar_plan(
+        heap,
+        atomic(94),
+        guarded.clone(),
+        b"planned",
+        Some(PlanMutation {
+            kind: MutationKind::Create,
+            collection_id: collection(),
+            key: CanonicalKey::string("cohort-proof"),
+            encoded_value: Some(b"yes".to_vec()),
+            if_version: None,
+        }),
+    );
+    let sees_prestate = exact_scalar_plan(heap, atomic(95), guarded, b"old", None);
+
+    let outcomes = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_cohort_outcomes(&[writer, sees_planned, sees_prestate])
+        .unwrap();
+    assert!(matches!(outcomes[0], Ok(AtomicOutcome::Committed(_))));
+    assert!(matches!(outcomes[1], Ok(AtomicOutcome::Committed(_))));
+    assert_eq!(
+        outcomes[2],
+        Ok(AtomicOutcome::NotCommitted {
+            atomic_id: atomic(95),
+            reason: AtomicAbortReason::PreconditionConflict,
+        })
+    );
+    assert_eq!(
+        store
+            .get_subject_bytes(&subject(heap, &CanonicalKey::string("cohort-proof")))
+            .unwrap(),
+        Some(b"yes".to_vec())
     );
 }
 

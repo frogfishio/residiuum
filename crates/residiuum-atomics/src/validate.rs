@@ -13,9 +13,9 @@ use crate::plan::AtomicPlan;
 
 /// Validate a closed plan against the Heap that would accept it.
 ///
-/// Checks profile, scope, Heap binding, public-builder predicate vocabulary,
-/// and applied resource ceilings. Does not evaluate data preconditions or
-/// replay identity.
+/// Checks profile, scope, Heap binding, the closed executable predicate
+/// vocabulary, and applied resource ceilings. Does not evaluate data
+/// preconditions or replay identity.
 pub fn validate_closed_plan(plan: &AtomicPlan, bound_heap: HeapId) -> Result<(), AtomicsError> {
     if !plan.profile().execution_supported() {
         return Err(AtomicsError::Refused(

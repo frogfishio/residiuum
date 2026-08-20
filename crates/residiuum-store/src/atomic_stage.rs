@@ -24,13 +24,14 @@ use crate::atomic_stage_recover::{
 use crate::error::StoreError;
 use crate::store::Store;
 use residiuum_atomics::{
-    decision_hash, encode_decision, encode_member, encode_prepare, members_match_prepare,
-    ordered_member_manifest_root, plan_content_root, prepare_from_closed_plan, prepare_hash,
-    validate_closed_plan, AtomicAbortReason, AtomicCohortOutcome, AtomicDecision, AtomicId,
-    AtomicMember, AtomicMemberReceipt, AtomicOutcome, AtomicPlan, AtomicPrepare, AtomicReceipt,
-    AtomicRefuseReason, AtomicStatus, AtomicsError, ChunkPlan, CoordinatorSeq, DecisionCode,
-    HeapId, LogicalStatus, MaterialStatus, MemberPhase, MutationKind, ObjectIdentity,
-    PlacementManifest, PredicateKind, StagingHeap, VersionId,
+    decision_hash, decode_exact_scalar_payload, encode_decision, encode_member, encode_prepare,
+    members_match_prepare, ordered_member_manifest_root, plan_content_root,
+    prepare_from_closed_plan, prepare_hash, validate_closed_plan, AtomicAbortReason,
+    AtomicCohortOutcome, AtomicDecision, AtomicId, AtomicMember, AtomicMemberReceipt,
+    AtomicOutcome, AtomicPlan, AtomicPrepare, AtomicReceipt, AtomicRefuseReason, AtomicStatus,
+    AtomicsError, ChunkPlan, CoordinatorSeq, DecisionCode, HeapId, LogicalStatus, MaterialStatus,
+    MemberPhase, MutationKind, ObjectIdentity, PlacementManifest, PredicateKind, StagingHeap,
+    VersionId,
 };
 use residiuum_format::{
     encode_atomic_commit_envelope, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
@@ -69,6 +70,12 @@ enum StagePersistMode {
     /// executor establishes one explicit member boundary and one explicit
     /// decision boundary after every independent record in that phase exists.
     BufferedDeferredBoundary,
+}
+
+#[derive(Clone)]
+struct AtomicOverlayCell {
+    version: Option<VersionId>,
+    value: Option<Vec<u8>>,
 }
 
 /// Retention obligations applied before detailed Atomic evidence may be
@@ -1532,14 +1539,29 @@ impl StoreAtomicStage<'_> {
                 )?;
             }
             self.persist_seal(prepare.atomic_id, prepare.content_root, mode)?;
-            for member in &members {
+            for (member, mutation) in members.iter().zip(plan.mutations()) {
                 let subject = atomic_subject(
                     plan.heap_id(),
                     member.object_identity.collection_id,
                     &member.object_identity.key,
                 )?;
-                let after = (member.member_kind != MutationKind::Delete).then_some(member.event_id);
-                overlay.insert(subject, after);
+                let present = member.member_kind != MutationKind::Delete;
+                let value = if present {
+                    Some(mutation.encoded_value.clone().ok_or_else(|| {
+                        StoreError::AtomicStage(
+                            "present Atomic overlay member omitted its value".into(),
+                        )
+                    })?)
+                } else {
+                    None
+                };
+                overlay.insert(
+                    subject,
+                    AtomicOverlayCell {
+                        version: present.then_some(member.event_id),
+                        value,
+                    },
+                );
             }
             pending.push((index, PendingDecision::Commit));
             pending_commits.push(prepare.atomic_id);
@@ -1764,7 +1786,7 @@ impl StoreAtomicStage<'_> {
     fn members_for_frontier_with_overlay(
         &self,
         plan: &AtomicPlan,
-        overlay: &HashMap<Vec<u8>, Option<VersionId>>,
+        overlay: &HashMap<Vec<u8>, AtomicOverlayCell>,
     ) -> Result<Vec<AtomicMember>, StoreError> {
         plan.mutations()
             .iter()
@@ -1808,7 +1830,7 @@ impl StoreAtomicStage<'_> {
     fn frontier_for_plan_with_overlay(
         &self,
         plan: &AtomicPlan,
-        overlay: &HashMap<Vec<u8>, Option<VersionId>>,
+        overlay: &HashMap<Vec<u8>, AtomicOverlayCell>,
     ) -> Result<[u8; 32], StoreError> {
         let mut targets = Vec::new();
         for read in plan.reads() {
@@ -1861,7 +1883,7 @@ impl StoreAtomicStage<'_> {
     fn validate_at_frontier_with_overlay(
         &self,
         plan: &AtomicPlan,
-        overlay: &HashMap<Vec<u8>, Option<VersionId>>,
+        overlay: &HashMap<Vec<u8>, AtomicOverlayCell>,
     ) -> Result<Option<AtomicAbortReason>, StoreError> {
         for read in plan.reads() {
             let subject = atomic_subject(plan.heap_id(), read.collection_id, &read.key)?;
@@ -1880,6 +1902,23 @@ impl StoreAtomicStage<'_> {
                     return Ok(Some(AtomicAbortReason::RuleRejected));
                 };
                 if encoded != current {
+                    return Ok(Some(AtomicAbortReason::PreconditionConflict));
+                }
+                continue;
+            }
+            if predicate.kind == PredicateKind::ExactScalarEquality {
+                let (Some(collection), Some(key), Some(encoded)) = (
+                    predicate.collection_id,
+                    predicate.key.as_ref(),
+                    predicate.encoded.as_deref(),
+                ) else {
+                    return Ok(Some(AtomicAbortReason::RuleRejected));
+                };
+                let compiled = decode_exact_scalar_payload(encoded)
+                    .map_err(|error| StoreError::AtomicStage(error.to_string()))?;
+                let subject = atomic_subject(plan.heap_id(), collection, key)?;
+                let observed = self.observed_value(&subject, overlay)?;
+                if !compiled.evaluate(observed.as_deref()) {
                     return Ok(Some(AtomicAbortReason::PreconditionConflict));
                 }
                 continue;
@@ -1924,13 +1963,27 @@ impl StoreAtomicStage<'_> {
     fn observed_version(
         &self,
         subject: &[u8],
-        overlay: &HashMap<Vec<u8>, Option<VersionId>>,
+        overlay: &HashMap<Vec<u8>, AtomicOverlayCell>,
     ) -> Option<VersionId> {
-        overlay.get(subject).copied().unwrap_or_else(|| {
-            self.store
-                .live_event_id(subject)
-                .and_then(|bytes| VersionId::from_bytes(bytes).ok())
-        })
+        overlay
+            .get(subject)
+            .map(|cell| cell.version)
+            .unwrap_or_else(|| {
+                self.store
+                    .live_event_id(subject)
+                    .and_then(|bytes| VersionId::from_bytes(bytes).ok())
+            })
+    }
+
+    fn observed_value(
+        &self,
+        subject: &[u8],
+        overlay: &HashMap<Vec<u8>, AtomicOverlayCell>,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        match overlay.get(subject) {
+            Some(cell) => Ok(cell.value.clone()),
+            None => self.store.get_subject_bytes(subject),
+        }
     }
 
     fn duplicate_target() -> StoreError {

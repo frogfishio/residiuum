@@ -6,6 +6,7 @@ include!("support/spec_dir.rs");
 
 const FIXTURES: &[&str] = &[
     "cbor-v1.json",
+    "predicates-v1.json",
     "protocol-vectors.json",
     "rejected-vectors.json",
     "hostile-corpus.json",
