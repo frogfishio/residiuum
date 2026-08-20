@@ -244,6 +244,31 @@ fn corrupt_atomic_body(store: &Store, role: AtomicFrameRole) {
     panic!("Atomic role {role:?} not found");
 }
 
+fn erase_local_material_and_atomic_support(root: &std::path::Path) {
+    for entry in fs::read_dir(root.join("segments")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    for path in [
+        root.join("store-info/atomic-stage.ckpt"),
+        root.join("store-info/atomic-coord.ckpt"),
+        root.join("store-info/atomic-tombstones.idx"),
+    ] {
+        let _ = fs::remove_file(path);
+    }
+    let authority_dir = root.join("store-info/atomic-authority");
+    if authority_dir.is_dir() {
+        for entry in fs::read_dir(&authority_dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_file() {
+                fs::remove_file(path).unwrap();
+            }
+        }
+    }
+}
+
 fn media_has_prepare_or_member(root: &std::path::Path) -> bool {
     fn walk(dir: &std::path::Path) -> bool {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -680,6 +705,8 @@ fn terminal_atomic_reclaim_crash_cuts_keep_one_complete_authority_generation() {
     for failpoint in [
         "store.atomic.authority.before_checkpoint_swap",
         "store.atomic.authority.after_checkpoint_swap",
+        "store.recovery_shadow.atomic.before_publish",
+        "store.recovery_shadow.atomic.after_publish",
         "store.compact.after_source_delete",
     ] {
         clear_failpoints();
@@ -718,6 +745,21 @@ fn terminal_atomic_reclaim_crash_cuts_keep_one_complete_authority_generation() {
         let completed = reopened.reclaim_compact_job(&job_id).unwrap();
         assert_eq!(completed.phase, residiuum_store::CompactPhase::Reclaimed);
         assert_committed_complete(&mut reopened, heap_id, &subject);
+        for source in &job.source_segment_ids {
+            let source = residiuum_store::unhex16(source).unwrap();
+            assert!(
+                !root
+                    .join("recovery/shadow")
+                    .join(format!("{}.rsh", residiuum_store::hex16(&source)))
+                    .is_file(),
+                "retry must retire the source Shadow after {failpoint}"
+            );
+        }
+        assert!(
+            residiuum_store::protected_frontier_gap_free(reopened.paths(), reopened.store_id())
+                .unwrap(),
+            "retry must retire obsolete frontier membership after {failpoint}"
+        );
     }
     clear_failpoints();
 }
@@ -763,18 +805,252 @@ fn terminal_atomic_reclaim_refuses_an_incomplete_replacement_before_source_delet
 }
 
 #[test]
-fn recovery_shadow_transition_refuses_before_value_only_representation_can_erase_authority() {
+fn recovery_shadow_transition_carries_terminal_atomic_authority() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
     let mut store = Store::create(&path).unwrap();
-    let (heap_id, _plan, subject) = committed_plan(&mut store);
+    store.rollback_to_materialized_mode().unwrap();
+    let (heap_id, plan, subject) = committed_plan(&mut store);
     store.seal_active().unwrap();
-    assert_refused(store.prepare_flip_to_compact_shadow().unwrap_err());
+    store.prepare_flip_to_compact_shadow().unwrap();
+    assert!(path.join("recovery/shadow/atomic-authority.rsh").is_file());
+    store.activate_compact_shadow_mode().unwrap();
     assert_committed_complete(&mut store, heap_id, &subject);
+    let replay = store
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&plan)
+        .unwrap();
+    assert_eq!(replay.commit_position, Some(1));
+    store.rollback_to_materialized_mode().unwrap();
     drop(store);
 
     let mut reopened = Store::open(&path).unwrap();
     assert_committed_complete(&mut reopened, heap_id, &subject);
+}
+
+#[test]
+fn compact_shadow_only_rebuild_restores_values_atomic_status_retry_and_frontier() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("s");
+    let mut store = Store::create(&root).unwrap();
+    let (heap_id, first_plan, subject) = committed_plan(&mut store);
+    let compact = store
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap();
+    assert_eq!(compact.phase, residiuum_store::CompactPhase::Reclaimed);
+    assert!(residiuum_store::protected_frontier_gap_free(store.paths(), store.store_id()).unwrap());
+    assert!(root.join("recovery/shadow/atomic-authority.rsh").is_file());
+    store.abandon_for_crash_test();
+    drop(store);
+
+    erase_local_material_and_atomic_support(&root);
+
+    let mut reopened = Store::open(&root).unwrap();
+    assert!(reopened.list_segment_ids().len() >= 1);
+    assert_committed_complete(&mut reopened, heap_id, &subject);
+    let replay = reopened
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&first_plan)
+        .unwrap();
+    assert_eq!(replay.commit_position, Some(1));
+    let next_member = second_member();
+    let next_plan = plan(heap_id, std::slice::from_ref(&next_member), b"second");
+    let next = reopened
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&next_plan)
+        .unwrap();
+    assert_eq!(next.commit_position, Some(2));
+}
+
+#[test]
+fn compact_shadow_rebuild_preserves_chunked_and_not_committed_authority() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("s");
+    let mut store = Store::create(&root).unwrap();
+    let heap_id = HeapId::from_bytes(store.store_id()).unwrap();
+    let committed_member = member();
+    let committed_plan = plan(heap_id, std::slice::from_ref(&committed_member), b"secret");
+    let chunk0 = b"se";
+    let chunk1 = b"cret";
+    let chunk_plan = ChunkPlan {
+        total: 2,
+        chunk_hashes: vec![
+            *blake3::hash(chunk0).as_bytes(),
+            *blake3::hash(chunk1).as_bytes(),
+        ],
+    };
+    {
+        let mut stage = store.atomic_stage_for_heap(heap_id).unwrap();
+        stage
+            .begin_prepare(
+                &committed_plan,
+                FRONTIER,
+                std::slice::from_ref(&committed_member),
+            )
+            .unwrap();
+        stage
+            .commit_chunk_manifest(aid(), 0, chunk_plan.clone())
+            .unwrap();
+        stage
+            .append_chunk(committed_member.clone(), 0, chunk0.to_vec())
+            .unwrap();
+        stage
+            .append_chunk(committed_member, 1, chunk1.to_vec())
+            .unwrap();
+        stage.seal_member_boundary(aid()).unwrap();
+        stage.persist_committed_decision(aid()).unwrap();
+        stage.decide_plan_evidence(&committed_plan).unwrap();
+    }
+
+    let occupied = subject(heap_id, "k2");
+    store
+        .put_subject_bytes(&occupied, b"occupied", DurabilityMode::Durable)
+        .unwrap();
+    let rejected_member = second_member();
+    let rejected_plan = plan(heap_id, std::slice::from_ref(&rejected_member), b"second");
+    let rejected = store
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&rejected_plan)
+        .unwrap();
+    assert_eq!(rejected.decision, DecisionCode::NotCommitted);
+    assert_eq!(rejected.commit_position, None);
+
+    store
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap();
+    store.abandon_for_crash_test();
+    drop(store);
+    erase_local_material_and_atomic_support(&root);
+
+    let mut reopened = Store::open(&root).unwrap();
+    assert_committed_complete(&mut reopened, heap_id, &subject(heap_id, "k"));
+    let mut stage = reopened.atomic_stage_for_heap(heap_id).unwrap();
+    assert_eq!(stage.kernel().chunk_plan(aid(), 0), Some(&chunk_plan));
+    assert_eq!(
+        stage
+            .decide_plan_evidence(&committed_plan)
+            .unwrap()
+            .commit_position,
+        Some(1)
+    );
+    let rejected_status = stage.atomic_status(second_aid()).unwrap();
+    assert_eq!(rejected_status.logical, LogicalStatus::NotCommitted);
+    assert_eq!(rejected_status.material, MaterialStatus::Complete);
+    assert!(rejected_status.receipt.is_none());
+    let rejected_replay = stage.decide_plan_evidence(&rejected_plan).unwrap();
+    assert_eq!(rejected_replay, rejected);
+    drop(stage);
+
+    let next_member = third_member();
+    let next_plan = plan(heap_id, std::slice::from_ref(&next_member), b"third");
+    let next = reopened
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&next_plan)
+        .unwrap();
+    assert_eq!(next.commit_position, Some(2));
+}
+
+#[test]
+fn compact_shadow_restore_crash_cuts_are_idempotent() {
+    let _guard = fp_lock();
+    for failpoint in [
+        "store.recovery_shadow.atomic.before_restore_file",
+        "store.recovery_shadow.atomic.after_restore_file",
+        "store.recovery_shadow.segment.before_restore",
+        "store.recovery_shadow.segment.after_restore",
+    ] {
+        clear_failpoints();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("s");
+        let mut store = Store::create(&root).unwrap();
+        let (heap_id, closed, key_subject) = committed_plan(&mut store);
+        store
+            .compact_live_with(CompactOptions {
+                reclaim_sources: true,
+                allow_history_loss: true,
+                ..CompactOptions::default()
+            })
+            .unwrap();
+        store.abandon_for_crash_test();
+        drop(store);
+        erase_local_material_and_atomic_support(&root);
+
+        arm_failpoint_once_current_thread(failpoint, FailpointAction::Error);
+        let err = Store::open(&root)
+            .err()
+            .expect("restore cut must interrupt open");
+        assert!(err.to_string().contains("failpoint"), "{failpoint}: {err}");
+        clear_failpoints();
+
+        let mut reopened = Store::open(&root).unwrap();
+        assert_committed_complete(&mut reopened, heap_id, &key_subject);
+        let replay = reopened
+            .atomic_stage_for_heap(heap_id)
+            .unwrap()
+            .decide_plan_evidence(&closed)
+            .unwrap();
+        assert_eq!(replay.commit_position, Some(1), "{failpoint}");
+    }
+    clear_failpoints();
+}
+
+#[test]
+fn corrupt_atomic_shadow_is_ignored_with_local_authority_and_refused_when_needed() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("s");
+    let mut store = Store::create(&root).unwrap();
+    let (heap_id, _plan, subject) = committed_plan(&mut store);
+    store
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap();
+    store.abandon_for_crash_test();
+    drop(store);
+
+    let bundle = root.join("recovery/shadow/atomic-authority.rsh");
+    let mut bytes = fs::read(&bundle).unwrap();
+    let last = bytes.last_mut().unwrap();
+    *last ^= 0x80;
+    fs::write(&bundle, bytes).unwrap();
+
+    let mut healthy = Store::open(&root).expect("unused corrupt Shadow must not kneel authority");
+    assert_committed_complete(&mut healthy, heap_id, &subject);
+    healthy.abandon_for_crash_test();
+    drop(healthy);
+
+    erase_local_material_and_atomic_support(&root);
+    let err = Store::open(&root)
+        .err()
+        .expect("corrupt needed Shadow must fail");
+    match err {
+        StoreError::AtomicStage(detail) => assert!(detail.contains("commitment mismatch")),
+        other => panic!("expected Atomic Shadow refusal, got {other:?}"),
+    }
+    assert_eq!(
+        fs::read_dir(root.join("segments"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_file())
+            .count(),
+        0,
+        "Atomic Shadow must verify before segment restoration mutates media"
+    );
 }
 
 #[test]

@@ -14,6 +14,7 @@ use super::policy::{shadow_reclaim_policy, ShadowReclaimPolicy};
 use super::wire::{
     publish_shadow, shadow_path, try_load_shadow, ShadowLoad, ShadowRecord, ShadowWriter,
 };
+use crate::atomic_file;
 use crate::error::StoreError;
 use crate::ids::segment_seq_from_id;
 use crate::layout::StorePaths;
@@ -305,11 +306,33 @@ pub fn retire_shadows_after_replacement_with_policy(
             // Still erase old Shadows for retention honesty when reclaiming.
         }
     }
+    let coverage = load_protected_coverage(paths, store_id)?;
+    let mut retired = Vec::new();
     for id in old_segment_ids {
         if id == replacement_segment_id {
             continue;
         }
-        secure_erase_shadow(paths, store_id, id, shard)?;
+        let seq = segment_seq_from_id(id);
+        let actual_shard = coverage
+            .sealed_by_shard
+            .iter()
+            .find_map(|(candidate, seqs)| seqs.contains(&seq).then_some(*candidate))
+            .or_else(|| {
+                coverage
+                    .durable_by_shard
+                    .iter()
+                    .find_map(|(candidate, seqs)| seqs.contains(&seq).then_some(*candidate))
+            })
+            .unwrap_or(shard);
+        secure_erase_shadow(paths, store_id, id, actual_shard)?;
+        retired.push((actual_shard, seq));
+    }
+    if !retired.is_empty() {
+        let mut coverage = load_protected_coverage(paths, store_id)?;
+        for (actual_shard, seq) in retired {
+            coverage.retire_sealed(actual_shard, seq);
+        }
+        publish_protected_coverage(paths, &coverage)?;
     }
     Ok(())
 }
@@ -386,6 +409,71 @@ pub fn rebuild_coverage_from_shadows(
     }
     publish_protected_coverage(paths, &cov)?;
     Ok(cov)
+}
+
+/// Materialize exact sealed segment images that are missing while the store is
+/// in CompactShadow mode. Legacy value-only Shadows cannot establish a segment
+/// image and therefore fail closed when they are the sole recovery source.
+pub(crate) fn restore_missing_segment_images(
+    paths: &StorePaths,
+    store_id: [u8; 16],
+) -> Result<u64, StoreError> {
+    let dir = super::wire::shadow_dir(paths);
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut restored = 0u64;
+    let mut entries = fs::read_dir(&dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("rsh") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        let Some(segment_id) = crate::layout::unhex16(name) else {
+            // Dedicated non-segment Shadows live in the same directory.
+            continue;
+        };
+        let target = paths.sealed_segment(&segment_id);
+        if target.is_file() {
+            continue;
+        }
+        let bytes = fs::read(&path)?;
+        let (embedded_id, image) = if super::dual_stream::is_dual_magic(&bytes) {
+            let (_, embedded, image) =
+                super::dual_stream::decode_dual_mirror(&bytes, Some(store_id)).map_err(|load| {
+                    StoreError::ConsistencyViolation(format!(
+                        "missing segment has unusable dual-stream Shadow: {load:?}"
+                    ))
+                })?;
+            (embedded, image)
+        } else if super::mirror::is_mirror_magic(&bytes) {
+            let mirror =
+                super::mirror::decode_mirror_to_struct(&bytes, Some(store_id)).map_err(|load| {
+                    StoreError::ConsistencyViolation(format!(
+                        "missing segment has unusable mirror Shadow: {load:?}"
+                    ))
+                })?;
+            (mirror.segment_id, mirror.image)
+        } else {
+            return Err(StoreError::ConsistencyViolation(
+                "missing segment is covered only by a legacy value Shadow".into(),
+            ));
+        };
+        if embedded_id != segment_id {
+            return Err(StoreError::ConsistencyViolation(
+                "Recovery Shadow filename and embedded segment identity disagree".into(),
+            ));
+        }
+        crate::failpoint::hit("store.recovery_shadow.segment.before_restore")?;
+        atomic_file::write_atomic(&target, &image)?;
+        crate::failpoint::hit("store.recovery_shadow.segment.after_restore")?;
+        restored = restored.saturating_add(1);
+    }
+    Ok(restored)
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@
 //! Normative: `CSE3_STAGE1_HYBRID_RECOVERY_SHADOW.md`,
 //! `CSE3_STAGE2_RECOVERY_SHADOW_IMPLEMENT.md`.
 
+mod atomic_authority;
 mod crypto;
 mod dual_stream;
 mod frontier;
@@ -28,6 +29,12 @@ pub mod qualify;
 mod recovery_mode;
 mod stager;
 mod wire;
+
+pub(crate) use atomic_authority::{
+    publish_current as publish_atomic_authority_shadow,
+    restore_missing as restore_atomic_authority_shadow,
+};
+pub(crate) use integrate::restore_missing_segment_images;
 
 pub use crypto::{contains_plaintext, envelope_open, envelope_seal, ENVELOPE_MAGIC};
 pub use dual_stream::{

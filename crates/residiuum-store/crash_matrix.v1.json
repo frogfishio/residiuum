@@ -1140,6 +1140,72 @@
           }
         },
         {
+          "name": "store.recovery_shadow.atomic.before_publish",
+          "ci_subset": true,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "Old Atomic authority and source Shadows remain authoritative."
+          }
+        },
+        {
+          "name": "store.recovery_shadow.atomic.after_publish",
+          "ci_subset": true,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "The new complete authority bundle is durable before source retirement."
+          }
+        },
+        {
+          "name": "store.recovery_shadow.atomic.before_restore_file",
+          "ci_subset": false,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "Bundle restoration is restartable before each file."
+          }
+        },
+        {
+          "name": "store.recovery_shadow.atomic.after_restore_file",
+          "ci_subset": false,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "Checkpoint-last restoration is idempotent after every file."
+          }
+        },
+        {
+          "name": "store.recovery_shadow.segment.before_restore",
+          "ci_subset": false,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "No segment mutation precedes exact-image verification."
+          }
+        },
+        {
+          "name": "store.recovery_shadow.segment.after_restore",
+          "ci_subset": false,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "The exact restored segment image is accepted on retry."
+          }
+        },
+        {
           "name": "store.compact.after_source_delete",
           "ci_subset": true,
           "expected_on_reopen": {

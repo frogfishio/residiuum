@@ -877,13 +877,22 @@ pub fn reclaim_source_segments(
     }
     sync_dir_best_effort(&paths.segments_dir());
 
-    // Stage 2: erase Recovery Shadows under current reclaim policy.
+    // Stage 2: erase Recovery Shadows under current reclaim policy. Derive the
+    // retirement set from durable job intent plus post-delete absence, not
+    // only from files deleted by this invocation. A crash after unlink but
+    // before Shadow retirement must be completed by the retry.
     if let Some(store_id) = unhex16(&job.store_id) {
+        let retired_ids = job
+            .source_segment_ids
+            .iter()
+            .filter_map(|id| unhex16(id))
+            .filter(|id| id != &output && !paths.sealed_segment(id).is_file())
+            .collect::<Vec<_>>();
         crate::recovery_shadow::retire_shadows_after_replacement(
             paths,
             store_id,
             &output,
-            &deleted_ids,
+            &retired_ids,
             0,
         )?;
     }

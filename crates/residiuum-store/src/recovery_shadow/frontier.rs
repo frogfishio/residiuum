@@ -69,6 +69,18 @@ impl ProtectedCoverage {
         }
     }
 
+    /// Retire a segment that no longer belongs to the authoritative sealed
+    /// set after replacement compaction. Both sets change together only after
+    /// the replacement Shadow is durable.
+    pub fn retire_sealed(&mut self, shard: u16, seq: u64) {
+        if let Some(set) = self.sealed_by_shard.get_mut(&shard) {
+            set.remove(&seq);
+        }
+        if let Some(set) = self.durable_by_shard.get_mut(&shard) {
+            set.remove(&seq);
+        }
+    }
+
     /// Downward-closed protected prefix for one shard.
     ///
     /// Walks sealed sequences in order; stops at the first sealed seq lacking

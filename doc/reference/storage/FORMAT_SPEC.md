@@ -329,8 +329,40 @@ accepted only when exactly one discovered candidate authenticates the complete
 covered prefix. After a reclaim checkpoint swap, superseded paths are ignored
 even while their files remain physically present.
 
-Recovery Shadow mode transition remains fenced until its representation carries
-the same Atomic authority; the current value-only representation is insufficient.
+CompactShadow carries Atomic authority independently of the compact value
+projection. Exact segment images remain protected by `RSHD0003`/`RSHD0004`;
+the current consolidated Atomic generation and its control set are published as
+`recovery/shadow/atomic-authority.rsh` with magic `RSHATM01` before an
+Atomic-bearing source Shadow may be retired.
+
+`RSHATM01` is:
+
+```text
+magic[8] = "RSHATM01"
+store_id[16]
+entry_count u32-le                  # 1..4
+repeat entry_count:
+    relative_path_len u16-le
+    relative_path[relative_path_len]
+    body_len u64-le
+    body_hash[32]                    # BLAKE3(body)
+    body[body_len]
+bundle_hash[32]                     # BLAKE3(all preceding bytes)
+```
+
+The frozen path vocabulary is one immutable
+`store-info/atomic-authority/<32-lowercase-hex>.residiuum` generation, exactly one
+`atomic-stage.ckpt`, exactly one `atomic-coord.ckpt`, and the optional
+`atomic-tombstones.idx`. Unknown, duplicate, absolute or non-normal paths are
+corrupt. Aggregate decode is bounded by the Atomic recovery work budget.
+
+Publication of the complete bundle is atomic and precedes source-segment and
+source-Shadow retirement. Shadow-only recovery verifies the whole bundle,
+restores immutable generation/index/coordinator material first, and publishes
+the checkpoint last. Exact segment Shadows are materialized before media
+inventory. Every restoration step is idempotent; a corrupt needed bundle fails
+before segment restoration, while an unused corrupt bundle cannot override or
+kneel complete local authority.
 
 Backup profile `residiuum-backup-v1` copies `store-info/` (including
 `atomic-stage.ckpt` and `atomic-coord.ckpt`) plus `active/`, `segments/`,

@@ -1516,6 +1516,15 @@ impl Store {
         let phase = Instant::now();
         store.load_tier_state()?;
         open_metrics.tier_state_ns = elapsed_ns(phase);
+        // CompactShadow recovery sources are independently authenticated. Put
+        // back missing canonical segment images and Atomic support files before
+        // authoritative inventory or catalogue rebuild observes the store.
+        let early_recovery_mode = crate::recovery_shadow::load_recovery_mode(&store.paths)?;
+        store.recovery_mode = early_recovery_mode;
+        if early_recovery_mode == crate::recovery_shadow::RecoveryMode::CompactShadow {
+            crate::recovery_shadow::restore_atomic_authority_shadow(&store.paths, store.store_id)?;
+            crate::recovery_shadow::restore_missing_segment_images(&store.paths, store.store_id)?;
+        }
         // P0: inventory authoritative media and refuse collisions **before**
         // pending recovery, index rebuild, or any overwrite-capable mutation.
         let phase = Instant::now();
@@ -6180,22 +6189,7 @@ impl Store {
         let _ = self.write_chimera_for_live_projection(segment_id);
         // CompactShadow post-flip reclaim requires a durable replacement Shadow
         // for the compact output before source retirement.
-        if self.recovery_mode.omits_new_materialized()
-            || matches!(
-                crate::recovery_shadow::shadow_reclaim_policy(),
-                crate::recovery_shadow::ShadowReclaimPolicy::RequireReplacementShadow
-            )
-        {
-            let sealed = self.paths.sealed_segment(&segment_id);
-            if sealed.is_file() {
-                crate::recovery_shadow::publish_mirror_shadow_from_path(
-                    &self.paths,
-                    self.store_id,
-                    &segment_id,
-                    &sealed,
-                )?;
-            }
-        }
+        self.ensure_compact_replacement_shadow(segment_id)?;
         crate::failpoint::hit("store.compact.after_activate")?;
         job.phase = CompactPhase::Activated;
         job.updated_ns = now_ns();
@@ -6345,6 +6339,7 @@ impl Store {
         let _ = self.refresh_segment_catalog();
         let _ = self.persist_index_cache();
         let _ = self.write_chimera_for_live_projection(segment_id);
+        self.ensure_compact_replacement_shadow(segment_id)?;
         job.phase = CompactPhase::Activated;
         job.updated_ns = now_ns();
         write_compact_job(&self.paths, job)?;
@@ -6362,6 +6357,11 @@ impl Store {
             // Rebind the live projection to payload locators in the replacement
             // authority before old segment paths can disappear.
             self.recover_committed_atomic_publications()?;
+        }
+        if self.recovery_mode == crate::recovery_shadow::RecoveryMode::CompactShadow {
+            // This must precede source deletion: the compact-output Shadow is a
+            // value projection and cannot replace lifetime Atomic authority.
+            crate::recovery_shadow::publish_atomic_authority_shadow(&self.paths, self.store_id)?;
         }
         // Source frames may be the only evidence left when the append succeeded
         // but the post-append ledger write was interrupted. Persist that
@@ -6400,6 +6400,36 @@ impl Store {
         job.updated_ns = now_ns();
         write_compact_job(&self.paths, job)?;
         Ok(())
+    }
+
+    fn ensure_compact_replacement_shadow(&self, segment_id: [u8; 16]) -> Result<(), StoreError> {
+        if !self.recovery_mode.omits_new_materialized()
+            && !matches!(
+                crate::recovery_shadow::shadow_reclaim_policy(),
+                crate::recovery_shadow::ShadowReclaimPolicy::RequireReplacementShadow
+            )
+        {
+            return Ok(());
+        }
+        let sealed = self.paths.sealed_segment(&segment_id);
+        if !sealed.is_file() {
+            return Err(StoreError::ConsistencyViolation(
+                "compact replacement segment is unavailable for Recovery Shadow".into(),
+            ));
+        }
+        crate::recovery_shadow::publish_mirror_shadow_from_path(
+            &self.paths,
+            self.store_id,
+            &segment_id,
+            &sealed,
+        )?;
+        let seq = crate::ids::segment_seq_from_id(&segment_id);
+        let mut coverage =
+            crate::recovery_shadow::load_protected_coverage(&self.paths, self.store_id)?;
+        coverage.store_id = self.store_id;
+        coverage.note_sealed(0, seq);
+        coverage.note_durable(0, seq);
+        crate::recovery_shadow::publish_protected_coverage(&self.paths, &coverage)
     }
 
     /// Clone the derived primary projection and materialize only Atomic-backed
@@ -8672,11 +8702,15 @@ impl Store {
 
     /// Step 8 prepare: Transitioning marker + backfill Shadows + gap-free check.
     pub fn prepare_flip_to_compact_shadow(&mut self) -> Result<u64, StoreError> {
-        // Current CompactShadow projection is value-complete but does not yet
-        // carry Atomic prepare/member/decision/tombstone authority. Refuse the
-        // transition before its durable marker until that representation is
-        // qualified by ATM-4C.
-        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)?;
+        crate::atomic_stage_recover::refuse_atomic_relocation_unless_terminal(&self.paths)?;
+        let generation_id = random_id()?;
+        if crate::atomic_stage_recover::install_compaction_authority_generation(
+            &self.paths,
+            &generation_id,
+        )? {
+            self.recover_committed_atomic_publications()?;
+            crate::recovery_shadow::publish_atomic_authority_shadow(&self.paths, self.store_id)?;
+        }
         let built =
             crate::recovery_shadow::prepare_flip_to_compact_shadow(&self.paths, self.store_id, 0)?;
         self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::Transitioning)?;
@@ -8685,14 +8719,14 @@ impl Store {
 
     /// Step 8 activate: durable CompactShadow marker, then stop new Materialized.
     pub fn activate_compact_shadow_mode(&mut self) -> Result<(), StoreError> {
-        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)?;
+        crate::atomic_stage_recover::refuse_atomic_relocation_unless_terminal(&self.paths)?;
+        crate::recovery_shadow::publish_atomic_authority_shadow(&self.paths, self.store_id)?;
         crate::recovery_shadow::activate_compact_shadow_mode(&self.paths, self.store_id)?;
         self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::CompactShadow)
     }
 
     /// Step 8 rollback: Materialized dual-run; keep Shadows and Materialized files.
     pub fn rollback_to_materialized_mode(&mut self) -> Result<(), StoreError> {
-        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)?;
         crate::recovery_shadow::rollback_to_materialized_mode(&self.paths, self.store_id)?;
         self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::Materialized)?;
         // Dual-stream may stay attached for experimental use; product default off.

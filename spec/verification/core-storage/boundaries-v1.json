@@ -3356,6 +3356,120 @@
       "source_ref": "crates/residiuum-store/src"
     },
     {
+      "id": "CSQ-BND-FP-recovery_shadow-store_recovery_shadow_atomic_before_publish",
+      "operation_id": "recovery_shadow",
+      "step": "store.recovery_shadow.atomic.before_publish",
+      "kind": "failpoint",
+      "failpoint": "store.recovery_shadow.atomic.before_publish",
+      "fault": "error",
+      "ci_subset": true,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Source authority remains present until the Atomic Recovery Shadow is durable."
+      },
+      "harness": "in_process_failpoint",
+      "historical_cell_id": "store.recovery_shadow.atomic.before_publish",
+      "source_ref": "crates/residiuum-store/src/recovery_shadow/atomic_authority.rs"
+    },
+    {
+      "id": "CSQ-BND-FP-recovery_shadow-store_recovery_shadow_atomic_after_publish",
+      "operation_id": "recovery_shadow",
+      "step": "store.recovery_shadow.atomic.after_publish",
+      "kind": "failpoint",
+      "failpoint": "store.recovery_shadow.atomic.after_publish",
+      "fault": "error",
+      "ci_subset": true,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "The complete Atomic Recovery Shadow is durable while source retirement has not begun."
+      },
+      "harness": "in_process_failpoint",
+      "historical_cell_id": "store.recovery_shadow.atomic.after_publish",
+      "source_ref": "crates/residiuum-store/src/recovery_shadow/atomic_authority.rs"
+    },
+    {
+      "id": "CSQ-BND-FP-recovery_shadow-store_recovery_shadow_atomic_before_restore_file",
+      "operation_id": "recovery_shadow",
+      "step": "store.recovery_shadow.atomic.before_restore_file",
+      "kind": "failpoint",
+      "failpoint": "store.recovery_shadow.atomic.before_restore_file",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Retry restarts restoration from the verified bundle without publishing a partial checkpoint."
+      },
+      "harness": "in_process_failpoint",
+      "historical_cell_id": "store.recovery_shadow.atomic.before_restore_file",
+      "source_ref": "crates/residiuum-store/src/recovery_shadow/atomic_authority.rs"
+    },
+    {
+      "id": "CSQ-BND-FP-recovery_shadow-store_recovery_shadow_atomic_after_restore_file",
+      "operation_id": "recovery_shadow",
+      "step": "store.recovery_shadow.atomic.after_restore_file",
+      "kind": "failpoint",
+      "failpoint": "store.recovery_shadow.atomic.after_restore_file",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Already restored immutable files are idempotent and the checkpoint remains last."
+      },
+      "harness": "in_process_failpoint",
+      "historical_cell_id": "store.recovery_shadow.atomic.after_restore_file",
+      "source_ref": "crates/residiuum-store/src/recovery_shadow/atomic_authority.rs"
+    },
+    {
+      "id": "CSQ-BND-FP-recovery_shadow-store_recovery_shadow_segment_before_restore",
+      "operation_id": "recovery_shadow",
+      "step": "store.recovery_shadow.segment.before_restore",
+      "kind": "failpoint",
+      "failpoint": "store.recovery_shadow.segment.before_restore",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "A verified segment image has not yet been materialized and retry is exact."
+      },
+      "harness": "in_process_failpoint",
+      "historical_cell_id": "store.recovery_shadow.segment.before_restore",
+      "source_ref": "crates/residiuum-store/src/recovery_shadow/integrate.rs"
+    },
+    {
+      "id": "CSQ-BND-FP-recovery_shadow-store_recovery_shadow_segment_after_restore",
+      "operation_id": "recovery_shadow",
+      "step": "store.recovery_shadow.segment.after_restore",
+      "kind": "failpoint",
+      "failpoint": "store.recovery_shadow.segment.after_restore",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "The exact image is durable and retry recognizes it before inventory."
+      },
+      "harness": "in_process_failpoint",
+      "historical_cell_id": "store.recovery_shadow.segment.after_restore",
+      "source_ref": "crates/residiuum-store/src/recovery_shadow/integrate.rs"
+    },
+    {
       "id": "CSQ-BND-FP-compact_live-store_compact_after_source_delete",
       "operation_id": "compact_live",
       "step": "store.compact.after_source_delete",

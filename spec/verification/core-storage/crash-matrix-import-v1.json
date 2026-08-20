@@ -736,6 +736,30 @@
           "boundary_id": "CSQ-BND-FP-atomic_control_doc-store_atomic_authority_before_publish"
         },
         {
+          "historical_cell_id": "store.recovery_shadow.atomic.before_publish",
+          "boundary_id": "CSQ-BND-FP-recovery_shadow-store_recovery_shadow_atomic_before_publish"
+        },
+        {
+          "historical_cell_id": "store.recovery_shadow.atomic.after_publish",
+          "boundary_id": "CSQ-BND-FP-recovery_shadow-store_recovery_shadow_atomic_after_publish"
+        },
+        {
+          "historical_cell_id": "store.recovery_shadow.atomic.before_restore_file",
+          "boundary_id": "CSQ-BND-FP-recovery_shadow-store_recovery_shadow_atomic_before_restore_file"
+        },
+        {
+          "historical_cell_id": "store.recovery_shadow.atomic.after_restore_file",
+          "boundary_id": "CSQ-BND-FP-recovery_shadow-store_recovery_shadow_atomic_after_restore_file"
+        },
+        {
+          "historical_cell_id": "store.recovery_shadow.segment.before_restore",
+          "boundary_id": "CSQ-BND-FP-recovery_shadow-store_recovery_shadow_segment_before_restore"
+        },
+        {
+          "historical_cell_id": "store.recovery_shadow.segment.after_restore",
+          "boundary_id": "CSQ-BND-FP-recovery_shadow-store_recovery_shadow_segment_after_restore"
+        },
+        {
           "historical_cell_id": "store.compact.after_source_delete",
           "boundary_id": "CSQ-BND-FP-compact_live-store_compact_after_source_delete"
         }

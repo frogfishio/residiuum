@@ -179,10 +179,22 @@ Delivered and locally qualified:
 - replacement comparison ignores only benign `Valid` scan observations, which
   are reconstruction provenance rather than durable damage. Every adverse
   finding is compared as an order-independent multiset.
+- CompactShadow publishes an authenticated `RSHATM01` bundle containing the
+  exact consolidated Atomic generation, checkpoint, coordinator and optional
+  tombstone index before retiring an Atomic-bearing source Shadow;
+- missing sealed segments are restored byte-identically from verified
+  RSHD0003/RSHD0004 images before authoritative inventory, while Atomic bundle
+  restoration verifies first and publishes its checkpoint last;
+- full Shadow-only rebuild preserves ordinary values, committed and
+  not-committed status, receipts, chunk maps/bodies, same-root retry and the
+  next global Heap commit position;
+- transition/activation/rollback, corrupt-needed versus corrupt-unused bundle
+  behavior, four restoration crash cuts and both sides of bundle publication
+  are qualified. Replacement coverage retires old sealed identities without
+  leaving a false frontier gap.
 
 Still open in ATM-4C:
 
-- Recovery Shadow Atomic authority carriage and rebuild equivalence;
 - external configured tier-root online/offline coverage truth;
 - tombstone-index obsolete-page generation-swap crash qualification;
 - canonical crash-matrix expansion for multi-source deletion cuts beyond the

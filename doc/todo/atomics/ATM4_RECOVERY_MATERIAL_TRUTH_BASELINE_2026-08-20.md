@@ -150,13 +150,19 @@ media permits and are never interpreted as the new composite-key format.
   preserving the global Heap commit frontier. Benign valid scan observations
   are normalized out of replacement comparison; adverse findings remain an
   exact order-independent multiset.
-- **Qualified fail-closed:** identity-reassign clone and CompactShadow
-  transition refuse before mutation while any issued Atomic identity exists.
-  The current value-only Recovery Shadow loses Atomic authority, so the
-  transition remains explicitly fenced.
-- **Remaining:** Recovery Shadow authority carriage and rebuild; external
-  tier-root discovery/offline truth; tombstone-index page generation reclaim;
-  and expanded multi-source deletion crash cuts.
+- **Qualified fail-closed:** identity-reassign clone still refuses any issued
+  source Atomic identity. CompactShadow transition refuses before mutation for
+  unresolved, damaged, conflicting or incomplete Atomic evidence.
+- **Delivered:** terminal Atomics may transition to CompactShadow. The
+  authenticated `RSHATM01` bundle independently carries the exact authority
+  generation and control set before source-Shadow retirement. Verified
+  segment-image plus checkpoint-last Atomic restoration reproduces values,
+  two-axis status, receipts, chunk evidence, exact retry and commit frontier
+  after deleting every local sealed segment and Atomic support file. Corruption
+  polarity and six Recovery Shadow publication/restoration boundaries are
+  registered and exercised.
+- **Remaining:** external tier-root discovery/offline truth; tombstone-index
+  page generation reclaim; and expanded multi-source deletion crash cuts.
 
 ### ATM-4D — serial histories and predicates
 
