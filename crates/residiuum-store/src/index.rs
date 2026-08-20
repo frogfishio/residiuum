@@ -146,6 +146,19 @@ impl PrimaryIndex {
         self.map.get(subject).and_then(|e| e.live_body())
     }
 
+    /// Install resident bytes in a temporary derived projection.
+    ///
+    /// Compaction uses this for committed Atomic values whose authoritative
+    /// payload lives behind a Heap-qualified staging locator rather than an
+    /// ordinary item-frame locator. It does not alter identity or ordering.
+    pub(crate) fn set_resident_body(&mut self, subject: &[u8], body: Vec<u8>) -> bool {
+        let Some(IndexEntry::Live(value)) = self.map.get_mut(subject) else {
+            return false;
+        };
+        value.body = body;
+        true
+    }
+
     /// Apply one verified item event in recovery order.
     #[allow(clippy::too_many_arguments)] // event identity fields stay explicit
     pub fn apply_event(

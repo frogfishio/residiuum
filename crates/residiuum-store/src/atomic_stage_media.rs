@@ -130,6 +130,25 @@ pub(crate) struct StageCatalog {
 }
 
 impl StageCatalog {
+    /// Rebind physical locators after an authenticated byte-identical media
+    /// relocation. Logical Atomic identity is never derived from this path.
+    pub(crate) fn relocate_body_refs(&mut self, from: &str, to: &str) {
+        for refer in self
+            .payload_refs
+            .values_mut()
+            .chain(self.chunk_refs.values_mut())
+        {
+            if refer.rel_path == from {
+                refer.rel_path = to.to_string();
+            }
+        }
+        for missing in &mut self.missing_covered {
+            if missing == from {
+                *missing = to.to_string();
+            }
+        }
+    }
+
     pub(crate) fn has_member(&self, key: StageAtomicKey, ordinal: u32) -> bool {
         self.members
             .get(&key)

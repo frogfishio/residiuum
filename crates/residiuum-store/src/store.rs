@@ -6028,8 +6028,18 @@ impl Store {
         }
     }
 
-    fn refuse_if_outstanding_atomic_evidence(&self) -> Result<(), StoreError> {
-        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)
+    fn refuse_if_atomic_relocation_is_unsafe(&self) -> Result<(), StoreError> {
+        crate::atomic_stage_recover::refuse_atomic_relocation_unless_terminal(&self.paths)
+    }
+
+    fn relocate_atomic_value_refs(&mut self, from: &Path, to: &Path) {
+        let from = crate::atomic_stage_recover::rel_path(&self.paths, from);
+        let to = crate::atomic_stage_recover::rel_path(&self.paths, to);
+        for refer in self.atomic_value_refs.values_mut() {
+            if refer.body.rel_path == from {
+                refer.body.rel_path = to.clone();
+            }
+        }
     }
 
     /// Release the writer without seal/flush. Crash-media tests only (CR-ATMR6-007).
@@ -6059,7 +6069,13 @@ impl Store {
                 "compact reclaim requires allow_history_loss for live-projection coverage".into(),
             ));
         }
-        self.refuse_if_outstanding_atomic_evidence()?;
+        if options.reclaim_sources {
+            // Reclaim is destructive and must refuse before seal, job creation,
+            // or output publication until the Atomic replacement-generation
+            // protocol is qualified.
+            crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)?;
+        }
+        self.refuse_if_atomic_relocation_is_unsafe()?;
 
         self.seal_active()?;
         let source_paths = all_segment_paths(
@@ -6107,11 +6123,12 @@ impl Store {
         // Event ids are pure CSPRNG identities (DEF-025); ordering is writer_seq.
         let store_id = self.store_id;
         let mut mint = || random_id();
+        let compact_index = self.compaction_projection_index()?;
         let create_result = write_live_segment(
             &self.paths,
             store_id,
             self.limits,
-            &self.index,
+            &compact_index,
             segment_id,
             &mut mint,
             created_ns,
@@ -6135,9 +6152,13 @@ impl Store {
         crate::failpoint::hit("store.compact.after_create")?;
 
         // --- verify ---
-        if let Err(e) =
-            verify_live_segment(&self.paths, self.limits, &self.index, &segment_id, written)
-        {
+        if let Err(e) = verify_live_segment(
+            &self.paths,
+            self.limits,
+            &compact_index,
+            &segment_id,
+            written,
+        ) {
             job.phase = CompactPhase::Failed;
             job.detail = Some(format!("verify failed: {e}"));
             job.updated_ns = now_ns();
@@ -6196,6 +6217,7 @@ impl Store {
     /// Requires the job to have `allow_history_loss` (set at plan time or via
     /// this call's force flag when the job already recorded it).
     pub fn reclaim_compact_job(&mut self, job_id: &[u8; 16]) -> Result<CompactReport, StoreError> {
+        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)?;
         let mut job = try_load_compact_job(&self.paths, job_id)?
             .ok_or(StoreError::CorruptMeta("compact job not found"))?;
         if !job.allow_history_loss {
@@ -6306,7 +6328,14 @@ impl Store {
             .ok_or(StoreError::CorruptMeta("compact output segment id"))?;
         let expected = job.live_subjects_written.max(job.live_subjects_planned);
         if job.phase == CompactPhase::Created {
-            verify_live_segment(&self.paths, self.limits, &self.index, &segment_id, expected)?;
+            let compact_index = self.compaction_projection_index()?;
+            verify_live_segment(
+                &self.paths,
+                self.limits,
+                &compact_index,
+                &segment_id,
+                expected,
+            )?;
             job.phase = CompactPhase::Verified;
             job.updated_ns = now_ns();
             write_compact_job(&self.paths, job)?;
@@ -6323,6 +6352,11 @@ impl Store {
     }
 
     fn reclaim_compact_job_inner(&mut self, job: &mut CompactJob) -> Result<(), StoreError> {
+        // Live-projection compaction does not yet carry Atomic authority into
+        // its rewritten generation. Retaining sources is safe; deleting them
+        // remains fenced until the ATM-4C replacement-generation protocol is
+        // installed.
+        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)?;
         // Source frames may be the only evidence left when the append succeeded
         // but the post-append ledger write was interrupted. Persist that
         // evidence before history-loss compaction is allowed to remove it.
@@ -6359,6 +6393,26 @@ impl Store {
         job.updated_ns = now_ns();
         write_compact_job(&self.paths, job)?;
         Ok(())
+    }
+
+    /// Clone the derived primary projection and materialize only Atomic-backed
+    /// values through their exact authenticated locators. Ordinary locators
+    /// remain lazy, so this does not turn compaction preparation into a full
+    /// database memory copy.
+    fn compaction_projection_index(&self) -> Result<PrimaryIndex, StoreError> {
+        let mut projection = self.index.clone();
+        for (subject, entry) in self.index.live_entries() {
+            if !self.atomic_value_refs.contains_key(&entry.event_id) {
+                continue;
+            }
+            let body = self.resolve_live_value_body(subject, entry)?;
+            if !projection.set_resident_body(subject, body) {
+                return Err(StoreError::ConsistencyViolation(
+                    "Atomic compaction projection lost a live subject".into(),
+                ));
+            }
+        }
+        Ok(projection)
     }
 
     /// Write a derived checkpoint under `snapshots/` with declared coverage.
@@ -7095,7 +7149,7 @@ impl Store {
                 .collect();
 
             if !written_shards.is_empty() {
-                self.refuse_if_outstanding_atomic_evidence()?;
+                self.refuse_if_atomic_relocation_is_unsafe()?;
             }
             for shard in written_shards {
                 if self.async_lifecycle_enabled() {
@@ -8045,7 +8099,7 @@ impl Store {
     /// `drain_lifecycle`, final active seal/publish, catalog publication,
     /// Hydra, and Chimera so campaigns can isolate interference.
     pub fn seal_active_with_breakdown(&mut self) -> Result<SealStageBreakdown, StoreError> {
-        self.refuse_if_outstanding_atomic_evidence()?;
+        self.refuse_if_atomic_relocation_is_unsafe()?;
         let mut out = SealStageBreakdown::default();
         let t_drain = std::time::Instant::now();
         // Wait for in-flight authoritative seals only — do not apply EnrichDone
@@ -8193,6 +8247,7 @@ impl Store {
                 fs::remove_file(&active_path)?;
             }
         }
+        self.relocate_atomic_value_refs(&active_path, &publish_dest);
         crate::failpoint::hit("store.seal.after_dest_sync")?;
         if flush_mode == DurabilityMode::Durable && !pair_async {
             sync_dir(&self.paths.segments_dir())?;
@@ -8602,6 +8657,11 @@ impl Store {
 
     /// Step 8 prepare: Transitioning marker + backfill Shadows + gap-free check.
     pub fn prepare_flip_to_compact_shadow(&mut self) -> Result<u64, StoreError> {
+        // Current CompactShadow projection is value-complete but does not yet
+        // carry Atomic prepare/member/decision/tombstone authority. Refuse the
+        // transition before its durable marker until that representation is
+        // qualified by ATM-4C.
+        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)?;
         let built =
             crate::recovery_shadow::prepare_flip_to_compact_shadow(&self.paths, self.store_id, 0)?;
         self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::Transitioning)?;
@@ -8610,12 +8670,14 @@ impl Store {
 
     /// Step 8 activate: durable CompactShadow marker, then stop new Materialized.
     pub fn activate_compact_shadow_mode(&mut self) -> Result<(), StoreError> {
+        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)?;
         crate::recovery_shadow::activate_compact_shadow_mode(&self.paths, self.store_id)?;
         self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::CompactShadow)
     }
 
     /// Step 8 rollback: Materialized dual-run; keep Shadows and Materialized files.
     pub fn rollback_to_materialized_mode(&mut self) -> Result<(), StoreError> {
+        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)?;
         crate::recovery_shadow::rollback_to_materialized_mode(&self.paths, self.store_id)?;
         self.apply_recovery_mode(crate::recovery_shadow::RecoveryMode::Materialized)?;
         // Dual-stream may stay attached for experimental use; product default off.
@@ -8705,6 +8767,10 @@ impl Store {
                 summary,
                 auth_publish_ns,
             } => {
+                self.relocate_atomic_value_refs(
+                    &self.paths.pending_segment(&segment_id),
+                    &self.paths.sealed_segment(&segment_id),
+                );
                 if let Some(p) = self.seal_pipeline.as_mut() {
                     p.inflight_seals = p.inflight_seals.saturating_sub(1);
                 }
@@ -8815,6 +8881,10 @@ impl Store {
                 shadow_staging_write_ns,
                 shadow_sync_ns,
             } => {
+                self.relocate_atomic_value_refs(
+                    &self.paths.pending_segment(&segment_id),
+                    &self.paths.sealed_segment(&segment_id),
+                );
                 if let Some(p) = self.seal_pipeline.as_mut() {
                     p.inflight_seals = p.inflight_seals.saturating_sub(1);
                 }
@@ -8994,6 +9064,7 @@ impl Store {
         crate::failpoint::hit("store.seal.before_dest_write")?;
         let t_rename = std::time::Instant::now();
         fs::rename(&active_path, &pending_path)?;
+        self.relocate_atomic_value_refs(&active_path, &pending_path);
         if require_fsync {
             sync_dir(&self.paths.active_shard_dir(shard, n))?;
             let _ = sync_dir(&pending_dir);
@@ -9145,7 +9216,7 @@ impl Store {
         if !need {
             return Ok(());
         }
-        self.refuse_if_outstanding_atomic_evidence()?;
+        self.refuse_if_atomic_relocation_is_unsafe()?;
         let t0 = std::time::Instant::now();
         let r = if self.async_lifecycle_enabled() {
             // The async rotation path handles both ordinary authoritative seals
@@ -9461,8 +9532,14 @@ impl Store {
         to_tier: TierClass,
         mode: TierMoveMode,
     ) -> Result<MigrationEvidence, StoreError> {
+        self.refuse_if_atomic_relocation_is_unsafe()?;
         // Ensure placement knows about hot sealed segments.
         discover_placements(&self.paths, &mut self.tier_placement)?;
+        let source_path = self
+            .tier_placement
+            .get(&segment_id)
+            .map(|placement| crate::tier::resolve_placement_path(&self.paths, placement))
+            .transpose()?;
         let evidence = transfer_segment(
             &self.paths,
             &mut self.tier_placement,
@@ -9470,6 +9547,15 @@ impl Store {
             to_tier,
             mode,
         )?;
+        if let (Some(source), Some(destination)) = (
+            source_path,
+            self.tier_placement
+                .get(&segment_id)
+                .map(|placement| crate::tier::resolve_placement_path(&self.paths, placement))
+                .transpose()?,
+        ) {
+            self.relocate_atomic_value_refs(&source, &destination);
+        }
         self.persist_tier_state()?;
         self.refresh_segment_catalog()?;
         // Fingerprint changed; refresh derived caches.

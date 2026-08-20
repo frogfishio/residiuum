@@ -636,7 +636,11 @@ fn compaction_stays_refused_and_does_not_leak() {
     }
     match store.compact_live() {
         Err(StoreError::AtomicStage(detail)) => {
-            assert!(detail.contains("outstanding Atomic"), "{detail}");
+            assert!(
+                detail.contains("outstanding Atomic")
+                    || detail.contains("maintenance relocation refused"),
+                "{detail}"
+            );
         }
         other => panic!("compact must refuse, got {other:?}"),
     }

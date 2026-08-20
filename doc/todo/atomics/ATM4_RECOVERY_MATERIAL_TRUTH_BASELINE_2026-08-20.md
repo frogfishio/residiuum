@@ -119,11 +119,33 @@ media permits and are never interpreted as the new composite-key format.
 
 ### ATM-4C — maintenance journeys
 
-- copy through or reconstruct Atomic authority across compaction, Recovery
-  Shadow, backup, restore, clone, salvage, scrub and tier movement;
-- replace the temporary maintenance fences only where a qualified journey
-  exists;
-- retain identity, commit position and tombstones across same-identity restore.
+- **Delivered in the first push:** the frozen journey/admission matrix in
+  `ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md`.
+- **Delivered:** healthy terminal Atomics may seal, relocate and run
+  source-retaining live compaction. Undecided, damaged, conflicting or
+  incomplete evidence still refuses before relocation.
+- **Delivered:** stale active/sealed/tier checkpoint paths heal only when one
+  discovered candidate authenticates the complete covered prefix. Payload and
+  chunk locators are rebound to that exact physical replacement; ambiguous or
+  missing candidates remain incomplete.
+- **Delivered:** locally managed tier moves discover Atomic-bearing segment
+  media without trusting the derived placement catalogue. Whole-object hashes,
+  status, receipt and value survive hot-to-tier move and restart.
+- **Delivered:** same-identity full backup/restore preserves the decision,
+  commit position, complete material, binary Heap SubjectV2 values and
+  same-root replay. Restore verification now uses the binary-key path rather
+  than the legacy UTF-8 scan façade.
+- **Delivered:** evidence salvage retains source Heap authority as inactive
+  foreign-Heap evidence; it is examinable but is not activated in the new
+  lineage. Scrub is qualified read-only for healthy terminal evidence.
+- **Qualified fail-closed:** identity-reassign clone, source reclaim and
+  CompactShadow transition refuse before mutation while any issued Atomic
+  identity exists. Qualification exposed that the current value-only Recovery
+  Shadow loses Atomic authority, so the transition is now explicitly fenced.
+- **Remaining:** authenticated Atomic-preserving replacement generations for
+  source reclaim; Recovery Shadow authority carriage and rebuild; external
+  tier-root discovery/offline truth; tombstone-index page generation reclaim;
+  crash/failpoint matrices for those destructive transitions.
 
 ### ATM-4D — serial histories and predicates
 

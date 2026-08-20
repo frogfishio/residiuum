@@ -1,0 +1,145 @@
+# ATM-4C maintenance journeys specification — 2026-08-20
+
+Status: `implementation_in_progress`
+
+ATM-4C proves that a maintenance operation cannot erase, alias, duplicate or
+invent Atomic authority. Maintenance may change physical placement and derived
+representations. It may not change the Heap-qualified logical history.
+
+## 1. Preservation invariant
+
+For every issued identity `(heap_id, atomic_id)`, an accepted maintenance
+journey preserves:
+
+```text
+logical decision
+content root
+decision hash
+commit position
+lifetime tombstone
+material truth (or an honestly weaker result)
+healthy-member examination
+same-root retry result
+```
+
+Physical paths, segment identities, indexes and derived catalogues may change.
+An exact move is recognized only by authenticated prefix or whole-object
+identity; filenames and operator intent are not evidence.
+
+## 2. Admission classes
+
+| Source state | Read-only maintenance | Copy/backup | Relocation | Reclaim/rewrite |
+|---|---:|---:|---:|---:|
+| no Atomic evidence | allow | allow | allow | allow |
+| healthy terminal decision and complete coverage | allow | allow | allow after proof | allow only with an authenticated replacement generation |
+| issued prepare without a decision | allow examination | allow exact copy | refuse | refuse |
+| damaged/conflicting attributable evidence | allow examination | allow exact copy | refuse unless byte-identical | refuse |
+| incomplete/unattributable coverage | allow examination | allow exact copy | refuse | refuse |
+
+Opening a normal writer may first resolve a complete-coverage undecided prepare
+to the specified durable recovery-abort. A maintenance call on an already-open
+handle does not silently make that decision merely to bypass a fence.
+
+## 3. Journey matrix
+
+### 3.1 Seal and physical relocation
+
+- Moving an authenticated active prefix into a sealed or tier path preserves
+  the exact bytes and their coverage frontier.
+- Recovery may heal a stale physical path only when exactly one discovered
+  candidate authenticates the complete covered prefix.
+- Zero or multiple candidates are not guessed; coverage remains incomplete.
+- Every payload/chunk locator is rebound to the authenticated replacement path.
+
+### 3.2 Compaction
+
+- Non-reclaiming compaction may run with healthy terminal Atomics because the
+  authoritative sources remain present.
+- Source reclaim requires a verified replacement containing everything needed
+  for ordinary values, Atomic status/retry, index rebuild, examination and
+  same-identity restore.
+- The replacement generation becomes authoritative before any source is
+  removed. Every crash cut exposes either the old generation or the complete
+  new generation.
+- Damaged, conflicted, undecided or incomplete Atomic evidence blocks reclaim.
+
+### 3.3 Recovery Shadow
+
+- A protected Shadow carries Atomic frames byte-identically or through a
+  versioned representation that authenticates the same identities and hashes.
+- Mode activation requires gap-free coverage including Atomic-bearing
+  segments. A value-only Shadow is not sufficient.
+- Recovery from Shadow must reproduce the same two-axis statuses and receipts.
+
+### 3.4 Backup and restore
+
+- A same-identity full backup contains Atomic media, checkpoint, coordinator,
+  tombstone index and maintenance-generation descriptors.
+- Restore verifies every package object before publication and preserves Heap
+  identity, decisions, positions, tombstones, values and retry results.
+- A crash or failed verification cannot publish a partial destination as a
+  valid restored store.
+
+### 3.5 Clone and new identity
+
+- Identity-reassign clone never aliases source Atomic authority into the new
+  Heap.
+- Until a provenance-bearing historical-evidence profile is implemented, a
+  package containing any issued Atomic identity is refused before destination
+  publication. This refusal is the qualified v1 behavior.
+
+### 3.6 Salvage
+
+- Evidence salvage copies every verified Atomic frame byte-identically and
+  records holes and corrupt regions.
+- A new-lineage salvage destination does not activate source Heap authority.
+  Source evidence remains examinable as provenance/foreign-Heap evidence.
+- Salvage never converts partial evidence into a complete decision or clean
+  current state.
+
+### 3.7 Scrub
+
+- Scrub is read-only with respect to authoritative Atomic bytes.
+- Findings cover Atomic media and remain attributable where authenticated
+  linkage survives.
+- Repair/coverage clearing requires exact authenticated replacement media; a
+  coincidental pathname or value is insufficient.
+
+### 3.8 Tier movement
+
+- Segment identity and whole-object hash remain stable across copy/move.
+- Atomic recovery discovers every online configured tier and heals checkpoint
+  paths by authenticated identity, including after catalog rebuild.
+- An offline Atomic-bearing tier yields `coverage_incomplete`, never absence.
+
+### 3.9 Tombstone-index page reclamation
+
+- Superseded copy-on-write pages are reclaimed only by a generation swap:
+  build complete new pages, authenticate the root, durably publish the new
+  descriptor, then retire old pages.
+- Crashes before descriptor publication use the old root; crashes after it use
+  the new root. Neither path scans obsolete-page count.
+
+## 4. Required qualification
+
+The `ATM-MNT` family must cover:
+
+1. committed and not-committed decisions through every supported journey;
+2. same-root retry and next commit position after each same-identity journey;
+3. ordinary value visibility and healthy-member examination;
+4. unresolved, damaged, conflicted and incomplete sources refusing every
+   destructive journey before mutation;
+5. active-to-sealed and hot-to-warm/cold/archive path healing, including stale
+   checkpoints and deleted placement catalogues;
+6. every failpoint around replacement creation, verification, activation,
+   descriptor publication and source retirement;
+7. same-identity backup/restore and new-identity clone refusal;
+8. salvage with clean frames, holes and foreign-Heap provenance;
+9. scrub before/after exact media return and a non-matching negative control;
+10. Recovery Shadow rebuild equivalence;
+11. tombstone-index generation-swap head/middle/tail corruption and crash cuts;
+12. negative controls proving that omitted authority, locator rebinding or a
+    premature source delete is detected.
+
+The clean full verifier must label ATM-MNT as an acceptance candidate. Public
+Atomics remain disabled until ATM-5.

@@ -344,10 +344,78 @@ pub fn outstanding_atomic_evidence(paths: &StorePaths) -> Result<bool, StoreErro
 
 /// Refuse seal / compact / reclaim / identity-reassign while staging remains.
 pub fn refuse_maintenance_while_outstanding(paths: &StorePaths) -> Result<(), StoreError> {
-    if outstanding_atomic_evidence(paths)? {
+    let quick = outstanding_atomic_evidence(paths)?;
+    let catalogued = if !quick
+        && (atomic_stage_checkpoint_path(paths).is_file() || atomic_coord_path(paths).is_file())
+    {
+        open_catalog_readonly(paths, AtomicStageLimits::operable())?
+            .catalog
+            .has_outstanding_evidence()
+    } else {
+        false
+    };
+    if quick || catalogued {
         return Err(StoreError::AtomicStage(
             "seal/compact/reclaim refused while outstanding Atomic staging evidence exists".into(),
         ));
+    }
+    Ok(())
+}
+
+/// Permit byte-preserving relocation only when every issued Atomic has an
+/// exact terminal decision and the authenticated catalogue is healthy.
+///
+/// This is deliberately narrower than a general reclaim permission: source
+/// deletion after a rewritten replacement still requires an ATM-4C generation
+/// proof. It is sufficient for active-to-sealed and whole-segment tier moves.
+pub(crate) fn refuse_atomic_relocation_unless_terminal(
+    paths: &StorePaths,
+) -> Result<(), StoreError> {
+    if !atomic_stage_checkpoint_path(paths).is_file()
+        && !atomic_coord_path(paths).is_file()
+        && !dirty_media_has_atomic_records(paths)?
+    {
+        return Ok(());
+    }
+    let opened = open_catalog_readonly(paths, AtomicStageLimits::operable())?;
+    let catalog = &opened.catalog;
+    let damaged = catalog.coverage_degraded
+        || !catalog.blocked.is_empty()
+        || opened.findings.records.iter().any(|finding| {
+            matches!(
+                finding.class,
+                StageEvidenceClass::Partial
+                    | StageEvidenceClass::Corrupt
+                    | StageEvidenceClass::Conflict
+            )
+        });
+    let undecided = catalog
+        .prepares
+        .keys()
+        .any(|key| !catalog.decisions.contains_key(key));
+    let incomplete_commit = catalog.decisions.iter().any(|(key, decision)| {
+        decision.decision == residiuum_atomics::DecisionCode::Committed
+            && !crate::atomic_stage_status::material_complete(catalog, *key)
+    });
+    if damaged || undecided || incomplete_commit {
+        return Err(StoreError::AtomicStage(format!(
+            "maintenance relocation refused: Atomic evidence is undecided, damaged, conflicting, or incomplete (coverage_degraded={}, blocked={}, adverse_findings={}, undecided={}, incomplete_commit={})",
+            catalog.coverage_degraded,
+            catalog.blocked.len(),
+            opened
+                .findings
+                .records
+                .iter()
+                .filter(|finding| matches!(
+                    finding.class,
+                    StageEvidenceClass::Partial
+                        | StageEvidenceClass::Corrupt
+                        | StageEvidenceClass::Conflict
+                ))
+                .count(),
+            undecided,
+            incomplete_commit,
+        )));
     }
     Ok(())
 }
@@ -499,6 +567,7 @@ fn open_catalog_inner(
     let mut findings = std::mem::take(&mut catalog.findings);
 
     let files = list_media_files(paths, &mut budget)?;
+    heal_relocated_coverage(paths, &files, &mut catalog, &mut covered, &mut budget)?;
     let mut unmatched: Vec<CoveredFile> = covered.clone();
     let mut next_covered = Vec::new();
 
@@ -774,8 +843,78 @@ fn list_media_files(paths: &StorePaths, budget: &mut Budget) -> Result<Vec<PathB
     collect_files(&paths.active_dir(), 0, budget, &mut out)?;
     collect_files(&paths.segments_dir(), 0, budget, &mut out)?;
     collect_files(&paths.pending_seal_dir(), 0, budget, &mut out)?;
+    let mut tier_files = Vec::new();
+    collect_files(&paths.tiers_dir(), 0, budget, &mut tier_files)?;
+    out.extend(tier_files.into_iter().filter(|path| {
+        path.extension().and_then(|extension| extension.to_str()) == Some("residiuum")
+    }));
     out.sort();
     Ok(out)
+}
+
+/// Heal a stale checkpoint pathname only when exactly one currently discovered
+/// file authenticates the complete covered prefix. This covers rename-based
+/// seal and whole-object tier movement without trusting names or placement
+/// catalogues. Ambiguity remains degraded rather than choosing a copy.
+fn heal_relocated_coverage(
+    paths: &StorePaths,
+    files: &[PathBuf],
+    catalog: &mut StageCatalog,
+    covered: &mut [CoveredFile],
+    budget: &mut Budget,
+) -> Result<(), StoreError> {
+    let existing: std::collections::BTreeSet<String> =
+        files.iter().map(|path| rel_path(paths, path)).collect();
+    let claimed: std::collections::BTreeSet<String> = covered
+        .iter()
+        .filter(|frontier| {
+            existing.contains(&frontier.rel_path)
+                && fs::metadata(paths.root.join(&frontier.rel_path))
+                    .is_ok_and(|meta| meta.len() >= frontier.covered_len)
+        })
+        .map(|frontier| frontier.rel_path.clone())
+        .collect();
+    let mut used = std::collections::BTreeSet::new();
+
+    for frontier in covered.iter_mut().filter(|frontier| {
+        frontier.atomic_evidence
+            && (!existing.contains(&frontier.rel_path)
+                || match fs::metadata(paths.root.join(&frontier.rel_path)) {
+                    Ok(meta) => meta.len() < frontier.covered_len,
+                    Err(_) => true,
+                })
+    }) {
+        let mut matches = Vec::new();
+        for candidate in files {
+            let candidate_rel = rel_path(paths, candidate);
+            if claimed.contains(&candidate_rel) || used.contains(&candidate_rel) {
+                continue;
+            }
+            let Ok(meta) = fs::metadata(candidate) else {
+                continue;
+            };
+            if meta.len() < frontier.covered_len {
+                continue;
+            }
+            // Charge before reading so adversarial lookalikes cannot turn path
+            // healing into an unbounded reopen scan.
+            budget.charge_bytes(frontier.covered_len)?;
+            if verify_covered_blocks(candidate, frontier).is_ok() {
+                matches.push(candidate_rel);
+                if matches.len() > 1 {
+                    break;
+                }
+            }
+        }
+        if matches.len() == 1 {
+            let from = frontier.rel_path.clone();
+            let to = matches.pop().expect("single relocation match");
+            frontier.rel_path = to.clone();
+            catalog.relocate_body_refs(&from, &to);
+            used.insert(to);
+        }
+    }
+    Ok(())
 }
 
 fn collect_files(

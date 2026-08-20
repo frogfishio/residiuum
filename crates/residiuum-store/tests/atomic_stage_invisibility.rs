@@ -433,7 +433,8 @@ fn examination_and_rotation_keep_staged_invisible() {
     match store.seal_active() {
         Err(StoreError::AtomicStage(detail)) => {
             assert!(
-                detail.contains("outstanding Atomic"),
+                detail.contains("outstanding Atomic")
+                    || detail.contains("maintenance relocation refused"),
                 "seal must refuse while staged: {detail}"
             );
         }
@@ -442,7 +443,8 @@ fn examination_and_rotation_keep_staged_invisible() {
     match store.compact_live() {
         Err(StoreError::AtomicStage(detail)) => {
             assert!(
-                detail.contains("outstanding Atomic"),
+                detail.contains("outstanding Atomic")
+                    || detail.contains("maintenance relocation refused"),
                 "compact must refuse while staged: {detail}"
             );
         }

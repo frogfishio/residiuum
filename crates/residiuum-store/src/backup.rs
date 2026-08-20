@@ -445,7 +445,18 @@ pub fn restore_full_backup(
         // Best-effort: refresh derived state (identity rewrite is separate).
         let _ = opened.persist_index_cache();
         let _ = opened.rebuild_catalogs();
-        opened.live_logical_entries()?.len()
+        // Heap SubjectV2 keys are binary and must not pass through the legacy
+        // UTF-8 scan façade. Verify every live subject through the byte-keyed
+        // read path used by the capability-bound Heap API.
+        let subjects = opened.index_live_after(None, None);
+        for subject in &subjects {
+            if opened.get_subject_bytes(subject)?.is_none() {
+                return Err(StoreError::CoverageIncomplete(
+                    "restored live subject has no complete payload".into(),
+                ));
+            }
+        }
+        subjects.len()
     };
 
     // After reassignment, write a fresh store descriptor matching the new id.
