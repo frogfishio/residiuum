@@ -11,10 +11,11 @@ members at the ordinary-write gap named by `ATORD1`, retains overwritten Atomic
 payload locators, and excludes prepared, aborted, and decision-less evidence.
 Multi-member publication, decision-before-publish, publish-before-ack, ordered
 history across reopen, and inspection-without-checkpoint-write cases are
-covered. This is not yet ATM-3 acceptance: the complete concurrent/crash proof
-and grouped member-boundary optimization remain open. Universal ordinary-write
-ordering now has its first implemented and tested witness profile, described
-below.
+covered. Concurrent/crash/resource qualification is now assembled by
+`scripts/verify-atomics.sh`; ATM-3 acceptance remains blocked by grouped
+independent outcomes and lifecycle/authority-frontier integration. Universal
+ordinary-write ordering has an implemented and tested witness profile,
+described below.
 
 The guarded-reader proof now runs point, full logical scan, and history readers
 concurrently with a two-member commit. Every sampled view is either the prior
@@ -199,9 +200,16 @@ ATM-3 is not yet accepted. The remaining delivery delta is explicit:
    The hidden Store/Heap/SDK qualification path now returns the frozen
    `AtomicOutcome`: exact before/after versions, event IDs, decision hash,
    durability, commit position and replay identity are proven through restart;
-4. finish maximum-plan resource measurement and update the ATM-3 evidence
-   assembler. The publication algorithm itself is now O(member count), and
+4. ~~finish maximum-plan resource measurement and update the ATM-3 evidence
+   assembler~~. The publication algorithm itself is now O(member count), and
    existing hard admission ceilings remain enforced before media append.
+
+Items 3 and 4 are closed. The verifier now emits a distinct ATM-3 manifest and
+runs publication/crash/receipt/resource (`ATM-PUB`) plus capability-bound RQL
+reader (`ATM-RDR`) evidence. The maximum 256-caller-member plan commits with
+two authoritative syncs; a 257-member negative control is refused before any
+authoritative write. That control exposed and fixed a missing executor call to
+the frozen closed-plan validator. Only items 1 and 2 remain open.
 
 `Capabilities::atomics` remains `false` until all slices and the ATM-3 exit gate
 are green.

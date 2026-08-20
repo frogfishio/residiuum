@@ -24,10 +24,10 @@ use crate::store::Store;
 use residiuum_atomics::{
     decision_hash, encode_decision, encode_member, encode_prepare, members_match_prepare,
     ordered_member_manifest_root, plan_content_root, prepare_from_closed_plan, prepare_hash,
-    AtomicAbortReason, AtomicDecision, AtomicId, AtomicMember, AtomicMemberReceipt, AtomicOutcome,
-    AtomicPlan, AtomicPrepare, AtomicReceipt, AtomicRefuseReason, AtomicsError, ChunkPlan,
-    CoordinatorSeq, DecisionCode, HeapId, MemberPhase, MutationKind, ObjectIdentity,
-    PlacementManifest, PredicateKind, StagingHeap, VersionId,
+    validate_closed_plan, AtomicAbortReason, AtomicDecision, AtomicId, AtomicMember,
+    AtomicMemberReceipt, AtomicOutcome, AtomicPlan, AtomicPrepare, AtomicReceipt,
+    AtomicRefuseReason, AtomicsError, ChunkPlan, CoordinatorSeq, DecisionCode, HeapId, MemberPhase,
+    MutationKind, ObjectIdentity, PlacementManifest, PredicateKind, StagingHeap, VersionId,
 };
 use residiuum_format::{
     encode_atomic_commit_envelope, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
@@ -727,6 +727,10 @@ impl StoreAtomicStage<'_> {
                 "atomic plan Heap does not match the capability-bound stage".into(),
             ));
         }
+        // Closing canonicalizes shape; admission is the separate operation
+        // that enforces the executable profile, scope and applied hard limits.
+        // It must precede content lookup or any durable evidence append.
+        validate_closed_plan(plan, self.heap.heap_id())?;
         let root = plan_content_root(plan).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         if let Some(stored) = self.catalog.prepares.get(&plan.atomic_id()) {
             if stored.content_root != root {

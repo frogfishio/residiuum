@@ -988,3 +988,30 @@ fn whole_plan_commit_uses_two_authoritative_boundaries_not_one_per_member() {
     assert_eq!(syncs_for(1, 40), 2, "one-member Atomic boundaries");
     assert_eq!(syncs_for(256, 41), 2, "256-member Atomic boundaries");
 }
+
+#[test]
+fn one_over_maximum_caller_plan_is_refused_before_media_append() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create_with_shards(&path, 4).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let atomic_plan = create_n_plan(heap, atomic(42), 257);
+    let before = store.write_path_stats().authoritative_io;
+
+    let error = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_outcome(&atomic_plan)
+        .unwrap_err();
+    assert!(
+        matches!(error, StoreError::AtomicStage(ref message) if message.contains("LimitExceeded")),
+        "expected structural limit refusal, got {error}"
+    );
+    assert_eq!(
+        store.write_path_stats().authoritative_io,
+        before,
+        "structural refusal must not append Atomic evidence"
+    );
+}

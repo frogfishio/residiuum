@@ -7,11 +7,10 @@
 #
 # Writes commit-scoped run records under target/atomics-evidence/runs/
 # <commit12>-<profile>.json plus a detached .sha256 sidecar (CR-R2-007).
-# Labels are package-specific (CR-ATMR4-010):
-#   ATM-1 may become acceptance_candidate on a clean full matrix.
-#   ATM-2 stays partial while not_store=true or any mandatory store/lane
-#   deliverable listed in the assembler is absent.
-# Run-level label is the worse of the two packages (never upgrades ATM-2).
+# Labels are package-specific (CR-ATMR4-010). A clean full matrix may make a
+# completed package an acceptance candidate. ATM-3 remains partial while its
+# grouped-boundary and lifecycle/authority-frontier deliverables are open.
+# Run-level label is the worst package label.
 # Dirty or failing runs are diagnostic. Capabilities::atomics must stay false.
 set -euo pipefail
 
@@ -30,7 +29,7 @@ esac
 
 OUT_ROOT="target/atomics-evidence"
 RUN_DIR="$OUT_ROOT/runs"
-mkdir -p "$OUT_ROOT/atm-1" "$OUT_ROOT/atm-2" "$RUN_DIR"
+mkdir -p "$OUT_ROOT/atm-1" "$OUT_ROOT/atm-2" "$OUT_ROOT/atm-3" "$RUN_DIR"
 
 fail() { echo "verify-atomics ($PROFILE): FAIL: $*" >&2; exit 1; }
 ok() { echo "verify-atomics ($PROFILE): $*"; }
@@ -44,7 +43,7 @@ TOOLCHAIN="$(rustc --version 2>/dev/null || echo rustc-missing)"
 CARGO_V="$(cargo --version 2>/dev/null || echo cargo-missing)"
 PLATFORM="$(uname -srm)"
 SEED="${ATOMICS_EVIDENCE_SEED:-0}"
-SUITE_VERSION="atm-1-atm-2-atmr6-2026-08-20"
+SUITE_VERSION="atm-1-atm-2-atm-3-2026-08-20"
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 STARTED_UNIX="$(date +%s)"
 # Label is decided after the run from dirty + family coverage (CR-R2-007).
@@ -189,6 +188,17 @@ run_store_atmr5_full() {
     crates/residiuum-store/tests/atomic_stage_maintenance.rs
 }
 
+run_atm3_store() {
+  run_cmd ATM-PUB "whole-generation publication, crash, receipt and limit proofs" \
+    cargo test -p residiuum-store --offline --test atomic_frontier_decision \
+    --features legacy-raw-store
+}
+
+run_atm3_sdk() {
+  run_cmd ATM-RDR "guarded SDK/RQL Atomic generation and receipt" \
+    cargo test -p residiuum-sdk --offline --test atomic_rql_generation
+}
+
 case "$PROFILE" in
   quick)
     run_enc
@@ -196,6 +206,8 @@ case "$PROFILE" in
     run_aut
     run_iso
     run_fmt
+    run_atm3_store
+    run_atm3_sdk
     ;;
   crash)
     run_crs
@@ -211,6 +223,8 @@ case "$PROFILE" in
     run_cmd ATM-CRS "io_prefix_matrix" \
       cargo test -p residiuum-atomic-lane --offline --test io_prefix_matrix
     run_store_atmr5_crash
+    run_atm3_store
+    run_atm3_sdk
     ;;
   model)
     run_model_kernel
@@ -231,6 +245,8 @@ case "$PROFILE" in
       cargo test -p residiuum-store --offline --test atomic_stage_invisibility \
       --features legacy-raw-store
     run_store_atmr5_full
+    run_atm3_store
+    run_atm3_sdk
     run_cmd ATM-RES "raised_limits_are_refused" \
       cargo test -p residiuum-atomics --offline --all-targets
     run_cmd ATM-CRS "residiuum-atomic-lane --all-targets" \
@@ -275,6 +291,18 @@ run_negatives() {
         cargo test -p residiuum-store --offline --test atomic_stage_invisibility \
         --features legacy-raw-store -- \
         leak_negative_control_is_visible_on_each_surface --exact
+      ;;
+  esac
+  case "$PROFILE" in
+    quick|crash|full)
+      run_cmd ATM-PUB "executed:one_over_maximum_caller_plan_is_refused_before_media_append" \
+        cargo test -p residiuum-store --offline --test atomic_frontier_decision \
+        --features legacy-raw-store -- \
+        one_over_maximum_caller_plan_is_refused_before_media_append --exact
+      run_cmd ATM-PUB "executed:unbound_heap_authority_predicate_fails_closed_and_replays_after_restart" \
+        cargo test -p residiuum-store --offline --test atomic_frontier_decision \
+        --features legacy-raw-store -- \
+        unbound_heap_authority_predicate_fails_closed_and_replays_after_restart --exact
       ;;
   esac
 }
@@ -323,6 +351,7 @@ def hash_existing(rel: str):
 ATM1_FAMILIES = {"ATM-ENC", "ATM-ORA", "ATM-AUT"}
 ATM1_FULL_FAMILIES = ATM1_FAMILIES | {"ATM-RES"}
 ATM2_FAMILIES = {"ATM-ISO", "ATM-CRS"}
+ATM3_FAMILIES = {"ATM-PUB", "ATM-RDR"}
 
 def decide_acceptance(*, dirty, failed, required_families, passing, blockers):
     if dirty or failed:
@@ -342,17 +371,14 @@ def cmd_passed(cmds, needle):
 
 atm1_required = ATM1_FULL_FAMILIES if profile == "full" else ATM1_FAMILIES
 atm1_blockers = []
+if profile != "full":
+    atm1_blockers.append("acceptance requires the clean full profile")
 if profile == "full" and not cmd_passed(cmds, "residiuum-format --offline --all-targets"):
     atm1_blockers.append("missing residiuum-format --all-targets")
 
-atm2_blockers = [
-    "not_store=true; store staging is not an accepted ATM-2 durability contract",
-    "ATM-3 must not consume StoreAtomicStage or the peer lane",
-    "RQL/watch/residiuum-examine remain untested store surfaces",
-    "Recovery Shadow of Atomic-bearing actives is fail-closed until ATM-4 copy-through (CR-ATMR6-006)",
-    "multiprocess crash_child Abort is not an Atomic staging cell (CR-ATMR6-007 uses in-process crash-media)",
-    "store-wide clippy -D warnings is not an Atomics gate (pre-existing store warnings)",
-]
+atm2_blockers = []
+if profile != "full":
+    atm2_blockers.append("acceptance requires the clean full profile")
 if profile in {"crash", "full"}:
     if not cmd_passed(cmds, "atomic_stage_retry"):
         atm2_blockers.append("missing store exact same-ID retry (CR-ATMR5-003)")
@@ -391,6 +417,15 @@ if profile == "full":
         atm2_blockers.append("missing store maintenance fence (CR-ATMR6-006)")
     if not cmd_passed(cmds, "rustfmt --check crates/residiuum-store/src/atomic_stage.rs"):
         atm2_blockers.append("missing scoped store Atomic staging rustfmt --check")
+
+atm3_blockers = [
+    "grouped independent outcomes do not yet share physical stable boundaries",
+    "Heap lifecycle/authority mutations and authority predicates are not yet integrated into the universal serialization frontier",
+]
+if not cmd_passed(cmds, "atomic_frontier_decision"):
+    atm3_blockers.append("missing store ATM-3 publication/crash/receipt/resource suite")
+if not cmd_passed(cmds, "atomic_rql_generation"):
+    atm3_blockers.append("missing capability-bound SDK/RQL generation suite")
 
 deferred = [
     {"family": "ATM-DMG", "result": "not_in_scope", "reason": "ATM-4 damage/material truth"},
@@ -432,6 +467,9 @@ atm1_failed = any(
 atm2_failed = any(
     c["result"] != "pass" and c["family"] in ATM2_FAMILIES for c in cmds
 )
+atm3_failed = any(
+    c["result"] != "pass" and c["family"] in ATM3_FAMILIES for c in cmds
+)
 atm1_acceptance = decide_acceptance(
     dirty=dirty,
     failed=failed or atm1_failed,
@@ -446,9 +484,14 @@ atm2_acceptance = decide_acceptance(
     passing=passing,
     blockers=atm2_blockers,
 )
-if atm2_acceptance == "acceptance_candidate":
-    sys.exit("ATM-2 must not be acceptance_candidate while not_store=true")
-acceptance = worse(atm1_acceptance, atm2_acceptance)
+atm3_acceptance = decide_acceptance(
+    dirty=dirty,
+    failed=failed or atm3_failed,
+    required_families=ATM3_FAMILIES,
+    passing=passing,
+    blockers=atm3_blockers,
+)
+acceptance = worse(worse(atm1_acceptance, atm2_acceptance), atm3_acceptance)
 
 run = {
     "format": "residiuum-atomics-verify/2",
@@ -460,16 +503,19 @@ run = {
     "acceptance_rule": (
         "Package-specific (CR-ATMR4-010). diagnostic = dirty or failing; "
         "ATM-1 acceptance_candidate = clean full ENC/ORA/AUT/RES + format all-targets; "
-        "ATM-2 stays partial while not_store=true or any listed mandatory/residual blocker remains; "
-        "run-level label is the worse of the two packages. "
+        "ATM-2 acceptance_candidate = clean full store/lane matrix; "
+        "ATM-3 stays partial while grouped boundaries or lifecycle/authority integration remain; "
+        "run-level label is the worst of the three packages. "
         "Run payload is hashed in a sidecar; this file never contains its own digest."
     ),
     "package_acceptance": {
         "ATM-1": atm1_acceptance,
         "ATM-2": atm2_acceptance,
+        "ATM-3": atm3_acceptance,
     },
     "atm1_blockers": atm1_blockers,
     "atm2_blockers": atm2_blockers,
+    "atm3_blockers": atm3_blockers,
     "toolchain": toolchain,
     "cargo": cargo_v,
     "platform": platform,
@@ -493,6 +539,9 @@ artifacts = [
     hash_existing("crates/residiuum-format/src/envelope_keys.rs"),
     hash_existing("crates/residiuum-atomic-lane/src/lane.rs"),
     hash_existing("crates/residiuum-store/src/atomic_stage.rs"),
+    hash_existing("crates/residiuum-store/src/heap/heap_store.rs"),
+    hash_existing("crates/residiuum-sdk/tests/atomic_rql_generation.rs"),
+    hash_existing("doc/todo/atomics/ATM3_PUBLICATION_ARCHITECTURE_2026-08-20.md"),
     hash_existing("crates/residiuum-atomics/src/builder.rs"),
     hash_existing("crates/residiuum-atomics/src/validate.rs"),
 ]
@@ -575,7 +624,7 @@ atm1 = merge_pack(out / "atm-1" / "manifest.json", {
 
 atm2 = merge_pack(out / "atm-2" / "manifest.json", {
     "package": "ATM-2",
-    "title": "Evidence and invisible staging (prototype / peer crate)",
+    "title": "Store-owned durable evidence and invisible staging",
     "format": "residiuum-atomics-package/2",
     **pack_scope,
     "acceptance": atm2_acceptance,
@@ -606,17 +655,50 @@ atm2 = merge_pack(out / "atm-2" / "manifest.json", {
             "leak_negative_control_is_visible_on_each_surface",
         }
     ],
-    "not_store": True,
+    "not_store": False,
     "verify_profile": profile,
     "source_run": run_rel,
     "artifact_hashes": [a for a in artifacts if a],
 }, [f for f in families.values() if f["family"] in {"ATM-ISO", "ATM-CRS", "ATM-ENC"}])
 (out / "atm-2" / "manifest.json").write_text(json.dumps(atm2, indent=2) + "\n", encoding="utf-8")
 
+atm3 = merge_pack(out / "atm-3" / "manifest.json", {
+    "package": "ATM-3",
+    "title": "Durable decision and whole-generation publication",
+    "format": "residiuum-atomics-package/2",
+    **pack_scope,
+    "acceptance": atm3_acceptance,
+    "acceptance_blockers": atm3_blockers,
+    "capabilities_atomics": False,
+    "implemented_requirements": [
+        "one monotonic per-Heap commit position per committed Atomic",
+        "validation at the guarded live Heap frontier",
+        "two authoritative stable boundaries independent of member count",
+        "all-or-none point, scan, history and capability-bound RQL visibility",
+        "committed-before-publish reconstruction and five-cut crash prefix proof",
+        "universal ATORD1 ordering with later ordinary writes and deletes",
+        "O(member-count) primary/history/locator publication",
+        "exact committed/not-committed outcomes and per-member CAS versions",
+        "maximum 256-caller-member execution plus one-over pre-media refusal",
+    ],
+    "negative_controls": [
+        n["name"] for n in executed_negatives if n["name"].startswith("executed:")
+        and n["name"].split(":", 1)[-1] in {
+            "one_over_maximum_caller_plan_is_refused_before_media_append",
+            "unbound_heap_authority_predicate_fails_closed_and_replays_after_restart",
+        }
+    ],
+    "verify_profile": profile,
+    "source_run": run_rel,
+    "artifact_hashes": [a for a in artifacts if a],
+}, [f for f in families.values() if f["family"] in ATM3_FAMILIES])
+(out / "atm-3" / "manifest.json").write_text(json.dumps(atm3, indent=2) + "\n", encoding="utf-8")
+
 print(f"wrote {run_path}")
 print(f"wrote {sidecar}")
 print(f"wrote {out / 'atm-1' / 'manifest.json'}")
 print(f"wrote {out / 'atm-2' / 'manifest.json'}")
+print(f"wrote {out / 'atm-3' / 'manifest.json'}")
 print(f"acceptance={acceptance}")
 # Sidecar must match the written payload; the payload must not list itself.
 digest = sidecar.read_text(encoding="utf-8").strip()
