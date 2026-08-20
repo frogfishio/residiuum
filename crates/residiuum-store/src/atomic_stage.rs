@@ -400,7 +400,7 @@ impl StoreAtomicStage<'_> {
                 "decision requires the exact complete member manifest and payloads".into(),
             ));
         }
-        let position = self.catalog.next_commit_position()?;
+        let position = self.catalog.next_commit_position(prepare.heap_id)?;
         let decision = AtomicDecision::committed(
             atomic_id,
             prepare_hash(&prepare).map_err(|e| StoreError::AtomicStage(e.to_string()))?,
@@ -428,8 +428,13 @@ impl StoreAtomicStage<'_> {
             decision_event_id(atomic_id),
         )?;
         crate::failpoint::hit("store.atomic.after_decision")?;
+        self.catalog
+            .decision_heaps
+            .insert(atomic_id, prepare.heap_id);
         self.catalog.decisions.insert(atomic_id, decision.clone());
-        self.catalog.commit_next = position.saturating_add(1);
+        self.catalog
+            .commit_next
+            .insert(prepare.heap_id, position.saturating_add(1));
         persist_live_checkpoint(
             self.store.paths(),
             &self.catalog,

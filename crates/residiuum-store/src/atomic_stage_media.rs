@@ -8,7 +8,7 @@
 use crate::error::StoreError;
 use residiuum_atomics::{
     decode_prepare, encode_prepare, AtomicDecision, AtomicId, AtomicMember, AtomicPrepare,
-    ChunkPlan, ContentRoot,
+    ChunkPlan, ContentRoot, HeapId,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -45,9 +45,12 @@ pub(crate) struct StageCatalog {
     /// Durable terminal decisions. A committed decision is the ATM-3
     /// linearization point; the checkpoint is only a rebuild accelerator.
     pub decisions: BTreeMap<AtomicId, AtomicDecision>,
+    /// Heap ownership authenticated by each decision envelope. Retained even
+    /// when its prepare is damaged so a named commit position is never reused.
+    pub decision_heaps: BTreeMap<AtomicId, HeapId>,
     /// Next non-zero Heap commit position. Reconstructed above every admitted
     /// committed decision during recovery.
-    pub commit_next: u64,
+    pub commit_next: BTreeMap<HeapId, u64>,
     /// Identities that must not be installed or reused (CR-ATMR5-002).
     pub blocked: BTreeSet<AtomicId>,
     /// Prepares observed as format-admitted `BatchPrepare` (CR-ATMR5-006).
@@ -119,6 +122,7 @@ impl StageCatalog {
             || !self.chunk_refs.is_empty()
             || !self.seals.is_empty()
             || !self.decisions.is_empty()
+            || !self.decision_heaps.is_empty()
             || !self.blocked.is_empty()
             || !self.prepare_batch.is_empty()
             || !self.coord_seq.is_empty()
@@ -143,6 +147,8 @@ impl StageCatalog {
             .saturating_add(members.saturating_mul(256))
             .saturating_add(self.seals.len() as u64 * 64)
             .saturating_add(self.decisions.len() as u64 * 192)
+            .saturating_add(self.decision_heaps.len() as u64 * 48)
+            .saturating_add(self.commit_next.len() as u64 * 24)
             .saturating_add(self.blocked.len() as u64 * 32)
             .saturating_add(self.prepare_batch.len() as u64 * 32)
             .saturating_add(self.coord_seq.len() as u64 * 40)
@@ -154,12 +160,19 @@ impl StageCatalog {
     /// Allocate the next Heap commit position while the exclusive store writer
     /// is held. Allocation becomes authoritative only when its decision frame
     /// is durably appended.
-    pub(crate) fn next_commit_position(&self) -> Result<u64, StoreError> {
-        let next = self.commit_next.max(1);
+    pub(crate) fn next_commit_position(&self, heap_id: HeapId) -> Result<u64, StoreError> {
+        let next = self.commit_next.get(&heap_id).copied().unwrap_or(1).max(1);
         if self
             .decisions
-            .values()
-            .filter_map(|decision| decision.commit_position)
+            .iter()
+            .filter(|(id, _)| {
+                self.decision_heaps
+                    .get(id)
+                    .copied()
+                    .or_else(|| self.prepares.get(id).map(|prepare| prepare.heap_id))
+                    == Some(heap_id)
+            })
+            .filter_map(|(_, decision)| decision.commit_position)
             .any(|position| position == next)
         {
             return Err(StoreError::AtomicStage(format!(
@@ -171,14 +184,23 @@ impl StageCatalog {
 
     /// Reconstruct the high-water mark from authoritative admitted decisions.
     pub(crate) fn reconstruct_commit_next(&mut self) {
-        self.commit_next = self
-            .decisions
-            .values()
-            .filter_map(|decision| decision.commit_position)
-            .max()
-            .unwrap_or(0)
-            .saturating_add(1)
-            .max(1);
+        let mut next = BTreeMap::new();
+        for (id, decision) in &self.decisions {
+            let Some(position) = decision.commit_position else {
+                continue;
+            };
+            let Some(heap_id) = self
+                .decision_heaps
+                .get(id)
+                .copied()
+                .or_else(|| self.prepares.get(id).map(|prepare| prepare.heap_id))
+            else {
+                continue;
+            };
+            let entry = next.entry(heap_id).or_insert(1u64);
+            *entry = (*entry).max(position.saturating_add(1).max(1));
+        }
+        self.commit_next = next;
     }
 
     /// Allocate or return the durable coordinator sequence for `atomic_id`.
@@ -218,6 +240,47 @@ impl StageCatalog {
             }
             let _ = self.assign_coord(id);
         }
+    }
+}
+
+#[cfg(test)]
+mod commit_position_tests {
+    use super::*;
+
+    fn heap(first: u8) -> HeapId {
+        let mut bytes = [0u8; 16];
+        bytes[0] = first;
+        HeapId::from_bytes(bytes).unwrap()
+    }
+
+    fn atomic(first: u8) -> AtomicId {
+        let mut bytes = [0u8; 32];
+        bytes[0] = first;
+        AtomicId::from_bytes(bytes).unwrap()
+    }
+
+    #[test]
+    fn heap_commit_positions_are_independent_and_reconstructed() {
+        let heap_a = heap(1);
+        let heap_b = heap(2);
+        let atomic_a = atomic(1);
+        let atomic_b = atomic(2);
+        let mut catalog = StageCatalog::default();
+        catalog.decisions.insert(
+            atomic_a,
+            AtomicDecision::committed(atomic_a, [1; 32], [2; 32], 1, 7).unwrap(),
+        );
+        catalog.decisions.insert(
+            atomic_b,
+            AtomicDecision::committed(atomic_b, [3; 32], [4; 32], 1, 2).unwrap(),
+        );
+        catalog.decision_heaps.insert(atomic_a, heap_a);
+        catalog.decision_heaps.insert(atomic_b, heap_b);
+
+        catalog.reconstruct_commit_next();
+
+        assert_eq!(catalog.next_commit_position(heap_a).unwrap(), 8);
+        assert_eq!(catalog.next_commit_position(heap_b).unwrap(), 3);
     }
 }
 

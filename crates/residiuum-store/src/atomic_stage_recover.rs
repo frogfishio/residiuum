@@ -28,8 +28,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 11;
-const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V11";
+const CHECKPOINT_VERSION: u8 = 12;
+const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V12";
 const BLOCK_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-BLK-V1";
 /// Fixed leaf size for the covered-prefix block frontier (CR-ATMR6-001).
 const FRONTIER_BLOCK: u64 = 64 * 1024;
@@ -1342,7 +1342,16 @@ fn encode_checkpoint(
         body.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
         body.extend_from_slice(&encoded);
     }
-    body.extend_from_slice(&catalog.commit_next.to_be_bytes());
+    body.extend_from_slice(&(catalog.decision_heaps.len() as u32).to_be_bytes());
+    for (id, heap_id) in &catalog.decision_heaps {
+        body.extend_from_slice(id.as_bytes());
+        body.extend_from_slice(heap_id.as_bytes());
+    }
+    body.extend_from_slice(&(catalog.commit_next.len() as u32).to_be_bytes());
+    for (heap_id, next) in &catalog.commit_next {
+        body.extend_from_slice(heap_id.as_bytes());
+        body.extend_from_slice(&next.to_be_bytes());
+    }
     body.extend_from_slice(&(catalog.blocked.len() as u32).to_be_bytes());
     for id in &catalog.blocked {
         body.extend_from_slice(id.as_bytes());
@@ -1541,7 +1550,32 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
             return None;
         }
     }
-    catalog.commit_next = read_u64(&mut cur)?;
+    let n_decision_heaps = read_u32(&mut cur)? as usize;
+    for _ in 0..n_decision_heaps {
+        if cur.len() < 48 {
+            return None;
+        }
+        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
+        let heap_id = HeapId::from_bytes(cur[32..48].try_into().ok()?).ok()?;
+        cur = &cur[48..];
+        if !catalog.decisions.contains_key(&id)
+            || catalog.decision_heaps.insert(id, heap_id).is_some()
+        {
+            return None;
+        }
+    }
+    let n_commit_heaps = read_u32(&mut cur)? as usize;
+    for _ in 0..n_commit_heaps {
+        if cur.len() < 24 {
+            return None;
+        }
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        cur = &cur[16..];
+        let next = read_u64(&mut cur)?;
+        if next == 0 || catalog.commit_next.insert(heap_id, next).is_some() {
+            return None;
+        }
+    }
     let n_blocked = read_u32(&mut cur)? as usize;
     for _ in 0..n_blocked {
         if cur.len() < 32 {
@@ -1703,7 +1737,7 @@ fn read_u64(cur: &mut &[u8]) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod checkpoint_v11_freeze {
+mod checkpoint_v12_freeze {
     use super::*;
     use crate::atomic_stage_media::{
         encode_stage_chunk_body, encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal,
@@ -1716,12 +1750,12 @@ mod checkpoint_v11_freeze {
     }
 
     #[test]
-    fn v11_empty_checkpoint_roundtrips() {
+    fn v12_empty_checkpoint_roundtrips() {
         let catalog = StageCatalog::default();
         let bytes = encode_checkpoint(&catalog, &[]).unwrap();
         assert!(bytes.starts_with(CHECKPOINT_MAGIC));
         assert_eq!(bytes[CHECKPOINT_MAGIC.len()], CHECKPOINT_VERSION);
-        let (decoded, covered) = decode_checkpoint(&bytes).expect("v11 empty");
+        let (decoded, covered) = decode_checkpoint(&bytes).expect("v12 empty");
         assert!(covered.is_empty());
         assert!(!decoded.has_outstanding_evidence());
     }

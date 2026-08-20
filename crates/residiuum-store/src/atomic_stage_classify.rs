@@ -309,6 +309,20 @@ fn admit_decision(
         );
         return;
     }
+    let envelope_heap = bound_heap;
+    if catalog
+        .decision_heaps
+        .get(&id)
+        .is_some_and(|stored| *stored != envelope_heap)
+    {
+        catalog.blocked.insert(id);
+        findings.push(
+            StageEvidenceKind::Decision,
+            StageEvidenceClass::Conflict,
+            Some(id),
+        );
+        return;
+    }
     if catalog
         .prepares
         .get(&id)
@@ -336,6 +350,7 @@ fn admit_decision(
                 .intended_members
                 .entry(id)
                 .or_insert(decision.member_count);
+            catalog.decision_heaps.insert(id, envelope_heap);
             catalog.decisions.insert(id, decision);
             findings.push(
                 StageEvidenceKind::Decision,

@@ -52,6 +52,13 @@ Commit position allocation is reconstructed as one greater than the maximum
 valid durable committed decision; an allocation is never acknowledged before
 its decision is durable.
 
+The catalogue may cover evidence for many named Heaps in one physical store,
+but commit-position high-water marks are partitioned by `HeapId`. A physical
+connection, writer, and sync cohort are shared infrastructure; they are not a
+logical Heap identity. Authenticated decision-envelope ownership is retained
+even when related evidence is damaged so a position named by damaged evidence
+cannot later be reused in that Heap.
+
 ## Rotation and multi-shard fencing
 
 Prepare, member evidence, payload sidecars, seal, and decision are admitted by
