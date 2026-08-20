@@ -194,7 +194,8 @@ run_store_atmr5_full() {
     crates/residiuum-store/tests/atomic_stage_damage_truth.rs \
     crates/residiuum-store/tests/atomic_stage_limits.rs \
     crates/residiuum-store/tests/atomic_stage_maintenance.rs \
-    crates/residiuum-store/tests/atomic_serial_histories.rs
+    crates/residiuum-store/tests/atomic_serial_histories.rs \
+    crates/residiuum-store/tests/atomic_range_predicates.rs
 }
 
 run_atm3_store() {
@@ -209,8 +210,9 @@ run_atm3_sdk() {
 }
 
 run_atm4d_point() {
-  run_cmd ATM-SER "point serial checker rejects witness-omission negative control" \
+  run_cmd ATM-SER "serial checker and exact range phantom/coverage negatives" \
     cargo test -p residiuum-store --offline --test atomic_serial_histories \
+    --test atomic_range_predicates \
     --features legacy-raw-store
 }
 
@@ -568,6 +570,7 @@ artifacts = [
     hash_existing("scripts/verify-atomics.sh"),
     hash_existing(handoff),
     hash_existing("spec/atomics/cbor-v1.json"),
+    hash_existing("spec/atomics/predicates-v1.json"),
     hash_existing("crates/residiuum-format/src/envelope_keys.rs"),
     hash_existing("crates/residiuum-atomic-lane/src/lane.rs"),
     hash_existing("crates/residiuum-store/src/atomic_stage.rs"),
@@ -578,6 +581,7 @@ artifacts = [
     hash_existing("doc/todo/atomics/ATM3_PUBLICATION_ARCHITECTURE_2026-08-20.md"),
     hash_existing("doc/todo/atomics/ATM4_RECOVERY_MATERIAL_TRUTH_BASELINE_2026-08-20.md"),
     hash_existing("crates/residiuum-atomics/src/builder.rs"),
+    hash_existing("crates/residiuum-atomics/src/predicate.rs"),
     hash_existing("crates/residiuum-atomics/src/validate.rs"),
 ]
 run["artifact_hashes"] = [a for a in artifacts if a]

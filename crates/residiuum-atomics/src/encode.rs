@@ -191,6 +191,40 @@ pub fn encode_exact_scalar_equality(
     })
 }
 
+/// Encode an exact empty bounded-range observation.
+pub fn encode_bounded_key_range_absence(
+    collection_id: CollectionId,
+    range: &crate::predicate::BoundedKeyRange,
+) -> Result<PlanPredicate, AtomicsError> {
+    if range.collection_id() != collection_id || range.expected_count() != 0 {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+    }
+    Ok(PlanPredicate {
+        kind: PredicateKind::BoundedKeyRangeAbsence,
+        collection_id: Some(collection_id),
+        key: None,
+        version: None,
+        encoded: Some(crate::predicate::encode_bounded_range_payload(range)?),
+    })
+}
+
+/// Encode an exact non-empty bounded-range observation.
+pub fn encode_bounded_key_range_presence(
+    collection_id: CollectionId,
+    range: &crate::predicate::BoundedKeyRange,
+) -> Result<PlanPredicate, AtomicsError> {
+    if range.collection_id() != collection_id || range.expected_count() == 0 {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+    }
+    Ok(PlanPredicate {
+        kind: PredicateKind::BoundedKeyRangePresence,
+        collection_id: Some(collection_id),
+        key: None,
+        version: None,
+        encoded: Some(crate::predicate::encode_bounded_range_payload(range)?),
+    })
+}
+
 /// Encode heap authority/security revision (`ATOMICS_SPEC` §7).
 ///
 /// This is not an active RRE rule revision. The payload is the 32-byte

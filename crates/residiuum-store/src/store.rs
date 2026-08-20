@@ -5271,6 +5271,20 @@ impl Store {
             .collect()
     }
 
+    /// Stream authoritative live subject identities and establishing versions
+    /// in one byte-prefix domain without cloning the collection.
+    ///
+    /// The physical order is SubjectV2 order, not application-key order. Range
+    /// consumers must decode and apply their declared mathematical comparator.
+    pub(crate) fn index_live_versions_with_prefix<'a>(
+        &'a self,
+        prefix: &'a [u8],
+    ) -> impl Iterator<Item = (&'a [u8], [u8; 16])> + 'a {
+        self.index
+            .live_entries_after(None, Some(prefix))
+            .map(|(subject, live)| (subject.as_slice(), live.event_id))
+    }
+
     /// Count live subjects in one byte-prefix range without cloning keys.
     ///
     /// Used to prove that an order-serving secondary index has exactly one

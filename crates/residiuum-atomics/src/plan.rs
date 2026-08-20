@@ -208,13 +208,16 @@ impl PredicateKind {
     /// Predicates the LocalHeap v1 closed-plan validator admits.
     ///
     /// `HeapAuthorityRevision` is a structural binding, not a compiled RRE
-    /// host closure. Exact scalar equality is the first typed compiled kind;
-    /// other compiled kinds stay unsupported.
+    /// host closure. Exact scalar and bounded exact ranges are typed compiled
+    /// kinds; other compiled kinds stay unsupported.
     pub const fn is_closed_plan_predicate(self) -> bool {
         self.is_public_builder_assert()
             || matches!(
                 self,
-                Self::ExactScalarEquality | Self::HeapAuthorityRevision
+                Self::ExactScalarEquality
+                    | Self::BoundedKeyRangeAbsence
+                    | Self::BoundedKeyRangePresence
+                    | Self::HeapAuthorityRevision
             )
     }
 
@@ -289,6 +292,17 @@ impl CanonicalKeyKind {
             Self::Decimal => 4,
         }
     }
+
+    /// Decode a known key-kind wire code.
+    pub const fn from_wire_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::String),
+            2 => Some(Self::Opaque),
+            3 => Some(Self::Integer),
+            4 => Some(Self::Decimal),
+            _ => None,
+        }
+    }
 }
 
 /// Canonical key value. Integer/decimal payloads are already-canonical bytes.
@@ -340,6 +354,37 @@ impl CanonicalKey {
                 bytes.extend_from_slice(&scale.to_be_bytes());
                 bytes.extend_from_slice(coefficient);
                 bytes
+            }
+        }
+    }
+
+    /// Decode a SubjectV2 application-key payload under a frozen key kind.
+    ///
+    /// This is the inverse of [`Self::subject_bytes`]. It is used only after
+    /// the collection contract has supplied `kind`; SubjectV2 intentionally
+    /// does not carry a second key-kind tag.
+    pub fn from_subject_bytes(
+        kind: CanonicalKeyKind,
+        bytes: &[u8],
+    ) -> Result<Self, crate::error::AtomicsError> {
+        match kind {
+            CanonicalKeyKind::String => String::from_utf8(bytes.to_vec())
+                .map(Self::String)
+                .map_err(|_| {
+                    crate::error::AtomicsError::Refused(
+                        crate::outcome::AtomicRefuseReason::InvalidValue,
+                    )
+                }),
+            CanonicalKeyKind::Opaque => Ok(Self::Opaque(bytes.to_vec())),
+            CanonicalKeyKind::Integer => Self::integer_bytes(bytes),
+            CanonicalKeyKind::Decimal => {
+                let (scale, coefficient) =
+                    bytes
+                        .split_first_chunk::<8>()
+                        .ok_or(crate::error::AtomicsError::Refused(
+                            crate::outcome::AtomicRefuseReason::InvalidValue,
+                        ))?;
+                Self::decimal_bytes(coefficient, i64::from_be_bytes(*scale))
             }
         }
     }
@@ -675,5 +720,20 @@ mod tests {
         assert_eq!(key.subject_bytes(), b"sdk-key");
         assert_ne!(key.identity_bytes(), key.subject_bytes());
         assert_eq!(&key.identity_bytes()[1..], key.subject_bytes());
+    }
+
+    #[test]
+    fn subject_key_payload_round_trips_under_declared_kind() {
+        for key in [
+            CanonicalKey::string("hello"),
+            CanonicalKey::opaque([0, 1, 2]),
+            CanonicalKey::integer(-129),
+            CanonicalKey::decimal(-12345, 3),
+        ] {
+            assert_eq!(
+                CanonicalKey::from_subject_bytes(key.kind(), &key.subject_bytes()).unwrap(),
+                key
+            );
+        }
     }
 }

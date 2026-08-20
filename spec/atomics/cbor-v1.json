@@ -60,7 +60,7 @@
     "encoded"
   ],
   "duplicate_read": "refuse same (collection_id, canonical_key_bytes) as a read witness, even when observed_version or projection_hash differs",
-  "duplicate_predicate": "refuse same (predicate_kind, collection_id, canonical_key_bytes)",
+  "duplicate_predicate": "refuse same (predicate_kind, collection_id, predicate_identity); predicate_identity is canonical_key_bytes for point/scalar predicates, compiled range_identity for bounded ranges, and empty for other keyless structural predicates",
   "read_frontier_rule": "required when reads is non-empty; write-only plans may omit it",
   "profile_codes": {
     "1": "local_heap_v1"

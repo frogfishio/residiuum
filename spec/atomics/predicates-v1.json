@@ -27,5 +27,45 @@
       "noncanonical_expected": "refuse before prepare",
       "host_closures": "forbidden"
     }
+  },
+  "bounded_key_range": {
+    "outer_predicate_kinds": {
+      "5": "absence; expected_count must be zero",
+      "6": "presence; expected_count must be nonzero"
+    },
+    "outer_fields": {
+      "collection_id": "required and equal to payload collection_id",
+      "key": "absent",
+      "version": "absent",
+      "encoded": "required"
+    },
+    "payload_fields": {
+      "1": { "name": "profile", "type": "uint", "required": true, "value": 1 },
+      "2": { "name": "collection_id", "type": "bstr(16)", "required": true },
+      "3": { "name": "key_kind", "type": "uint", "required": true },
+      "4": { "name": "order_profile", "type": "uint", "required": true, "value": 1 },
+      "5": { "name": "lower", "type": "canonical_key_map", "required": true },
+      "6": { "name": "lower_inclusive", "type": "uint(0|1)", "required": true },
+      "7": { "name": "upper", "type": "canonical_key_map", "required": true },
+      "8": { "name": "upper_inclusive", "type": "uint(0|1)", "required": true },
+      "9": { "name": "coverage_domain", "type": "bstr(32)", "required": true },
+      "10": { "name": "examination_limit", "type": "uint", "required": true, "range": "1..=1000000" },
+      "11": { "name": "expected_count", "type": "uint", "required": true, "range": "0..=4096" },
+      "12": { "name": "expected_result_commitment", "type": "bstr(32)", "required": true },
+      "13": { "name": "range_identity", "type": "bstr(32)", "required": true }
+    },
+    "order_profile_1": {
+      "string": "UTF-8 scalar order",
+      "opaque": "unsigned byte lexicographic order",
+      "integer": "mathematical signed arbitrary-width integer order",
+      "decimal": "mathematical coefficient times 10^-scale order, then declared scale as the distinct-representation tie-break"
+    },
+    "result_commitment": "domain-separated hash of collection_id, cardinality, and canonically ordered (key_identity, establishing_version) pairs",
+    "coverage": {
+      "authoritative_primary_only": true,
+      "offline_or_unknown_key_authority": "coverage_incomplete",
+      "examination_limit_exceeded": "coverage_incomplete",
+      "candidate_partial_or_damaged_derived_index": "cannot prove the predicate"
+    }
   }
 }

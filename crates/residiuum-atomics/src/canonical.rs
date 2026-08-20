@@ -168,7 +168,16 @@ fn refuse_duplicate_reads(reads: &[ReadWitness]) -> Result<(), AtomicsError> {
 fn refuse_duplicate_predicates(predicates: &[PlanPredicate]) -> Result<(), AtomicsError> {
     let mut seen: Vec<(u8, Option<CollectionId>, Vec<u8>)> = Vec::new();
     for p in predicates {
-        let key = p.key.as_ref().map(key_order_bytes).unwrap_or_default();
+        let key = match p.kind {
+            PredicateKind::BoundedKeyRangeAbsence | PredicateKind::BoundedKeyRangePresence => p
+                .encoded
+                .as_deref()
+                .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))
+                .and_then(crate::predicate::decode_bounded_range_payload)?
+                .range_identity()
+                .to_vec(),
+            _ => p.key.as_ref().map(key_order_bytes).unwrap_or_default(),
+        };
         let ident = (p.kind.wire_code(), p.collection_id, key);
         if seen.contains(&ident) {
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
@@ -235,6 +244,27 @@ fn validate_predicate_shapes(predicates: &[PlanPredicate]) -> Result<(), Atomics
                     && p.version.is_none()
                     && p.encoded.as_deref().is_some_and(|bytes| {
                         crate::predicate::decode_exact_scalar_payload(bytes).is_ok()
+                    })
+            }
+            PredicateKind::BoundedKeyRangeAbsence | PredicateKind::BoundedKeyRangePresence => {
+                let decoded = p
+                    .encoded
+                    .as_deref()
+                    .and_then(|bytes| crate::predicate::decode_bounded_range_payload(bytes).ok());
+                p.collection_id.is_some()
+                    && p.key.is_none()
+                    && p.version.is_none()
+                    && decoded.as_ref().is_some_and(|range| {
+                        Some(range.collection_id()) == p.collection_id
+                            && match p.kind {
+                                PredicateKind::BoundedKeyRangeAbsence => {
+                                    range.expected_count() == 0
+                                }
+                                PredicateKind::BoundedKeyRangePresence => {
+                                    range.expected_count() > 0
+                                }
+                                _ => unreachable!(),
+                            }
                     })
             }
             _ => true,

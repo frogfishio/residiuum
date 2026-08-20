@@ -195,8 +195,13 @@ media permits and are never interpreted as the new composite-key format.
   payload, canonical validation, serialization-frontier and cohort-overlay
   execution, and independent serial-history negative control. The canonical
   RQL/RRE compiler bridge and heterogeneous query differential remain open.
-- **Remaining:** host construction-session bridge; bounded exact-range
-  presence/absence and phantom proof; rule/lifecycle
+- **Delivered in ATM-4D.4 authoritative core:** typed bounded-range payload,
+  exact string/opaque/integer/decimal order, complete primary-domain execution
+  with cohort overlay, range result commitments, phantom/version proof,
+  predicate-only commits and fail-closed work/tier coverage. Derived-index
+  acceleration remains barred until an exact forced-scan differential exists.
+- **Remaining:** host construction-session bridge; range-index acceleration
+  differential; rule/lifecycle
   predicates; broader randomized concurrent/restart histories and two-Heap
   noninterference.
 - Detailed contract and delivery order:

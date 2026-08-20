@@ -3,9 +3,9 @@
 use crate::{
     admit_closed_plan, plan_content_root, serialize_canonical_value, validate_closed_plan,
     AtomicBuilder, AtomicId, AtomicOptions, AtomicOutcome, AtomicRefuseReason, AtomicsError,
-    BoundCollection, CanonicalKey, CanonicalKeyKind, CanonicalValue, CollectionId,
+    BoundCollection, BoundedKeyRange, CanonicalKey, CanonicalKeyKind, CanonicalValue, CollectionId,
     CollectionRights, ConstructionRead, CoordinationScope, EncodingProfile, HeapId, PredicateKind,
-    ResourceLimits, SerialOracle, TrustedAuthorityView, ValueEncoding, VersionId,
+    RangeEntry, ResourceLimits, SerialOracle, TrustedAuthorityView, ValueEncoding, VersionId,
 };
 use std::time::{Duration, Instant};
 
@@ -644,5 +644,112 @@ fn compiled_exact_scalar_is_typed_authorized_and_canonical() {
     assert_eq!(
         admit_closed_plan(&forged, &integer_authority).unwrap_err(),
         AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
+    );
+}
+
+#[test]
+fn compiled_ranges_are_authorized_typed_and_have_exact_identities() {
+    let strings = coll(1, 1, CollectionRights::ordinary(), 1);
+    let empty_left = BoundedKeyRange::observed(
+        cid(1),
+        CanonicalKey::string("a"),
+        true,
+        CanonicalKey::string("m"),
+        true,
+        100,
+        &[],
+    )
+    .unwrap();
+    let empty_right = BoundedKeyRange::observed(
+        cid(1),
+        CanonicalKey::string("n"),
+        true,
+        CanonicalKey::string("z"),
+        true,
+        100,
+        &[],
+    )
+    .unwrap();
+    let mut b = builder(1, 60);
+    b.compiled_bounded_key_range_absence(&strings, &empty_right)
+        .unwrap()
+        .compiled_bounded_key_range_absence(&strings, &empty_left)
+        .unwrap();
+    let plan = b.build().unwrap();
+    assert_eq!(
+        plan.predicates()
+            .iter()
+            .filter(|predicate| predicate.kind == PredicateKind::BoundedKeyRangeAbsence)
+            .count(),
+        2
+    );
+    let encoded = crate::encode_canonical_plan(&plan).unwrap();
+    assert_eq!(crate::decode_canonical_plan(&encoded).unwrap(), plan);
+
+    let observed = BoundedKeyRange::observed(
+        cid(1),
+        CanonicalKey::string("a"),
+        true,
+        CanonicalKey::string("z"),
+        true,
+        100,
+        &[RangeEntry {
+            key: CanonicalKey::string("k"),
+            version: vid(7),
+        }],
+    )
+    .unwrap();
+    let mut present = builder(1, 61);
+    present
+        .compiled_bounded_key_range_presence(&strings, &observed)
+        .unwrap();
+    assert!(present.build().is_ok());
+
+    let readless = coll(1, 2, CollectionRights::CREATE, 1);
+    let foreign_collection = BoundedKeyRange::observed(
+        cid(2),
+        CanonicalKey::string("a"),
+        true,
+        CanonicalKey::string("z"),
+        true,
+        10,
+        &[],
+    )
+    .unwrap();
+    let mut denied = builder(1, 62);
+    assert_eq!(
+        denied
+            .compiled_bounded_key_range_absence(&readless, &foreign_collection)
+            .unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::AuthorizationFailure)
+    );
+
+    let integers = BoundedKeyRange::observed(
+        cid(1),
+        CanonicalKey::integer(-1),
+        true,
+        CanonicalKey::integer(1),
+        true,
+        10,
+        &[],
+    )
+    .unwrap();
+    let mut wrong_kind = builder(1, 63);
+    assert_eq!(
+        wrong_kind
+            .compiled_bounded_key_range_absence(&strings, &integers)
+            .unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
+    );
+
+    let mut duplicate = builder(1, 64);
+    duplicate
+        .compiled_bounded_key_range_absence(&strings, &empty_left)
+        .unwrap()
+        .compiled_bounded_key_range_absence(&strings, &empty_left)
+        .unwrap();
+    assert_eq!(
+        duplicate.build().unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
     );
 }

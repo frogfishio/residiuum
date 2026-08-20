@@ -436,7 +436,7 @@ fn validator_is_sensitive_to_single_field_flips() {
         defaults(),
         Vec::new(),
         vec![PlanPredicate {
-            kind: PredicateKind::BoundedKeyRangePresence,
+            kind: PredicateKind::ActiveRuleRevisionEquality,
             collection_id: Some(cid(1)),
             key: Some(key("k")),
             version: None,

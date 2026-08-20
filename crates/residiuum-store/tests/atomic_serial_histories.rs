@@ -3,10 +3,11 @@
 #![cfg(feature = "legacy-raw-store")]
 
 use residiuum_atomics::{
-    decode_exact_scalar_payload, encode_exact_scalar_equality, AtomicAbortReason,
-    AtomicCohortOutcome, AtomicId, AtomicOutcome, AtomicPlan, AtomicPlanParts, AtomicProfile,
-    CanonicalKey, CollectionId, CoordinationScope, ExactScalarEquality, HeapId, MutationKind,
-    PlanMutation, PlanPredicate, PredicateKind, ReadWitness, ResourceLimits, ValueEncoding,
+    decode_bounded_range_payload, decode_exact_scalar_payload, encode_bounded_key_range_absence,
+    encode_exact_scalar_equality, AtomicAbortReason, AtomicCohortOutcome, AtomicId, AtomicOutcome,
+    AtomicPlan, AtomicPlanParts, AtomicProfile, BoundedKeyRange, CanonicalKey, CanonicalKeyKind,
+    CollectionId, CoordinationScope, ExactScalarEquality, HeapId, MutationKind, PlanMutation,
+    PlanPredicate, PredicateKind, RangeEntry, ReadWitness, ResourceLimits, ValueEncoding,
     VersionId,
 };
 use residiuum_format::{encode_subject_v2, SubjectObjectKind};
@@ -146,22 +147,53 @@ fn plan_is_valid(plan: &AtomicPlan, state: &SerialState) -> bool {
         if predicate.kind == PredicateKind::HeapAuthorityRevision {
             continue;
         }
-        let (Some(collection_id), Some(key)) = (predicate.collection_id, predicate.key.as_ref())
-        else {
+        let Some(collection_id) = predicate.collection_id else {
             return false;
         };
-        let observed = state.get(&cell_key(collection_id, key));
+        let observed = predicate
+            .key
+            .as_ref()
+            .and_then(|key| state.get(&cell_key(collection_id, key)));
         let valid = match predicate.kind {
-            PredicateKind::AssertAbsent => observed.is_none(),
-            PredicateKind::AssertPresent => observed.is_some(),
-            PredicateKind::AssertVersion => observed.map(|cell| cell.version) == predicate.version,
+            PredicateKind::AssertAbsent => predicate.key.is_some() && observed.is_none(),
+            PredicateKind::AssertPresent => predicate.key.is_some() && observed.is_some(),
+            PredicateKind::AssertVersion => {
+                predicate.key.is_some() && observed.map(|cell| cell.version) == predicate.version
+            }
             PredicateKind::ExactScalarEquality => predicate
                 .encoded
                 .as_deref()
                 .and_then(|bytes| decode_exact_scalar_payload(bytes).ok())
                 .is_some_and(|compiled| {
-                    compiled.evaluate(observed.map(|cell| cell.value.as_slice()))
+                    predicate.key.is_some() && {
+                        compiled.evaluate(observed.map(|cell| cell.value.as_slice()))
+                    }
                 }),
+            PredicateKind::BoundedKeyRangeAbsence | PredicateKind::BoundedKeyRangePresence => {
+                predicate
+                    .encoded
+                    .as_deref()
+                    .and_then(|bytes| decode_bounded_range_payload(bytes).ok())
+                    .and_then(|range| {
+                        let mut entries = Vec::new();
+                        for ((candidate_collection, identity), cell) in state {
+                            if *candidate_collection != collection_id {
+                                continue;
+                            }
+                            let (&kind, subject) = identity.split_first()?;
+                            let kind = CanonicalKeyKind::from_wire_code(kind)?;
+                            let key = CanonicalKey::from_subject_bytes(kind, subject).ok()?;
+                            if range.contains(&key).ok()? {
+                                entries.push(RangeEntry {
+                                    key,
+                                    version: cell.version,
+                                });
+                            }
+                        }
+                        range.matches_entries(&entries).ok()
+                    })
+                    .unwrap_or(false)
+            }
             _ => false,
         };
         if !valid {
@@ -541,6 +573,52 @@ fn exact_scalar_dependency_has_an_independent_serial_explanation() {
     assert!(
         find_serial_order(&initial, &impossible, &outcomes).is_none(),
         "negative control: changing the scalar dependency must invalidate the recorded history"
+    );
+}
+
+#[test]
+fn bounded_range_phantom_has_an_independent_serial_explanation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::create(dir.path().join("s")).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let initial = SerialState::new();
+    let range =
+        BoundedKeyRange::observed(collection(), key("a"), true, key("m"), true, 100, &[]).unwrap();
+    let plans = vec![
+        close_plan(
+            heap,
+            atomic(15),
+            vec![],
+            vec![],
+            vec![create("g", b"phantom")],
+        ),
+        close_plan(
+            heap,
+            atomic(16),
+            vec![],
+            vec![encode_bounded_key_range_absence(collection(), &range).unwrap()],
+            vec![create("range-result", b"must-not-publish")],
+        ),
+    ];
+    let outcomes = run_cohort(&mut store, heap, &plans);
+    assert_eq!(committed_count(&outcomes), 1);
+    assert!(find_serial_order(&initial, &plans, &outcomes).is_some());
+
+    let irrelevant =
+        BoundedKeyRange::observed(collection(), key("n"), true, key("z"), true, 100, &[]).unwrap();
+    let weakened = vec![
+        plans[0].clone(),
+        close_plan(
+            heap,
+            atomic(16),
+            vec![],
+            vec![encode_bounded_key_range_absence(collection(), &irrelevant).unwrap()],
+            vec![create("range-result", b"must-not-publish")],
+        ),
+    ];
+    assert!(
+        find_serial_order(&initial, &weakened, &outcomes).is_none(),
+        "negative control: moving the range off the phantom must make the recorded abort unjustifiable"
     );
 }
 

@@ -113,10 +113,33 @@ Index and forced-scan execution must agree on the same canonical predicate.
 
 ### ATM-4D.4 — bounded exact ranges
 
-- freeze bound/order/coverage payload;
-- exact range presence and absence validation;
-- phantom and uniqueness contention through index and forced-scan paths;
-- damaged, stale, partial and missing-index refusal.
+- **Delivered canonical contract:** `predicates-v1.json` freezes collection,
+  key kind, mathematical order profile, inclusive/exclusive bounds, exact
+  coverage domain, examination ceiling, cardinality, ordered `(key, version)`
+  commitment and semantic range identity. Empty or backwards geometry,
+  duplicate observations, mixed key kinds and unbounded work are refused.
+- **Delivered mathematical order:** UTF-8 strings, opaque bytes, arbitrary-width
+  signed integers and exact decimals (`coefficient × 10^-scale`, then declared
+  scale as the distinct-representation tie-break) compare by a total semantic
+  order rather than SubjectV2 bytes. Exhaustive bounded decimal
+  cross-multiplication checks protect the comparator.
+- **Delivered authoritative execution:** the LocalHeap executor streams the
+  complete primary key/version domain under the writer frontier, decodes every
+  SubjectV2 key under the collection profile, applies prior-cohort overlay
+  versions/creates/deletes, sorts only bounded matching results, and compares
+  the exact commitment. Writes outside the range do not conflict.
+- **Delivered fail-closed coverage:** offline key authority, malformed stored
+  identities and an exceeded examination ceiling produce
+  `coverage_incomplete`; they never prove absence. Result cardinality is capped
+  at 4,096 and collection examination at 1,000,000 identities per predicate.
+- **Delivered proof:** in-cohort phantom, exact version drift, outside-range
+  non-conflict, integer physical-order negative, work/tier coverage refusal,
+  predicate-only commit/retry mechanics, and an independent serial-history
+  mutation-sensitive negative control.
+- **Open acceleration differential:** v1 deliberately uses the authoritative
+  forced scan. A derived range index may be added only after it carries this
+  exact order/coverage identity and differentially matches the forced scan;
+  candidate, stale, partial or damaged indexes remain ineligible.
 
 ### ATM-4D.5 — remaining shared-frontier predicates
 

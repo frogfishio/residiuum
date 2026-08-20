@@ -8,7 +8,8 @@
 
 use crate::canonical::key_order_bytes;
 use crate::encode::{
-    encode_assert_absent, encode_assert_present, encode_assert_version, encode_create,
+    encode_assert_absent, encode_assert_present, encode_assert_version,
+    encode_bounded_key_range_absence, encode_bounded_key_range_presence, encode_create,
     encode_delete, encode_exact_scalar_equality, encode_heap_authority_revision, encode_put,
     encode_replace, CanonicalValue,
 };
@@ -489,6 +490,57 @@ impl AtomicBuilder {
         Ok(self)
     }
 
+    /// Add a completely observed empty range produced by RQL/RRE compilation.
+    pub fn compiled_bounded_key_range_absence(
+        &mut self,
+        collection: &BoundCollection,
+        range: &crate::predicate::BoundedKeyRange,
+    ) -> Result<&mut Self, AtomicsError> {
+        let id = self.admit_compiled_range(collection, range)?;
+        self.predicates
+            .push(encode_bounded_key_range_absence(id, range)?);
+        Ok(self)
+    }
+
+    /// Add a completely observed non-empty range produced by RQL/RRE compilation.
+    pub fn compiled_bounded_key_range_presence(
+        &mut self,
+        collection: &BoundCollection,
+        range: &crate::predicate::BoundedKeyRange,
+    ) -> Result<&mut Self, AtomicsError> {
+        let id = self.admit_compiled_range(collection, range)?;
+        self.predicates
+            .push(encode_bounded_key_range_presence(id, range)?);
+        Ok(self)
+    }
+
+    fn admit_compiled_range(
+        &mut self,
+        collection: &BoundCollection,
+        range: &crate::predicate::BoundedKeyRange,
+    ) -> Result<CollectionId, AtomicsError> {
+        if range.collection_id() != collection.collection_id
+            || range.key_kind() != collection.encoding.key_kind()
+        {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+        }
+        let id = self.admit(
+            collection,
+            CollectionRights::READ,
+            range.lower(),
+            None,
+            false,
+        )?;
+        self.admit(
+            collection,
+            CollectionRights::READ,
+            range.upper(),
+            None,
+            false,
+        )?;
+        Ok(id)
+    }
+
     /// Record an exact-version prior read (`ATOMICS_SPEC` §7).
     pub fn witness_version(
         &mut self,
@@ -688,6 +740,24 @@ pub fn admit_closed_plan(
                     Some(compiled.expected()),
                 )?;
             }
+            if matches!(
+                predicate.kind,
+                PredicateKind::BoundedKeyRangeAbsence | PredicateKind::BoundedKeyRangePresence
+            ) {
+                let range = predicate
+                    .encoded
+                    .as_deref()
+                    .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))
+                    .and_then(crate::predicate::decode_bounded_range_payload)?;
+                let encoding = trusted.encoding(cid).ok_or(AtomicsError::Refused(
+                    AtomicRefuseReason::AuthorizationFailure,
+                ))?;
+                if range.collection_id() != cid || range.key_kind() != encoding.key_kind() {
+                    return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+                }
+                require_encoding(trusted, cid, range.lower(), None)?;
+                require_encoding(trusted, cid, range.upper(), None)?;
+            }
         }
     }
     for read in plan.reads() {
@@ -733,6 +803,10 @@ fn right_for_mutation(mutation: &PlanMutation) -> CollectionRights {
 fn right_for_predicate(predicate: &PlanPredicate) -> Option<(CollectionId, CollectionRights)> {
     if !predicate.kind.is_public_builder_assert()
         && predicate.kind != PredicateKind::ExactScalarEquality
+        && !matches!(
+            predicate.kind,
+            PredicateKind::BoundedKeyRangeAbsence | PredicateKind::BoundedKeyRangePresence
+        )
     {
         return None;
     }

@@ -24,18 +24,19 @@ use crate::atomic_stage_recover::{
 use crate::error::StoreError;
 use crate::store::Store;
 use residiuum_atomics::{
-    decision_hash, decode_exact_scalar_payload, encode_decision, encode_member, encode_prepare,
-    members_match_prepare, ordered_member_manifest_root, plan_content_root,
-    prepare_from_closed_plan, prepare_hash, validate_closed_plan, AtomicAbortReason,
-    AtomicCohortOutcome, AtomicDecision, AtomicId, AtomicMember, AtomicMemberReceipt,
-    AtomicOutcome, AtomicPlan, AtomicPrepare, AtomicReceipt, AtomicRefuseReason, AtomicStatus,
-    AtomicsError, ChunkPlan, CoordinatorSeq, DecisionCode, HeapId, LogicalStatus, MaterialStatus,
-    MemberPhase, MutationKind, ObjectIdentity, PlacementManifest, PredicateKind, StagingHeap,
-    VersionId,
+    decision_hash, decode_bounded_range_payload, decode_exact_scalar_payload, encode_decision,
+    encode_member, encode_prepare, members_match_prepare, ordered_member_manifest_root,
+    plan_content_root, prepare_from_closed_plan, prepare_hash, validate_closed_plan,
+    AtomicAbortReason, AtomicCohortOutcome, AtomicDecision, AtomicId, AtomicMember,
+    AtomicMemberReceipt, AtomicOutcome, AtomicPlan, AtomicPrepare, AtomicReceipt,
+    AtomicRefuseReason, AtomicStatus, AtomicsError, CanonicalKey, ChunkPlan, CoordinatorSeq,
+    DecisionCode, HeapId, LogicalStatus, MaterialStatus, MemberPhase, MutationKind, ObjectIdentity,
+    PlacementManifest, PredicateKind, RangeEntry, StagingHeap, VersionId,
 };
 use residiuum_format::{
-    encode_atomic_commit_envelope, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
-    encode_subject_v2, FrameKind, SubjectObjectKind, EMPTY_ENVELOPE,
+    decode_subject_v2, encode_atomic_commit_envelope, encode_atomic_member_envelope,
+    encode_atomic_prepare_envelope, encode_subject_v2, FrameKind, SubjectObjectKind,
+    EMPTY_ENVELOPE,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -1107,8 +1108,7 @@ impl StoreAtomicStage<'_> {
         }
         let members = self.catalog.members.get(&key).cloned().unwrap_or_default();
         let intended = prepare.member_count;
-        if intended == 0
-            || members.len() != intended as usize
+        if members.len() != intended as usize
             || !members_match_prepare(&prepare, &members)
             || members.iter().any(|member| {
                 !self.catalog.has_payload(key, member.ordinal)
@@ -1747,7 +1747,8 @@ impl StoreAtomicStage<'_> {
             .catalog
             .members
             .get(&key)
-            .ok_or_else(|| StoreError::AtomicStage("committed receipt missing members".into()))?
+            .map(Vec::as_slice)
+            .unwrap_or_default()
             .iter()
             .map(|member| AtomicMemberReceipt {
                 collection_id: member.object_identity.collection_id,
@@ -1870,6 +1871,19 @@ impl StoreAtomicStage<'_> {
                 }
             }
         }
+        for predicate in plan.predicates().iter().filter(|predicate| {
+            matches!(
+                predicate.kind,
+                PredicateKind::BoundedKeyRangeAbsence | PredicateKind::BoundedKeyRangePresence
+            )
+        }) {
+            let encoded = predicate.encoded.as_deref().ok_or_else(|| {
+                StoreError::AtomicStage("range predicate omitted its compiled payload".into())
+            })?;
+            hasher.update(&[predicate.kind.wire_code()]);
+            hasher.update(&(encoded.len() as u32).to_be_bytes());
+            hasher.update(encoded);
+        }
         Ok(*hasher.finalize().as_bytes())
     }
 
@@ -1920,6 +1934,15 @@ impl StoreAtomicStage<'_> {
                 let observed = self.observed_value(&subject, overlay)?;
                 if !compiled.evaluate(observed.as_deref()) {
                     return Ok(Some(AtomicAbortReason::PreconditionConflict));
+                }
+                continue;
+            }
+            if matches!(
+                predicate.kind,
+                PredicateKind::BoundedKeyRangeAbsence | PredicateKind::BoundedKeyRangePresence
+            ) {
+                if let Some(reason) = self.validate_bounded_range(predicate, overlay)? {
+                    return Ok(Some(reason));
                 }
                 continue;
             }
@@ -1983,6 +2006,123 @@ impl StoreAtomicStage<'_> {
         match overlay.get(subject) {
             Some(cell) => Ok(cell.value.clone()),
             None => self.store.get_subject_bytes(subject),
+        }
+    }
+
+    fn validate_bounded_range(
+        &self,
+        predicate: &residiuum_atomics::PlanPredicate,
+        overlay: &HashMap<Vec<u8>, AtomicOverlayCell>,
+    ) -> Result<Option<AtomicAbortReason>, StoreError> {
+        let Some(encoded) = predicate.encoded.as_deref() else {
+            return Ok(Some(AtomicAbortReason::RuleRejected));
+        };
+        let range = match decode_bounded_range_payload(encoded) {
+            Ok(range) => range,
+            Err(_) => return Ok(Some(AtomicAbortReason::RuleRejected)),
+        };
+        let Some(collection_id) = predicate.collection_id else {
+            return Ok(Some(AtomicAbortReason::RuleRejected));
+        };
+        if range.collection_id() != collection_id {
+            return Ok(Some(AtomicAbortReason::RuleRejected));
+        }
+        if self.store.tier_coverage().is_incomplete() {
+            return Ok(Some(AtomicAbortReason::CoverageIncomplete));
+        }
+
+        let mut prefix = Vec::with_capacity(34);
+        prefix.push(0x02);
+        prefix.extend_from_slice(self.heap.heap_id().as_bytes());
+        prefix.push(SubjectObjectKind::Collection as u8);
+        prefix.extend_from_slice(collection_id.as_bytes());
+
+        let mut examined = 0u32;
+        let mut entries = Vec::with_capacity(range.expected_count() as usize);
+        for (subject, event_id) in self.store.index_live_versions_with_prefix(&prefix) {
+            examined = examined.saturating_add(1);
+            if examined > range.examination_limit() {
+                return Ok(Some(AtomicAbortReason::CoverageIncomplete));
+            }
+            let decoded = match decode_subject_v2(subject) {
+                Ok(decoded)
+                    if decoded.heap_id == self.heap.heap_id().as_bytes()
+                        && decoded.object_kind == SubjectObjectKind::Collection
+                        && decoded.object_id == collection_id.as_bytes() =>
+                {
+                    decoded
+                }
+                _ => return Ok(Some(AtomicAbortReason::CoverageIncomplete)),
+            };
+            let key = match CanonicalKey::from_subject_bytes(range.key_kind(), decoded.key) {
+                Ok(key) => key,
+                Err(_) => return Ok(Some(AtomicAbortReason::CoverageIncomplete)),
+            };
+            let version = match overlay.get(subject) {
+                Some(cell) => cell.version,
+                None => match VersionId::from_bytes(event_id) {
+                    Ok(version) => Some(version),
+                    Err(_) => return Ok(Some(AtomicAbortReason::CoverageIncomplete)),
+                },
+            };
+            if let Some(version) = version {
+                if range
+                    .contains(&key)
+                    .map_err(|error| StoreError::AtomicStage(error.to_string()))?
+                {
+                    entries.push(RangeEntry { key, version });
+                    if entries.len() > range.expected_count() as usize {
+                        return Ok(Some(AtomicAbortReason::PreconditionConflict));
+                    }
+                }
+            }
+        }
+
+        // A prior plan in this physical cohort may create a subject not yet in
+        // the ordinary primary projection. Overlay replacements were handled
+        // during the authoritative walk; only overlay-only subjects remain.
+        for (subject, cell) in overlay {
+            if self.store.live_event_id(subject).is_some() {
+                continue;
+            }
+            let Ok(decoded) = decode_subject_v2(subject) else {
+                return Ok(Some(AtomicAbortReason::CoverageIncomplete));
+            };
+            if decoded.heap_id != self.heap.heap_id().as_bytes()
+                || decoded.object_kind != SubjectObjectKind::Collection
+                || decoded.object_id != collection_id.as_bytes()
+            {
+                continue;
+            }
+            examined = examined.saturating_add(1);
+            if examined > range.examination_limit() {
+                return Ok(Some(AtomicAbortReason::CoverageIncomplete));
+            }
+            let Some(version) = cell.version else {
+                continue;
+            };
+            let key = match CanonicalKey::from_subject_bytes(range.key_kind(), decoded.key) {
+                Ok(key) => key,
+                Err(_) => return Ok(Some(AtomicAbortReason::CoverageIncomplete)),
+            };
+            if range
+                .contains(&key)
+                .map_err(|error| StoreError::AtomicStage(error.to_string()))?
+            {
+                entries.push(RangeEntry { key, version });
+                if entries.len() > range.expected_count() as usize {
+                    return Ok(Some(AtomicAbortReason::PreconditionConflict));
+                }
+            }
+        }
+
+        if range
+            .matches_entries(&entries)
+            .map_err(|error| StoreError::AtomicStage(error.to_string()))?
+        {
+            Ok(None)
+        } else {
+            Ok(Some(AtomicAbortReason::PreconditionConflict))
         }
     }
 
