@@ -160,8 +160,13 @@ content_root = BLAKE3-256(
 
 Rules:
 
-- same `AtomicId` + same `content_root` resolves the original outcome;
-- same `AtomicId` + different root returns `atomic_id_conflict`;
+- within one Heap, same `AtomicId` + same `content_root` resolves the original
+  outcome;
+- within one Heap, same `AtomicId` + different root returns
+  `atomic_id_conflict`;
+- the physical lifetime key is exactly `(HeapId, AtomicId)`; the same
+  caller-selected `AtomicId` in another Heap is independent, including under
+  damage, recovery, status, retry and retention;
 - an expired detailed receipt never permits re-execution;
 - a minimal decision tombstone remains until Heap purge.
 

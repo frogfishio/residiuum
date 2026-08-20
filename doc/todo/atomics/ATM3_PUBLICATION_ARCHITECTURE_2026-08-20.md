@@ -48,6 +48,14 @@ their order even after deleting the derived primary index. An `ATORD1` without
 a decision publishes nothing; a committed decision without its complete order
 witness is damaged evidence and cannot be guessed into visibility.
 
+Heap-identity amendment (2026-08-20): checkpoint profile v14 and coordinator
+profile v2 replace every store-wide AtomicId key with the exact composite
+`(HeapId, AtomicId)`. `ATPAY1`, `ATSEAL1`, `ATMAP1`, `ATCHK1`, and `ATORD1`
+carry `heap_id[16]` before `atomic_id[32]`; their derived event IDs bind both.
+This permits the same caller-selected Atomic ID to exist independently in two
+named Heaps sharing one physical Store. The older private checkpoint profiles
+are rebuild inputs only and are not interpreted as v14 authority.
+
 This record satisfies the mandatory ATM-3 design review in
 `ATOMICS_IMPLEMENTATION_PLAN.md` section 9. It is deliberately narrower than
 ATM-4 recovery/status and does not enable the product capability.

@@ -33,6 +33,13 @@ never be inferred from a decision.
 5. Existing crash-prefix qualification now reflects the frozen ATM-4 rule:
    before the decision boundary recovers not committed; at or after a durable
    committed decision recovers committed.
+6. Physical Atomic identity is now `(HeapId, AtomicId)` throughout the
+   catalogue, coordinator, checkpoint, recovery, status, retry and publication
+   paths. Payload, seal, chunk and order-frontier sidecars carry the Heap ID,
+   and their derived event IDs bind it. Two named Heaps can issue and commit the
+   same caller-selected Atomic ID independently across restart. Conflicting
+   material in one Heap blocks only that composite identity and does not poison
+   the same Atomic ID in another Heap.
 
 ## Format amendment
 
@@ -40,7 +47,10 @@ This is a deliberate pre-publication amendment to the private Atomic evidence
 profile. The product capability is still false, so no released SDK could have
 created supported Atomic data. New prepares require CBOR field 11
 `member_count: uint`; old experimental prepares that omit it are not silently
-upgraded because their exact intended cardinality is unknowable.
+upgraded because their exact intended cardinality is unknowable. The same
+pre-publication rule applies to `ATCKP1` v14, `ATCRD1` v2 and the heap-qualified
+sidecars: older experimental private layouts are rebuilt where authoritative
+media permits and are never interpreted as the new composite-key format.
 
 ## Remaining delivery blocks
 
@@ -77,14 +87,13 @@ upgraded because their exact intended cardinality is unknowable.
 - lost update, write skew, ABA, phantom, uniqueness, ordinary/Atomic,
   authority-change and disjoint/overlapping Atomic anomaly corpus.
 
-### ATM-4E — Heap-qualified identity key
+### ATM-4E — Heap-qualified identity key — delivered
 
-The physical catalogue is currently keyed primarily by `AtomicId`. The frozen
-qualification requires two Heaps with identical caller keys and identical
-Atomic IDs to remain independent. Before ATM-4 acceptance, catalogue,
-coordinator, status, tombstone and retry identity must therefore be keyed by
-`(HeapId, AtomicId)` or an equivalently proven composite key. Hash-derived ID
-conventions are not an isolation boundary.
+The catalogue and all dependent physical keys use the exact composite
+`(HeapId, AtomicId)`. `ATCKP1` v14, `ATCRD1` v2 and every non-prepare staging
+sidecar carry the Heap component. No hash-derived naming convention is used as
+an isolation boundary. Tombstones introduced by ATM-4A MUST use the same
+composite key.
 
 ## Red lines
 
@@ -95,4 +104,3 @@ conventions are not an isolation boundary.
 - no detail pruning before a durable exact tombstone exists;
 - no maintenance operation may discard or alias an Atomic identity;
 - no public capability until ATM-5 completes against accepted ATM-4 evidence.
-

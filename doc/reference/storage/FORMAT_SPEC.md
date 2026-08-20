@@ -330,44 +330,48 @@ Backup profile `residiuum-backup-v1` copies `store-info/` (including
 Identity-reassign clone MUST refuse while outstanding staging exists: prepare
 `heap_id` is the source store id and becomes foreign after reassignment.
 
-#### Checkpoint `ATCKP1` version 10
+#### Checkpoint `ATCKP1` version 14
 
 File: `store-info/atomic-stage.ckpt`. Domain separator
-`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V10`. Layout, all integers big-endian:
+`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V14`. Layout, all integers big-endian:
 
 | Field | Encoding |
 |---|---|
 | magic | `ATCKP1` |
-| version | `u8` = 10 |
+| version | `u8` = 14 |
 | covered files | `u32` count; each: `u16` path len, path UTF-8, `u8` atomic_evidence, `u64` covered_len, head `[32]`, tail `[32]`, `u32` block count, block hashes `[32]*`, leftover `u32` + hash `[32]`. Ordinary (`atomic_evidence=0`) entries carry no block hashes and are metadata-only; Atomic entries authenticate every byte. |
 | prepares | `u32` count; each: `u32` len + `encode_prepare` bytes |
-| members | `u32` count; each: `u32` len + `encode_member` bytes |
-| payload refs | `u32` count; each: atomic_id `[32]`, ordinal `u32`, `BodyRef` |
-| seals | `u32` count; each: atomic_id `[32]`, content_root `[32]` |
-| blocked | `u32` count; each: atomic_id `[32]` |
-| prepare_batch | `u32` count; each: atomic_id `[32]` |
+| members | `u32` count; each: heap_id `[16]` + `u32` len + `encode_member` bytes |
+| payload refs | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, ordinal `u32`, `BodyRef` |
+| seals | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, content_root `[32]` |
+| decisions | `u32` count; each: heap_id `[16]` + `u32` len + `encode_decision` bytes |
+| commit high-water | `u32` count; each: heap_id `[16]`, next `u64` |
+| order frontiers | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, shard count `u16`, then `(shard u16, segment_id [16], next_writer_sequence u64)*` |
+| blocked | `u32` count; each: heap_id `[16]`, atomic_id `[32]` |
+| prepare_batch | `u32` count; each: heap_id `[16]`, atomic_id `[32]` |
 | coord_next | `u64` |
-| coord_seq | `u32` count; each: atomic_id `[32]`, seq `u64` |
-| chunk plans | `u32` count; each: atomic_id `[32]`, ordinal `u32`, total `u32`, hash count `u32`, hashes `[32]*` |
-| chunk refs | `u32` count; each: atomic_id `[32]`, ordinal `u32`, index `u32`, `BodyRef` |
+| coord_seq | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, seq `u64` |
+| chunk plans | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, ordinal `u32`, total `u32`, hash count `u32`, hashes `[32]*` |
+| chunk refs | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, ordinal `u32`, index `u32`, `BodyRef` |
 | coverage_degraded | `u8` |
 | findings | `u32` count; each: kind `u8`, class `u8`, has_id `u8`, optional atomic_id `[32]` |
 | missing_covered | `u32` count; each: `u16` len + UTF-8 |
-| intended_members | `u32` count; each: atomic_id `[32]`, `u32` |
+| intended_members | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, `u32` |
 | digest | BLAKE3-256(`domain` \\| body) |
 
 `BodyRef` is `u16` path len, path UTF-8, `u64` offset, `u32` len, hash `[32]`.
 Covered block size is 64 KiB. Finding kind 8 is global `Coverage` loss.
-Version ≠ 10 or domain mismatch MUST NOT be interpreted; recovery rebuilds
-from media. Older checkpoint versions are not readable by a v10 decoder.
+Version ≠ 14 or domain mismatch MUST NOT be interpreted; recovery rebuilds
+from media. Older checkpoint versions are not readable by a v14 decoder.
 
-#### Coordinator `ATCRD1` version 1
+#### Coordinator `ATCRD1` version 2
 
 File: `store-info/atomic-coord.ckpt`. Domain
-`RESIDIUUM-STORE-ATOMIC-COORD-V1`:
+`RESIDIUUM-STORE-ATOMIC-COORD-V2`:
 
-`ATCRD1` + `u8` version 1 + `u64` next + `u32` count + (`u64` seq + atomic_id
-`[32]`)* + BLAKE3-256(domain \\| body). Sequences are unique and nonzero.
+`ATCRD1` + `u8` version 2 + `u64` next + `u32` count + (`u64` seq + heap_id
+`[16]` + atomic_id `[32]`)* + BLAKE3-256(domain \\| body). Sequences are unique
+and nonzero.
 
 #### Sidecar bodies inside `PayloadChunk` frames
 
@@ -376,10 +380,11 @@ prepares are `BatchPrepare` frames, not `ATPREP1`.
 
 | Magic | Body after magic |
 |---|---|
-| `ATPAY1` | atomic_id `[32]` + ordinal `u32` + payload bytes |
-| `ATSEAL1` | atomic_id `[32]` + content_root `[32]` |
-| `ATMAP1` | atomic_id `[32]` + ordinal `u32` + total `u32` + hashes `[32]*total` |
-| `ATCHK1` | atomic_id `[32]` + ordinal `u32` + index `u32` + chunk bytes |
+| `ATPAY1` | heap_id `[16]` + atomic_id `[32]` + ordinal `u32` + payload bytes |
+| `ATSEAL1` | heap_id `[16]` + atomic_id `[32]` + content_root `[32]` |
+| `ATMAP1` | heap_id `[16]` + atomic_id `[32]` + ordinal `u32` + total `u32` + hashes `[32]*total` |
+| `ATCHK1` | heap_id `[16]` + atomic_id `[32]` + ordinal `u32` + index `u32` + chunk bytes |
+| `ATORD1` | heap_id `[16]` + atomic_id `[32]` + shard count `u16` + shard frontier rows |
 | `ATPREP1` | legacy `encode_prepare` bytes only; writers MUST NOT emit it |
 
 ## 5. Frame validity

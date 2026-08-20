@@ -245,6 +245,7 @@ fn mismatched_seal_root_cannot_seal() {
     wrong[0] = 0x5E;
     let root = ContentRoot::from_bytes(wrong).unwrap();
     let mut body = b"ATSEAL1".to_vec();
+    body.extend_from_slice(heap.as_bytes());
     body.extend_from_slice(aid().as_bytes());
     body.extend_from_slice(root.as_bytes());
     let segs = store.paths().segments_dir();
@@ -325,6 +326,7 @@ fn mismatched_seal_stays_blocked_across_reopen() {
     wrong[0] = 0x5E;
     let root = ContentRoot::from_bytes(wrong).unwrap();
     let mut body = b"ATSEAL1".to_vec();
+    body.extend_from_slice(heap.as_bytes());
     body.extend_from_slice(aid().as_bytes());
     body.extend_from_slice(root.as_bytes());
     let segs = store.paths().segments_dir();
@@ -381,6 +383,7 @@ fn conflicting_seals_stay_blocked_across_reopen() {
         ("seal-b.residiuum", root_b, 22),
     ] {
         let mut body = b"ATSEAL1".to_vec();
+        body.extend_from_slice(heap.as_bytes());
         body.extend_from_slice(aid().as_bytes());
         body.extend_from_slice(root.as_bytes());
         write_payload_chunk(&segs.join(name), body, ev);
@@ -403,6 +406,64 @@ fn conflicting_seals_stay_blocked_across_reopen() {
             .any(|f| f.kind == StageEvidenceKind::Seal && f.class == StageEvidenceClass::Conflict));
     }
     refuse_reuse(&mut store);
+}
+
+#[test]
+fn damage_for_one_heap_does_not_block_the_same_atomic_id_in_another_heap() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap_a = HeapId::from_bytes([0xA1; 16]).unwrap();
+    let heap_b = HeapId::from_bytes([0xB1; 16]).unwrap();
+    let m = member();
+
+    let plan_a = plan(heap_a, std::slice::from_ref(&m), b"secret");
+    {
+        let mut stage = store.atomic_stage_for_heap(heap_a).unwrap();
+        stage
+            .begin_prepare(&plan_a, FRONTIER, std::slice::from_ref(&m))
+            .unwrap();
+        stage.append_staged(m.clone(), b"secret".to_vec()).unwrap();
+    }
+
+    let plan_b = plan(heap_b, std::slice::from_ref(&m), b"secret");
+    {
+        let mut stage = store.atomic_stage_for_heap(heap_b).unwrap();
+        stage
+            .begin_prepare(&plan_b, FRONTIER, std::slice::from_ref(&m))
+            .unwrap();
+        stage.append_staged(m.clone(), b"secret".to_vec()).unwrap();
+        stage.seal_member_boundary(aid()).unwrap();
+        stage.persist_committed_decision(aid()).unwrap();
+    }
+
+    let wrong_root = ContentRoot::from_bytes([0x5E; 32]).unwrap();
+    let mut body = b"ATSEAL1".to_vec();
+    body.extend_from_slice(heap_a.as_bytes());
+    body.extend_from_slice(aid().as_bytes());
+    body.extend_from_slice(wrong_root.as_bytes());
+    let segs = store.paths().segments_dir();
+    fs::create_dir_all(&segs).unwrap();
+    write_payload_chunk(&segs.join("heap-a-bad-seal.residiuum"), body, 29);
+    let _ = fs::remove_file(atomic_stage_checkpoint_path(store.paths()));
+
+    {
+        let stage_a = store.atomic_stage_for_heap(heap_a).unwrap();
+        assert_eq!(stage_a.examine(aid()).class, AtomicStageClass::Blocked);
+    }
+    {
+        let stage_b = store.atomic_stage_for_heap(heap_b).unwrap();
+        assert_eq!(stage_b.examine(aid()).class, AtomicStageClass::Committed);
+        assert_eq!(
+            stage_b
+                .atomic_status(aid())
+                .unwrap()
+                .receipt
+                .unwrap()
+                .heap_id,
+            heap_b
+        );
+    }
 }
 
 fn write_member_file(path: &Path, heap: HeapId, member: &AtomicMember, root: ContentRoot) {
@@ -435,6 +496,7 @@ fn write_orphan_role(segs: &Path, heap: HeapId, role: &str) {
         ),
         "payload" => {
             let mut body = b"ATPAY1".to_vec();
+            body.extend_from_slice(heap.as_bytes());
             body.extend_from_slice(aid().as_bytes());
             body.extend_from_slice(&0u32.to_be_bytes());
             body.extend_from_slice(b"secret");
@@ -442,6 +504,7 @@ fn write_orphan_role(segs: &Path, heap: HeapId, role: &str) {
         }
         "seal" => {
             let mut body = b"ATSEAL1".to_vec();
+            body.extend_from_slice(heap.as_bytes());
             body.extend_from_slice(aid().as_bytes());
             body.extend_from_slice(&[0x44u8; 32]);
             write_payload_chunk(&segs.join("orphan-seal.residiuum"), body, 32);
@@ -452,6 +515,7 @@ fn write_orphan_role(segs: &Path, heap: HeapId, role: &str) {
                 chunk_hashes: vec![[0x55u8; 32], [0x56u8; 32]],
             };
             let mut body = b"ATMAP1".to_vec();
+            body.extend_from_slice(heap.as_bytes());
             body.extend_from_slice(aid().as_bytes());
             body.extend_from_slice(&0u32.to_be_bytes());
             body.extend_from_slice(&plan.total.to_be_bytes());
@@ -462,6 +526,7 @@ fn write_orphan_role(segs: &Path, heap: HeapId, role: &str) {
         }
         "chunk-body" => {
             let mut body = b"ATCHK1".to_vec();
+            body.extend_from_slice(heap.as_bytes());
             body.extend_from_slice(aid().as_bytes());
             body.extend_from_slice(&0u32.to_be_bytes());
             body.extend_from_slice(&0u32.to_be_bytes());

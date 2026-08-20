@@ -14,7 +14,8 @@ use crate::atomic_stage_classify::{
     StageEvidenceClass, StageFinding, StageFindings,
 };
 use crate::atomic_stage_media::{
-    decode_stage_sidecar, AtomicShardFrontier, BodyRef, SidecarDecode, StageCatalog,
+    decode_stage_sidecar, stage_key, AtomicShardFrontier, BodyRef, SidecarDecode, StageAtomicKey,
+    StageCatalog,
 };
 use crate::error::StoreError;
 use crate::layout::StorePaths;
@@ -30,14 +31,14 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 13;
-const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V13";
+const CHECKPOINT_VERSION: u8 = 14;
+const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V14";
 const BLOCK_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-BLK-V1";
 /// Fixed leaf size for the covered-prefix block frontier (CR-ATMR6-001).
 const FRONTIER_BLOCK: u64 = 64 * 1024;
 const COORD_MAGIC: &[u8] = b"ATCRD1";
-const COORD_VERSION: u8 = 1;
-const COORD_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-COORD-V1";
+const COORD_VERSION: u8 = 2;
+const COORD_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-COORD-V2";
 const CHECKPOINT_WRITE_POINTS: AtomicWriteFailpoints = AtomicWriteFailpoints {
     after_write: "store.atomic.checkpoint.after_write",
     after_file_sync: "store.atomic.checkpoint.after_file_sync",
@@ -992,11 +993,17 @@ fn record_frame_locator(
     };
     match decode_stage_sidecar(sidecar_body) {
         SidecarDecode::Payload {
-            atomic_id, ordinal, ..
+            heap_id,
+            atomic_id,
+            ordinal,
+            ..
         } => {
-            catalog.payload_refs.insert((atomic_id, ordinal), refer);
+            catalog
+                .payload_refs
+                .insert((heap_id, atomic_id, ordinal), refer);
         }
         SidecarDecode::ChunkBody {
+            heap_id,
             atomic_id,
             ordinal,
             index,
@@ -1004,7 +1011,7 @@ fn record_frame_locator(
         } => {
             catalog
                 .chunk_refs
-                .insert((atomic_id, ordinal, index), refer);
+                .insert((heap_id, atomic_id, ordinal, index), refer);
         }
         _ => {}
     }
@@ -1013,13 +1020,13 @@ fn record_frame_locator(
 pub(crate) fn resolve_payload_body(
     paths: &StorePaths,
     catalog: &StageCatalog,
-    atomic_id: AtomicId,
+    key: StageAtomicKey,
     ordinal: u32,
 ) -> Result<Option<Vec<u8>>, StoreError> {
-    if let Some(payload) = catalog.payloads.get(&(atomic_id, ordinal)) {
+    if let Some(payload) = catalog.payloads.get(&(key.0, key.1, ordinal)) {
         return Ok(Some(payload.clone()));
     }
-    let Some(refer) = catalog.payload_refs.get(&(atomic_id, ordinal)) else {
+    let Some(refer) = catalog.payload_refs.get(&(key.0, key.1, ordinal)) else {
         return Ok(None);
     };
     sidecar_payload_from_frame(&load_body_ref(paths, refer)?)
@@ -1030,6 +1037,7 @@ pub(crate) fn resolve_payload_body(
 pub(crate) fn resolve_published_payload(
     paths: &StorePaths,
     refer: &BodyRef,
+    expected_heap_id: HeapId,
     expected_atomic_id: AtomicId,
     expected_ordinal: u32,
 ) -> Result<Vec<u8>, StoreError> {
@@ -1046,15 +1054,24 @@ pub(crate) fn resolve_published_payload(
     // the exact Atomic identity and ordinal used by the primary projection.
     let matches = match decode_stage_sidecar(&bytes) {
         SidecarDecode::Payload {
-            atomic_id, ordinal, ..
-        } => atomic_id == expected_atomic_id && ordinal == expected_ordinal,
+            heap_id,
+            atomic_id,
+            ordinal,
+            ..
+        } => {
+            heap_id == expected_heap_id
+                && atomic_id == expected_atomic_id
+                && ordinal == expected_ordinal
+        }
         _ => {
             let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
             let matched = report.verified_frames().any(|(_, frame)| {
                 matches!(
                     decode_stage_sidecar(&frame.body),
-                    SidecarDecode::Payload { atomic_id, ordinal, .. }
-                        if atomic_id == expected_atomic_id && ordinal == expected_ordinal
+                    SidecarDecode::Payload { heap_id, atomic_id, ordinal, .. }
+                        if heap_id == expected_heap_id
+                            && atomic_id == expected_atomic_id
+                            && ordinal == expected_ordinal
                 )
             });
             matched
@@ -1071,14 +1088,14 @@ pub(crate) fn resolve_published_payload(
 pub(crate) fn resolve_chunk_body(
     paths: &StorePaths,
     catalog: &StageCatalog,
-    atomic_id: AtomicId,
+    key: StageAtomicKey,
     ordinal: u32,
     index: u32,
 ) -> Result<Option<Vec<u8>>, StoreError> {
-    if let Some(body) = catalog.chunks.get(&(atomic_id, ordinal, index)) {
+    if let Some(body) = catalog.chunks.get(&(key.0, key.1, ordinal, index)) {
         return Ok(Some(body.clone()));
     }
-    let Some(refer) = catalog.chunk_refs.get(&(atomic_id, ordinal, index)) else {
+    let Some(refer) = catalog.chunk_refs.get(&(key.0, key.1, ordinal, index)) else {
         return Ok(None);
     };
     sidecar_chunk_from_frame(&load_body_ref(paths, refer)?)
@@ -1208,15 +1225,16 @@ fn persist_coordinator(paths: &StorePaths, catalog: &StageCatalog) -> Result<(),
     body.push(COORD_VERSION);
     body.extend_from_slice(&catalog.coord_next.to_be_bytes());
     body.extend_from_slice(&(catalog.coord_seq.len() as u32).to_be_bytes());
-    let mut rows: Vec<(u64, AtomicId)> = catalog
+    let mut rows: Vec<(u64, StageAtomicKey)> = catalog
         .coord_seq
         .iter()
-        .map(|(id, seq)| (*seq, *id))
+        .map(|(key, seq)| (*seq, *key))
         .collect();
     rows.sort_by_key(|(seq, _)| *seq);
-    for (seq, id) in rows {
+    for (seq, key) in rows {
         body.extend_from_slice(&seq.to_be_bytes());
-        body.extend_from_slice(id.as_bytes());
+        body.extend_from_slice(key.0.as_bytes());
+        body.extend_from_slice(key.1.as_bytes());
     }
     let mut hasher = blake3::Hasher::new();
     hasher.update(COORD_DOMAIN);
@@ -1265,22 +1283,25 @@ fn load_coordinator(paths: &StorePaths, catalog: &mut StageCatalog) -> Result<()
     for _ in 0..n {
         let seq = read_u64(&mut cur)
             .ok_or_else(|| StoreError::AtomicStage("atomic coordinator truncated".into()))?;
-        if cur.len() < 32 {
+        if cur.len() < 48 {
             return Err(StoreError::AtomicStage(
                 "atomic coordinator truncated".into(),
             ));
         }
-        let id = AtomicId::from_bytes(cur[..32].try_into().unwrap_or([0; 32]))
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().unwrap_or([0; 16]))
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        cur = &cur[32..];
+        let id = AtomicId::from_bytes(cur[16..48].try_into().unwrap_or([0; 32]))
+            .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        cur = &cur[48..];
+        let key = stage_key(heap_id, id);
         if seq == 0 || !seen.insert(seq) {
             return Err(StoreError::AtomicStage(format!(
                 "duplicate or zero coordinator sequence {seq}"
             )));
         }
-        catalog.coord_seq.insert(id, seq);
-        if !catalog.prepare_seen.contains(&id) {
-            catalog.prepare_seen.push(id);
+        catalog.coord_seq.insert(key, seq);
+        if !catalog.prepare_seen.contains(&key) {
+            catalog.prepare_seen.push(key);
         }
     }
     if !cur.is_empty() {
@@ -1389,8 +1410,9 @@ fn encode_checkpoint(
     }
     let member_count: u32 = catalog.members.values().map(|ms| ms.len() as u32).sum();
     body.extend_from_slice(&member_count.to_be_bytes());
-    for members in catalog.members.values() {
+    for (key, members) in &catalog.members {
         for member in members {
+            body.extend_from_slice(key.0.as_bytes());
             let encoded =
                 encode_member(member).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
             body.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
@@ -1398,27 +1420,25 @@ fn encode_checkpoint(
         }
     }
     body.extend_from_slice(&(catalog.payload_refs.len() as u32).to_be_bytes());
-    for ((id, ordinal), refer) in &catalog.payload_refs {
+    for ((heap_id, id, ordinal), refer) in &catalog.payload_refs {
+        body.extend_from_slice(heap_id.as_bytes());
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(&ordinal.to_be_bytes());
         encode_body_ref(&mut body, refer);
     }
     body.extend_from_slice(&(catalog.seals.len() as u32).to_be_bytes());
-    for (id, root) in &catalog.seals {
+    for ((heap_id, id), root) in &catalog.seals {
+        body.extend_from_slice(heap_id.as_bytes());
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(root.as_bytes());
     }
     body.extend_from_slice(&(catalog.decisions.len() as u32).to_be_bytes());
-    for decision in catalog.decisions.values() {
+    for (key, decision) in &catalog.decisions {
+        body.extend_from_slice(key.0.as_bytes());
         let encoded =
             encode_decision(decision).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         body.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
         body.extend_from_slice(&encoded);
-    }
-    body.extend_from_slice(&(catalog.evidence_heaps.len() as u32).to_be_bytes());
-    for (id, heap_id) in &catalog.evidence_heaps {
-        body.extend_from_slice(id.as_bytes());
-        body.extend_from_slice(heap_id.as_bytes());
     }
     body.extend_from_slice(&(catalog.commit_next.len() as u32).to_be_bytes());
     for (heap_id, next) in &catalog.commit_next {
@@ -1426,7 +1446,8 @@ fn encode_checkpoint(
         body.extend_from_slice(&next.to_be_bytes());
     }
     body.extend_from_slice(&(catalog.order_frontiers.len() as u32).to_be_bytes());
-    for (id, frontiers) in &catalog.order_frontiers {
+    for ((heap_id, id), frontiers) in &catalog.order_frontiers {
+        body.extend_from_slice(heap_id.as_bytes());
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(&(frontiers.len() as u16).to_be_bytes());
         for frontier in frontiers {
@@ -1436,21 +1457,25 @@ fn encode_checkpoint(
         }
     }
     body.extend_from_slice(&(catalog.blocked.len() as u32).to_be_bytes());
-    for id in &catalog.blocked {
+    for (heap_id, id) in &catalog.blocked {
+        body.extend_from_slice(heap_id.as_bytes());
         body.extend_from_slice(id.as_bytes());
     }
     body.extend_from_slice(&(catalog.prepare_batch.len() as u32).to_be_bytes());
-    for id in &catalog.prepare_batch {
+    for (heap_id, id) in &catalog.prepare_batch {
+        body.extend_from_slice(heap_id.as_bytes());
         body.extend_from_slice(id.as_bytes());
     }
     body.extend_from_slice(&catalog.coord_next.to_be_bytes());
     body.extend_from_slice(&(catalog.coord_seq.len() as u32).to_be_bytes());
-    for (id, seq) in &catalog.coord_seq {
+    for ((heap_id, id), seq) in &catalog.coord_seq {
+        body.extend_from_slice(heap_id.as_bytes());
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(&seq.to_be_bytes());
     }
     body.extend_from_slice(&(catalog.chunk_plans.len() as u32).to_be_bytes());
-    for ((id, ordinal), plan) in &catalog.chunk_plans {
+    for ((heap_id, id, ordinal), plan) in &catalog.chunk_plans {
+        body.extend_from_slice(heap_id.as_bytes());
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(&ordinal.to_be_bytes());
         body.extend_from_slice(&plan.total.to_be_bytes());
@@ -1460,7 +1485,8 @@ fn encode_checkpoint(
         }
     }
     body.extend_from_slice(&(catalog.chunk_refs.len() as u32).to_be_bytes());
-    for ((id, ordinal, index), refer) in &catalog.chunk_refs {
+    for ((heap_id, id, ordinal, index), refer) in &catalog.chunk_refs {
+        body.extend_from_slice(heap_id.as_bytes());
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(&ordinal.to_be_bytes());
         body.extend_from_slice(&index.to_be_bytes());
@@ -1486,7 +1512,8 @@ fn encode_checkpoint(
         body.extend_from_slice(bytes);
     }
     body.extend_from_slice(&(catalog.intended_members.len() as u32).to_be_bytes());
-    for (id, n) in &catalog.intended_members {
+    for ((heap_id, id), n) in &catalog.intended_members {
+        body.extend_from_slice(heap_id.as_bytes());
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(&n.to_be_bytes());
     }
@@ -1580,10 +1607,17 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
         }
         let prepare = decode_prepare(&cur[..n]).ok()?;
         cur = &cur[n..];
-        catalog.prepares.insert(prepare.atomic_id, prepare);
+        catalog
+            .prepares
+            .insert(stage_key(prepare.heap_id, prepare.atomic_id), prepare);
     }
     let n_members = read_u32(&mut cur)? as usize;
     for _ in 0..n_members {
+        if cur.len() < 16 {
+            return None;
+        }
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        cur = &cur[16..];
         let n = read_u32(&mut cur)? as usize;
         if cur.len() < n {
             return None;
@@ -1592,33 +1626,40 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
         cur = &cur[n..];
         catalog
             .members
-            .entry(member.atomic_id)
+            .entry(stage_key(heap_id, member.atomic_id))
             .or_default()
             .push(member);
     }
     let n_payloads = read_u32(&mut cur)? as usize;
     for _ in 0..n_payloads {
-        if cur.len() < 32 + 4 {
+        if cur.len() < 16 + 32 + 4 {
             return None;
         }
-        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
-        cur = &cur[32..];
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        let id = AtomicId::from_bytes(cur[16..48].try_into().ok()?).ok()?;
+        cur = &cur[48..];
         let ordinal = read_u32(&mut cur)?;
         let refer = decode_body_ref(&mut cur)?;
-        catalog.payload_refs.insert((id, ordinal), refer);
+        catalog.payload_refs.insert((heap_id, id, ordinal), refer);
     }
     let n_seals = read_u32(&mut cur)? as usize;
     for _ in 0..n_seals {
-        if cur.len() < 64 {
+        if cur.len() < 80 {
             return None;
         }
-        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
-        let root = ContentRoot::from_bytes(cur[32..64].try_into().ok()?).ok()?;
-        cur = &cur[64..];
-        catalog.seals.insert(id, root);
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        let id = AtomicId::from_bytes(cur[16..48].try_into().ok()?).ok()?;
+        let root = ContentRoot::from_bytes(cur[48..80].try_into().ok()?).ok()?;
+        cur = &cur[80..];
+        catalog.seals.insert(stage_key(heap_id, id), root);
     }
     let n_decisions = read_u32(&mut cur)? as usize;
     for _ in 0..n_decisions {
+        if cur.len() < 16 {
+            return None;
+        }
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        cur = &cur[16..];
         let n = read_u32(&mut cur)? as usize;
         if cur.len() < n {
             return None;
@@ -1627,24 +1668,9 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
         cur = &cur[n..];
         if catalog
             .decisions
-            .insert(decision.atomic_id, decision)
+            .insert(stage_key(heap_id, decision.atomic_id), decision)
             .is_some()
         {
-            return None;
-        }
-    }
-    let n_evidence_heaps = read_u32(&mut cur)? as usize;
-    for _ in 0..n_evidence_heaps {
-        if cur.len() < 48 {
-            return None;
-        }
-        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
-        let heap_id = HeapId::from_bytes(cur[32..48].try_into().ok()?).ok()?;
-        cur = &cur[48..];
-        let known = catalog.prepares.contains_key(&id)
-            || catalog.members.contains_key(&id)
-            || catalog.decisions.contains_key(&id);
-        if !known || catalog.evidence_heaps.insert(id, heap_id).is_some() {
             return None;
         }
     }
@@ -1662,11 +1688,12 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
     }
     let n_order_frontiers = read_u32(&mut cur)? as usize;
     for _ in 0..n_order_frontiers {
-        if cur.len() < 34 {
+        if cur.len() < 50 {
             return None;
         }
-        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
-        cur = &cur[32..];
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        let id = AtomicId::from_bytes(cur[16..48].try_into().ok()?).ok()?;
+        cur = &cur[48..];
         let count = read_u16(&mut cur)? as usize;
         if count == 0 || cur.len() < count.saturating_mul(26) {
             return None;
@@ -1689,49 +1716,57 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
                 next_writer_sequence,
             });
         }
-        if catalog.order_frontiers.insert(id, frontiers).is_some() {
+        if catalog
+            .order_frontiers
+            .insert(stage_key(heap_id, id), frontiers)
+            .is_some()
+        {
             return None;
         }
     }
     let n_blocked = read_u32(&mut cur)? as usize;
     for _ in 0..n_blocked {
-        if cur.len() < 32 {
+        if cur.len() < 48 {
             return None;
         }
-        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
-        cur = &cur[32..];
-        catalog.blocked.insert(id);
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        let id = AtomicId::from_bytes(cur[16..48].try_into().ok()?).ok()?;
+        cur = &cur[48..];
+        catalog.blocked.insert(stage_key(heap_id, id));
     }
     let n_batch = read_u32(&mut cur)? as usize;
     for _ in 0..n_batch {
-        if cur.len() < 32 {
+        if cur.len() < 48 {
             return None;
         }
-        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
-        cur = &cur[32..];
-        catalog.prepare_batch.insert(id);
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        let id = AtomicId::from_bytes(cur[16..48].try_into().ok()?).ok()?;
+        cur = &cur[48..];
+        catalog.prepare_batch.insert(stage_key(heap_id, id));
     }
     catalog.coord_next = read_u64(&mut cur)?;
     let n_coord = read_u32(&mut cur)? as usize;
     for _ in 0..n_coord {
-        if cur.len() < 40 {
+        if cur.len() < 56 {
             return None;
         }
-        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
-        cur = &cur[32..];
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        let id = AtomicId::from_bytes(cur[16..48].try_into().ok()?).ok()?;
+        cur = &cur[48..];
         let seq = read_u64(&mut cur)?;
         if seq == 0 || catalog.coord_seq.values().any(|&s| s == seq) {
             return None;
         }
-        catalog.coord_seq.insert(id, seq);
+        catalog.coord_seq.insert(stage_key(heap_id, id), seq);
     }
     let n_plans = read_u32(&mut cur)? as usize;
     for _ in 0..n_plans {
-        if cur.len() < 32 + 4 + 4 + 4 {
+        if cur.len() < 16 + 32 + 4 + 4 + 4 {
             return None;
         }
-        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
-        cur = &cur[32..];
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        let id = AtomicId::from_bytes(cur[16..48].try_into().ok()?).ok()?;
+        cur = &cur[48..];
         let ordinal = read_u32(&mut cur)?;
         let total = read_u32(&mut cur)?;
         let n_hashes = read_u32(&mut cur)? as usize;
@@ -1746,7 +1781,7 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
             chunk_hashes.push(hash);
         }
         catalog.chunk_plans.insert(
-            (id, ordinal),
+            (heap_id, id, ordinal),
             ChunkPlan {
                 total,
                 chunk_hashes,
@@ -1755,15 +1790,18 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
     }
     let n_chunks = read_u32(&mut cur)? as usize;
     for _ in 0..n_chunks {
-        if cur.len() < 32 + 4 + 4 {
+        if cur.len() < 16 + 32 + 4 + 4 {
             return None;
         }
-        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
-        cur = &cur[32..];
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        let id = AtomicId::from_bytes(cur[16..48].try_into().ok()?).ok()?;
+        cur = &cur[48..];
         let ordinal = read_u32(&mut cur)?;
         let index = read_u32(&mut cur)?;
         let refer = decode_body_ref(&mut cur)?;
-        catalog.chunk_refs.insert((id, ordinal, index), refer);
+        catalog
+            .chunk_refs
+            .insert((heap_id, id, ordinal, index), refer);
     }
     if cur.is_empty() {
         return None;
@@ -1812,13 +1850,14 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
     }
     let n_intended = read_u32(&mut cur)? as usize;
     for _ in 0..n_intended {
-        if cur.len() < 36 {
+        if cur.len() < 52 {
             return None;
         }
-        let id = AtomicId::from_bytes(cur[..32].try_into().ok()?).ok()?;
-        cur = &cur[32..];
+        let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+        let id = AtomicId::from_bytes(cur[16..48].try_into().ok()?).ok()?;
+        cur = &cur[48..];
         let n = read_u32(&mut cur)?;
-        catalog.intended_members.insert(id, n);
+        catalog.intended_members.insert(stage_key(heap_id, id), n);
     }
     if !cur.is_empty() {
         return None;
@@ -1854,7 +1893,7 @@ fn read_u64(cur: &mut &[u8]) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod checkpoint_v13_freeze {
+mod checkpoint_v14_freeze {
     use super::*;
     use crate::atomic_stage_media::{
         encode_stage_chunk_body, encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal,
@@ -1867,12 +1906,12 @@ mod checkpoint_v13_freeze {
     }
 
     #[test]
-    fn v13_empty_checkpoint_roundtrips() {
+    fn v14_empty_checkpoint_roundtrips() {
         let catalog = StageCatalog::default();
         let bytes = encode_checkpoint(&catalog, &[]).unwrap();
         assert!(bytes.starts_with(CHECKPOINT_MAGIC));
         assert_eq!(bytes[CHECKPOINT_MAGIC.len()], CHECKPOINT_VERSION);
-        let (decoded, covered) = decode_checkpoint(&bytes).expect("v13 empty");
+        let (decoded, covered) = decode_checkpoint(&bytes).expect("v14 empty");
         assert!(covered.is_empty());
         assert!(!decoded.has_outstanding_evidence());
     }
@@ -1880,10 +1919,12 @@ mod checkpoint_v13_freeze {
     #[test]
     fn sidecar_magics_are_frozen() {
         let id = aid();
+        let heap_id = HeapId::from_bytes([0x44; 16]).unwrap();
         let root = ContentRoot::from_bytes([0x11; 32]).unwrap();
-        assert!(encode_stage_payload(id, 0, b"x").starts_with(b"ATPAY1"));
-        assert!(encode_stage_seal(id, root).starts_with(b"ATSEAL1"));
+        assert!(encode_stage_payload(heap_id, id, 0, b"x").starts_with(b"ATPAY1"));
+        assert!(encode_stage_seal(heap_id, id, root).starts_with(b"ATSEAL1"));
         assert!(encode_stage_chunk_plan(
+            heap_id,
             id,
             0,
             &ChunkPlan {
@@ -1892,6 +1933,6 @@ mod checkpoint_v13_freeze {
             }
         )
         .starts_with(b"ATMAP1"));
-        assert!(encode_stage_chunk_body(id, 0, 0, b"c").starts_with(b"ATCHK1"));
+        assert!(encode_stage_chunk_body(heap_id, id, 0, 0, b"c").starts_with(b"ATCHK1"));
     }
 }

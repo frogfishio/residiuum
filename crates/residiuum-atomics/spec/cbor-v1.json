@@ -236,19 +236,20 @@
     "maintenance": "fail-closed seal/compact/reclaim/identity-reassign while outstanding; Recovery Shadow gated via seal refuse; backup copies store-info sidecars",
     "ATCKP1": {
       "file": "store-info/atomic-stage.ckpt",
-      "version": 10,
-      "domain": "RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V10",
+      "version": 14,
+      "domain": "RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V14",
       "covered_block_bytes": 65536
     },
     "ATCRD1": {
       "file": "store-info/atomic-coord.ckpt",
-      "version": 1,
-      "domain": "RESIDIUUM-STORE-ATOMIC-COORD-V1"
+      "version": 2,
+      "domain": "RESIDIUUM-STORE-ATOMIC-COORD-V2"
     },
-    "ATPAY1": { "role": "payload sidecar body", "layout": "atomic_id[32] || ordinal_u32be || payload" },
-    "ATSEAL1": { "role": "member-boundary sidecar body", "layout": "atomic_id[32] || content_root[32]" },
-    "ATMAP1": { "role": "frozen chunk-plan sidecar body", "layout": "atomic_id[32] || ordinal_u32be || total_u32be || hashes[32]*total" },
-    "ATCHK1": { "role": "chunk-body sidecar body", "layout": "atomic_id[32] || ordinal_u32be || index_u32be || bytes" },
+    "ATPAY1": { "role": "payload sidecar body", "layout": "heap_id[16] || atomic_id[32] || ordinal_u32be || payload" },
+    "ATSEAL1": { "role": "member-boundary sidecar body", "layout": "heap_id[16] || atomic_id[32] || content_root[32]" },
+    "ATMAP1": { "role": "frozen chunk-plan sidecar body", "layout": "heap_id[16] || atomic_id[32] || ordinal_u32be || total_u32be || hashes[32]*total" },
+    "ATCHK1": { "role": "chunk-body sidecar body", "layout": "heap_id[16] || atomic_id[32] || ordinal_u32be || index_u32be || bytes" },
+    "ATORD1": { "role": "ordinary-order frontier sidecar body", "layout": "heap_id[16] || atomic_id[32] || shard_count_u16be || (shard_u16be || segment_id[16] || next_writer_sequence_u64be)*" },
     "ATPREP1": { "role": "legacy prepare sidecar; writers must not emit" }
   }
 }

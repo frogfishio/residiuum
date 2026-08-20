@@ -5610,6 +5610,7 @@ impl Store {
                 Some(refer) => crate::atomic_stage_recover::resolve_published_payload(
                     &self.paths,
                     &refer.body,
+                    refer.heap_id,
                     refer.atomic_id,
                     refer.ordinal,
                 )?,
@@ -7414,6 +7415,7 @@ impl Store {
             let body = crate::atomic_stage_recover::resolve_published_payload(
                 &self.paths,
                 &refer.body,
+                refer.heap_id,
                 refer.atomic_id,
                 refer.ordinal,
             )?;

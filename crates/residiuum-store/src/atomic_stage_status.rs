@@ -4,8 +4,9 @@
 //! complete member set. A durable prepare with missing members is `Prepared`,
 //! never absence.
 
-use crate::atomic_stage_media::StageCatalog;
-use residiuum_atomics::{members_match_prepare, AtomicId, DecisionCode};
+use crate::atomic_stage_media::{stage_key, StageAtomicKey, StageCatalog};
+use residiuum_atomics::{members_match_prepare, AtomicId, DecisionCode, HeapId};
+use std::collections::BTreeSet;
 
 /// Public classification of one Atomic identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -57,38 +58,45 @@ pub struct AtomicStageStatus {
 }
 
 /// Project one identity from the authoritative catalogue.
-pub fn project_atomic(catalog: &StageCatalog, atomic_id: AtomicId) -> AtomicStageStatus {
-    let blocked = catalog.blocked.contains(&atomic_id);
-    let prepare = catalog.prepares.get(&atomic_id);
-    let members = catalog.members.get(&atomic_id);
+pub fn project_atomic(
+    catalog: &StageCatalog,
+    heap_id: HeapId,
+    atomic_id: AtomicId,
+) -> AtomicStageStatus {
+    let key = stage_key(heap_id, atomic_id);
+    let blocked = catalog.blocked.contains(&key);
+    let prepare = catalog.prepares.get(&key);
+    let members = catalog.members.get(&key);
     let present_members = members.map(|ms| ms.len() as u32).unwrap_or(0);
     let intended_members = prepare.map(|p| p.member_count).unwrap_or(present_members);
-    let present_payloads = unique_count(
-        catalog.payloads.keys().filter(|(id, _)| *id == atomic_id),
-        catalog
-            .payload_refs
-            .keys()
-            .filter(|(id, _)| *id == atomic_id),
-    );
+    let present_payloads = catalog
+        .payloads
+        .keys()
+        .chain(catalog.payload_refs.keys())
+        .filter_map(|(heap, id, ordinal)| ((*heap, *id) == key).then_some(*ordinal))
+        .collect::<BTreeSet<_>>()
+        .len() as u32;
     let present_chunk_plans = catalog
         .chunk_plans
         .keys()
-        .filter(|(id, _)| *id == atomic_id)
+        .filter(|(heap, id, _)| (*heap, *id) == key)
         .count() as u32;
-    let present_chunk_bodies = unique_triple(
-        catalog.chunks.keys().filter(|(id, _, _)| *id == atomic_id),
-        catalog
-            .chunk_refs
-            .keys()
-            .filter(|(id, _, _)| *id == atomic_id),
-    );
-    let sealed = catalog.seals.contains_key(&atomic_id);
-    let decision = catalog.decisions.get(&atomic_id);
+    let present_chunk_bodies = catalog
+        .chunks
+        .keys()
+        .chain(catalog.chunk_refs.keys())
+        .filter_map(|(heap, id, ordinal, index)| {
+            ((*heap, *id) == key).then_some((*ordinal, *index))
+        })
+        .collect::<BTreeSet<_>>()
+        .len() as u32;
+    let sealed = catalog.seals.contains_key(&key);
+    let decision = catalog.decisions.get(&key);
     let members_complete = prepare.is_some_and(|p| {
         let ms = members.cloned().unwrap_or_default();
         intended_members > 0 && present_members >= intended_members && members_match_prepare(p, &ms)
     });
-    let material_complete = material_complete(catalog, atomic_id);
+    let material_complete = material_complete(catalog, key);
     let class = if blocked {
         AtomicStageClass::Blocked
     } else if decision.is_some_and(|d| d.decision == DecisionCode::Committed) {
@@ -120,52 +128,24 @@ pub fn project_atomic(catalog: &StageCatalog, atomic_id: AtomicId) -> AtomicStag
     }
 }
 
-pub(crate) fn material_complete(catalog: &StageCatalog, atomic_id: AtomicId) -> bool {
-    catalog.members.get(&atomic_id).is_some_and(|members| {
+pub(crate) fn material_complete(catalog: &StageCatalog, key: StageAtomicKey) -> bool {
+    catalog.members.get(&key).is_some_and(|members| {
         members.iter().all(|member| {
-            catalog.has_payload(atomic_id, member.ordinal)
+            catalog.has_payload(key, member.ordinal)
                 || catalog
                     .payload_refs
-                    .contains_key(&(atomic_id, member.ordinal))
-                || chunk_complete(catalog, atomic_id, member.ordinal)
+                    .contains_key(&(key.0, key.1, member.ordinal))
+                || chunk_complete(catalog, key, member.ordinal)
         })
     })
 }
 
-fn chunk_complete(catalog: &StageCatalog, atomic_id: AtomicId, ordinal: u32) -> bool {
-    let Some(plan) = catalog.chunk_plans.get(&(atomic_id, ordinal)) else {
+fn chunk_complete(catalog: &StageCatalog, key: StageAtomicKey, ordinal: u32) -> bool {
+    let Some(plan) = catalog.chunk_plans.get(&(key.0, key.1, ordinal)) else {
         return false;
     };
     (0..plan.total).all(|i| {
-        catalog.has_chunk(atomic_id, ordinal, i)
-            || catalog.chunk_refs.contains_key(&(atomic_id, ordinal, i))
+        catalog.has_chunk(key, ordinal, i)
+            || catalog.chunk_refs.contains_key(&(key.0, key.1, ordinal, i))
     })
-}
-
-fn unique_count<'a, I, J>(a: I, b: J) -> u32
-where
-    I: Iterator<Item = &'a (AtomicId, u32)>,
-    J: Iterator<Item = &'a (AtomicId, u32)>,
-{
-    let mut seen = Vec::new();
-    for key in a.chain(b) {
-        if !seen.contains(key) {
-            seen.push(*key);
-        }
-    }
-    seen.len() as u32
-}
-
-fn unique_triple<'a, I, J>(a: I, b: J) -> u32
-where
-    I: Iterator<Item = &'a (AtomicId, u32, u32)>,
-    J: Iterator<Item = &'a (AtomicId, u32, u32)>,
-{
-    let mut seen = Vec::new();
-    for key in a.chain(b) {
-        if !seen.contains(key) {
-            seen.push(*key);
-        }
-    }
-    seen.len() as u32
 }

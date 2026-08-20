@@ -19,6 +19,14 @@ const CHUNK_PLAN_MAGIC: &[u8] = b"ATMAP1";
 const CHUNK_BODY_MAGIC: &[u8] = b"ATCHK1";
 const ORDER_FRONTIER_MAGIC: &[u8] = b"ATORD1";
 
+/// Physical Atomic identity. Caller-chosen Atomic IDs are scoped to a Heap;
+/// neither component alone is a store-wide identity.
+pub(crate) type StageAtomicKey = (HeapId, AtomicId);
+
+pub(crate) fn stage_key(heap_id: HeapId, atomic_id: AtomicId) -> StageAtomicKey {
+    (heap_id, atomic_id)
+}
+
 /// One writer-shard position captured immediately before an Atomic decision.
 /// `next_writer_sequence` is the first sequence that is strictly after the
 /// witnessed frontier in `segment_id`.
@@ -43,6 +51,7 @@ pub(crate) struct BodyRef {
 /// material; this locator is rebuilt from the durable decision catalogue.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AtomicValueRef {
+    pub heap_id: HeapId,
     pub atomic_id: AtomicId,
     pub ordinal: u32,
     pub body: BodyRef,
@@ -61,40 +70,37 @@ pub(crate) struct AtomicPublishMember {
 /// Staging facts recovered from store media only.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct StageCatalog {
-    pub prepares: BTreeMap<AtomicId, AtomicPrepare>,
-    pub members: BTreeMap<AtomicId, Vec<AtomicMember>>,
-    pub payloads: BTreeMap<(AtomicId, u32), Vec<u8>>,
+    pub prepares: BTreeMap<StageAtomicKey, AtomicPrepare>,
+    pub members: BTreeMap<StageAtomicKey, Vec<AtomicMember>>,
+    pub payloads: BTreeMap<(HeapId, AtomicId, u32), Vec<u8>>,
     /// Media locators for payloads (checkpoint authority, not a second copy).
-    pub payload_refs: BTreeMap<(AtomicId, u32), BodyRef>,
+    pub payload_refs: BTreeMap<(HeapId, AtomicId, u32), BodyRef>,
     /// Frozen chunk maps (CR-ATMR5-005).
-    pub chunk_plans: BTreeMap<(AtomicId, u32), ChunkPlan>,
+    pub chunk_plans: BTreeMap<(HeapId, AtomicId, u32), ChunkPlan>,
     /// Verified chunk bodies keyed by (atomic, ordinal, index).
-    pub chunks: BTreeMap<(AtomicId, u32, u32), Vec<u8>>,
+    pub chunks: BTreeMap<(HeapId, AtomicId, u32, u32), Vec<u8>>,
     /// Media locators for chunk bodies.
-    pub chunk_refs: BTreeMap<(AtomicId, u32, u32), BodyRef>,
-    pub seals: BTreeMap<AtomicId, ContentRoot>,
+    pub chunk_refs: BTreeMap<(HeapId, AtomicId, u32, u32), BodyRef>,
+    pub seals: BTreeMap<StageAtomicKey, ContentRoot>,
     /// Durable terminal decisions. A committed decision is the ATM-3
     /// linearization point; the checkpoint is only a rebuild accelerator.
-    pub decisions: BTreeMap<AtomicId, AtomicDecision>,
-    /// Heap ownership authenticated by each decision envelope. Retained even
-    /// when its prepare is damaged so a named commit position is never reused.
-    pub evidence_heaps: BTreeMap<AtomicId, HeapId>,
+    pub decisions: BTreeMap<StageAtomicKey, AtomicDecision>,
     /// Next non-zero Heap commit position. Reconstructed above every admitted
     /// committed decision during recovery.
     pub commit_next: BTreeMap<HeapId, u64>,
     /// Per-shard ordinary-write frontier durably covered by each committed
     /// decision. The witness frame precedes the decision stable boundary.
-    pub order_frontiers: BTreeMap<AtomicId, Vec<AtomicShardFrontier>>,
+    pub order_frontiers: BTreeMap<StageAtomicKey, Vec<AtomicShardFrontier>>,
     /// Identities that must not be installed or reused (CR-ATMR5-002).
-    pub blocked: BTreeSet<AtomicId>,
+    pub blocked: BTreeSet<StageAtomicKey>,
     /// Prepares observed as format-admitted `BatchPrepare` (CR-ATMR5-006).
-    pub prepare_batch: BTreeSet<AtomicId>,
+    pub prepare_batch: BTreeSet<StageAtomicKey>,
     /// Durable coordinator sequence per Atomic (CR-ATMR5-004).
-    pub coord_seq: BTreeMap<AtomicId, u64>,
+    pub coord_seq: BTreeMap<StageAtomicKey, u64>,
     /// Next sequence to allocate (strictly above every issued sequence).
     pub coord_next: u64,
     /// Encounter order of prepares (not Atomic-ID sort).
-    pub prepare_seen: Vec<AtomicId>,
+    pub prepare_seen: Vec<StageAtomicKey>,
     /// Persisted honest findings (CR-ATMR6-002). Ordinary reopen must not drop them.
     pub findings: crate::atomic_stage_classify::StageFindings,
     /// Store/coverage degradation. Ordinary reopen must not clear it.
@@ -102,30 +108,30 @@ pub(crate) struct StageCatalog {
     /// Covered paths that vanished after a checkpoint. Cleared only by scrub.
     pub missing_covered: Vec<String>,
     /// Intended member counts from the issuing prepare (CR-ATMR6-005).
-    pub intended_members: BTreeMap<AtomicId, u32>,
+    pub intended_members: BTreeMap<StageAtomicKey, u32>,
 }
 
 impl StageCatalog {
-    pub(crate) fn has_member(&self, atomic_id: AtomicId, ordinal: u32) -> bool {
+    pub(crate) fn has_member(&self, key: StageAtomicKey, ordinal: u32) -> bool {
         self.members
-            .get(&atomic_id)
+            .get(&key)
             .is_some_and(|ms| ms.iter().any(|m| m.ordinal == ordinal))
     }
 
-    pub(crate) fn has_payload(&self, atomic_id: AtomicId, ordinal: u32) -> bool {
-        self.payloads.contains_key(&(atomic_id, ordinal))
+    pub(crate) fn has_payload(&self, key: StageAtomicKey, ordinal: u32) -> bool {
+        self.payloads.contains_key(&(key.0, key.1, ordinal))
     }
 
-    pub(crate) fn has_chunk_plan(&self, atomic_id: AtomicId, ordinal: u32) -> bool {
-        self.chunk_plans.contains_key(&(atomic_id, ordinal))
+    pub(crate) fn has_chunk_plan(&self, key: StageAtomicKey, ordinal: u32) -> bool {
+        self.chunk_plans.contains_key(&(key.0, key.1, ordinal))
     }
 
-    pub(crate) fn has_chunk(&self, atomic_id: AtomicId, ordinal: u32, index: u32) -> bool {
-        self.chunks.contains_key(&(atomic_id, ordinal, index))
+    pub(crate) fn has_chunk(&self, key: StageAtomicKey, ordinal: u32, index: u32) -> bool {
+        self.chunks.contains_key(&(key.0, key.1, ordinal, index))
     }
 
-    pub(crate) fn is_sealed(&self, atomic_id: AtomicId) -> bool {
-        self.seals.contains_key(&atomic_id)
+    pub(crate) fn is_sealed(&self, key: StageAtomicKey) -> bool {
+        self.seals.contains_key(&key)
     }
 
     pub(crate) fn retained_payload_bytes(&self) -> u64 {
@@ -156,7 +162,6 @@ impl StageCatalog {
             || !self.chunk_refs.is_empty()
             || !self.seals.is_empty()
             || !self.decisions.is_empty()
-            || !self.evidence_heaps.is_empty()
             || !self.order_frontiers.is_empty()
             || !self.blocked.is_empty()
             || !self.prepare_batch.is_empty()
@@ -182,7 +187,6 @@ impl StageCatalog {
             .saturating_add(members.saturating_mul(256))
             .saturating_add(self.seals.len() as u64 * 64)
             .saturating_add(self.decisions.len() as u64 * 192)
-            .saturating_add(self.evidence_heaps.len() as u64 * 48)
             .saturating_add(self.commit_next.len() as u64 * 24)
             .saturating_add(
                 self.order_frontiers
@@ -206,13 +210,7 @@ impl StageCatalog {
         if self
             .decisions
             .iter()
-            .filter(|(id, _)| {
-                self.evidence_heaps
-                    .get(id)
-                    .copied()
-                    .or_else(|| self.prepares.get(id).map(|prepare| prepare.heap_id))
-                    == Some(heap_id)
-            })
+            .filter(|((decision_heap, _), _)| *decision_heap == heap_id)
             .filter_map(|(_, decision)| decision.commit_position)
             .any(|position| position == next)
         {
@@ -226,18 +224,11 @@ impl StageCatalog {
     /// Reconstruct the high-water mark from authoritative admitted decisions.
     pub(crate) fn reconstruct_commit_next(&mut self) {
         let mut next = BTreeMap::new();
-        for (id, decision) in &self.decisions {
+        for ((decision_heap, _), decision) in &self.decisions {
             let Some(position) = decision.commit_position else {
                 continue;
             };
-            let Some(heap_id) = self
-                .evidence_heaps
-                .get(id)
-                .copied()
-                .or_else(|| self.prepares.get(id).map(|prepare| prepare.heap_id))
-            else {
-                continue;
-            };
+            let heap_id = *decision_heap;
             let entry = next.entry(heap_id).or_insert(1u64);
             *entry = (*entry).max(position.saturating_add(1).max(1));
         }
@@ -245,8 +236,8 @@ impl StageCatalog {
     }
 
     /// Allocate or return the durable coordinator sequence for `atomic_id`.
-    pub(crate) fn assign_coord(&mut self, atomic_id: AtomicId) -> Result<u64, StoreError> {
-        if let Some(seq) = self.coord_seq.get(&atomic_id).copied() {
+    pub(crate) fn assign_coord(&mut self, key: StageAtomicKey) -> Result<u64, StoreError> {
+        if let Some(seq) = self.coord_seq.get(&key).copied() {
             return Ok(seq);
         }
         let seq = if self.coord_next == 0 {
@@ -259,10 +250,10 @@ impl StageCatalog {
                 "duplicate coordinator sequence {seq}"
             )));
         }
-        self.coord_seq.insert(atomic_id, seq);
+        self.coord_seq.insert(key, seq);
         self.coord_next = seq.saturating_add(1);
-        if !self.prepare_seen.contains(&atomic_id) {
-            self.prepare_seen.push(atomic_id);
+        if !self.prepare_seen.contains(&key) {
+            self.prepare_seen.push(key);
         }
         Ok(seq)
     }
@@ -308,16 +299,13 @@ mod commit_position_tests {
         let atomic_b = atomic(2);
         let mut catalog = StageCatalog::default();
         catalog.decisions.insert(
-            atomic_a,
+            stage_key(heap_a, atomic_a),
             AtomicDecision::committed(atomic_a, [1; 32], [2; 32], 1, 7).unwrap(),
         );
         catalog.decisions.insert(
-            atomic_b,
+            stage_key(heap_b, atomic_b),
             AtomicDecision::committed(atomic_b, [3; 32], [4; 32], 1, 2).unwrap(),
         );
-        catalog.evidence_heaps.insert(atomic_a, heap_a);
-        catalog.evidence_heaps.insert(atomic_b, heap_b);
-
         catalog.reconstruct_commit_next();
 
         assert_eq!(catalog.next_commit_position(heap_a).unwrap(), 8);
@@ -326,6 +314,7 @@ mod commit_position_tests {
 
     #[test]
     fn order_frontier_roundtrips_and_refuses_non_contiguous_shards() {
+        let heap_id = heap(7);
         let id = atomic(7);
         let frontiers = vec![
             AtomicShardFrontier {
@@ -339,12 +328,14 @@ mod commit_position_tests {
                 next_writer_sequence: 4,
             },
         ];
-        let encoded = encode_order_frontier(id, &frontiers).unwrap();
+        let encoded = encode_order_frontier(heap_id, id, &frontiers).unwrap();
         match decode_stage_sidecar(&encoded) {
             SidecarDecode::OrderFrontier {
+                heap_id: decoded_heap,
                 atomic_id,
                 frontiers: decoded,
             } => {
+                assert_eq!(decoded_heap, heap_id);
                 assert_eq!(atomic_id, id);
                 assert_eq!(decoded, frontiers);
             }
@@ -355,13 +346,19 @@ mod commit_position_tests {
             segment_id: [1; 16],
             next_writer_sequence: 9,
         }];
-        assert!(encode_order_frontier(id, &invalid).is_err());
+        assert!(encode_order_frontier(heap_id, id, &invalid).is_err());
     }
 }
 
-pub(crate) fn encode_stage_payload(atomic_id: AtomicId, ordinal: u32, payload: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(PAYLOAD_MAGIC.len() + 36 + payload.len());
+pub(crate) fn encode_stage_payload(
+    heap_id: HeapId,
+    atomic_id: AtomicId,
+    ordinal: u32,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(PAYLOAD_MAGIC.len() + 52 + payload.len());
     out.extend_from_slice(PAYLOAD_MAGIC);
+    out.extend_from_slice(heap_id.as_bytes());
     out.extend_from_slice(atomic_id.as_bytes());
     out.extend_from_slice(&ordinal.to_be_bytes());
     out.extend_from_slice(payload);
@@ -369,6 +366,7 @@ pub(crate) fn encode_stage_payload(atomic_id: AtomicId, ordinal: u32, payload: &
 }
 
 pub(crate) fn encode_order_frontier(
+    heap_id: HeapId,
     atomic_id: AtomicId,
     frontiers: &[AtomicShardFrontier],
 ) -> Result<Vec<u8>, StoreError> {
@@ -385,8 +383,9 @@ pub(crate) fn encode_order_frontier(
             "Atomic writer frontiers must cover contiguous shards".into(),
         ));
     }
-    let mut out = Vec::with_capacity(ORDER_FRONTIER_MAGIC.len() + 34 + ordered.len() * 26);
+    let mut out = Vec::with_capacity(ORDER_FRONTIER_MAGIC.len() + 50 + ordered.len() * 26);
     out.extend_from_slice(ORDER_FRONTIER_MAGIC);
+    out.extend_from_slice(heap_id.as_bytes());
     out.extend_from_slice(atomic_id.as_bytes());
     out.extend_from_slice(&count.to_be_bytes());
     for frontier in ordered {
@@ -407,21 +406,28 @@ pub(crate) fn encode_stage_prepare(prepare: &AtomicPrepare) -> Result<Vec<u8>, S
     Ok(out)
 }
 
-pub(crate) fn encode_stage_seal(atomic_id: AtomicId, content_root: ContentRoot) -> Vec<u8> {
-    let mut out = Vec::with_capacity(SEAL_MAGIC.len() + 64);
+pub(crate) fn encode_stage_seal(
+    heap_id: HeapId,
+    atomic_id: AtomicId,
+    content_root: ContentRoot,
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(SEAL_MAGIC.len() + 80);
     out.extend_from_slice(SEAL_MAGIC);
+    out.extend_from_slice(heap_id.as_bytes());
     out.extend_from_slice(atomic_id.as_bytes());
     out.extend_from_slice(content_root.as_bytes());
     out
 }
 
 pub(crate) fn encode_stage_chunk_plan(
+    heap_id: HeapId,
     atomic_id: AtomicId,
     ordinal: u32,
     plan: &ChunkPlan,
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(CHUNK_PLAN_MAGIC.len() + 40 + plan.chunk_hashes.len() * 32);
+    let mut out = Vec::with_capacity(CHUNK_PLAN_MAGIC.len() + 56 + plan.chunk_hashes.len() * 32);
     out.extend_from_slice(CHUNK_PLAN_MAGIC);
+    out.extend_from_slice(heap_id.as_bytes());
     out.extend_from_slice(atomic_id.as_bytes());
     out.extend_from_slice(&ordinal.to_be_bytes());
     out.extend_from_slice(&plan.total.to_be_bytes());
@@ -432,13 +438,15 @@ pub(crate) fn encode_stage_chunk_plan(
 }
 
 pub(crate) fn encode_stage_chunk_body(
+    heap_id: HeapId,
     atomic_id: AtomicId,
     ordinal: u32,
     index: u32,
     body: &[u8],
 ) -> Vec<u8> {
-    let mut out = Vec::with_capacity(CHUNK_BODY_MAGIC.len() + 40 + body.len());
+    let mut out = Vec::with_capacity(CHUNK_BODY_MAGIC.len() + 56 + body.len());
     out.extend_from_slice(CHUNK_BODY_MAGIC);
+    out.extend_from_slice(heap_id.as_bytes());
     out.extend_from_slice(atomic_id.as_bytes());
     out.extend_from_slice(&ordinal.to_be_bytes());
     out.extend_from_slice(&index.to_be_bytes());
@@ -446,9 +454,10 @@ pub(crate) fn encode_stage_chunk_body(
     out
 }
 
-pub(crate) fn payload_event_id(atomic_id: AtomicId, ordinal: u32) -> [u8; 16] {
+pub(crate) fn payload_event_id(heap_id: HeapId, atomic_id: AtomicId, ordinal: u32) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"residiuum.atomic-stage.payload");
+    hasher.update(heap_id.as_bytes());
     hasher.update(atomic_id.as_bytes());
     hasher.update(&ordinal.to_be_bytes());
     let hash = hasher.finalize();
@@ -458,9 +467,10 @@ pub(crate) fn payload_event_id(atomic_id: AtomicId, ordinal: u32) -> [u8; 16] {
 }
 
 #[allow(dead_code)]
-pub(crate) fn prepare_event_id(atomic_id: AtomicId) -> [u8; 16] {
+pub(crate) fn prepare_event_id(heap_id: HeapId, atomic_id: AtomicId) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"residiuum.atomic-stage.prepare");
+    hasher.update(heap_id.as_bytes());
     hasher.update(atomic_id.as_bytes());
     let hash = hasher.finalize();
     let mut id = [0u8; 16];
@@ -468,9 +478,10 @@ pub(crate) fn prepare_event_id(atomic_id: AtomicId) -> [u8; 16] {
     id
 }
 
-pub(crate) fn seal_event_id(atomic_id: AtomicId) -> [u8; 16] {
+pub(crate) fn seal_event_id(heap_id: HeapId, atomic_id: AtomicId) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"residiuum.atomic-stage.seal");
+    hasher.update(heap_id.as_bytes());
     hasher.update(atomic_id.as_bytes());
     let hash = hasher.finalize();
     let mut id = [0u8; 16];
@@ -478,9 +489,10 @@ pub(crate) fn seal_event_id(atomic_id: AtomicId) -> [u8; 16] {
     id
 }
 
-pub(crate) fn order_frontier_event_id(atomic_id: AtomicId) -> [u8; 16] {
+pub(crate) fn order_frontier_event_id(heap_id: HeapId, atomic_id: AtomicId) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"residiuum.atomic-stage.order-frontier");
+    hasher.update(heap_id.as_bytes());
     hasher.update(atomic_id.as_bytes());
     let hash = hasher.finalize();
     let mut id = [0u8; 16];
@@ -488,9 +500,10 @@ pub(crate) fn order_frontier_event_id(atomic_id: AtomicId) -> [u8; 16] {
     id
 }
 
-pub(crate) fn chunk_plan_event_id(atomic_id: AtomicId, ordinal: u32) -> [u8; 16] {
+pub(crate) fn chunk_plan_event_id(heap_id: HeapId, atomic_id: AtomicId, ordinal: u32) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"residiuum.atomic-stage.chunk-plan");
+    hasher.update(heap_id.as_bytes());
     hasher.update(atomic_id.as_bytes());
     hasher.update(&ordinal.to_be_bytes());
     let hash = hasher.finalize();
@@ -499,9 +512,15 @@ pub(crate) fn chunk_plan_event_id(atomic_id: AtomicId, ordinal: u32) -> [u8; 16]
     id
 }
 
-pub(crate) fn chunk_body_event_id(atomic_id: AtomicId, ordinal: u32, index: u32) -> [u8; 16] {
+pub(crate) fn chunk_body_event_id(
+    heap_id: HeapId,
+    atomic_id: AtomicId,
+    ordinal: u32,
+    index: u32,
+) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"residiuum.atomic-stage.chunk-body");
+    hasher.update(heap_id.as_bytes());
     hasher.update(atomic_id.as_bytes());
     hasher.update(&ordinal.to_be_bytes());
     hasher.update(&index.to_be_bytes());
@@ -538,23 +557,27 @@ pub(crate) enum SidecarDecode {
     Prepare(Box<AtomicPrepare>),
     /// Valid payload sidecar.
     Payload {
+        heap_id: HeapId,
         atomic_id: AtomicId,
         ordinal: u32,
         payload: Vec<u8>,
     },
     /// Valid seal sidecar (identity + content root).
     Seal {
+        heap_id: HeapId,
         atomic_id: AtomicId,
         content_root: ContentRoot,
     },
     /// Valid frozen chunk map.
     ChunkPlan {
+        heap_id: HeapId,
         atomic_id: AtomicId,
         ordinal: u32,
         plan: ChunkPlan,
     },
     /// Valid verified chunk body.
     ChunkBody {
+        heap_id: HeapId,
         atomic_id: AtomicId,
         ordinal: u32,
         index: u32,
@@ -562,6 +585,7 @@ pub(crate) enum SidecarDecode {
     },
     /// Durable per-shard order witness covered by the decision boundary.
     OrderFrontier {
+        heap_id: HeapId,
         atomic_id: AtomicId,
         frontiers: Vec<AtomicShardFrontier>,
     },
@@ -570,26 +594,31 @@ pub(crate) enum SidecarDecode {
 /// Classify a PayloadChunk body as a staging sidecar or not-ours.
 pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
     if body.starts_with(ORDER_FRONTIER_MAGIC) {
-        let header = ORDER_FRONTIER_MAGIC.len() + 32 + 2;
+        let header = ORDER_FRONTIER_MAGIC.len() + 16 + 32 + 2;
         if body.len() < header {
             return SidecarDecode::Partial {
                 kind: SidecarKind::OrderFrontier,
             };
         }
-        let atomic_id = match AtomicId::from_bytes(
-            body[ORDER_FRONTIER_MAGIC.len()..ORDER_FRONTIER_MAGIC.len() + 32]
-                .try_into()
-                .unwrap_or([0; 32]),
-        ) {
-            Ok(id) => id,
-            Err(_) => {
-                return SidecarDecode::Corrupt {
-                    kind: SidecarKind::OrderFrontier,
-                    atomic_id: None,
-                };
-            }
+        let heap_at = ORDER_FRONTIER_MAGIC.len();
+        let Some(heap_id) = decode_heap_id(&body[heap_at..heap_at + 16]) else {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::OrderFrontier,
+                atomic_id: None,
+            };
         };
-        let count_at = ORDER_FRONTIER_MAGIC.len() + 32;
+        let id_at = heap_at + 16;
+        let atomic_id =
+            match AtomicId::from_bytes(body[id_at..id_at + 32].try_into().unwrap_or([0; 32])) {
+                Ok(id) => id,
+                Err(_) => {
+                    return SidecarDecode::Corrupt {
+                        kind: SidecarKind::OrderFrontier,
+                        atomic_id: None,
+                    };
+                }
+            };
+        let count_at = id_at + 32;
         let count =
             u16::from_be_bytes(body[count_at..count_at + 2].try_into().unwrap_or([0; 2])) as usize;
         let Some(expected) = header.checked_add(count.saturating_mul(26)) else {
@@ -625,6 +654,7 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
             offset += 26;
         }
         return SidecarDecode::OrderFrontier {
+            heap_id,
             atomic_id,
             frontiers,
         };
@@ -642,13 +672,21 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
         };
     }
     if body.starts_with(PAYLOAD_MAGIC) {
-        let header = PAYLOAD_MAGIC.len() + 32 + 4;
+        let header = PAYLOAD_MAGIC.len() + 16 + 32 + 4;
         if body.len() < header {
             return SidecarDecode::Partial {
                 kind: SidecarKind::Payload,
             };
         }
-        let id = match body[PAYLOAD_MAGIC.len()..PAYLOAD_MAGIC.len() + 32].try_into() {
+        let heap_at = PAYLOAD_MAGIC.len();
+        let Some(heap_id) = decode_heap_id(&body[heap_at..heap_at + 16]) else {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::Payload,
+                atomic_id: None,
+            };
+        };
+        let id_at = heap_at + 16;
+        let id = match body[id_at..id_at + 32].try_into() {
             Ok(bytes) => match AtomicId::from_bytes(bytes) {
                 Ok(id) => id,
                 Err(_) => {
@@ -665,16 +703,17 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
                 };
             }
         };
-        let ord_at = PAYLOAD_MAGIC.len() + 32;
+        let ord_at = id_at + 32;
         let ordinal = u32::from_be_bytes(body[ord_at..ord_at + 4].try_into().unwrap_or([0; 4]));
         return SidecarDecode::Payload {
+            heap_id,
             atomic_id: id,
             ordinal,
             payload: body[header..].to_vec(),
         };
     }
     if body.starts_with(SEAL_MAGIC) {
-        let header = SEAL_MAGIC.len() + 64;
+        let header = SEAL_MAGIC.len() + 16 + 64;
         if body.len() < header {
             return SidecarDecode::Partial {
                 kind: SidecarKind::Seal,
@@ -684,14 +723,22 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
             return SidecarDecode::Corrupt {
                 kind: SidecarKind::Seal,
                 atomic_id: AtomicId::from_bytes(
-                    body[SEAL_MAGIC.len()..SEAL_MAGIC.len() + 32]
+                    body[SEAL_MAGIC.len() + 16..SEAL_MAGIC.len() + 48]
                         .try_into()
                         .unwrap_or([0; 32]),
                 )
                 .ok(),
             };
         }
-        let id_bytes: [u8; 32] = match body[SEAL_MAGIC.len()..SEAL_MAGIC.len() + 32].try_into() {
+        let heap_at = SEAL_MAGIC.len();
+        let Some(heap_id) = decode_heap_id(&body[heap_at..heap_at + 16]) else {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::Seal,
+                atomic_id: None,
+            };
+        };
+        let id_at = heap_at + 16;
+        let id_bytes: [u8; 32] = match body[id_at..id_at + 32].try_into() {
             Ok(b) => b,
             Err(_) => {
                 return SidecarDecode::Corrupt {
@@ -700,16 +747,15 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
                 };
             }
         };
-        let root_bytes: [u8; 32] =
-            match body[SEAL_MAGIC.len() + 32..SEAL_MAGIC.len() + 64].try_into() {
-                Ok(b) => b,
-                Err(_) => {
-                    return SidecarDecode::Corrupt {
-                        kind: SidecarKind::Seal,
-                        atomic_id: AtomicId::from_bytes(id_bytes).ok(),
-                    };
-                }
-            };
+        let root_bytes: [u8; 32] = match body[id_at + 32..id_at + 64].try_into() {
+            Ok(b) => b,
+            Err(_) => {
+                return SidecarDecode::Corrupt {
+                    kind: SidecarKind::Seal,
+                    atomic_id: AtomicId::from_bytes(id_bytes).ok(),
+                };
+            }
+        };
         let (Ok(atomic_id), Ok(content_root)) = (
             AtomicId::from_bytes(id_bytes),
             ContentRoot::from_bytes(root_bytes),
@@ -720,19 +766,27 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
             };
         };
         return SidecarDecode::Seal {
+            heap_id,
             atomic_id,
             content_root,
         };
     }
     if body.starts_with(CHUNK_PLAN_MAGIC) {
-        let header = CHUNK_PLAN_MAGIC.len() + 32 + 4 + 4;
+        let header = CHUNK_PLAN_MAGIC.len() + 16 + 32 + 4 + 4;
         if body.len() < header {
             return SidecarDecode::Partial {
                 kind: SidecarKind::ChunkPlan,
             };
         }
-        let id = match decode_atomic_id(&body[CHUNK_PLAN_MAGIC.len()..CHUNK_PLAN_MAGIC.len() + 32])
-        {
+        let heap_at = CHUNK_PLAN_MAGIC.len();
+        let Some(heap_id) = decode_heap_id(&body[heap_at..heap_at + 16]) else {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::ChunkPlan,
+                atomic_id: None,
+            };
+        };
+        let id_at = heap_at + 16;
+        let id = match decode_atomic_id(&body[id_at..id_at + 32]) {
             Some(id) => id,
             None => {
                 return SidecarDecode::Corrupt {
@@ -741,7 +795,7 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
                 };
             }
         };
-        let ord_at = CHUNK_PLAN_MAGIC.len() + 32;
+        let ord_at = id_at + 32;
         let ordinal = u32::from_be_bytes(body[ord_at..ord_at + 4].try_into().unwrap_or([0; 4]));
         let total = u32::from_be_bytes(body[ord_at + 4..ord_at + 8].try_into().unwrap_or([0; 4]));
         let hashes_len = body.len() - header;
@@ -760,6 +814,7 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
             rest = &rest[32..];
         }
         return SidecarDecode::ChunkPlan {
+            heap_id,
             atomic_id: id,
             ordinal,
             plan: ChunkPlan {
@@ -769,14 +824,21 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
         };
     }
     if body.starts_with(CHUNK_BODY_MAGIC) {
-        let header = CHUNK_BODY_MAGIC.len() + 32 + 4 + 4;
+        let header = CHUNK_BODY_MAGIC.len() + 16 + 32 + 4 + 4;
         if body.len() < header {
             return SidecarDecode::Partial {
                 kind: SidecarKind::ChunkBody,
             };
         }
-        let id = match decode_atomic_id(&body[CHUNK_BODY_MAGIC.len()..CHUNK_BODY_MAGIC.len() + 32])
-        {
+        let heap_at = CHUNK_BODY_MAGIC.len();
+        let Some(heap_id) = decode_heap_id(&body[heap_at..heap_at + 16]) else {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::ChunkBody,
+                atomic_id: None,
+            };
+        };
+        let id_at = heap_at + 16;
+        let id = match decode_atomic_id(&body[id_at..id_at + 32]) {
             Some(id) => id,
             None => {
                 return SidecarDecode::Corrupt {
@@ -785,10 +847,11 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
                 };
             }
         };
-        let ord_at = CHUNK_BODY_MAGIC.len() + 32;
+        let ord_at = id_at + 32;
         let ordinal = u32::from_be_bytes(body[ord_at..ord_at + 4].try_into().unwrap_or([0; 4]));
         let index = u32::from_be_bytes(body[ord_at + 4..ord_at + 8].try_into().unwrap_or([0; 4]));
         return SidecarDecode::ChunkBody {
+            heap_id,
             atomic_id: id,
             ordinal,
             index,
@@ -801,4 +864,9 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
 fn decode_atomic_id(bytes: &[u8]) -> Option<AtomicId> {
     let arr: [u8; 32] = bytes.try_into().ok()?;
     AtomicId::from_bytes(arr).ok()
+}
+
+fn decode_heap_id(bytes: &[u8]) -> Option<HeapId> {
+    let arr: [u8; 16] = bytes.try_into().ok()?;
+    HeapId::from_bytes(arr).ok()
 }

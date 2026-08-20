@@ -260,7 +260,7 @@ fn failpoint_after_durable_decision_recovers_commit() {
 }
 
 #[test]
-fn named_heaps_share_media_but_not_commit_order_or_status() {
+fn identical_atomic_ids_are_independent_across_named_heaps_and_restart() {
     let _serial = FAILPOINT_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     clear_failpoints();
     let dir = tempfile::tempdir().unwrap();
@@ -268,25 +268,42 @@ fn named_heaps_share_media_but_not_commit_order_or_status() {
     let heap_a = heap(0xA1);
     let heap_b = heap(0xB1);
     let atomic_a = id(7);
-    let atomic_b = id(8);
+    let atomic_b = atomic_a;
     {
         let mut store = Store::create(&path).unwrap();
         let first_a = stage_one_for_heap(&mut store, heap_a, atomic_a, "a", b"one", 3);
         let first_b = stage_one_for_heap(&mut store, heap_b, atomic_b, "b", b"two", 4);
         assert_eq!(first_a.commit_position, Some(1));
         assert_eq!(first_b.commit_position, Some(1));
+        assert_ne!(first_a.prepare_hash, first_b.prepare_hash);
     }
 
     let mut store = Store::open(&path).unwrap();
     {
         let stage_a = store.atomic_stage_for_heap(heap_a).unwrap();
         assert_eq!(stage_a.examine(atomic_a).class, AtomicStageClass::Committed);
-        assert_eq!(stage_a.examine(atomic_b).class, AtomicStageClass::Absent);
+        assert_eq!(
+            stage_a
+                .atomic_status(atomic_a)
+                .unwrap()
+                .receipt
+                .unwrap()
+                .heap_id,
+            heap_a
+        );
     }
     {
         let stage_b = store.atomic_stage_for_heap(heap_b).unwrap();
         assert_eq!(stage_b.examine(atomic_b).class, AtomicStageClass::Committed);
-        assert_eq!(stage_b.examine(atomic_a).class, AtomicStageClass::Absent);
+        assert_eq!(
+            stage_b
+                .atomic_status(atomic_b)
+                .unwrap()
+                .receipt
+                .unwrap()
+                .heap_id,
+            heap_b
+        );
     }
     let second_a = stage_one_for_heap(&mut store, heap_a, id(9), "c", b"three", 5);
     let second_b = stage_one_for_heap(&mut store, heap_b, id(10), "d", b"four", 6);

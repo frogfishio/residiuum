@@ -12,7 +12,8 @@ use crate::atomic_stage_classify::{
 use crate::atomic_stage_media::{
     chunk_body_event_id, chunk_plan_event_id, encode_order_frontier, encode_stage_chunk_body,
     encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal, order_frontier_event_id,
-    payload_event_id, seal_event_id, AtomicPublishMember, AtomicValueRef, BodyRef, StageCatalog,
+    payload_event_id, seal_event_id, stage_key, AtomicPublishMember, AtomicValueRef, BodyRef,
+    StageAtomicKey, StageCatalog,
 };
 use crate::atomic_stage_recover::{
     checkpoint_encoded_len, open_catalog, open_catalog_readonly, persist_live_checkpoint, rel_path,
@@ -202,22 +203,11 @@ impl Store {
             .catalog
             .decisions
             .iter()
-            .filter_map(|(atomic_id, decision)| {
-                decision.commit_position.map(|position| {
-                    let heap = opened.catalog.evidence_heaps.get(atomic_id).copied();
-                    (*atomic_id, heap, position)
-                })
-            })
+            .filter_map(|(key, decision)| decision.commit_position.map(|position| (*key, position)))
             .collect();
-        committed.sort_by_key(|(atomic_id, heap, position)| {
-            (
-                heap.map(|id| *id.as_bytes()).unwrap_or([0; 16]),
-                *position,
-                *atomic_id,
-            )
-        });
-        for (atomic_id, _, _) in committed {
-            let delta = publication_delta(self.paths(), &opened.catalog, atomic_id)?;
+        committed.sort_by_key(|(key, position)| (*key.0.as_bytes(), *position, key.1));
+        for (key, _) in committed {
+            let delta = publication_delta(self.paths(), &opened.catalog, key)?;
             self.publish_atomic_generation(&delta, true)?;
         }
         Ok(())
@@ -238,13 +228,14 @@ fn recover_prepared_without_decision(
     let unresolved = catalog
         .prepares
         .iter()
-        .filter_map(|(atomic_id, prepare)| {
-            (!catalog.decisions.contains_key(atomic_id) && !catalog.blocked.contains(atomic_id))
-                .then_some((*atomic_id, prepare.clone()))
+        .filter_map(|(key, prepare)| {
+            (!catalog.decisions.contains_key(key) && !catalog.blocked.contains(key))
+                .then_some((*key, prepare.clone()))
         })
         .collect::<Vec<_>>();
     let mut resolved = 0u32;
-    for (atomic_id, prepare) in unresolved {
+    for (key, prepare) in unresolved {
+        let atomic_id = key.1;
         let intended = prepare.member_count;
         let decision = AtomicDecision::not_committed(
             atomic_id,
@@ -267,11 +258,10 @@ fn recover_prepared_without_decision(
             FrameKind::BatchCommit,
             &envelope,
             &body,
-            decision_event_id(atomic_id),
+            decision_event_id(key.0, atomic_id),
         )?;
         crate::failpoint::hit("store.atomic.recovery.after_decision")?;
-        catalog.evidence_heaps.insert(atomic_id, prepare.heap_id);
-        catalog.decisions.insert(atomic_id, decision);
+        catalog.decisions.insert(key, decision);
         resolved = resolved.saturating_add(1);
     }
     if resolved != 0 {
@@ -281,6 +271,10 @@ fn recover_prepared_without_decision(
 }
 
 impl StoreAtomicStage<'_> {
+    fn key(&self, atomic_id: AtomicId) -> StageAtomicKey {
+        stage_key(self.heap.heap_id(), atomic_id)
+    }
+
     /// Historical peer-lane path. This stage does not create or open it.
     pub fn lane_root(&self) -> PathBuf {
         self.store.paths().store_info().join("atomic-lane")
@@ -306,10 +300,7 @@ impl StoreAtomicStage<'_> {
     /// A durable prepare with incomplete members is [`AtomicStageClass::Prepared`],
     /// never absence (CR-ATMR6-005).
     pub fn examine(&self, atomic_id: AtomicId) -> crate::AtomicStageStatus {
-        if self.catalog.evidence_heaps.get(&atomic_id).copied() != Some(self.heap.heap_id()) {
-            return crate::atomic_stage_status::project_atomic(&StageCatalog::default(), atomic_id);
-        }
-        crate::atomic_stage_status::project_atomic(&self.catalog, atomic_id)
+        crate::atomic_stage_status::project_atomic(&self.catalog, self.heap.heap_id(), atomic_id)
     }
 
     /// ATM-4 logical/material status projection from authoritative evidence.
@@ -321,21 +312,16 @@ impl StoreAtomicStage<'_> {
         if self.catalog.coverage_degraded {
             return Ok(AtomicStatus::incomplete_coverage());
         }
-        if self.catalog.evidence_heaps.get(&atomic_id).copied() != Some(self.heap.heap_id()) {
-            return Ok(AtomicStatus::not_found());
-        }
-        let projected = crate::atomic_stage_status::project_atomic(&self.catalog, atomic_id);
-        let content_root = self
-            .catalog
-            .prepares
-            .get(&atomic_id)
-            .map(|p| p.content_root);
-        let decision_conflict = self.findings.records.iter().any(|finding| {
-            finding.atomic_id == Some(atomic_id)
-                && finding.kind == StageEvidenceKind::Decision
-                && finding.class == StageEvidenceClass::Conflict
-        });
-        if decision_conflict {
+        let key = self.key(atomic_id);
+        let projected = crate::atomic_stage_status::project_atomic(&self.catalog, key.0, atomic_id);
+        let content_root = self.catalog.prepares.get(&key).map(|p| p.content_root);
+        if projected.blocked
+            && self.findings.records.iter().any(|finding| {
+                finding.atomic_id == Some(atomic_id)
+                    && finding.kind == StageEvidenceKind::Decision
+                    && finding.class == StageEvidenceClass::Conflict
+            })
+        {
             return Ok(AtomicStatus {
                 logical: LogicalStatus::ConflictingDecisionEvidence,
                 material: MaterialStatus::Conflicting,
@@ -351,13 +337,13 @@ impl StoreAtomicStage<'_> {
                 receipt: None,
             });
         }
-        let Some(decision) = self.catalog.decisions.get(&atomic_id) else {
-            if self.catalog.prepares.contains_key(&atomic_id) {
+        let Some(decision) = self.catalog.decisions.get(&key) else {
+            if self.catalog.prepares.contains_key(&key) {
                 let material = if projected.present_members == 0 && projected.intended_members != 0
                 {
                     MaterialStatus::Missing
                 } else if projected.present_members == projected.intended_members
-                    && crate::atomic_stage_status::material_complete(&self.catalog, atomic_id)
+                    && crate::atomic_stage_status::material_complete(&self.catalog, key)
                 {
                     MaterialStatus::Complete
                 } else {
@@ -381,7 +367,7 @@ impl StoreAtomicStage<'_> {
             });
         }
         let complete = projected.present_members == projected.intended_members
-            && crate::atomic_stage_status::material_complete(&self.catalog, atomic_id)
+            && crate::atomic_stage_status::material_complete(&self.catalog, key)
             && projected.sealed;
         let material = if complete {
             MaterialStatus::Complete
@@ -463,22 +449,22 @@ impl StoreAtomicStage<'_> {
         }
         let prepare = prepare_from_closed_plan(plan, frontier, members)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        if self.catalog.blocked.contains(&prepare.atomic_id) {
+        let key = stage_key(prepare.heap_id, prepare.atomic_id);
+        if self.catalog.blocked.contains(&key) {
             return Err(StoreError::AtomicStage(
                 "atomic identity is blocked by conflicting or damaged evidence".into(),
             ));
         }
-        if self.catalog.coverage_degraded && !self.catalog.prepares.contains_key(&prepare.atomic_id)
-        {
+        if self.catalog.coverage_degraded && !self.catalog.prepares.contains_key(&key) {
             return Err(StoreError::AtomicStage(
                 "atomic prepare refused: authenticated Atomic coverage is incomplete".into(),
             ));
         }
-        if let Some(stored) = self.catalog.prepares.get(&prepare.atomic_id) {
+        if let Some(stored) = self.catalog.prepares.get(&key) {
             if stored != &prepare {
                 return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
             }
-            if !self.catalog.prepare_batch.contains(&prepare.atomic_id) {
+            if !self.catalog.prepare_batch.contains(&key) {
                 // Legacy ATPREP1-only prefix: repair the BatchPrepare authority.
                 self.persist_prepare(&prepare, members.len() as u32, mode)?;
             }
@@ -508,14 +494,17 @@ impl StoreAtomicStage<'_> {
             return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
         }
         for member in members {
-            if !self.catalog.has_member(member.atomic_id, member.ordinal) {
+            if !self
+                .catalog
+                .has_member(stage_key(prepare.heap_id, member.atomic_id), member.ordinal)
+            {
                 self.persist_member(&prepare, member, mode)?;
             }
         }
         let seq = self
             .catalog
             .coord_seq
-            .get(&prepare.atomic_id)
+            .get(&stage_key(prepare.heap_id, prepare.atomic_id))
             .copied()
             .and_then(CoordinatorSeq::from_raw)
             .ok_or_else(|| {
@@ -545,11 +534,12 @@ impl StoreAtomicStage<'_> {
         payload: Vec<u8>,
         mode: StagePersistMode,
     ) -> Result<(), StoreError> {
+        let key = self.key(member.atomic_id);
         if self.existing_payload_conflicts(&member, &payload) {
             return Err(Self::duplicate_target());
         }
         if self.find_staged(member.atomic_id, member.ordinal).is_some() {
-            if !self.catalog.has_payload(member.atomic_id, member.ordinal) {
+            if !self.catalog.has_payload(key, member.ordinal) {
                 self.persist_payload(&member, &payload, mode)?;
             }
             return Ok(());
@@ -557,7 +547,7 @@ impl StoreAtomicStage<'_> {
         self.heap
             .check_append_staged(&member, &payload)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        if !self.catalog.has_payload(member.atomic_id, member.ordinal) {
+        if !self.catalog.has_payload(key, member.ordinal) {
             self.persist_payload(&member, &payload, mode)?;
         }
         self.heap
@@ -573,17 +563,18 @@ impl StoreAtomicStage<'_> {
         ordinal: u32,
         plan: ChunkPlan,
     ) -> Result<(), StoreError> {
+        let key = self.key(atomic_id);
         if let Some(existing) = self.heap.chunk_plan(atomic_id, ordinal) {
             if existing != &plan {
                 return Err(Self::duplicate_target());
             }
-        } else if let Some(stored) = self.catalog.chunk_plans.get(&(atomic_id, ordinal)) {
+        } else if let Some(stored) = self.catalog.chunk_plans.get(&(key.0, key.1, ordinal)) {
             if stored != &plan {
                 return Err(Self::duplicate_target());
             }
         }
         if self.heap.chunk_plan(atomic_id, ordinal).is_some() {
-            if !self.catalog.has_chunk_plan(atomic_id, ordinal) {
+            if !self.catalog.has_chunk_plan(key, ordinal) {
                 self.persist_chunk_plan(atomic_id, ordinal, &plan)?;
             }
             return Ok(());
@@ -591,7 +582,7 @@ impl StoreAtomicStage<'_> {
         self.heap
             .check_commit_chunk_manifest(atomic_id, ordinal, &plan)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        if !self.catalog.has_chunk_plan(atomic_id, ordinal) {
+        if !self.catalog.has_chunk_plan(key, ordinal) {
             self.persist_chunk_plan(atomic_id, ordinal, &plan)?;
         }
         self.heap
@@ -612,13 +603,14 @@ impl StoreAtomicStage<'_> {
     ) -> Result<(), StoreError> {
         let atomic_id = member.atomic_id;
         let ordinal = member.ordinal;
+        let key = self.key(atomic_id);
         if let Some(decision) = self.existing_chunk_decision(&member, index, &body) {
             if decision.is_ok() {
                 self.persist_completed_payload_if_missing(&member)?;
             }
             return decision;
         }
-        if let Some(stored) = self.catalog.chunks.get(&(atomic_id, ordinal, index)) {
+        if let Some(stored) = self.catalog.chunks.get(&(key.0, key.1, ordinal, index)) {
             if stored != &body {
                 return Err(Self::duplicate_target());
             }
@@ -626,7 +618,7 @@ impl StoreAtomicStage<'_> {
         self.heap
             .check_append_chunk(&member, index, &body)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        if !self.catalog.has_chunk(atomic_id, ordinal, index) {
+        if !self.catalog.has_chunk(key, ordinal, index) {
             self.persist_chunk_body(&member, index, &body)?;
         }
         self.heap
@@ -646,7 +638,7 @@ impl StoreAtomicStage<'_> {
             .and_then(|ms| ms.iter().find(|s| s.member.ordinal == ordinal))
             .map(|s| s.payload.clone())
             .ok_or_else(|| StoreError::AtomicStage("complete chunk without payload".into()))?;
-        if !self.catalog.has_payload(atomic_id, ordinal) {
+        if !self.catalog.has_payload(key, ordinal) {
             self.persist_payload(&member, &payload, StagePersistMode::StableCheckpointed)?;
         }
         Ok(())
@@ -662,11 +654,12 @@ impl StoreAtomicStage<'_> {
         atomic_id: AtomicId,
         mode: StagePersistMode,
     ) -> Result<(), StoreError> {
+        let key = self.key(atomic_id);
         let already_applied = self
             .heap
             .lifecycle(atomic_id)
             .is_some_and(|life| life.members == MemberPhase::DurableInvisible);
-        if !self.catalog.is_sealed(atomic_id) {
+        if !self.catalog.is_sealed(key) {
             self.heap
                 .check_seal_member_boundary(atomic_id)
                 .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
@@ -701,51 +694,47 @@ impl StoreAtomicStage<'_> {
         atomic_id: AtomicId,
         mode: StagePersistMode,
     ) -> Result<AtomicDecision, StoreError> {
-        if self.catalog.blocked.contains(&atomic_id) || self.catalog.coverage_degraded {
+        let key = self.key(atomic_id);
+        if self.catalog.blocked.contains(&key) || self.catalog.coverage_degraded {
             return Err(StoreError::AtomicStage(
                 "atomic decision refused: evidence is blocked or coverage is incomplete".into(),
             ));
         }
-        if let Some(existing) = self.catalog.decisions.get(&atomic_id) {
+        if let Some(existing) = self.catalog.decisions.get(&key) {
             return Ok(existing.clone());
         }
         let prepare = self
             .catalog
             .prepares
-            .get(&atomic_id)
+            .get(&key)
             .cloned()
             .ok_or_else(|| StoreError::AtomicStage("decision without prepare".into()))?;
-        if self.catalog.seals.get(&atomic_id) != Some(&prepare.content_root) {
+        if self.catalog.seals.get(&key) != Some(&prepare.content_root) {
             return Err(StoreError::AtomicStage(
                 "decision before stable member boundary".into(),
             ));
         }
-        let members = self
-            .catalog
-            .members
-            .get(&atomic_id)
-            .cloned()
-            .unwrap_or_default();
+        let members = self.catalog.members.get(&key).cloned().unwrap_or_default();
         let intended = prepare.member_count;
         if intended == 0
             || members.len() != intended as usize
             || !members_match_prepare(&prepare, &members)
             || members.iter().any(|member| {
-                !self.catalog.has_payload(atomic_id, member.ordinal)
+                !self.catalog.has_payload(key, member.ordinal)
                     && !self
                         .catalog
                         .payload_refs
-                        .contains_key(&(atomic_id, member.ordinal))
+                        .contains_key(&(key.0, key.1, member.ordinal))
             })
         {
             let missing_payloads = members
                 .iter()
                 .filter(|member| {
-                    !self.catalog.has_payload(atomic_id, member.ordinal)
+                    !self.catalog.has_payload(key, member.ordinal)
                         && !self
                             .catalog
                             .payload_refs
-                            .contains_key(&(atomic_id, member.ordinal))
+                            .contains_key(&(key.0, key.1, member.ordinal))
                 })
                 .count();
             return Err(StoreError::AtomicStage(format!(
@@ -766,23 +755,21 @@ impl StoreAtomicStage<'_> {
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         let body =
             encode_decision(&decision).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        if !self.catalog.order_frontiers.contains_key(&atomic_id) {
+        if !self.catalog.order_frontiers.contains_key(&key) {
             let frontiers = self.store.atomic_order_frontier()?;
-            let witness = encode_order_frontier(atomic_id, &frontiers)?;
+            let witness = encode_order_frontier(key.0, atomic_id, &frontiers)?;
             let mut candidate = self.catalog.clone();
-            candidate
-                .order_frontiers
-                .insert(atomic_id, frontiers.clone());
+            candidate.order_frontiers.insert(key, frontiers.clone());
             self.admit_catalog_change(&candidate, witness.len() as u64)?;
             crate::failpoint::hit("store.atomic.before_order_frontier")?;
             self.store.append_buffered_atomic_frame(
                 FrameKind::PayloadChunk,
                 EMPTY_ENVELOPE,
                 &witness,
-                order_frontier_event_id(atomic_id),
+                order_frontier_event_id(key.0, atomic_id),
             )?;
             crate::failpoint::hit("store.atomic.after_order_frontier")?;
-            self.catalog.order_frontiers.insert(atomic_id, frontiers);
+            self.catalog.order_frontiers.insert(key, frontiers);
         }
         let envelope = encode_atomic_commit_envelope(
             prepare.heap_id.as_bytes(),
@@ -798,22 +785,19 @@ impl StoreAtomicStage<'_> {
                 FrameKind::BatchCommit,
                 &envelope,
                 &body,
-                decision_event_id(atomic_id),
+                decision_event_id(key.0, atomic_id),
             )?,
             StagePersistMode::StableCheckpointed | StagePersistMode::BufferedCohort => {
                 self.store.append_unindexed_atomic_frame(
                     FrameKind::BatchCommit,
                     &envelope,
                     &body,
-                    decision_event_id(atomic_id),
+                    decision_event_id(key.0, atomic_id),
                 )?
             }
         }
         crate::failpoint::hit("store.atomic.after_decision")?;
-        self.catalog
-            .evidence_heaps
-            .insert(atomic_id, prepare.heap_id);
-        self.catalog.decisions.insert(atomic_id, decision.clone());
+        self.catalog.decisions.insert(key, decision.clone());
         self.catalog
             .commit_next
             .insert(prepare.heap_id, position.saturating_add(1));
@@ -849,18 +833,19 @@ impl StoreAtomicStage<'_> {
         reason: AtomicAbortReason,
         mode: StagePersistMode,
     ) -> Result<AtomicDecision, StoreError> {
-        if self.catalog.blocked.contains(&atomic_id) || self.catalog.coverage_degraded {
+        let key = self.key(atomic_id);
+        if self.catalog.blocked.contains(&key) || self.catalog.coverage_degraded {
             return Err(StoreError::AtomicStage(
                 "atomic decision refused: evidence is blocked or coverage is incomplete".into(),
             ));
         }
-        if let Some(existing) = self.catalog.decisions.get(&atomic_id) {
+        if let Some(existing) = self.catalog.decisions.get(&key) {
             return Ok(existing.clone());
         }
         let prepare = self
             .catalog
             .prepares
-            .get(&atomic_id)
+            .get(&key)
             .cloned()
             .ok_or_else(|| StoreError::AtomicStage("decision without prepare".into()))?;
         let intended = prepare.member_count;
@@ -886,22 +871,19 @@ impl StoreAtomicStage<'_> {
                 FrameKind::BatchCommit,
                 &envelope,
                 &body,
-                decision_event_id(atomic_id),
+                decision_event_id(key.0, atomic_id),
             )?,
             StagePersistMode::StableCheckpointed | StagePersistMode::BufferedCohort => {
                 self.store.append_unindexed_atomic_frame(
                     FrameKind::BatchCommit,
                     &envelope,
                     &body,
-                    decision_event_id(atomic_id),
+                    decision_event_id(key.0, atomic_id),
                 )?
             }
         }
         crate::failpoint::hit("store.atomic.after_decision")?;
-        self.catalog
-            .evidence_heaps
-            .insert(atomic_id, prepare.heap_id);
-        self.catalog.decisions.insert(atomic_id, decision.clone());
+        self.catalog.decisions.insert(key, decision.clone());
         if mode == StagePersistMode::StableCheckpointed {
             persist_live_checkpoint(
                 self.store.paths(),
@@ -931,11 +913,12 @@ impl StoreAtomicStage<'_> {
         // It must precede content lookup or any durable evidence append.
         validate_closed_plan(plan, self.heap.heap_id())?;
         let root = plan_content_root(plan).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-        if let Some(stored) = self.catalog.prepares.get(&plan.atomic_id()) {
+        let key = self.key(plan.atomic_id());
+        if let Some(stored) = self.catalog.prepares.get(&key) {
             if stored.content_root != root {
                 return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
             }
-            if let Some(decision) = self.catalog.decisions.get(&plan.atomic_id()) {
+            if let Some(decision) = self.catalog.decisions.get(&key) {
                 let decision = decision.clone();
                 if decision.decision == DecisionCode::Committed {
                     self.publish_decision(plan.atomic_id())?;
@@ -975,7 +958,10 @@ impl StoreAtomicStage<'_> {
     /// without rereading every committed member.
     #[doc(hidden)]
     pub fn decide_plan_outcome(&mut self, plan: &AtomicPlan) -> Result<AtomicOutcome, StoreError> {
-        let replayed = self.catalog.decisions.contains_key(&plan.atomic_id());
+        let replayed = self
+            .catalog
+            .decisions
+            .contains_key(&self.key(plan.atomic_id()));
         let decision = self.decide_plan_evidence(plan)?;
         self.outcome_for_decision(plan, &decision, replayed)
     }
@@ -1035,12 +1021,13 @@ impl StoreAtomicStage<'_> {
             }
             owners.insert(plan.atomic_id(), (root, index));
 
-            if let Some(stored) = self.catalog.prepares.get(&plan.atomic_id()) {
+            let key = self.key(plan.atomic_id());
+            if let Some(stored) = self.catalog.prepares.get(&key) {
                 if stored.content_root != root {
                     results[index] = Some(Err(AtomicRefuseReason::AtomicIdConflict));
                     continue;
                 }
-                if let Some(decision) = self.catalog.decisions.get(&plan.atomic_id()).cloned() {
+                if let Some(decision) = self.catalog.decisions.get(&key).cloned() {
                     if decision.decision == DecisionCode::Committed {
                         self.publish_decision(plan.atomic_id())?;
                     }
@@ -1166,14 +1153,15 @@ impl StoreAtomicStage<'_> {
         decision: &AtomicDecision,
         replayed: bool,
     ) -> Result<AtomicReceipt, StoreError> {
+        let key = self.key(atomic_id);
         let prepare =
-            self.catalog.prepares.get(&atomic_id).ok_or_else(|| {
+            self.catalog.prepares.get(&key).ok_or_else(|| {
                 StoreError::AtomicStage("committed receipt missing prepare".into())
             })?;
         let members = self
             .catalog
             .members
-            .get(&atomic_id)
+            .get(&key)
             .ok_or_else(|| StoreError::AtomicStage("committed receipt missing members".into()))?
             .iter()
             .map(|member| AtomicMemberReceipt {
@@ -1202,7 +1190,7 @@ impl StoreAtomicStage<'_> {
     }
 
     fn publish_decision(&mut self, atomic_id: AtomicId) -> Result<(), StoreError> {
-        let delta = publication_delta(self.store.paths(), &self.catalog, atomic_id)?;
+        let delta = publication_delta(self.store.paths(), &self.catalog, self.key(atomic_id))?;
         self.store.publish_atomic_generation(&delta, false)
     }
 
@@ -1244,7 +1232,7 @@ impl StoreAtomicStage<'_> {
                     member_kind: mutation.kind,
                     before_version,
                     after_content_hash,
-                    event_id: atomic_member_event_id(plan.atomic_id(), ordinal)?,
+                    event_id: atomic_member_event_id(plan.heap_id(), plan.atomic_id(), ordinal)?,
                 })
             })
             .collect()
@@ -1399,7 +1387,7 @@ impl StoreAtomicStage<'_> {
     fn catalog_member(&self, atomic_id: AtomicId, ordinal: u32) -> Option<&AtomicMember> {
         self.catalog
             .members
-            .get(&atomic_id)
+            .get(&self.key(atomic_id))
             .and_then(|ms| ms.iter().find(|m| m.ordinal == ordinal))
     }
 
@@ -1407,10 +1395,10 @@ impl StoreAtomicStage<'_> {
         if let Some(staged) = self.find_staged(member.atomic_id, member.ordinal) {
             return staged.member != *member || staged.payload.as_slice() != payload;
         }
-        if let Some(stored) = self
-            .catalog
-            .payloads
-            .get(&(member.atomic_id, member.ordinal))
+        if let Some(stored) =
+            self.catalog
+                .payloads
+                .get(&(self.heap.heap_id(), member.atomic_id, member.ordinal))
         {
             if stored.as_slice() != payload {
                 return true;
@@ -1464,24 +1452,25 @@ impl StoreAtomicStage<'_> {
         ordinal: u32,
         plan: &ChunkPlan,
     ) -> Result<(), StoreError> {
+        let key = self.key(atomic_id);
         let mut candidate = self.catalog.clone();
         candidate
             .chunk_plans
-            .insert((atomic_id, ordinal), plan.clone());
-        let body_len = encode_stage_chunk_plan(atomic_id, ordinal, plan).len() as u64;
+            .insert((key.0, key.1, ordinal), plan.clone());
+        let body_len = encode_stage_chunk_plan(key.0, atomic_id, ordinal, plan).len() as u64;
         self.admit_catalog_change(&candidate, body_len)?;
         crate::failpoint::hit("store.atomic.chunk_plan.before_append")?;
-        let body = encode_stage_chunk_plan(atomic_id, ordinal, plan);
+        let body = encode_stage_chunk_plan(key.0, atomic_id, ordinal, plan);
         self.store.append_unindexed_atomic_frame(
             FrameKind::PayloadChunk,
             EMPTY_ENVELOPE,
             &body,
-            chunk_plan_event_id(atomic_id, ordinal),
+            chunk_plan_event_id(key.0, atomic_id, ordinal),
         )?;
         crate::failpoint::hit("store.atomic.chunk_plan.after_append")?;
         self.catalog
             .chunk_plans
-            .insert((atomic_id, ordinal), plan.clone());
+            .insert((key.0, key.1, ordinal), plan.clone());
         persist_live_checkpoint(
             self.store.paths(),
             &self.catalog,
@@ -1498,20 +1487,18 @@ impl StoreAtomicStage<'_> {
         index: u32,
         body: &[u8],
     ) -> Result<(), StoreError> {
-        if !self
-            .catalog
-            .has_chunk(member.atomic_id, member.ordinal, index)
-        {
+        let key = self.key(member.atomic_id);
+        if !self.catalog.has_chunk(key, member.ordinal, index) {
             self.admit_payload_bytes(body.len() as u64)?;
         }
         let start = self.active_len();
-        let encoded = encode_stage_chunk_body(member.atomic_id, member.ordinal, index, body);
+        let encoded = encode_stage_chunk_body(key.0, member.atomic_id, member.ordinal, index, body);
         let mut candidate = self.catalog.clone();
         candidate
             .chunks
-            .insert((member.atomic_id, member.ordinal, index), body.to_vec());
+            .insert((key.0, key.1, member.ordinal, index), body.to_vec());
         candidate.chunk_refs.insert(
-            (member.atomic_id, member.ordinal, index),
+            (key.0, key.1, member.ordinal, index),
             self.candidate_body_ref(start, encoded.len()),
         );
         self.admit_catalog_change(&candidate, encoded.len() as u64)?;
@@ -1520,12 +1507,12 @@ impl StoreAtomicStage<'_> {
             FrameKind::PayloadChunk,
             EMPTY_ENVELOPE,
             &encoded,
-            chunk_body_event_id(member.atomic_id, member.ordinal, index),
+            chunk_body_event_id(key.0, member.atomic_id, member.ordinal, index),
         )?;
         crate::failpoint::hit("store.atomic.chunk_body.after_append")?;
         self.catalog
             .chunks
-            .insert((member.atomic_id, member.ordinal, index), body.to_vec());
+            .insert((key.0, key.1, member.ordinal, index), body.to_vec());
         self.note_chunk_ref(member.atomic_id, member.ordinal, index, start, &encoded);
         persist_live_checkpoint(
             self.store.paths(),
@@ -1541,7 +1528,10 @@ impl StoreAtomicStage<'_> {
         &mut self,
         member: &AtomicMember,
     ) -> Result<(), StoreError> {
-        if self.catalog.has_payload(member.atomic_id, member.ordinal) {
+        if self
+            .catalog
+            .has_payload(self.key(member.atomic_id), member.ordinal)
+        {
             return Ok(());
         }
         let Some(staged) = self.find_staged(member.atomic_id, member.ordinal) else {
@@ -1609,13 +1599,17 @@ impl StoreAtomicStage<'_> {
 
     fn note_payload_ref(&mut self, id: AtomicId, ordinal: u32, start: u64, _body: &[u8]) {
         if let Some(refer) = self.note_written_ref(start) {
-            self.catalog.payload_refs.insert((id, ordinal), refer);
+            self.catalog
+                .payload_refs
+                .insert((self.heap.heap_id(), id, ordinal), refer);
         }
     }
 
     fn note_chunk_ref(&mut self, id: AtomicId, ordinal: u32, index: u32, start: u64, _body: &[u8]) {
         if let Some(refer) = self.note_written_ref(start) {
-            self.catalog.chunk_refs.insert((id, ordinal, index), refer);
+            self.catalog
+                .chunk_refs
+                .insert((self.heap.heap_id(), id, ordinal, index), refer);
         }
     }
 
@@ -1630,18 +1624,12 @@ impl StoreAtomicStage<'_> {
                 "prepare member count does not match the closed manifest".into(),
             ));
         }
-        let _seq = self.catalog.assign_coord(prepare.atomic_id)?;
+        let key = stage_key(prepare.heap_id, prepare.atomic_id);
+        let _seq = self.catalog.assign_coord(key)?;
         let mut candidate = self.catalog.clone();
-        candidate
-            .prepares
-            .insert(prepare.atomic_id, prepare.clone());
-        candidate
-            .evidence_heaps
-            .insert(prepare.atomic_id, prepare.heap_id);
-        candidate.prepare_batch.insert(prepare.atomic_id);
-        candidate
-            .intended_members
-            .insert(prepare.atomic_id, intended_members);
+        candidate.prepares.insert(key, prepare.clone());
+        candidate.prepare_batch.insert(key);
+        candidate.intended_members.insert(key, intended_members);
         let encoded_prepare =
             encode_prepare(prepare).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         self.admit_catalog_change(&candidate, encoded_prepare.len() as u64)?;
@@ -1661,8 +1649,7 @@ impl StoreAtomicStage<'_> {
         )
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         let body = encoded_prepare;
-        let mut event_id = [0u8; 16];
-        event_id.copy_from_slice(&prepare.atomic_id.as_bytes()[..16]);
+        let event_id = prepare_event_id(prepare.heap_id, prepare.atomic_id);
         match mode {
             StagePersistMode::StableCheckpointed => self.store.append_unindexed_atomic_frame(
                 FrameKind::BatchPrepare,
@@ -1680,16 +1667,9 @@ impl StoreAtomicStage<'_> {
             }
         }
         crate::failpoint::hit("store.atomic.prepare.after_append")?;
-        self.catalog
-            .prepares
-            .insert(prepare.atomic_id, prepare.clone());
-        self.catalog
-            .evidence_heaps
-            .insert(prepare.atomic_id, prepare.heap_id);
-        self.catalog.prepare_batch.insert(prepare.atomic_id);
-        self.catalog
-            .intended_members
-            .insert(prepare.atomic_id, intended_members);
+        self.catalog.prepares.insert(key, prepare.clone());
+        self.catalog.prepare_batch.insert(key);
+        self.catalog.intended_members.insert(key, intended_members);
         if mode == StagePersistMode::StableCheckpointed {
             persist_live_checkpoint(
                 self.store.paths(),
@@ -1718,7 +1698,8 @@ impl StoreAtomicStage<'_> {
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         let body = encode_member(member).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         let mut candidate = self.catalog.clone();
-        let slot = candidate.members.entry(member.atomic_id).or_default();
+        let key = stage_key(prepare.heap_id, member.atomic_id);
+        let slot = candidate.members.entry(key).or_default();
         if !slot
             .iter()
             .any(|existing| existing.ordinal == member.ordinal)
@@ -1744,7 +1725,7 @@ impl StoreAtomicStage<'_> {
             }
         }
         crate::failpoint::hit("store.atomic.member.after_append")?;
-        let slot = self.catalog.members.entry(member.atomic_id).or_default();
+        let slot = self.catalog.members.entry(key).or_default();
         if !slot.iter().any(|m| m.ordinal == member.ordinal) {
             slot.push(member.clone());
         }
@@ -1766,17 +1747,18 @@ impl StoreAtomicStage<'_> {
         payload: &[u8],
         mode: StagePersistMode,
     ) -> Result<(), StoreError> {
-        if !self.catalog.has_payload(member.atomic_id, member.ordinal) {
+        let key = self.key(member.atomic_id);
+        if !self.catalog.has_payload(key, member.ordinal) {
             self.admit_payload_bytes(payload.len() as u64)?;
         }
         let start = self.active_len();
-        let body = encode_stage_payload(member.atomic_id, member.ordinal, payload);
+        let body = encode_stage_payload(key.0, member.atomic_id, member.ordinal, payload);
         let mut candidate = self.catalog.clone();
         candidate
             .payloads
-            .insert((member.atomic_id, member.ordinal), payload.to_vec());
+            .insert((key.0, key.1, member.ordinal), payload.to_vec());
         candidate.payload_refs.insert(
-            (member.atomic_id, member.ordinal),
+            (key.0, key.1, member.ordinal),
             self.candidate_body_ref(start, body.len()),
         );
         self.admit_catalog_change(&candidate, body.len() as u64)?;
@@ -1786,21 +1768,21 @@ impl StoreAtomicStage<'_> {
                 FrameKind::PayloadChunk,
                 EMPTY_ENVELOPE,
                 &body,
-                payload_event_id(member.atomic_id, member.ordinal),
+                payload_event_id(key.0, member.atomic_id, member.ordinal),
             )?,
             StagePersistMode::BufferedCohort | StagePersistMode::BufferedDeferredBoundary => {
                 self.store.append_buffered_atomic_frame(
                     FrameKind::PayloadChunk,
                     EMPTY_ENVELOPE,
                     &body,
-                    payload_event_id(member.atomic_id, member.ordinal),
+                    payload_event_id(key.0, member.atomic_id, member.ordinal),
                 )?
             }
         }
         crate::failpoint::hit("store.atomic.payload.after_append")?;
         self.catalog
             .payloads
-            .insert((member.atomic_id, member.ordinal), payload.to_vec());
+            .insert((key.0, key.1, member.ordinal), payload.to_vec());
         self.note_payload_ref(member.atomic_id, member.ordinal, start, &body);
         if mode == StagePersistMode::StableCheckpointed {
             persist_live_checkpoint(
@@ -1820,12 +1802,13 @@ impl StoreAtomicStage<'_> {
         content_root: residiuum_atomics::ContentRoot,
         mode: StagePersistMode,
     ) -> Result<(), StoreError> {
-        if self.catalog.is_sealed(atomic_id) {
+        let key = self.key(atomic_id);
+        if self.catalog.is_sealed(key) {
             return Ok(());
         }
-        let body = encode_stage_seal(atomic_id, content_root);
+        let body = encode_stage_seal(key.0, atomic_id, content_root);
         let mut candidate = self.catalog.clone();
-        candidate.seals.insert(atomic_id, content_root);
+        candidate.seals.insert(key, content_root);
         self.admit_catalog_change(&candidate, body.len() as u64)?;
         crate::failpoint::hit("store.atomic.seal.before_append")?;
         match mode {
@@ -1833,18 +1816,18 @@ impl StoreAtomicStage<'_> {
                 FrameKind::PayloadChunk,
                 EMPTY_ENVELOPE,
                 &body,
-                seal_event_id(atomic_id),
+                seal_event_id(key.0, atomic_id),
             )?,
             StagePersistMode::StableCheckpointed | StagePersistMode::BufferedCohort => {
                 self.store.append_unindexed_atomic_frame(
                     FrameKind::PayloadChunk,
                     EMPTY_ENVELOPE,
                     &body,
-                    seal_event_id(atomic_id),
+                    seal_event_id(key.0, atomic_id),
                 )?
             }
         }
-        self.catalog.seals.insert(atomic_id, content_root);
+        self.catalog.seals.insert(key, content_root);
         crate::failpoint::hit("store.atomic.seal.after_append")?;
         if mode == StagePersistMode::StableCheckpointed {
             persist_live_checkpoint(
@@ -1897,9 +1880,10 @@ impl StoreAtomicStage<'_> {
     }
 }
 
-fn decision_event_id(atomic_id: AtomicId) -> [u8; 16] {
+fn decision_event_id(heap_id: HeapId, atomic_id: AtomicId) -> [u8; 16] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"residiuum.atomic-stage.decision");
+    hasher.update(heap_id.as_bytes());
     hasher.update(atomic_id.as_bytes());
     let hash = hasher.finalize();
     let mut event_id = [0u8; 16];
@@ -1907,9 +1891,25 @@ fn decision_event_id(atomic_id: AtomicId) -> [u8; 16] {
     event_id
 }
 
-fn atomic_member_event_id(atomic_id: AtomicId, ordinal: u32) -> Result<VersionId, StoreError> {
+fn prepare_event_id(heap_id: HeapId, atomic_id: AtomicId) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"residiuum.atomic-stage.prepare");
+    hasher.update(heap_id.as_bytes());
+    hasher.update(atomic_id.as_bytes());
+    let hash = hasher.finalize();
+    let mut event_id = [0u8; 16];
+    event_id.copy_from_slice(&hash.as_bytes()[..16]);
+    event_id
+}
+
+fn atomic_member_event_id(
+    heap_id: HeapId,
+    atomic_id: AtomicId,
+    ordinal: u32,
+) -> Result<VersionId, StoreError> {
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"RESIDIUUM-ATOMIC-MEMBER-EVENT-V1");
+    hasher.update(heap_id.as_bytes());
     hasher.update(atomic_id.as_bytes());
     hasher.update(&ordinal.to_be_bytes());
     let mut bytes = [0u8; 16];
@@ -1936,16 +1936,17 @@ fn atomic_subject(
 fn publication_delta(
     paths: &crate::layout::StorePaths,
     catalog: &StageCatalog,
-    atomic_id: AtomicId,
+    key: StageAtomicKey,
 ) -> Result<Vec<AtomicPublishMember>, StoreError> {
-    if catalog.blocked.contains(&atomic_id) {
+    let atomic_id = key.1;
+    if catalog.blocked.contains(&key) {
         return Err(StoreError::AtomicStage(
             "committed Atomic publication blocked by damaged evidence".into(),
         ));
     }
     let decision = catalog
         .decisions
-        .get(&atomic_id)
+        .get(&key)
         .ok_or_else(|| StoreError::AtomicStage("publication without decision".into()))?;
     if decision.decision != DecisionCode::Committed {
         return Err(StoreError::AtomicStage(
@@ -1958,9 +1959,9 @@ fn publication_delta(
         .ok_or_else(|| StoreError::AtomicStage("committed decision without position".into()))?;
     let prepare = catalog
         .prepares
-        .get(&atomic_id)
+        .get(&key)
         .ok_or_else(|| StoreError::AtomicStage("committed decision without prepare".into()))?;
-    if catalog.seals.get(&atomic_id) != Some(&prepare.content_root)
+    if catalog.seals.get(&key) != Some(&prepare.content_root)
         || prepare_hash(prepare).map_err(|e| StoreError::AtomicStage(e.to_string()))?
             != decision.prepare_hash
     {
@@ -1968,7 +1969,7 @@ fn publication_delta(
             "committed Atomic prepare or stable boundary does not verify".into(),
         ));
     }
-    let mut members = catalog.members.get(&atomic_id).cloned().unwrap_or_default();
+    let mut members = catalog.members.get(&key).cloned().unwrap_or_default();
     members.sort_by_key(|member| member.ordinal);
     if members.len() != decision.member_count as usize
         || !members_match_prepare(prepare, &members)
@@ -1982,7 +1983,7 @@ fn publication_delta(
     }
 
     let mut delta = Vec::with_capacity(members.len());
-    let frontiers = catalog.order_frontiers.get(&atomic_id).ok_or_else(|| {
+    let frontiers = catalog.order_frontiers.get(&key).ok_or_else(|| {
         StoreError::AtomicStage("committed Atomic lacks its durable order frontier".into())
     })?;
     for member in members {
@@ -2005,20 +2006,21 @@ fn publication_delta(
         } else {
             let body = catalog
                 .payload_refs
-                .get(&(atomic_id, member.ordinal))
+                .get(&(key.0, atomic_id, member.ordinal))
                 .cloned()
                 .ok_or_else(|| {
                     StoreError::AtomicStage(
                         "committed Atomic member lacks a durable payload locator".into(),
                     )
                 })?;
-            let bytes = resolve_published_payload(paths, &body, atomic_id, member.ordinal)?;
+            let bytes = resolve_published_payload(paths, &body, key.0, atomic_id, member.ordinal)?;
             if member.after_content_hash != Some(*blake3::hash(&bytes).as_bytes()) {
                 return Err(StoreError::AtomicStage(
                     "committed Atomic payload hash does not match member".into(),
                 ));
             }
             Some(AtomicValueRef {
+                heap_id: key.0,
                 atomic_id,
                 ordinal: member.ordinal,
                 body,
@@ -2048,23 +2050,26 @@ fn rebuild_heap(
 ) -> Result<StagingHeap, StoreError> {
     let mut heap =
         StagingHeap::new(heap_id, 1).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-    let mut ids: Vec<AtomicId> = catalog.prepares.keys().copied().collect();
-    ids.sort_by_key(|id| catalog.coord_seq.get(id).copied().unwrap_or(u64::MAX));
-    for atomic_id in ids {
-        if catalog.blocked.contains(&atomic_id) {
+    let mut keys: Vec<StageAtomicKey> = catalog
+        .prepares
+        .keys()
+        .filter(|(candidate_heap, _)| *candidate_heap == heap_id)
+        .copied()
+        .collect();
+    keys.sort_by_key(|key| catalog.coord_seq.get(key).copied().unwrap_or(u64::MAX));
+    for key in keys {
+        let atomic_id = key.1;
+        if catalog.blocked.contains(&key) {
             continue;
         }
-        let prepare = &catalog.prepares[&atomic_id];
-        if prepare.heap_id != heap_id {
-            continue;
-        }
-        let members = catalog.members.get(&atomic_id).cloned().unwrap_or_default();
+        let prepare = &catalog.prepares[&key];
+        let members = catalog.members.get(&key).cloned().unwrap_or_default();
         if !members_match_prepare(prepare, &members) {
             continue;
         }
         let seq = catalog
             .coord_seq
-            .get(&atomic_id)
+            .get(&key)
             .copied()
             .and_then(CoordinatorSeq::from_raw)
             .ok_or_else(|| {
@@ -2073,35 +2078,33 @@ fn rebuild_heap(
         heap.install_prepared(seq, atomic_id, prepare.content_root, &members)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         for member in &members {
-            if let Some(plan) = catalog.chunk_plans.get(&(atomic_id, member.ordinal)) {
+            if let Some(plan) = catalog.chunk_plans.get(&(key.0, atomic_id, member.ordinal)) {
                 heap.commit_chunk_manifest(atomic_id, member.ordinal, plan.clone())
                     .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
                 let mut indexes: Vec<u32> = catalog
                     .chunks
                     .keys()
                     .chain(catalog.chunk_refs.keys())
-                    .filter(|(id, ord, _)| *id == atomic_id && *ord == member.ordinal)
-                    .map(|(_, _, idx)| *idx)
+                    .filter(|(heap, id, ord, _)| (*heap, *id) == key && *ord == member.ordinal)
+                    .map(|(_, _, _, idx)| *idx)
                     .collect();
                 indexes.sort_unstable();
                 indexes.dedup();
                 for index in indexes {
-                    let body =
-                        resolve_chunk_body(paths, catalog, atomic_id, member.ordinal, index)?
-                            .ok_or_else(|| {
-                                StoreError::AtomicStage("chunk index missing after key scan".into())
-                            })?;
+                    let body = resolve_chunk_body(paths, catalog, key, member.ordinal, index)?
+                        .ok_or_else(|| {
+                            StoreError::AtomicStage("chunk index missing after key scan".into())
+                        })?;
                     heap.append_chunk(member.clone(), index, body)
                         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
                 }
-            } else if let Some(payload) =
-                resolve_payload_body(paths, catalog, atomic_id, member.ordinal)?
+            } else if let Some(payload) = resolve_payload_body(paths, catalog, key, member.ordinal)?
             {
                 heap.append_staged(member.clone(), payload)
                     .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
             }
         }
-        if let Some(root) = catalog.seals.get(&atomic_id) {
+        if let Some(root) = catalog.seals.get(&key) {
             if *root != prepare.content_root {
                 continue;
             }
