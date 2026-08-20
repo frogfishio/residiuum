@@ -169,8 +169,13 @@ media permits and are never interpreted as the new composite-key format.
   remains exact while unavailable material reports `CoverageIncomplete`
   without a receipt or raw I/O error. Destructive compaction physically
   reclaims external sources and reopens on its consolidated generation.
-- **Remaining:** tombstone-index page generation reclaim and expanded
-  multi-source deletion crash cuts.
+- **Delivered:** the tombstone index reclaims obsolete COW pages through a
+  streamed, root-addressed generation swap without changing checkpoint v18.
+  Old-root/new-root publication ordering, candidate corruption and both sides
+  of retirement are registered. Three-source compaction now cuts after its
+  middle and final unlinks and resumes with exact authority.
+- **ATM-4C remaining:** none, subject to the clean full verifier acceptance
+  record for this closing slice.
 
 ### ATM-4D — serial histories and predicates
 

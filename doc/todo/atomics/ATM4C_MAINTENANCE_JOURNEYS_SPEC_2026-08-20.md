@@ -208,6 +208,25 @@ Delivered and locally qualified:
 
 Still open in ATM-4C:
 
-- tombstone-index obsolete-page generation-swap crash qualification;
-- canonical crash-matrix expansion for multi-source deletion cuts beyond the
-  already registered first-source cut.
+- none. ATM-4C implementation and focused qualification are complete; final
+  acceptance remains subject to the clean full Atomics verifier.
+
+Delivered in the closing slice:
+
+- the append-only `ATTOMB2` index now reclaims obsolete COW pages only through
+  a complete streamed generation rewrite. It does not collect the lifetime
+  table in memory and does not scan obsolete pages;
+- the existing checkpoint root is also the physical generation identity. The
+  prior file is retained under a root-derived authenticated name, the new file
+  is synced and published, the checkpoint descriptor is then swapped, and only
+  non-selected generations are retired;
+- old checkpoints remain wire-compatible. A crash before descriptor
+  publication resolves the old root from either the primary or root-derived
+  path; a crash after publication resolves the new root;
+- head, middle and tail corruption of an unpublished generation cannot erase
+  the checkpoint-selected old authority;
+- canonical crash boundaries cover new-generation sync, old-generation
+  archival, new-generation publication and both sides of retirement;
+- three-source destructive reclaim now has distinct middle-source and
+  last-source deletion cuts. Both reopen on the complete replacement, preserve
+  all decisions/values/receipts, and resume to `Reclaimed` exactly.

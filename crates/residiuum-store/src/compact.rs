@@ -859,6 +859,23 @@ pub fn reclaim_source_segments(
 
     let mut reclaimed = 0u64;
     let mut deleted_ids = Vec::new();
+    let deletion_total = job
+        .source_segment_ids
+        .iter()
+        .filter_map(|id| unhex16(id))
+        .filter(|id| id != &output)
+        .filter(|id| {
+            placement
+                .and_then(|placement| {
+                    placement.get(id).map(|known| {
+                        crate::tier::segment_path_on_tier(paths, placement, known.tier, id)
+                    })
+                })
+                .unwrap_or_else(|| paths.sealed_segment(id))
+                .is_file()
+        })
+        .count();
+    let middle_delete = deletion_total.saturating_add(1) / 2;
     for id_hex in &job.source_segment_ids {
         let Some(id) = unhex16(id_hex) else {
             continue;
@@ -881,6 +898,12 @@ pub fn reclaim_source_segments(
         reclaimed = reclaimed.saturating_add(size);
         deleted_ids.push(id);
         crate::failpoint::hit("store.compact.after_source_delete")?;
+        if deleted_ids.len() == middle_delete {
+            crate::failpoint::hit("store.compact.after_middle_source_delete")?;
+        }
+        if deleted_ids.len() == deletion_total {
+            crate::failpoint::hit("store.compact.after_last_source_delete")?;
+        }
     }
     sync_dir_best_effort(&paths.segments_dir());
 

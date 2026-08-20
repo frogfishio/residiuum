@@ -32,6 +32,7 @@ const LEAF_CAPACITY: usize = (PAGE_CONTENT_LEN - PAGE_HEADER_LEN) / RECORD_LEN;
 const INTERNAL_CAPACITY: usize = (PAGE_CONTENT_LEN - PAGE_HEADER_LEN) / CHILD_LEN;
 const KIND_LEAF: u8 = 1;
 const KIND_INTERNAL: u8 = 2;
+const RECLAIM_MIN_GARBAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 pub(crate) const TOMBSTONE_INDEX_FILE: &str = "atomic-tombstones.idx";
 
@@ -66,6 +67,34 @@ pub(crate) fn tombstone_index_path(paths: &StorePaths) -> PathBuf {
     paths.store_info().join(TOMBSTONE_INDEX_FILE)
 }
 
+fn archived_index_path(paths: &StorePaths, root: [u8; 32]) -> PathBuf {
+    let mut name = String::from("atomic-tombstones.root-");
+    for byte in root {
+        use std::fmt::Write as _;
+        let _ = write!(name, "{byte:02x}");
+    }
+    name.push_str(".idx");
+    paths.store_info().join(name)
+}
+
+fn candidate_path(paths: &StorePaths, meta: TombstoneIndexMeta) -> Result<PathBuf, StoreError> {
+    let primary = tombstone_index_path(paths);
+    for path in [primary, archived_index_path(paths, meta.root)] {
+        let Ok(mut file) = File::open(&path) else {
+            continue;
+        };
+        if validate_header(&mut file).is_ok()
+            && validate_meta_extent(&file, meta).is_ok()
+            && root_ref(&mut file, meta).is_ok()
+        {
+            return Ok(path);
+        }
+    }
+    Err(StoreError::AtomicStage(
+        "lifetime tombstone index generation unavailable or unauthenticated".into(),
+    ))
+}
+
 /// Merge new tombstones using COW page updates. The first build uses a linear
 /// bottom-up bulk loader so recovery does not incur per-record path rewrites.
 pub(crate) fn refresh_index(
@@ -81,6 +110,7 @@ pub(crate) fn refresh_index(
         return bulk_build(&path, additions).map(Some);
     }
     let mut meta = prior.unwrap();
+    let path = candidate_path(paths, meta)?;
     let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
     validate_header(&mut file)?;
     validate_meta_extent(&file, meta)?;
@@ -124,7 +154,8 @@ pub(crate) fn lookup(
     meta: TombstoneIndexMeta,
     key: StageAtomicKey,
 ) -> Result<Option<RetainedDecisionTombstone>, StoreError> {
-    let mut file = File::open(tombstone_index_path(paths)).map_err(|error| {
+    let path = candidate_path(paths, meta)?;
+    let mut file = File::open(path).map_err(|error| {
         StoreError::AtomicStage(format!("lifetime tombstone index unavailable: {error}"))
     })?;
     validate_header(&mut file)?;
@@ -153,12 +184,217 @@ pub(crate) fn validate_index(
     paths: &StorePaths,
     meta: TombstoneIndexMeta,
 ) -> Result<(), StoreError> {
-    let mut file = File::open(tombstone_index_path(paths))?;
+    let mut file = File::open(candidate_path(paths, meta)?)?;
     validate_header(&mut file)?;
     validate_meta_extent(&file, meta)?;
     let root = root_ref(&mut file, meta)?;
     let _ = read_node(&mut file, meta.file_len, root)?;
     Ok(())
+}
+
+/// Rewrite only pages reachable from `meta` into a compact generation. The
+/// old generation remains root-addressable until the caller durably publishes
+/// the returned descriptor and invokes [`retire_obsolete_generations`].
+pub(crate) fn reclaim_generation(
+    paths: &StorePaths,
+    meta: TombstoneIndexMeta,
+) -> Result<TombstoneIndexMeta, StoreError> {
+    let source_path = candidate_path(paths, meta)?;
+    let mut source = File::open(&source_path)?;
+    validate_header(&mut source)?;
+    validate_meta_extent(&source, meta)?;
+    let root = root_ref(&mut source, meta)?;
+
+    let next = paths.store_info().join("atomic-tombstones.reclaim.next");
+    let _ = std::fs::remove_file(&next);
+    let new_meta = bulk_rewrite(&mut source, meta, root, &next)?;
+    crate::failpoint::hit("store.atomic.tombstone_index.reclaim.after_new_sync")?;
+
+    let primary = tombstone_index_path(paths);
+    if source_path == primary {
+        let archived = archived_index_path(paths, meta.root);
+        let _ = std::fs::remove_file(&archived);
+        std::fs::rename(&primary, archived)?;
+        crate::atomic_file::sync_dir(&paths.store_info())?;
+    } else if primary.is_file() {
+        // A candidate installed by a crash before checkpoint publication is
+        // not authoritative for `meta` and may be replaced.
+        std::fs::remove_file(&primary)?;
+        crate::atomic_file::sync_dir(&paths.store_info())?;
+    }
+    crate::failpoint::hit("store.atomic.tombstone_index.reclaim.after_old_archive")?;
+    std::fs::rename(&next, &primary)?;
+    crate::atomic_file::sync_dir(&paths.store_info())?;
+    crate::failpoint::hit("store.atomic.tombstone_index.reclaim.after_new_publish")?;
+    Ok(new_meta)
+}
+
+/// Reclaim when copied paths have grown materially beyond a compact tree.
+pub(crate) fn maybe_reclaim_generation(
+    paths: &StorePaths,
+    meta: TombstoneIndexMeta,
+) -> Result<TombstoneIndexMeta, StoreError> {
+    let compact_upper_bound = compact_tree_upper_bound(meta.record_count)?;
+    if meta.file_len.saturating_sub(compact_upper_bound) < RECLAIM_MIN_GARBAGE_BYTES
+        || meta.file_len <= compact_upper_bound.saturating_mul(2)
+    {
+        return Ok(meta);
+    }
+    reclaim_generation(paths, meta)
+}
+
+/// Delete only root-addressed generations which cannot satisfy the descriptor
+/// already published by the checkpoint.
+pub(crate) fn retire_obsolete_generations(
+    paths: &StorePaths,
+    current: TombstoneIndexMeta,
+) -> Result<(), StoreError> {
+    let current_path = candidate_path(paths, current)?;
+    let mut obsolete = Vec::new();
+    for entry in std::fs::read_dir(paths.store_info())? {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if name.starts_with("atomic-tombstones.root-")
+            && name.ends_with(".idx")
+            && path != current_path
+        {
+            obsolete.push(path);
+        }
+    }
+    let next = paths.store_info().join("atomic-tombstones.reclaim.next");
+    if next.is_file() {
+        obsolete.push(next);
+    }
+    if obsolete.is_empty() {
+        return Ok(());
+    }
+    crate::failpoint::hit("store.atomic.tombstone_index.reclaim.before_retire")?;
+    for path in obsolete {
+        std::fs::remove_file(path)?;
+    }
+    crate::atomic_file::sync_dir(&paths.store_info())?;
+    crate::failpoint::hit("store.atomic.tombstone_index.reclaim.after_retire")?;
+    Ok(())
+}
+
+fn stream_leaf_rows(
+    source: &mut File,
+    readable_len: u64,
+    refer: NodeRef,
+    destination: &mut File,
+    append_at: &mut u64,
+    row_buffer: &mut Vec<(StageAtomicKey, RetainedDecisionTombstone)>,
+    leaf_refs: &mut Vec<NodeRef>,
+    seen: &mut u64,
+    last_key: &mut Option<StageAtomicKey>,
+) -> Result<(), StoreError> {
+    match read_node(source, readable_len, refer)? {
+        Node::Leaf(found) => {
+            for (key, value) in found {
+                if last_key.is_some_and(|last| last >= key) {
+                    return Err(corrupt("reachable leaf order"));
+                }
+                *last_key = Some(key);
+                row_buffer.push((key, value));
+                *seen = seen
+                    .checked_add(1)
+                    .ok_or_else(|| StoreError::AtomicStage("tombstone count overflow".into()))?;
+                if row_buffer.len() == LEAF_CAPACITY {
+                    leaf_refs.push(append_leaf(destination, append_at, row_buffer)?);
+                    row_buffer.clear();
+                }
+            }
+        }
+        Node::Internal { children, .. } => {
+            for child in children {
+                stream_leaf_rows(
+                    source,
+                    readable_len,
+                    child,
+                    destination,
+                    append_at,
+                    row_buffer,
+                    leaf_refs,
+                    seen,
+                    last_key,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bulk_rewrite(
+    source: &mut File,
+    old_meta: TombstoneIndexMeta,
+    old_root: NodeRef,
+    path: &Path,
+) -> Result<TombstoneIndexMeta, StoreError> {
+    let mut destination = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    write_header(&mut destination)?;
+    let mut append_at = HEADER_LEN as u64;
+    let mut row_buffer = Vec::with_capacity(LEAF_CAPACITY);
+    let mut leaf_refs = Vec::new();
+    let mut seen = 0u64;
+    let mut last_key = None;
+    stream_leaf_rows(
+        source,
+        old_meta.file_len,
+        old_root,
+        &mut destination,
+        &mut append_at,
+        &mut row_buffer,
+        &mut leaf_refs,
+        &mut seen,
+        &mut last_key,
+    )?;
+    if !row_buffer.is_empty() {
+        leaf_refs.push(append_leaf(&mut destination, &mut append_at, &row_buffer)?);
+    }
+    if seen != old_meta.record_count || leaf_refs.is_empty() {
+        return Err(corrupt("reachable record count"));
+    }
+    let mut level = leaf_refs;
+    while level.len() > 1 {
+        let next_level = level[0].level + 1;
+        level = level
+            .chunks(INTERNAL_CAPACITY)
+            .map(|chunk| append_internal(&mut destination, &mut append_at, next_level, chunk))
+            .collect::<Result<Vec<_>, _>>()?;
+    }
+    let root = level[0];
+    destination.sync_all()?;
+    crate::failpoint::hit("store.atomic.tombstone_index.after_sync")?;
+    Ok(TombstoneIndexMeta {
+        record_count: seen,
+        file_len: append_at,
+        root: root.hash,
+    })
+}
+
+fn compact_tree_upper_bound(record_count: u64) -> Result<u64, StoreError> {
+    if record_count == 0 {
+        return Err(corrupt("zero compact record count"));
+    }
+    let ceil_div = |value: u64, by: u64| value.saturating_add(by - 1) / by;
+    let mut pages = ceil_div(record_count, LEAF_CAPACITY as u64);
+    let mut level = pages;
+    while level > 1 {
+        level = ceil_div(level, INTERNAL_CAPACITY as u64);
+        pages = pages
+            .checked_add(level)
+            .ok_or_else(|| StoreError::AtomicStage("tombstone page count overflow".into()))?;
+    }
+    (HEADER_LEN as u64)
+        .checked_add(pages.saturating_mul(PAGE_SIZE as u64))
+        .ok_or_else(|| StoreError::AtomicStage("tombstone index size overflow".into()))
 }
 
 fn bulk_build(
@@ -695,6 +931,95 @@ mod tests {
     }
 
     #[test]
+    fn generation_swap_keeps_both_roots_until_checkpoint_side_retirement() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StorePaths::new(dir.path());
+        fs::create_dir_all(paths.store_info()).unwrap();
+        let heap = heap(7);
+        let prior = refresh_index(&paths, None, &records(heap, 1, 10_000))
+            .unwrap()
+            .unwrap();
+        let grown = refresh_index(&paths, Some(prior), &records(heap, 10_001, 10_100))
+            .unwrap()
+            .unwrap();
+        let compact = reclaim_generation(&paths, grown).unwrap();
+        assert!(compact.file_len < grown.file_len);
+        assert_eq!(
+            lookup(&paths, grown, (heap, atomic(10_100))).unwrap(),
+            Some(retained(10_100))
+        );
+        assert_eq!(
+            lookup(&paths, compact, (heap, atomic(10_100))).unwrap(),
+            Some(retained(10_100))
+        );
+
+        retire_obsolete_generations(&paths, compact).unwrap();
+        assert!(lookup(&paths, grown, (heap, atomic(10_100))).is_err());
+        assert_eq!(
+            lookup(&paths, compact, (heap, atomic(10_100))).unwrap(),
+            Some(retained(10_100))
+        );
+    }
+
+    #[test]
+    fn generation_swap_crash_cuts_leave_the_checkpoint_root_readable() {
+        for point in [
+            "store.atomic.tombstone_index.reclaim.after_new_sync",
+            "store.atomic.tombstone_index.reclaim.after_old_archive",
+            "store.atomic.tombstone_index.reclaim.after_new_publish",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = StorePaths::new(dir.path());
+            fs::create_dir_all(paths.store_info()).unwrap();
+            let heap = heap(7);
+            let prior = refresh_index(&paths, None, &records(heap, 1, 1_000))
+                .unwrap()
+                .unwrap();
+            crate::failpoint::arm_once_current_thread(point, crate::failpoint::Action::Error);
+            // Other lib tests deliberately clear the process-global failpoint
+            // registry. If that races this test, the complete swap is also a
+            // legal state; the checkpoint-selected prior root must remain
+            // readable on either outcome.
+            let _ = reclaim_generation(&paths, prior);
+            assert_eq!(
+                lookup(&paths, prior, (heap, atomic(1_000))).unwrap(),
+                Some(retained(1_000)),
+                "{point}"
+            );
+        }
+    }
+
+    #[test]
+    fn corrupt_unpublished_generation_head_middle_and_tail_fall_back_to_old_root() {
+        for fraction in [0usize, 1, 2] {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = StorePaths::new(dir.path());
+            fs::create_dir_all(paths.store_info()).unwrap();
+            let heap = heap(7);
+            let prior = refresh_index(&paths, None, &records(heap, 1, 2_000))
+                .unwrap()
+                .unwrap();
+            let grown = refresh_index(&paths, Some(prior), &records(heap, 2_001, 2_010))
+                .unwrap()
+                .unwrap();
+            let _candidate = reclaim_generation(&paths, grown).unwrap();
+            let primary = tombstone_index_path(&paths);
+            let mut bytes = fs::read(&primary).unwrap();
+            let at = match fraction {
+                0 => 0,
+                1 => bytes.len() / 2,
+                _ => bytes.len() - 1,
+            };
+            bytes[at] ^= 0x80;
+            fs::write(primary, bytes).unwrap();
+            assert_eq!(
+                lookup(&paths, grown, (heap, atomic(2_010))).unwrap(),
+                Some(retained(2_010))
+            );
+        }
+    }
+
+    #[test]
     fn crash_suffix_is_ignored_then_truncated() {
         let dir = tempfile::tempdir().unwrap();
         let paths = StorePaths::new(dir.path());
@@ -761,5 +1086,15 @@ mod tests {
                 Some(retained(n))
             );
         }
+        let compact = reclaim_generation(&paths, meta).unwrap();
+        assert_eq!(compact.record_count, 1_000_000);
+        assert!(compact.file_len <= meta.file_len);
+        for n in [1, 500_000, 1_000_000] {
+            assert_eq!(
+                lookup(&paths, compact, (heap, atomic(n))).unwrap(),
+                Some(retained(n))
+            );
+        }
+        retire_obsolete_generations(&paths, compact).unwrap();
     }
 }

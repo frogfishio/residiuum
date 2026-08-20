@@ -1292,6 +1292,83 @@
             "prior_durable_retained": true,
             "notes": "Instrumentation cell for store.compact.job_write"
           }
+        },
+        {
+          "name": "store.atomic.tombstone_index.reclaim.after_new_sync",
+          "ci_subset": true,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "The new compact index is durable but unpublished; the checkpoint-selected old root remains authoritative."
+          }
+        },
+        {
+          "name": "store.atomic.tombstone_index.reclaim.after_old_archive",
+          "ci_subset": true,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "The old generation is root-addressable at its archive name while the checkpoint still selects it."
+          }
+        },
+        {
+          "name": "store.atomic.tombstone_index.reclaim.after_new_publish",
+          "ci_subset": true,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "Both generations are durable; the existing checkpoint resolves the old root until descriptor publication."
+          }
+        },
+        {
+          "name": "store.atomic.tombstone_index.reclaim.before_retire",
+          "ci_subset": false,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "The checkpoint selects the new generation; retaining obsolete generations is harmless and retryable."
+          }
+        },
+        {
+          "name": "store.atomic.tombstone_index.reclaim.after_retire",
+          "ci_subset": false,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "Only the checkpoint-selected authenticated generation remains."
+          }
+        },
+        {
+          "name": "store.compact.after_middle_source_delete",
+          "ci_subset": true,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "A multi-source reclaim stopped after its middle unlink reopens on the complete replacement and resumes exactly."
+          }
+        },
+        {
+          "name": "store.compact.after_last_source_delete",
+          "ci_subset": true,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "All source unlinks completed but post-delete housekeeping may be pending; replacement authority remains complete."
+          }
         }
       ]
     }

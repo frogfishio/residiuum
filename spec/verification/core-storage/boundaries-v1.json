@@ -3470,6 +3470,48 @@
       "source_ref": "crates/residiuum-store/src/recovery_shadow/integrate.rs"
     },
     {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_tombstone_index_reclaim_after_new_sync",
+      "operation_id": "atomic_control_doc", "step": "store.atomic.tombstone_index.reclaim.after_new_sync", "kind": "failpoint", "failpoint": "store.atomic.tombstone_index.reclaim.after_new_sync", "fault": "error", "ci_subset": true,
+      "expected_on_reopen": {"acknowledged_visible": true, "no_fabricated_commit": true, "salvageable": true, "prior_durable_retained": true, "notes": "Unpublished compact generation cannot displace the checkpoint-selected old root."},
+      "harness": "in_process_failpoint", "source_ref": "crates/residiuum-store/src/atomic_tombstone_index.rs"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_tombstone_index_reclaim_after_old_archive",
+      "operation_id": "atomic_control_doc", "step": "store.atomic.tombstone_index.reclaim.after_old_archive", "kind": "failpoint", "failpoint": "store.atomic.tombstone_index.reclaim.after_old_archive", "fault": "error", "ci_subset": true,
+      "expected_on_reopen": {"acknowledged_visible": true, "no_fabricated_commit": true, "salvageable": true, "prior_durable_retained": true, "notes": "The old root remains available at its authenticated root-derived archive path."},
+      "harness": "in_process_failpoint", "source_ref": "crates/residiuum-store/src/atomic_tombstone_index.rs"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_tombstone_index_reclaim_after_new_publish",
+      "operation_id": "atomic_control_doc", "step": "store.atomic.tombstone_index.reclaim.after_new_publish", "kind": "failpoint", "failpoint": "store.atomic.tombstone_index.reclaim.after_new_publish", "fault": "error", "ci_subset": true,
+      "expected_on_reopen": {"acknowledged_visible": true, "no_fabricated_commit": true, "salvageable": true, "prior_durable_retained": true, "notes": "Both roots are durable and the checkpoint continues to select exactly one."},
+      "harness": "in_process_failpoint", "source_ref": "crates/residiuum-store/src/atomic_tombstone_index.rs"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_tombstone_index_reclaim_before_retire",
+      "operation_id": "atomic_control_doc", "step": "store.atomic.tombstone_index.reclaim.before_retire", "kind": "failpoint", "failpoint": "store.atomic.tombstone_index.reclaim.before_retire", "fault": "error", "ci_subset": false,
+      "expected_on_reopen": {"acknowledged_visible": true, "no_fabricated_commit": true, "salvageable": true, "prior_durable_retained": true, "notes": "Descriptor publication precedes retirement; leftover old generations are harmless."},
+      "harness": "in_process_failpoint", "source_ref": "crates/residiuum-store/src/atomic_tombstone_index.rs"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_tombstone_index_reclaim_after_retire",
+      "operation_id": "atomic_control_doc", "step": "store.atomic.tombstone_index.reclaim.after_retire", "kind": "failpoint", "failpoint": "store.atomic.tombstone_index.reclaim.after_retire", "fault": "error", "ci_subset": false,
+      "expected_on_reopen": {"acknowledged_visible": true, "no_fabricated_commit": true, "salvageable": true, "prior_durable_retained": true, "notes": "The checkpoint-selected generation survives completed obsolete-generation retirement."},
+      "harness": "in_process_failpoint", "source_ref": "crates/residiuum-store/src/atomic_tombstone_index.rs"
+    },
+    {
+      "id": "CSQ-BND-FP-compact_live-store_compact_after_middle_source_delete",
+      "operation_id": "compact_live", "step": "store.compact.after_middle_source_delete", "kind": "failpoint", "failpoint": "store.compact.after_middle_source_delete", "fault": "error", "ci_subset": true,
+      "expected_on_reopen": {"acknowledged_visible": true, "no_fabricated_commit": true, "salvageable": true, "prior_durable_retained": true, "notes": "A middle multi-source unlink resumes against the already authoritative replacement."},
+      "harness": "in_process_failpoint", "source_ref": "crates/residiuum-store/src/compact.rs"
+    },
+    {
+      "id": "CSQ-BND-FP-compact_live-store_compact_after_last_source_delete",
+      "operation_id": "compact_live", "step": "store.compact.after_last_source_delete", "kind": "failpoint", "failpoint": "store.compact.after_last_source_delete", "fault": "error", "ci_subset": true,
+      "expected_on_reopen": {"acknowledged_visible": true, "no_fabricated_commit": true, "salvageable": true, "prior_durable_retained": true, "notes": "The complete replacement remains authoritative after the last unlink and before housekeeping."},
+      "harness": "in_process_failpoint", "source_ref": "crates/residiuum-store/src/compact.rs"
+    },
+    {
       "id": "CSQ-BND-FP-compact_live-store_compact_after_source_delete",
       "operation_id": "compact_live",
       "step": "store.compact.after_source_delete",

@@ -18,7 +18,8 @@ use crate::atomic_stage_media::{
     SidecarDecode, StageAtomicKey, StageCatalog,
 };
 use crate::atomic_tombstone_index::{
-    lookup as lookup_tombstone, refresh_index, validate_index, TombstoneIndexMeta,
+    lookup as lookup_tombstone, maybe_reclaim_generation, refresh_index,
+    retire_obsolete_generations, validate_index, TombstoneIndexMeta,
 };
 use crate::error::StoreError;
 use crate::layout::StorePaths;
@@ -1900,6 +1901,9 @@ fn persist_checkpoint(
     if catalog.tombstone_index_dirty || catalog.tombstone_index.is_none() {
         catalog.tombstone_index =
             refresh_index(paths, catalog.tombstone_index, &catalog.tombstones)?;
+        if let Some(index) = catalog.tombstone_index {
+            catalog.tombstone_index = Some(maybe_reclaim_generation(paths, index)?);
+        }
         catalog.tombstone_index_dirty = false;
     }
     // The index is the bounded checkpoint representation. Detailed decisions
@@ -1920,6 +1924,9 @@ fn persist_checkpoint(
         CHECKPOINT_WRITE_POINTS,
     )?;
     crate::failpoint::hit("store.atomic.checkpoint.after_persist")?;
+    if let Some(index) = catalog.tombstone_index {
+        retire_obsolete_generations(paths, index)?;
+    }
     Ok(())
 }
 

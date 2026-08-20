@@ -744,6 +744,120 @@ fn multi_source_reclaim_preserves_every_atomic_and_global_commit_frontier() {
 }
 
 #[test]
+fn multi_source_reclaim_middle_and_last_delete_crash_cuts_resume_exactly() {
+    let _guard = fp_lock();
+    for failpoint in [
+        "store.compact.after_middle_source_delete",
+        "store.compact.after_last_source_delete",
+    ] {
+        clear_failpoints();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("s");
+        let mut store = Store::create(&root).unwrap();
+        let heap_id = HeapId::from_bytes(store.store_id()).unwrap();
+
+        let first_member = member();
+        let first_plan = plan(heap_id, std::slice::from_ref(&first_member), b"secret");
+        assert_eq!(
+            store
+                .atomic_stage_for_heap(heap_id)
+                .unwrap()
+                .decide_plan_evidence(&first_plan)
+                .unwrap()
+                .commit_position,
+            Some(1)
+        );
+        store.seal_active().unwrap();
+
+        let second_member = second_member();
+        let second_plan = plan(heap_id, std::slice::from_ref(&second_member), b"second");
+        assert_eq!(
+            store
+                .atomic_stage_for_heap(heap_id)
+                .unwrap()
+                .decide_plan_evidence(&second_plan)
+                .unwrap()
+                .commit_position,
+            Some(2)
+        );
+        store.seal_active().unwrap();
+
+        let third_member = third_member();
+        let third_plan = plan(heap_id, std::slice::from_ref(&third_member), b"third");
+        assert_eq!(
+            store
+                .atomic_stage_for_heap(heap_id)
+                .unwrap()
+                .decide_plan_evidence(&third_plan)
+                .unwrap()
+                .commit_position,
+            Some(3)
+        );
+        store.seal_active().unwrap();
+        assert!(store.list_segment_ids().len() >= 3);
+
+        arm_failpoint_once_current_thread(failpoint, FailpointAction::Error);
+        let err = store
+            .compact_live_with(CompactOptions {
+                reclaim_sources: true,
+                allow_history_loss: true,
+                ..CompactOptions::default()
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("failpoint"), "{failpoint}: {err}");
+        clear_failpoints();
+        store.abandon_for_crash_test();
+        drop(store);
+
+        let mut reopened = Store::open(&root).unwrap();
+        for (id, closed, key, value, position) in [
+            (aid(), &first_plan, "k", b"secret".as_slice(), 1),
+            (second_aid(), &second_plan, "k2", b"second".as_slice(), 2),
+            (third_aid(), &third_plan, "k3", b"third".as_slice(), 3),
+        ] {
+            assert_eq!(
+                reopened
+                    .get_subject_bytes(&subject(heap_id, key))
+                    .unwrap()
+                    .as_deref(),
+                Some(value),
+                "{failpoint}: {id:?}"
+            );
+            let status = reopened
+                .atomic_stage_for_heap(heap_id)
+                .unwrap()
+                .atomic_status(id)
+                .unwrap();
+            assert_eq!(status.logical, LogicalStatus::Committed);
+            assert_eq!(status.material, MaterialStatus::Complete);
+            assert_eq!(status.receipt.unwrap().commit_position, position);
+            assert_eq!(
+                reopened
+                    .atomic_stage_for_heap(heap_id)
+                    .unwrap()
+                    .decide_plan_evidence(closed)
+                    .unwrap()
+                    .commit_position,
+                Some(position),
+                "{failpoint}: {id:?}"
+            );
+        }
+        let job = reopened
+            .list_compact_jobs()
+            .unwrap()
+            .into_iter()
+            .find(|job| job.reclaim_requested)
+            .expect("reclaim job");
+        let job_id = residiuum_store::unhex16(&job.job_id).unwrap();
+        assert_eq!(
+            reopened.reclaim_compact_job(&job_id).unwrap().phase,
+            residiuum_store::CompactPhase::Reclaimed
+        );
+    }
+    clear_failpoints();
+}
+
+#[test]
 fn terminal_atomic_reclaim_crash_cuts_keep_one_complete_authority_generation() {
     let _guard = fp_lock();
     for failpoint in [

@@ -418,6 +418,17 @@ File: `store-info/atomic-stage.ckpt`. Domain separator
 | findings | `u32` count; each: kind `u8`, class `u8`, has_heap `u8`, optional heap_id `[16]`, has_id `u8`, optional atomic_id `[32]` |
 | missing_covered | `u32` count; each: `u16` len + UTF-8 |
 | intended_members | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, `u32` |
+
+The lifetime-index root is also its physical generation identity. The selected
+generation normally occupies `store-info/atomic-tombstones.idx`. During an
+obsolete-page generation swap, the prior file may occupy
+`store-info/atomic-tombstones.root-<64-lowercase-hex-root>.idx`. Readers accept
+only a candidate whose header, committed extent and root page authenticate the
+checkpoint descriptor. A compact generation is fully written and synced before
+publication; the checkpoint descriptor is published before any non-selected
+generation is retired. Therefore the version-18 checkpoint wire format requires
+no migration and every crash resolves either the old complete root or the new
+complete root.
 | superseded media | `u32` count; each: `u16` len + safe store-relative UTF-8 path |
 | digest | BLAKE3-256(`domain` \\| body) |
 

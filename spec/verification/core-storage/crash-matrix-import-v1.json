@@ -762,6 +762,34 @@
         {
           "historical_cell_id": "store.compact.after_source_delete",
           "boundary_id": "CSQ-BND-FP-compact_live-store_compact_after_source_delete"
+        },
+        {
+          "historical_cell_id": "store.atomic.tombstone_index.reclaim.after_new_sync",
+          "boundary_id": "CSQ-BND-FP-atomic_control_doc-store_atomic_tombstone_index_reclaim_after_new_sync"
+        },
+        {
+          "historical_cell_id": "store.atomic.tombstone_index.reclaim.after_old_archive",
+          "boundary_id": "CSQ-BND-FP-atomic_control_doc-store_atomic_tombstone_index_reclaim_after_old_archive"
+        },
+        {
+          "historical_cell_id": "store.atomic.tombstone_index.reclaim.after_new_publish",
+          "boundary_id": "CSQ-BND-FP-atomic_control_doc-store_atomic_tombstone_index_reclaim_after_new_publish"
+        },
+        {
+          "historical_cell_id": "store.atomic.tombstone_index.reclaim.before_retire",
+          "boundary_id": "CSQ-BND-FP-atomic_control_doc-store_atomic_tombstone_index_reclaim_before_retire"
+        },
+        {
+          "historical_cell_id": "store.atomic.tombstone_index.reclaim.after_retire",
+          "boundary_id": "CSQ-BND-FP-atomic_control_doc-store_atomic_tombstone_index_reclaim_after_retire"
+        },
+        {
+          "historical_cell_id": "store.compact.after_middle_source_delete",
+          "boundary_id": "CSQ-BND-FP-compact_live-store_compact_after_middle_source_delete"
+        },
+        {
+          "historical_cell_id": "store.compact.after_last_source_delete",
+          "boundary_id": "CSQ-BND-FP-compact_live-store_compact_after_last_source_delete"
         }
       ]
     }
