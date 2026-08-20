@@ -866,7 +866,10 @@ impl StoreAtomicStage<'_> {
         }
         for predicate in plan.predicates() {
             if predicate.kind == PredicateKind::HeapAuthorityRevision {
-                continue;
+                // Heap authority state is not yet bound into the Store's
+                // universal publication frontier. Silently accepting this
+                // predicate would claim validation that never happened.
+                return Ok(Some(AtomicAbortReason::RuleRejected));
             }
             if !predicate.kind.is_public_builder_assert() {
                 return Ok(Some(AtomicAbortReason::RuleRejected));

@@ -182,12 +182,23 @@ remains independently authenticated.
 The primary and history projections now share the same durable order witness,
 including later ordinary puts/deletes and overlapping Atomics after a full
 derived-index rebuild. The five mandated decision/publication/ack crash cuts
-are green, as is guarded concurrent point/scan/history observation. ATM-3D must
-still close the resource-bound qualification before the hidden qualification
-path can become a product capability. SDK/RQL generation binding is now green
-on the real embedded façade. Whole-plan I/O has an executable invariant: one-
-and 256-member commits both complete with exactly two authoritative syncs,
-proving sync count is independent of member count.
+are green, as is guarded concurrent point/scan/history observation. SDK/RQL
+generation binding is green on the real embedded façade. Whole-plan I/O has an
+executable invariant: one- and 256-member commits both complete with exactly
+two authoritative syncs, proving sync count is independent of member count.
+
+ATM-3 is not yet accepted. The remaining delivery delta is explicit:
+
+1. implement grouped independent outcomes that can share the two physical
+   boundaries without sharing validation, decision, or acknowledgement;
+2. integrate Heap lifecycle/authority mutations and predicates into the same
+   serial frontier (until then `HeapAuthorityRevision` fails closed as
+   `RuleRejected` rather than being silently accepted);
+3. expose and qualify the exact committed/not-committed receipt shape, including
+   per-member before/after versions, without enabling the public capability;
+4. finish maximum-plan resource measurement and update the ATM-3 evidence
+   assembler. The publication algorithm itself is now O(member count), and
+   existing hard admission ceilings remain enforced before media append.
 
 `Capabilities::atomics` remains `false` until all slices and the ATM-3 exit gate
 are green.

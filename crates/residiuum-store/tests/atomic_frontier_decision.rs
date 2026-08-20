@@ -5,7 +5,7 @@
 use residiuum_atomics::{
     AtomicAbortReason, AtomicId, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey,
     CollectionId, CoordinationScope, DecisionCode, HeapId, MutationKind, PlanMutation,
-    ResourceLimits, VersionId,
+    PlanPredicate, PredicateKind, ResourceLimits, VersionId,
 };
 use residiuum_format::{encode_subject_v2, SubjectObjectKind};
 use residiuum_store::{
@@ -231,6 +231,69 @@ fn stale_replace_replays_exact_terminal_decision_after_restart() {
         .iter()
         .any(|finding| finding.atomic_id == Some(atomic_id)
             && finding.class == StageEvidenceClass::Partial));
+}
+
+#[test]
+fn unbound_heap_authority_predicate_fails_closed_and_replays_after_restart() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let atomic_id = atomic(31);
+    let (heap, atomic_plan, original) = {
+        let mut store = Store::create(&path).unwrap();
+        let heap = HeapId::from_bytes(store.store_id()).unwrap();
+        let key = CanonicalKey::string("authority-guarded");
+        let atomic_plan = AtomicPlan::close(AtomicPlanParts {
+            profile: AtomicProfile::LocalHeapV1,
+            atomic_id,
+            heap_id: heap,
+            scope: CoordinationScope::LocalHeap,
+            read_frontier: None,
+            reads: vec![],
+            predicates: vec![PlanPredicate {
+                kind: PredicateKind::HeapAuthorityRevision,
+                collection_id: None,
+                key: None,
+                version: None,
+                encoded: Some(vec![7; 32]),
+            }],
+            mutations: vec![PlanMutation {
+                kind: MutationKind::Create,
+                collection_id: collection(),
+                key: key.clone(),
+                encoded_value: Some(b"must-not-publish".to_vec()),
+                if_version: None,
+            }],
+            active_rule_revisions: vec![],
+            limits: ResourceLimits::hard_local_heap(),
+        })
+        .unwrap();
+        let original = store
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_evidence(&atomic_plan)
+            .unwrap();
+        assert_eq!(original.decision, DecisionCode::NotCommitted);
+        assert_eq!(original.commit_position, None);
+        assert_eq!(original.abort_reason, Some(AtomicAbortReason::RuleRejected));
+        assert_eq!(store.get_subject_bytes(&subject(heap, &key)).unwrap(), None);
+        (heap, atomic_plan, original)
+    };
+
+    let mut reopened = Store::open(&path).unwrap();
+    let replay = reopened
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_evidence(&atomic_plan)
+        .unwrap();
+    assert_eq!(replay, original);
+    assert_eq!(
+        reopened
+            .get_subject_bytes(&subject(heap, &CanonicalKey::string("authority-guarded")))
+            .unwrap(),
+        None
+    );
 }
 
 #[test]
