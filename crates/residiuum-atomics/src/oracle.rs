@@ -15,6 +15,7 @@ use crate::outcome::{
 use crate::plan::{
     AtomicPlan, CanonicalKey, MutationKind, PlanMutation, PlanPredicate, PredicateKind,
 };
+use crate::predicate::{decode_collection_lifecycle_payload, CollectionLifecycleState};
 use std::collections::BTreeMap;
 
 /// Shared history record consumed by this oracle and later store tests.
@@ -75,6 +76,7 @@ pub struct SerialOracle {
     heap_id: HeapId,
     next_position: u64,
     cells: BTreeMap<(CollectionId, Vec<u8>), OracleCell>,
+    collection_lifecycles: BTreeMap<CollectionId, CollectionLifecycleState>,
     issued: BTreeMap<AtomicId, (ContentRoot, Issued)>,
     history: Vec<OracleHistoryRecord>,
 }
@@ -86,6 +88,7 @@ impl SerialOracle {
             heap_id,
             next_position: 1,
             cells: BTreeMap::new(),
+            collection_lifecycles: BTreeMap::new(),
             issued: BTreeMap::new(),
             history: Vec::new(),
         }
@@ -104,6 +107,16 @@ impl SerialOracle {
     /// Point read of published state. Staged-but-unpublished never exists here.
     pub fn get(&self, collection: CollectionId, key: &CanonicalKey) -> Option<&OracleCell> {
         self.cells.get(&(collection, key_order_bytes(key)))
+    }
+
+    /// Establish authoritative lifecycle state for a collection. Collections
+    /// not explicitly established model ordinary active handles.
+    pub fn set_collection_lifecycle(
+        &mut self,
+        collection: CollectionId,
+        state: CollectionLifecycleState,
+    ) {
+        self.collection_lifecycles.insert(collection, state);
     }
 
     /// Status under complete coverage.
@@ -293,6 +306,26 @@ impl SerialOracle {
             // Bound at admission. Not a data precondition.
             return None;
         }
+        if p.kind == PredicateKind::CollectionLifecycleState {
+            let collection = match p.collection_id {
+                Some(collection) => collection,
+                None => return Some(AtomicAbortReason::PreconditionConflict),
+            };
+            let expected = match p
+                .encoded
+                .as_deref()
+                .and_then(|bytes| decode_collection_lifecycle_payload(bytes).ok())
+            {
+                Some(expected) => expected,
+                None => return Some(AtomicAbortReason::PreconditionConflict),
+            };
+            let actual = self
+                .collection_lifecycles
+                .get(&collection)
+                .copied()
+                .unwrap_or(CollectionLifecycleState::Active);
+            return (actual != expected).then_some(AtomicAbortReason::PreconditionConflict);
+        }
         let (coll, key) = match (p.collection_id, p.key.as_ref()) {
             (Some(c), Some(k)) => (c, k),
             _ => return Some(AtomicAbortReason::PreconditionConflict),
@@ -434,6 +467,54 @@ mod tests {
                 assert!(!h.published);
             }
         }
+    }
+
+    #[test]
+    fn lifecycle_predicate_observes_configured_authoritative_state() {
+        use crate::encode::encode_collection_lifecycle_state;
+
+        let plan = AtomicPlan::close(AtomicPlanParts {
+            profile: AtomicProfile::LocalHeapV1,
+            atomic_id: aid(8),
+            heap_id: hid(),
+            scope: CoordinationScope::LocalHeap,
+            read_frontier: None,
+            reads: Vec::new(),
+            predicates: vec![encode_collection_lifecycle_state(
+                cid(1),
+                CollectionLifecycleState::Active,
+            )
+            .unwrap()],
+            mutations: vec![PlanMutation {
+                kind: MutationKind::Create,
+                collection_id: cid(1),
+                key: CanonicalKey::String("k".into()),
+                encoded_value: Some(b"v".to_vec()),
+                if_version: None,
+            }],
+            active_rule_revisions: Vec::new(),
+            limits: ResourceLimits::builder_defaults_local_heap(),
+        })
+        .unwrap();
+
+        let mut active = SerialOracle::new(hid());
+        assert!(matches!(
+            active.apply(&plan).unwrap(),
+            AtomicOutcome::Committed(_)
+        ));
+
+        let mut retired = SerialOracle::new(hid());
+        retired.set_collection_lifecycle(cid(1), CollectionLifecycleState::Retired);
+        assert!(matches!(
+            retired.apply(&plan).unwrap(),
+            AtomicOutcome::NotCommitted {
+                reason: AtomicAbortReason::PreconditionConflict,
+                ..
+            }
+        ));
+        assert!(retired
+            .get(cid(1), &CanonicalKey::String("k".into()))
+            .is_none());
     }
 
     #[test]

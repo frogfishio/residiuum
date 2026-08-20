@@ -185,15 +185,22 @@ Index and forced-scan execution must agree on the same canonical predicate.
   transition is removed. Concurrent embedded same-name creation has exactly one
   winner, demonstrating the administration path actually enters the shared
   writer order.
-- **Open product bridge:** the future public Atomic construction session should
-  add an `active` lifecycle binding automatically for every data collection it
-  admits. Public capability-gated rename/retire APIs do not exist yet; when
-  introduced they must call the ordered Store primitives rather than the raw
-  descriptor functions.
-- **Open combined corpus:** exercise authority revision, lifecycle transition,
-  ordinary data mutation and Atomic decision in one independently checked
-  randomized history. Each dependency is already individually executable and
-  tested; this is the remaining composed proof.
+- **Delivered construction binding:** every typed collection admission now adds
+  exactly one canonical `active` lifecycle predicate automatically. Repeated
+  operations deduplicate it, and an active handle cannot claim `absent` or
+  `retired`. Because this is an observation, typed admission requires `READ`
+  alongside the requested mutation right and refuses early if it is absent.
+  The pure serial oracle models lifecycle state and proves a retired collection
+  rejects without publishing. Public capability-gated rename/retire APIs do not
+  exist yet; when introduced they must call the ordered Store primitives rather
+  than the raw descriptor functions.
+- **Delivered combined corpus:** all 32 subsets of authority revision, lifecycle
+  rename/retire, ordinary data mutation, rule-set mutation and Atomic decision
+  run against the real capability-bound store. The independent classifier
+  distinguishes committed, durably not-committed and capability refusal before
+  issuance. Every campaign reopens the store, checks exact terminal status and
+  visible value, and includes mutation-sensitive controls for every semantic
+  transition; rename remains the deliberate non-conflicting control.
 
 ## 5. Required anomaly corpus
 

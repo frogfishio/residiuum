@@ -202,9 +202,20 @@ media permits and are never interpreted as the new composite-key format.
   publication-invalidated process-local range projection now carries the same
   coverage/order identity and passes forced-scan differentials across every key
   kind; oversized or unavailable-authority cases retain the authoritative path.
-- **Remaining:** host construction-session bridge; rule/lifecycle
-  predicates; broader randomized concurrent/restart histories and two-Heap
-  noninterference.
+- **Delivered in ATM-4D.5:** active-rule and collection-lifecycle predicates
+  execute against authoritative state in the shared physical writer order.
+  Typed collection use now binds `active` automatically and exactly once.
+  Create/retire conflicts, rename non-conflict, damage fail-closed behavior,
+  restart and cross-Heap isolation are proved.
+- **Delivered composed proof:** all 32 subsets of authority, lifecycle, rule,
+  ordinary-write and Atomic transitions are independently classified against
+  the real capability-bound store and checked again after restart. Capability
+  refusal before issuance is kept distinct from durable `NotCommitted`.
+- **Remaining:** the ATM-5 host construction session which turns external
+  reads into exact witnesses; canonical RQL/RRE compiler bridges; public
+  capability-gated rule and rename/retire administration. Broader stochastic
+  concurrency campaigns remain useful hardening, not an ATM-4D correctness
+  blocker.
 - Detailed contract and delivery order:
   `ATM4D_SERIAL_HISTORIES_AND_PREDICATES_SPEC_2026-08-20.md`.
 

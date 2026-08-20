@@ -592,9 +592,10 @@ impl AtomicBuilder {
         collection: &BoundCollection,
         expected: crate::predicate::CollectionLifecycleState,
     ) -> Result<&mut Self, AtomicsError> {
-        let id = self.admit_collection(collection, CollectionRights::READ)?;
-        self.predicates
-            .push(encode_collection_lifecycle_state(id, expected)?);
+        self.admit_collection(collection, CollectionRights::READ)?;
+        if expected != crate::predicate::CollectionLifecycleState::Active {
+            return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+        }
         Ok(self)
     }
 
@@ -656,7 +657,10 @@ impl AtomicBuilder {
                 AtomicRefuseReason::CrossHeapCollection,
             ));
         }
-        if !collection.rights.contains(need) {
+        // Every typed data operation also observes the collection's Active
+        // lifecycle state at the serialization frontier.
+        let effective_need = need.union(CollectionRights::READ);
+        if !collection.rights.contains(effective_need) {
             return Err(AtomicsError::Refused(
                 AtomicRefuseReason::AuthorizationFailure,
             ));
@@ -670,8 +674,40 @@ impl AtomicBuilder {
             }
             Some(_) => {}
         }
-        self.required_rights = self.required_rights.union(need);
+        self.required_rights = self.required_rights.union(effective_need);
+        self.ensure_active_collection_lifecycle(collection.collection_id)?;
         Ok(collection.collection_id)
+    }
+
+    /// A typed collection handle represents an existing, usable collection.
+    /// Bind that fact into every plan automatically so retirement cannot race
+    /// between construction and the Atomic validation frontier.
+    fn ensure_active_collection_lifecycle(
+        &mut self,
+        collection_id: CollectionId,
+    ) -> Result<(), AtomicsError> {
+        for predicate in &self.predicates {
+            if predicate.kind != PredicateKind::CollectionLifecycleState
+                || predicate.collection_id != Some(collection_id)
+            {
+                continue;
+            }
+            let encoded = predicate
+                .encoded
+                .as_deref()
+                .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+            let expected = crate::predicate::decode_collection_lifecycle_payload(encoded)?;
+            return if expected == crate::predicate::CollectionLifecycleState::Active {
+                Ok(())
+            } else {
+                Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue))
+            };
+        }
+        self.predicates.push(encode_collection_lifecycle_state(
+            collection_id,
+            crate::predicate::CollectionLifecycleState::Active,
+        )?);
+        Ok(())
     }
 
     fn push_mutation(&mut self, mutation: PlanMutation) {
@@ -762,6 +798,16 @@ pub fn admit_closed_plan(
                         .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?,
                     Some(compiled.expected()),
                 )?;
+            }
+            if predicate.kind == PredicateKind::CollectionLifecycleState {
+                let expected = predicate
+                    .encoded
+                    .as_deref()
+                    .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))
+                    .and_then(crate::predicate::decode_collection_lifecycle_payload)?;
+                if expected != crate::predicate::CollectionLifecycleState::Active {
+                    return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
+                }
             }
             if matches!(
                 predicate.kind,

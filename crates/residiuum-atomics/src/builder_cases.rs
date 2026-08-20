@@ -137,6 +137,26 @@ fn missing_right_is_authorization_failure() {
 }
 
 #[test]
+fn lifecycle_binding_requires_read_alongside_mutation_right() {
+    let create_only = coll(1, 1, CollectionRights::CREATE, 1);
+    let mut b = builder(1, 48);
+    assert_eq!(
+        b.create(&create_only, key("k"), val(b"v")).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::AuthorizationFailure)
+    );
+
+    let create_and_read = coll(
+        1,
+        1,
+        CollectionRights::CREATE.union(CollectionRights::READ),
+        1,
+    );
+    b.create(&create_and_read, key("k"), val(b"v")).unwrap();
+    assert!(b.required_rights().contains(CollectionRights::READ));
+    assert!(b.required_rights().contains(CollectionRights::CREATE));
+}
+
+#[test]
 fn mismatched_authority_revision_is_stale_or_foreign() {
     let a = coll(1, 1, CollectionRights::ordinary(), 1);
     let stale = coll(1, 2, CollectionRights::ordinary(), 2);
@@ -348,6 +368,45 @@ fn lifecycle_binding_is_collection_scoped_authorized_and_canonical() {
         decode_collection_lifecycle_payload(lifecycle.encoded.as_deref().unwrap()).unwrap(),
         CollectionLifecycleState::Active
     );
+}
+
+#[test]
+fn typed_collection_use_automatically_binds_active_lifecycle_once() {
+    let state = coll(1, 9, CollectionRights::ordinary(), 7);
+    let mut b = builder(1, 45);
+    b.create(&state, key("a"), val(b"1"))
+        .unwrap()
+        .assert_absent(&state, key("b"))
+        .unwrap()
+        .bind_collection_lifecycle(&state, CollectionLifecycleState::Active)
+        .unwrap();
+    let plan = b.build().unwrap();
+    let lifecycle: Vec<_> = plan
+        .predicates()
+        .iter()
+        .filter(|predicate| predicate.kind == PredicateKind::CollectionLifecycleState)
+        .collect();
+    assert_eq!(lifecycle.len(), 1);
+    assert_eq!(lifecycle[0].collection_id, Some(cid(9)));
+    assert_eq!(
+        decode_collection_lifecycle_payload(lifecycle[0].encoded.as_deref().unwrap()).unwrap(),
+        CollectionLifecycleState::Active
+    );
+}
+
+#[test]
+fn typed_active_handle_cannot_claim_absent_or_retired_lifecycle() {
+    let state = coll(1, 9, CollectionRights::READ, 7);
+    for expected in [
+        CollectionLifecycleState::Absent,
+        CollectionLifecycleState::Retired,
+    ] {
+        let mut b = builder(1, 46);
+        assert_eq!(
+            b.bind_collection_lifecycle(&state, expected).unwrap_err(),
+            AtomicsError::Refused(AtomicRefuseReason::InvalidValue)
+        );
+    }
 }
 
 #[test]
