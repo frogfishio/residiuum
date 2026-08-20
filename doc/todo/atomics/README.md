@@ -11,9 +11,11 @@ Execution authority:
 
 Current acceptance review:
 
+- [ATM1_ATM2_DEEP_REVIEW_CR_ATMR7_2026-08-20.md](./ATM1_ATM2_DEEP_REVIEW_CR_ATMR7_2026-08-20.md)
+  — ATM-1 is accepted; ATM-2 remains partial at clean `5f90d59`; active changes
+  use only the `CR-ATMR7-*` namespace.
 - [ATM1_ATM2_DEEP_REVIEW_CR_ATMR6_2026-08-20.md](./ATM1_ATM2_DEEP_REVIEW_CR_ATMR6_2026-08-20.md)
-  — ATM-1 semantic acceptance remains at `00a06ae`; ATM-2 is not accepted;
-  active changes use only the `CR-ATMR6-*` namespace.
+  — superseded review retained as historical evidence.
 - [ATM1_ATM2_HANDOFF_ATMR6_2026-08-20.md](./ATM1_ATM2_HANDOFF_ATMR6_2026-08-20.md)
   — current labor handoff. Dirty-tree verifier records are diagnostic.
 - [ATM1_ATM2_DEEP_REVIEW_CR_ATMR5_2026-08-19.md](./ATM1_ATM2_DEEP_REVIEW_CR_ATMR5_2026-08-19.md)
