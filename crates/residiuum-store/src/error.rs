@@ -289,6 +289,11 @@ pub enum StoreError {
     #[error("atomic stage: {0}")]
     AtomicStage(String),
 
+    /// Typed Atomic protocol refusal. This remains structured through the SDK
+    /// so clients never parse an internal staging message.
+    #[error(transparent)]
+    Atomic(#[from] residiuum_atomics::AtomicsError),
+
     /// Scan/get coverage is incomplete; ordinary complete results are refused (DEF-012).
     #[error("coverage incomplete: {0}")]
     CoverageIncomplete(String),

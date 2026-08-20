@@ -306,12 +306,16 @@ pub enum ErrorCode {
     Closed,
     /// Deadline expired before a result was available.
     DeadlineExceeded,
+    /// Atomic deadline expired before admission/dispatch; no Atomic was issued.
+    AtomicDeadlineExceeded,
     /// A dispatched mutation crossed its deadline and requires outcome lookup.
     CommitOutcomeUnknown,
     /// Work was cancelled before reaching a kernel worker.
     CancelledBeforeDispatch,
     /// Operation identity was reused with different canonical content.
     OperationIdentityConflict,
+    /// Atomic identity was reused with a different canonical content root.
+    AtomicIdConflict,
     /// Capability or authentication refused the operation.
     PermissionDenied,
     /// Requested entity was absent.
@@ -418,6 +422,15 @@ impl Error {
         let (code, class, retry) = match &source {
             SdkError::Store(residiuum_store::StoreError::OperationIdentityConflict) => (
                 ErrorCode::OperationIdentityConflict,
+                ErrorClass::Request,
+                RetryDisposition::Never,
+            ),
+            SdkError::Store(residiuum_store::StoreError::Atomic(
+                residiuum_atomics::AtomicsError::Refused(
+                    residiuum_atomics::AtomicRefuseReason::AtomicIdConflict,
+                ),
+            )) => (
+                ErrorCode::AtomicIdConflict,
                 ErrorClass::Request,
                 RetryDisposition::Never,
             ),
@@ -573,6 +586,41 @@ pub struct ClientInspection {
     /// Constant-time deployment decoded JSON cache counters. `None` only when
     /// the cache mutex was poisoned.
     pub decoded_json_cache: Option<crate::DecodedJsonCacheStats>,
+    /// Bounded/redacted Atomic product counters for this connection.
+    pub atomics: AtomicInspection,
+}
+
+/// Constant-space Atomic submission and observer counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AtomicInspection {
+    /// Plans presented to the scheduler.
+    pub submitted: u64,
+    /// Plans whose engine operation is currently admitted or running.
+    pub inflight: usize,
+    /// Durable committed outcomes observed by the engine call.
+    pub committed: u64,
+    /// Durable not-committed outcomes observed by the engine call.
+    pub not_committed: u64,
+    /// Observer outcomes requiring status resolution.
+    pub unknown: u64,
+    /// Definite pre-acceptance/admission refusals.
+    pub refused: u64,
+    /// Same-ID/different-root refusals.
+    pub identity_conflicts: u64,
+    /// Status lookups submitted.
+    pub status_lookups: u64,
+    /// Sum of mutation members across submitted plans.
+    pub submitted_members: u64,
+    /// Largest submitted mutation member count.
+    pub max_members: usize,
+    /// Sum of canonical plan bytes submitted.
+    pub submitted_plan_bytes: u64,
+    /// Largest canonical plan submitted.
+    pub max_plan_bytes: usize,
+    /// Sum of completed engine-call latency in nanoseconds.
+    pub total_engine_latency_ns: u64,
+    /// Largest completed engine-call latency in nanoseconds.
+    pub max_engine_latency_ns: u64,
 }
 
 /// Async connection to one physical Residiuum deployment.
@@ -729,7 +777,7 @@ impl HeapClient {
     /// Submit one immutable Atomic as one bounded scheduler job.
     pub async fn commit_atomic(
         &self,
-        plan: residiuum_atomics::AtomicPlan,
+        plan: atomics::AtomicPlan,
     ) -> Result<residiuum_atomics::AtomicOutcome, Error> {
         atomics::commit(self, plan).await
     }
@@ -1748,6 +1796,20 @@ struct Counters {
     refused: AtomicU64,
     byte_refused: AtomicU64,
     cancelled_before_dispatch: AtomicU64,
+    atomic_submitted: AtomicU64,
+    atomic_inflight: AtomicUsize,
+    atomic_committed: AtomicU64,
+    atomic_not_committed: AtomicU64,
+    atomic_unknown: AtomicU64,
+    atomic_refused: AtomicU64,
+    atomic_identity_conflicts: AtomicU64,
+    atomic_status_lookups: AtomicU64,
+    atomic_submitted_members: AtomicU64,
+    atomic_max_members: AtomicUsize,
+    atomic_submitted_plan_bytes: AtomicU64,
+    atomic_max_plan_bytes: AtomicUsize,
+    atomic_total_engine_latency_ns: AtomicU64,
+    atomic_max_engine_latency_ns: AtomicU64,
 }
 
 type DeadlineCallback = Box<dyn FnOnce() + Send + 'static>;
@@ -2048,18 +2110,56 @@ impl Scheduler {
         T: Send + 'static,
         F: FnOnce() -> Result<T, SdkError> + Send + 'static,
     {
-        self.dispatch_worker(request_id, operation_id, deadline, operation)
+        self.dispatch_worker(request_id, operation_id, deadline, None, operation)
     }
 
     /// Admit one worker operation with indivisible byte credit. The captured
     /// RAII credit is released on completion, cancellation, queue refusal, or
     /// worker shutdown; members of a compound operation are never scheduled
     /// independently.
+    #[cfg(test)]
     fn dispatch_weighted<T, F>(
         &self,
         request_id: RequestId,
         deadline: Option<Instant>,
         admission_bytes: usize,
+        operation: F,
+    ) -> ResponseFuture<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, SdkError> + Send + 'static,
+    {
+        self.dispatch_weighted_inner(request_id, deadline, admission_bytes, None, operation)
+    }
+
+    fn dispatch_weighted_with_unknown<T, U, F>(
+        &self,
+        request_id: RequestId,
+        deadline: Option<Instant>,
+        admission_bytes: usize,
+        unknown: U,
+        operation: F,
+    ) -> ResponseFuture<T>
+    where
+        T: Send + 'static,
+        U: Fn() -> T + Send + Sync + 'static,
+        F: FnOnce() -> Result<T, SdkError> + Send + 'static,
+    {
+        self.dispatch_weighted_inner(
+            request_id,
+            deadline,
+            admission_bytes,
+            Some(Arc::new(unknown)),
+            operation,
+        )
+    }
+
+    fn dispatch_weighted_inner<T, F>(
+        &self,
+        request_id: RequestId,
+        deadline: Option<Instant>,
+        admission_bytes: usize,
+        unknown_after_dispatch: Option<Arc<dyn Fn() -> T + Send + Sync + 'static>>,
         operation: F,
     ) -> ResponseFuture<T>
     where
@@ -2108,10 +2208,16 @@ impl Scheduler {
             counters: Arc::clone(&self.counters),
             bytes: admission_bytes,
         };
-        self.dispatch_worker(request_id, None, deadline, move || {
-            let _credit = credit;
-            operation()
-        })
+        self.dispatch_worker(
+            request_id,
+            None,
+            deadline,
+            unknown_after_dispatch,
+            move || {
+                let _credit = credit;
+                operation()
+            },
+        )
     }
 
     fn dispatch_worker<T, F>(
@@ -2119,6 +2225,7 @@ impl Scheduler {
         request_id: RequestId,
         operation_id: Option<OperationId>,
         deadline: Option<Instant>,
+        unknown_after_dispatch: Option<Arc<dyn Fn() -> T + Send + Sync + 'static>>,
         operation: F,
     ) -> ResponseFuture<T>
     where
@@ -2126,9 +2233,14 @@ impl Scheduler {
         F: FnOnce() -> Result<T, SdkError> + Send + 'static,
     {
         let (future, responder) = response_pair();
+        let atomic_deadline = unknown_after_dispatch.is_some();
         if deadline.map(|at| Instant::now() >= at).unwrap_or(false) {
             responder.complete(Err(Error::for_request(
-                ErrorCode::DeadlineExceeded,
+                if atomic_deadline {
+                    ErrorCode::AtomicDeadlineExceeded
+                } else {
+                    ErrorCode::DeadlineExceeded
+                },
                 ErrorClass::Cancellation,
                 "deadline exceeded before admission",
                 request_id,
@@ -2145,13 +2257,18 @@ impl Scheduler {
         let task_stage = Arc::clone(&stage);
         let task_registration = Arc::clone(&deadline_registration);
         let deadlines = Arc::clone(&self.deadlines);
+        let task_atomic_deadline = atomic_deadline;
         let task = Box::new(move || {
             counters.queued.fetch_sub(1, Ordering::AcqRel);
             if deadline.map(|at| Instant::now() >= at).unwrap_or(false) {
                 task_stage.store(2, Ordering::Release);
                 deadlines.cancel(task_registration.load(Ordering::Acquire));
                 responder.complete(Err(Error::for_request(
-                    ErrorCode::DeadlineExceeded,
+                    if task_atomic_deadline {
+                        ErrorCode::AtomicDeadlineExceeded
+                    } else {
+                        ErrorCode::DeadlineExceeded
+                    },
                     ErrorClass::Cancellation,
                     "deadline exceeded before dispatch",
                     request_id,
@@ -2246,6 +2363,7 @@ impl Scheduler {
             let callback_shared = Arc::clone(&future.shared);
             let callback_cancelled = Arc::clone(&future.cancelled);
             let callback_stage = Arc::clone(&stage);
+            let callback_unknown = unknown_after_dispatch;
             let registration = self.deadlines.register(
                 at,
                 Box::new(move || {
@@ -2256,9 +2374,19 @@ impl Scheduler {
                     if observed == 0 {
                         callback_cancelled.store(true, Ordering::Release);
                     }
+                    if observed == 1 {
+                        if let Some(unknown) = callback_unknown.as_ref() {
+                            complete_response_shared(&callback_shared, Ok(unknown()));
+                            return;
+                        }
+                    }
                     let error = if observed == 0 || operation_id.is_none() {
                         Error::for_request(
-                            ErrorCode::DeadlineExceeded,
+                            if callback_unknown.is_some() {
+                                ErrorCode::AtomicDeadlineExceeded
+                            } else {
+                                ErrorCode::DeadlineExceeded
+                            },
                             ErrorClass::Cancellation,
                             if observed == 0 {
                                 "deadline exceeded while queued"
@@ -2538,6 +2666,37 @@ impl Scheduler {
             operation_commits: residiuum_store::OperationCommitStats::default(),
             write_path: None,
             decoded_json_cache: None,
+            atomics: AtomicInspection {
+                submitted: self.counters.atomic_submitted.load(Ordering::Relaxed),
+                inflight: self.counters.atomic_inflight.load(Ordering::Acquire),
+                committed: self.counters.atomic_committed.load(Ordering::Relaxed),
+                not_committed: self.counters.atomic_not_committed.load(Ordering::Relaxed),
+                unknown: self.counters.atomic_unknown.load(Ordering::Relaxed),
+                refused: self.counters.atomic_refused.load(Ordering::Relaxed),
+                identity_conflicts: self
+                    .counters
+                    .atomic_identity_conflicts
+                    .load(Ordering::Relaxed),
+                status_lookups: self.counters.atomic_status_lookups.load(Ordering::Relaxed),
+                submitted_members: self
+                    .counters
+                    .atomic_submitted_members
+                    .load(Ordering::Relaxed),
+                max_members: self.counters.atomic_max_members.load(Ordering::Relaxed),
+                submitted_plan_bytes: self
+                    .counters
+                    .atomic_submitted_plan_bytes
+                    .load(Ordering::Relaxed),
+                max_plan_bytes: self.counters.atomic_max_plan_bytes.load(Ordering::Relaxed),
+                total_engine_latency_ns: self
+                    .counters
+                    .atomic_total_engine_latency_ns
+                    .load(Ordering::Relaxed),
+                max_engine_latency_ns: self
+                    .counters
+                    .atomic_max_engine_latency_ns
+                    .load(Ordering::Relaxed),
+            },
         }
     }
 
@@ -3056,6 +3215,91 @@ mod tests {
             thread::yield_now();
         }
         drop(first);
+    }
+
+    #[test]
+    fn weighted_atomic_deadline_returns_unknown_after_dispatch_and_keeps_running() {
+        let scheduler = Scheduler::new(1, 8, 8).unwrap();
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let operation_gate = Arc::clone(&gate);
+        let future = scheduler.dispatch_weighted_with_unknown(
+            RequestId([4; 16]),
+            Some(Instant::now() + Duration::from_millis(25)),
+            6,
+            || 99u8,
+            move || {
+                let (lock, cv) = &*operation_gate;
+                let mut open = lock.lock().unwrap();
+                while !*open {
+                    open = cv.wait(open).unwrap();
+                }
+                Ok(1u8)
+            },
+        );
+        while scheduler.inspect().running == 0 {
+            thread::yield_now();
+        }
+        loop {
+            if let Some(result) = future.shared.state.lock().unwrap().result.as_ref() {
+                assert_eq!(result.as_ref().copied().unwrap(), 99);
+                break;
+            }
+            thread::yield_now();
+        }
+        assert_eq!(scheduler.inspect().admitted_bytes, 6);
+        assert_eq!(scheduler.inspect().running, 1);
+
+        let (lock, cv) = &*gate;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+        while scheduler.inspect().running != 0 || scheduler.inspect().admitted_bytes != 0 {
+            thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn dropping_queued_weighted_atomic_cancels_before_kernel_and_releases_credit() {
+        let scheduler = Scheduler::new(1, 8, 8).unwrap();
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let blocker_gate = Arc::clone(&gate);
+        let blocker = scheduler.dispatch(RequestId([5; 16]), None, None, move || {
+            let (lock, cv) = &*blocker_gate;
+            let mut open = lock.lock().unwrap();
+            while !*open {
+                open = cv.wait(open).unwrap();
+            }
+            Ok(())
+        });
+        while scheduler.inspect().running == 0 {
+            thread::yield_now();
+        }
+
+        let entered_kernel = Arc::new(AtomicBool::new(false));
+        let marker = Arc::clone(&entered_kernel);
+        let queued = scheduler.dispatch_weighted_with_unknown(
+            RequestId([6; 16]),
+            None,
+            5,
+            || 99u8,
+            move || {
+                marker.store(true, Ordering::Release);
+                Ok(1u8)
+            },
+        );
+        assert_eq!(scheduler.inspect().admitted_bytes, 5);
+        drop(queued);
+        let (lock, cv) = &*gate;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
+        while scheduler.inspect().running != 0
+            || scheduler.inspect().queued != 0
+            || scheduler.inspect().admitted_bytes != 0
+        {
+            thread::yield_now();
+        }
+        assert!(!entered_kernel.load(Ordering::Acquire));
+        assert_eq!(scheduler.inspect().cancelled_before_dispatch, 1);
+        drop(blocker);
     }
 
     #[test]

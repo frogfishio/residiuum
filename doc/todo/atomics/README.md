@@ -11,9 +11,11 @@ Execution authority:
 
 Current continuation point:
 
+- [ATM5B_OUTCOME_AND_JOURNEY_BASELINE_2026-08-20.md](./ATM5B_OUTCOME_AND_JOURNEY_BASELINE_2026-08-20.md)
+  — current async outcome/cancellation contract, adversarial Gremlin journey,
+  bounded inspection and remaining release delta.
 - [ATM5_ASYNC_SDK_BASELINE_2026-08-20.md](./ATM5_ASYNC_SDK_BASELINE_2026-08-20.md)
-  — first public async construction/commit/status slice, evidence and exact
-  remaining release delta. Capability advertisement remains closed.
+  — superseded ATM-5A continuation point retained as historical evidence.
 
 Historical acceptance reviews:
 

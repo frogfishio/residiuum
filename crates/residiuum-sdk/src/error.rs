@@ -330,7 +330,7 @@ fn map_store(e: &StoreError) -> ErrorCode {
         StoreError::VersionConflict { .. } => ErrorCode::VersionConflict,
         StoreError::KeyExists => ErrorCode::AlreadyExists,
         StoreError::AdaptiveWriterActive | StoreError::AdaptiveWriterPoisoned => ErrorCode::Io,
-        StoreError::AtomicStage(_) => ErrorCode::ConsistencyViolation,
+        StoreError::AtomicStage(_) | StoreError::Atomic(_) => ErrorCode::ConsistencyViolation,
         // P0: sealed segment identity collision — refuse without mutating media.
         StoreError::SegmentIdCollision { .. } => ErrorCode::ConsistencyViolation,
     }

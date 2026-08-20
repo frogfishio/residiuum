@@ -18,6 +18,7 @@ use std::future::Future;
 use std::pin::pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Wake, Waker};
+use std::time::{Duration, Instant};
 use tempfile::tempdir;
 
 struct ThreadWake(std::thread::Thread);
@@ -247,6 +248,78 @@ fn atomic_driver_runs_gremlin_three_record_journey_and_restart_resolution() {
         residiuum_atomics::LogicalStatus::Committed
     );
 
+    let mut changed = heap.atomic(AtomicOptions::new(atomic_id)).unwrap();
+    changed
+        .create(
+            &turns,
+            "same-id-different-root",
+            &json!({"text": "must refuse"}),
+        )
+        .unwrap();
+    let conflict = block_on(heap.commit_atomic(changed.build().unwrap())).unwrap_err();
+    assert_eq!(conflict.code, ErrorCode::AtomicIdConflict);
+    assert!(block_on(turns.get("same-id-different-root"))
+        .unwrap()
+        .is_none());
+
+    let established = block_on(states.get_versioned("conversation-1"))
+        .unwrap()
+        .unwrap();
+    let mut left = heap
+        .atomic(AtomicOptions::new(AtomicId::random().unwrap()))
+        .unwrap();
+    left.replace(
+        &states,
+        "conversation-1",
+        established.version,
+        &json!({"turn": 2, "winner": "left"}),
+    )
+    .unwrap()
+    .create(&turns, "race-left", &json!({"winner": "left"}))
+    .unwrap();
+    let mut right = heap
+        .atomic(AtomicOptions::new(AtomicId::random().unwrap()))
+        .unwrap();
+    right
+        .replace(
+            &states,
+            "conversation-1",
+            established.version,
+            &json!({"turn": 2, "winner": "right"}),
+        )
+        .unwrap()
+        .create(&turns, "race-right", &json!({"winner": "right"}))
+        .unwrap();
+    let barrier = Arc::new(std::sync::Barrier::new(2));
+    let left_heap = heap.clone();
+    let left_barrier = Arc::clone(&barrier);
+    let left_thread = std::thread::spawn(move || {
+        left_barrier.wait();
+        block_on(left_heap.commit_atomic(left.build().unwrap())).unwrap()
+    });
+    let right_heap = heap.clone();
+    let right_barrier = Arc::clone(&barrier);
+    let right_thread = std::thread::spawn(move || {
+        right_barrier.wait();
+        block_on(right_heap.commit_atomic(right.build().unwrap())).unwrap()
+    });
+    let race = [left_thread.join().unwrap(), right_thread.join().unwrap()];
+    assert_eq!(
+        race.iter()
+            .filter(|outcome| matches!(outcome, AtomicOutcome::Committed(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        race.iter()
+            .filter(|outcome| matches!(outcome, AtomicOutcome::NotCommitted { .. }))
+            .count(),
+        1
+    );
+    let race_left = block_on(turns.get("race-left")).unwrap();
+    let race_right = block_on(turns.get("race-right")).unwrap();
+    assert_ne!(race_left.is_some(), race_right.is_some());
+
     let stale_id = AtomicId::random().unwrap();
     let mut stale = heap.atomic(AtomicOptions::new(stale_id)).unwrap();
     stale
@@ -265,12 +338,56 @@ fn atomic_driver_runs_gremlin_three_record_journey_and_restart_resolution() {
     ));
     assert!(block_on(turns.get("must-not-exist")).unwrap().is_none());
 
+    let lost_reply_id = AtomicId::random().unwrap();
+    let mut lost_reply = heap.atomic(AtomicOptions::new(lost_reply_id)).unwrap();
+    lost_reply
+        .create(&turns, "lost-reply", &json!({"durable": true}))
+        .unwrap();
+    let lost_reply_plan = lost_reply.build().unwrap();
+    residiuum_store::arm_failpoint_once(
+        "store.atomic.before_ack",
+        residiuum_store::FailpointAction::Error,
+    );
+    assert!(matches!(
+        block_on(heap.commit_atomic(lost_reply_plan.clone())).unwrap(),
+        AtomicOutcome::Unknown { atomic_id, .. } if atomic_id == lost_reply_id
+    ));
+    residiuum_store::disarm_failpoint("store.atomic.before_ack");
+    assert_eq!(
+        block_on(heap.atomic_status(lost_reply_id)).unwrap().logical,
+        residiuum_atomics::LogicalStatus::Committed
+    );
+    let AtomicOutcome::Committed(lost_reply_replay) =
+        block_on(heap.commit_atomic(lost_reply_plan)).unwrap()
+    else {
+        panic!("lost reply retry did not resolve committed")
+    };
+    assert!(lost_reply_replay.replayed);
+    let atomic_inspection = connection.inspect().atomics;
+    assert_eq!(atomic_inspection.inflight, 0);
+    assert!(atomic_inspection.submitted >= 8);
+    assert!(atomic_inspection.committed >= 4);
+    assert!(atomic_inspection.not_committed >= 2);
+    assert!(atomic_inspection.unknown >= 1);
+    assert!(atomic_inspection.refused >= 1);
+    assert!(atomic_inspection.identity_conflicts >= 1);
+    assert!(atomic_inspection.status_lookups >= 2);
+    assert!(atomic_inspection.submitted_members >= 14);
+    assert!(atomic_inspection.max_members >= 3);
+    assert!(atomic_inspection.submitted_plan_bytes > 0);
+    assert!(atomic_inspection.max_plan_bytes > 0);
+    assert!(atomic_inspection.total_engine_latency_ns > 0);
+    assert!(atomic_inspection.max_engine_latency_ns > 0);
+
     block_on(connection.close()).unwrap();
     drop(states);
     drop(turns);
     drop(locators);
     drop(heap);
     drop(connection);
+    let mut compacted = residiuum_store::Store::open(directory.path()).unwrap();
+    compacted.compact_live().unwrap();
+    drop(compacted);
     let reopened = block_on(Client::open_embedded(EmbeddedOptions::new(
         directory.path(),
     )))
@@ -315,6 +432,54 @@ fn atomic_builder_refuses_collection_from_another_heap_before_build() {
         Err(error) => error,
     };
     assert_eq!(error.code, ErrorCode::PermissionDenied);
+}
+
+#[test]
+fn atomic_submission_deadline_before_dispatch_issues_nothing_and_plan_can_be_renewed() {
+    let (directory, capability) = prepared_deployment();
+    let connection = block_on(Client::open_embedded(EmbeddedOptions::new(
+        directory.path(),
+    )))
+    .unwrap();
+    let heap = block_on(connection.open_heap(capability)).unwrap();
+    let records: Collection<Value> =
+        block_on(heap.create_collection("deadline-records", CreateCollectionOptions::default()))
+            .unwrap();
+    let atomic_id = AtomicId::random().unwrap();
+    let mut atomic = heap
+        .atomic(
+            AtomicOptions::new(atomic_id)
+                .with_deadline(Instant::now() + Duration::from_millis(100)),
+        )
+        .unwrap();
+    atomic
+        .create(&records, "deadline-key", &json!({"v": 1}))
+        .unwrap();
+    let plan = atomic.build().unwrap();
+    std::thread::sleep(Duration::from_millis(120));
+
+    let error = block_on(heap.commit_atomic(plan.clone())).unwrap_err();
+    assert_eq!(error.code, ErrorCode::AtomicDeadlineExceeded);
+    assert_eq!(
+        block_on(heap.atomic_status(atomic_id)).unwrap().logical,
+        residiuum_atomics::LogicalStatus::NotFound
+    );
+    assert!(block_on(records.get("deadline-key")).unwrap().is_none());
+
+    let renewed = plan.with_deadline(Instant::now() + Duration::from_secs(1));
+    assert!(matches!(
+        block_on(heap.commit_atomic(renewed)).unwrap(),
+        AtomicOutcome::Committed(_)
+    ));
+    let inspection = connection.inspect().atomics;
+    assert_eq!(inspection.submitted, 2);
+    assert_eq!(inspection.inflight, 0);
+    assert_eq!(inspection.committed, 1);
+    assert_eq!(inspection.refused, 1);
+    assert_eq!(inspection.status_lookups, 1);
+    assert_eq!(inspection.submitted_members, 2);
+    assert_eq!(inspection.max_members, 1);
+    assert!(inspection.submitted_plan_bytes >= inspection.max_plan_bytes as u64);
 }
 
 #[test]

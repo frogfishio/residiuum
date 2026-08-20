@@ -305,6 +305,12 @@ impl AtomicOptions {
         self.limits
     }
 
+    /// Optional caller-supplied end-to-end construction/submission deadline.
+    /// It is transport metadata and never enters canonical plan bytes.
+    pub const fn deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
     /// Declared scope.
     pub const fn scope(&self) -> CoordinationScope {
         self.scope

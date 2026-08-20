@@ -3074,12 +3074,6 @@ fn publication_delta(
     Ok(delta)
 }
 
-impl From<AtomicsError> for StoreError {
-    fn from(err: AtomicsError) -> Self {
-        StoreError::AtomicStage(err.to_string())
-    }
-}
-
 fn rebuild_heap(
     paths: &crate::layout::StorePaths,
     heap_id: HeapId,
