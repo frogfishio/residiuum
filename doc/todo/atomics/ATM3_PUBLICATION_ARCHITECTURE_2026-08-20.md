@@ -71,8 +71,13 @@ payload locators as a first-class durable locator class.
 2. Atomic `ItemEvent` frames carry canonical `AtomicMember` records. `ATPAY1`,
    `ATMAP1`, and `ATCHK1` payload frames carry value bytes or frozen chunks.
    None participates in ordinary indexes before a valid committed decision.
-3. `ATSEAL1` is appended after the complete member set and payload bytes. Its
-   durable append is the member stable boundary. There is no per-member sync.
+3. On the whole-plan commit path, prepare/member/payload frames are submitted
+   with buffered durability and no checkpoint refresh. `ATSEAL1` is appended
+   after the complete member set and payload bytes; its durable append flushes
+   that entire prefix and is the first stable boundary. There is no per-member
+   sync. The separately exposed low-level/manual staging surface deliberately
+   retains record-by-record durability for forensic qualification and is not
+   the product commit path.
 4. `ATORD1` captures every writer shard's ordinary-event frontier and is
    appended without a separate stable boundary.
 5. `BatchCommit` carries canonical `AtomicDecision`. The store appends it only
@@ -80,8 +85,10 @@ payload locators as a first-class durable locator class.
    durable append covers `ATORD1`, is the decision stable boundary, and is the
    linearization point.
 6. The catalogue checkpoint is an authenticated acceleration structure, never
-   authority. A crash before it is replaced is recovered from the segment
-   tail.
+   authority. The whole-plan path does not refresh it between members, seal,
+   decision, or acknowledgement; a stale checkpoint is recovered from the
+   segment tail. A later catalogue open may checkpoint that tail independently
+   of the decision's two authoritative boundaries.
 
 The current embedded writer has one exclusive physical `Store` mutation guard.
 ATM-3 assigns Heap commit positions while that guard is held. Ordinary writes,
@@ -163,8 +170,10 @@ The primary and history projections now share the same durable order witness,
 including later ordinary puts/deletes and overlapping Atomics after a full
 derived-index rebuild. The five mandated decision/publication/ack crash cuts
 are green, as is guarded concurrent point/scan/history observation. ATM-3D must
-still prove SDK/RQL generation binding, member-boundary I/O, and resource bounds
-before the hidden qualification path can become a product capability.
+still prove SDK/RQL generation binding and resource bounds before the hidden
+qualification path can become a product capability. Whole-plan I/O now has an
+executable invariant: one- and two-member commits both complete with exactly
+two authoritative syncs, proving sync count is independent of member count.
 
 `Capabilities::atomics` remains `false` until all slices and the ATM-3 exit gate
 are green.

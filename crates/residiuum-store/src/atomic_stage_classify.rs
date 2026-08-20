@@ -209,6 +209,15 @@ pub fn finalize_catalog(catalog: &mut StageCatalog, findings: &mut StageFindings
                 StageEvidenceClass::Conflict,
                 Some(id),
             );
+        } else if !members.is_empty() {
+            // The prepare's ordered manifest root authenticates the complete
+            // recovered member vector. This recovers the count when the
+            // derived checkpoint was intentionally left behind by the
+            // two-boundary whole-plan path.
+            catalog
+                .intended_members
+                .entry(id)
+                .or_insert(members.len() as u32);
         }
         if let Some(root) = catalog.seals.get(&id).copied() {
             if root != prepare.content_root {

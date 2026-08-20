@@ -2574,9 +2574,9 @@ impl Store {
         Ok(())
     }
 
-    /// Append derived Atomic control evidence without establishing a stable
-    /// boundary. A following durable decision append on shard zero flushes this
-    /// prefix and the decision together in order.
+    /// Append Atomic evidence and submit it to the file without establishing a
+    /// durability boundary. A later durable seal/decision flushes the complete
+    /// preceding prefix in order.
     pub(crate) fn append_buffered_atomic_frame(
         &mut self,
         kind: residiuum_format::FrameKind,
@@ -2589,11 +2589,18 @@ impl Store {
                 "buffered atomic append requires the writer lock".into(),
             ));
         }
-        let writer = self
-            .active_mut(0)
+        let mut writer = self
+            .take_active(0)
             .ok_or_else(|| StoreError::AtomicStage("no active segment".into()))?;
-        writer.segment.append(kind, envelope, body, event_id)?;
-        Ok(())
+        let append = writer.segment.append(kind, envelope, body, event_id);
+        if append.is_err() {
+            self.set_active(0, Some(writer));
+            append?;
+            return Ok(());
+        }
+        let flush = self.flush_active_file(&mut writer, DurabilityMode::Buffered, 0);
+        self.set_active(0, Some(writer));
+        flush
     }
 
     /// Capture the first writer sequence strictly after the current contents

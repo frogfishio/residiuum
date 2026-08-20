@@ -46,6 +46,16 @@ pub struct StoreAtomicStage<'a> {
     limits: AtomicStageLimits,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StagePersistMode {
+    /// Legacy/manual staging surface: each accepted record and checkpoint is
+    /// independently durable for fine-grained recovery tooling.
+    StableCheckpointed,
+    /// Whole-plan commit: submit member bytes without sync; the seal and
+    /// decision establish the only two authoritative durability boundaries.
+    BufferedCohort,
+}
+
 impl Store {
     /// Open the store-owned Atomic stage. Requires the exclusive writer lock.
     pub fn atomic_stage(&mut self) -> Result<StoreAtomicStage<'_>, StoreError> {
@@ -242,8 +252,9 @@ impl StoreAtomicStage<'_> {
         frontier: [u8; 32],
         members: &[AtomicMember],
     ) -> Result<(CoordinatorSeq, PlacementManifest), StoreError> {
-        let prepare = self.ensure_prepare_record(plan, frontier, members)?;
-        self.install_prepared_members(&prepare, members)
+        let mode = StagePersistMode::StableCheckpointed;
+        let prepare = self.ensure_prepare_record(plan, frontier, members, mode)?;
+        self.install_prepared_members(&prepare, members, mode)
     }
 
     /// Persist only the accepted prepare. Validation and member installation
@@ -253,6 +264,7 @@ impl StoreAtomicStage<'_> {
         plan: &AtomicPlan,
         frontier: [u8; 32],
         members: &[AtomicMember],
+        mode: StagePersistMode,
     ) -> Result<AtomicPrepare, StoreError> {
         if plan.heap_id() != self.heap.heap_id() {
             return Err(StoreError::AtomicStage(
@@ -278,11 +290,11 @@ impl StoreAtomicStage<'_> {
             }
             if !self.catalog.prepare_batch.contains(&prepare.atomic_id) {
                 // Legacy ATPREP1-only prefix: repair the BatchPrepare authority.
-                self.persist_prepare(&prepare, members.len() as u32)?;
+                self.persist_prepare(&prepare, members.len() as u32, mode)?;
             }
         } else {
             self.admit_new_atomic()?;
-            self.persist_prepare(&prepare, members.len() as u32)?;
+            self.persist_prepare(&prepare, members.len() as u32, mode)?;
         }
         Ok(prepare)
     }
@@ -291,6 +303,7 @@ impl StoreAtomicStage<'_> {
         &mut self,
         prepare: &AtomicPrepare,
         members: &[AtomicMember],
+        mode: StagePersistMode,
     ) -> Result<(CoordinatorSeq, PlacementManifest), StoreError> {
         if let Some(existing) = self.heap.placement(prepare.atomic_id) {
             if existing.content_root() == prepare.content_root
@@ -306,7 +319,7 @@ impl StoreAtomicStage<'_> {
         }
         for member in members {
             if !self.catalog.has_member(member.atomic_id, member.ordinal) {
-                self.persist_member(&prepare, member)?;
+                self.persist_member(&prepare, member, mode)?;
             }
         }
         let seq = self
@@ -333,12 +346,21 @@ impl StoreAtomicStage<'_> {
         member: AtomicMember,
         payload: Vec<u8>,
     ) -> Result<(), StoreError> {
+        self.append_staged_inner(member, payload, StagePersistMode::StableCheckpointed)
+    }
+
+    fn append_staged_inner(
+        &mut self,
+        member: AtomicMember,
+        payload: Vec<u8>,
+        mode: StagePersistMode,
+    ) -> Result<(), StoreError> {
         if self.existing_payload_conflicts(&member, &payload) {
             return Err(Self::duplicate_target());
         }
         if self.find_staged(member.atomic_id, member.ordinal).is_some() {
             if !self.catalog.has_payload(member.atomic_id, member.ordinal) {
-                self.persist_payload(&member, &payload)?;
+                self.persist_payload(&member, &payload, mode)?;
             }
             return Ok(());
         }
@@ -346,7 +368,7 @@ impl StoreAtomicStage<'_> {
             .check_append_staged(&member, &payload)
             .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         if !self.catalog.has_payload(member.atomic_id, member.ordinal) {
-            self.persist_payload(&member, &payload)?;
+            self.persist_payload(&member, &payload, mode)?;
         }
         self.heap
             .append_staged(member, payload)
@@ -435,13 +457,21 @@ impl StoreAtomicStage<'_> {
             .map(|s| s.payload.clone())
             .ok_or_else(|| StoreError::AtomicStage("complete chunk without payload".into()))?;
         if !self.catalog.has_payload(atomic_id, ordinal) {
-            self.persist_payload(&member, &payload)?;
+            self.persist_payload(&member, &payload, StagePersistMode::StableCheckpointed)?;
         }
         Ok(())
     }
 
     /// First stable member boundary: persist a store seal, then apply the model.
     pub fn seal_member_boundary(&mut self, atomic_id: AtomicId) -> Result<(), StoreError> {
+        self.seal_member_boundary_inner(atomic_id, StagePersistMode::StableCheckpointed)
+    }
+
+    fn seal_member_boundary_inner(
+        &mut self,
+        atomic_id: AtomicId,
+        mode: StagePersistMode,
+    ) -> Result<(), StoreError> {
         let already_applied = self
             .heap
             .lifecycle(atomic_id)
@@ -455,7 +485,7 @@ impl StoreAtomicStage<'_> {
                 .placement(atomic_id)
                 .ok_or_else(|| StoreError::AtomicStage("seal without prepare".into()))?
                 .content_root();
-            self.persist_seal(atomic_id, content_root)?;
+            self.persist_seal(atomic_id, content_root, mode)?;
         }
         if !already_applied {
             self.heap
@@ -472,6 +502,14 @@ impl StoreAtomicStage<'_> {
     pub fn persist_committed_decision(
         &mut self,
         atomic_id: AtomicId,
+    ) -> Result<AtomicDecision, StoreError> {
+        self.persist_committed_decision_inner(atomic_id, StagePersistMode::StableCheckpointed)
+    }
+
+    fn persist_committed_decision_inner(
+        &mut self,
+        atomic_id: AtomicId,
+        mode: StagePersistMode,
     ) -> Result<AtomicDecision, StoreError> {
         if self.catalog.blocked.contains(&atomic_id) || self.catalog.coverage_degraded {
             return Err(StoreError::AtomicStage(
@@ -515,9 +553,21 @@ impl StoreAtomicStage<'_> {
                         .contains_key(&(atomic_id, member.ordinal))
             })
         {
-            return Err(StoreError::AtomicStage(
-                "decision requires the exact complete member manifest and payloads".into(),
-            ));
+            let missing_payloads = members
+                .iter()
+                .filter(|member| {
+                    !self.catalog.has_payload(atomic_id, member.ordinal)
+                        && !self
+                            .catalog
+                            .payload_refs
+                            .contains_key(&(atomic_id, member.ordinal))
+                })
+                .count();
+            return Err(StoreError::AtomicStage(format!(
+                "decision requires the exact complete member manifest and payloads \
+                 (members={}/{intended}, missing_payloads={missing_payloads})",
+                members.len()
+            )));
         }
         let position = self.catalog.next_commit_position(prepare.heap_id)?;
         let decision = AtomicDecision::committed(
@@ -572,12 +622,14 @@ impl StoreAtomicStage<'_> {
         self.catalog
             .commit_next
             .insert(prepare.heap_id, position.saturating_add(1));
-        persist_live_checkpoint(
-            self.store.paths(),
-            &self.catalog,
-            &mut self.covered,
-            self.limits,
-        )?;
+        if mode == StagePersistMode::StableCheckpointed {
+            persist_live_checkpoint(
+                self.store.paths(),
+                &self.catalog,
+                &mut self.covered,
+                self.limits,
+            )?;
+        }
         Ok(decision)
     }
 
@@ -588,6 +640,19 @@ impl StoreAtomicStage<'_> {
         &mut self,
         atomic_id: AtomicId,
         reason: AtomicAbortReason,
+    ) -> Result<AtomicDecision, StoreError> {
+        self.persist_not_committed_decision_inner(
+            atomic_id,
+            reason,
+            StagePersistMode::StableCheckpointed,
+        )
+    }
+
+    fn persist_not_committed_decision_inner(
+        &mut self,
+        atomic_id: AtomicId,
+        reason: AtomicAbortReason,
+        mode: StagePersistMode,
     ) -> Result<AtomicDecision, StoreError> {
         if self.catalog.blocked.contains(&atomic_id) || self.catalog.coverage_degraded {
             return Err(StoreError::AtomicStage(
@@ -637,12 +702,14 @@ impl StoreAtomicStage<'_> {
             .evidence_heaps
             .insert(atomic_id, prepare.heap_id);
         self.catalog.decisions.insert(atomic_id, decision.clone());
-        persist_live_checkpoint(
-            self.store.paths(),
-            &self.catalog,
-            &mut self.covered,
-            self.limits,
-        )?;
+        if mode == StagePersistMode::StableCheckpointed {
+            persist_live_checkpoint(
+                self.store.paths(),
+                &self.catalog,
+                &mut self.covered,
+                self.limits,
+            )?;
+        }
         Ok(decision)
     }
 
@@ -675,18 +742,19 @@ impl StoreAtomicStage<'_> {
 
         let members = self.members_for_frontier(plan)?;
         let frontier = self.frontier_for_plan(plan)?;
-        let prepare = self.ensure_prepare_record(plan, frontier, &members)?;
+        let mode = StagePersistMode::BufferedCohort;
+        let prepare = self.ensure_prepare_record(plan, frontier, &members, mode)?;
         if let Some(reason) = self.validate_at_frontier(plan)? {
-            return self.persist_not_committed_decision(prepare.atomic_id, reason);
+            return self.persist_not_committed_decision_inner(prepare.atomic_id, reason, mode);
         }
 
-        self.install_prepared_members(&prepare, &members)?;
+        self.install_prepared_members(&prepare, &members, mode)?;
         for (member, mutation) in members.iter().zip(plan.mutations()) {
             let payload = mutation.encoded_value.clone().unwrap_or_default();
-            self.append_staged(member.clone(), payload)?;
+            self.append_staged_inner(member.clone(), payload, mode)?;
         }
-        self.seal_member_boundary(prepare.atomic_id)?;
-        let decision = self.persist_committed_decision(prepare.atomic_id)?;
+        self.seal_member_boundary_inner(prepare.atomic_id, mode)?;
+        let decision = self.persist_committed_decision_inner(prepare.atomic_id, mode)?;
         crate::failpoint::hit("store.atomic.before_publish")?;
         self.publish_decision(prepare.atomic_id)?;
         crate::failpoint::hit("store.atomic.after_publish")?;
@@ -1012,7 +1080,7 @@ impl StoreAtomicStage<'_> {
             return Ok(());
         }
         let payload = staged.payload.clone();
-        self.persist_payload(member, &payload)
+        self.persist_payload(member, &payload, StagePersistMode::StableCheckpointed)
     }
 
     fn admit_new_atomic(&self) -> Result<(), StoreError> {
@@ -1084,6 +1152,7 @@ impl StoreAtomicStage<'_> {
         &mut self,
         prepare: &AtomicPrepare,
         intended_members: u32,
+        mode: StagePersistMode,
     ) -> Result<(), StoreError> {
         let _seq = self.catalog.assign_coord(prepare.atomic_id)?;
         let mut candidate = self.catalog.clone();
@@ -1100,12 +1169,14 @@ impl StoreAtomicStage<'_> {
         let encoded_prepare =
             encode_prepare(prepare).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         self.admit_catalog_change(&candidate, encoded_prepare.len() as u64)?;
-        persist_live_checkpoint(
-            self.store.paths(),
-            &self.catalog,
-            &mut self.covered,
-            self.limits,
-        )?;
+        if mode == StagePersistMode::StableCheckpointed {
+            persist_live_checkpoint(
+                self.store.paths(),
+                &self.catalog,
+                &mut self.covered,
+                self.limits,
+            )?;
+        }
         crate::failpoint::hit("store.atomic.prepare.before_append")?;
         let envelope = encode_atomic_prepare_envelope(
             prepare.heap_id.as_bytes(),
@@ -1116,12 +1187,20 @@ impl StoreAtomicStage<'_> {
         let body = encoded_prepare;
         let mut event_id = [0u8; 16];
         event_id.copy_from_slice(&prepare.atomic_id.as_bytes()[..16]);
-        self.store.append_unindexed_atomic_frame(
-            FrameKind::BatchPrepare,
-            &envelope,
-            &body,
-            event_id,
-        )?;
+        match mode {
+            StagePersistMode::StableCheckpointed => self.store.append_unindexed_atomic_frame(
+                FrameKind::BatchPrepare,
+                &envelope,
+                &body,
+                event_id,
+            )?,
+            StagePersistMode::BufferedCohort => self.store.append_buffered_atomic_frame(
+                FrameKind::BatchPrepare,
+                &envelope,
+                &body,
+                event_id,
+            )?,
+        }
         crate::failpoint::hit("store.atomic.prepare.after_append")?;
         self.catalog
             .prepares
@@ -1133,12 +1212,14 @@ impl StoreAtomicStage<'_> {
         self.catalog
             .intended_members
             .insert(prepare.atomic_id, intended_members);
-        persist_live_checkpoint(
-            self.store.paths(),
-            &self.catalog,
-            &mut self.covered,
-            self.limits,
-        )?;
+        if mode == StagePersistMode::StableCheckpointed {
+            persist_live_checkpoint(
+                self.store.paths(),
+                &self.catalog,
+                &mut self.covered,
+                self.limits,
+            )?;
+        }
         crate::failpoint::hit("store.atomic.prepare.after_checkpoint")?;
         Ok(())
     }
@@ -1147,6 +1228,7 @@ impl StoreAtomicStage<'_> {
         &mut self,
         prepare: &AtomicPrepare,
         member: &AtomicMember,
+        mode: StagePersistMode,
     ) -> Result<(), StoreError> {
         let envelope = encode_atomic_member_envelope(
             prepare.heap_id.as_bytes(),
@@ -1167,28 +1249,43 @@ impl StoreAtomicStage<'_> {
         }
         self.admit_catalog_change(&candidate, body.len() as u64)?;
         crate::failpoint::hit("store.atomic.member.before_append")?;
-        self.store.append_unindexed_atomic_frame(
-            FrameKind::ItemEvent,
-            &envelope,
-            &body,
-            member.event_id.to_bytes(),
-        )?;
+        match mode {
+            StagePersistMode::StableCheckpointed => self.store.append_unindexed_atomic_frame(
+                FrameKind::ItemEvent,
+                &envelope,
+                &body,
+                member.event_id.to_bytes(),
+            )?,
+            StagePersistMode::BufferedCohort => self.store.append_buffered_atomic_frame(
+                FrameKind::ItemEvent,
+                &envelope,
+                &body,
+                member.event_id.to_bytes(),
+            )?,
+        }
         crate::failpoint::hit("store.atomic.member.after_append")?;
         let slot = self.catalog.members.entry(member.atomic_id).or_default();
         if !slot.iter().any(|m| m.ordinal == member.ordinal) {
             slot.push(member.clone());
         }
-        persist_live_checkpoint(
-            self.store.paths(),
-            &self.catalog,
-            &mut self.covered,
-            self.limits,
-        )?;
+        if mode == StagePersistMode::StableCheckpointed {
+            persist_live_checkpoint(
+                self.store.paths(),
+                &self.catalog,
+                &mut self.covered,
+                self.limits,
+            )?;
+        }
         crate::failpoint::hit("store.atomic.member.after_checkpoint")?;
         Ok(())
     }
 
-    fn persist_payload(&mut self, member: &AtomicMember, payload: &[u8]) -> Result<(), StoreError> {
+    fn persist_payload(
+        &mut self,
+        member: &AtomicMember,
+        payload: &[u8],
+        mode: StagePersistMode,
+    ) -> Result<(), StoreError> {
         if !self.catalog.has_payload(member.atomic_id, member.ordinal) {
             self.admit_payload_bytes(payload.len() as u64)?;
         }
@@ -1204,23 +1301,33 @@ impl StoreAtomicStage<'_> {
         );
         self.admit_catalog_change(&candidate, body.len() as u64)?;
         crate::failpoint::hit("store.atomic.payload.before_append")?;
-        self.store.append_unindexed_atomic_frame(
-            FrameKind::PayloadChunk,
-            EMPTY_ENVELOPE,
-            &body,
-            payload_event_id(member.atomic_id, member.ordinal),
-        )?;
+        match mode {
+            StagePersistMode::StableCheckpointed => self.store.append_unindexed_atomic_frame(
+                FrameKind::PayloadChunk,
+                EMPTY_ENVELOPE,
+                &body,
+                payload_event_id(member.atomic_id, member.ordinal),
+            )?,
+            StagePersistMode::BufferedCohort => self.store.append_buffered_atomic_frame(
+                FrameKind::PayloadChunk,
+                EMPTY_ENVELOPE,
+                &body,
+                payload_event_id(member.atomic_id, member.ordinal),
+            )?,
+        }
         crate::failpoint::hit("store.atomic.payload.after_append")?;
         self.catalog
             .payloads
             .insert((member.atomic_id, member.ordinal), payload.to_vec());
         self.note_payload_ref(member.atomic_id, member.ordinal, start, &body);
-        persist_live_checkpoint(
-            self.store.paths(),
-            &self.catalog,
-            &mut self.covered,
-            self.limits,
-        )?;
+        if mode == StagePersistMode::StableCheckpointed {
+            persist_live_checkpoint(
+                self.store.paths(),
+                &self.catalog,
+                &mut self.covered,
+                self.limits,
+            )?;
+        }
         crate::failpoint::hit("store.atomic.payload.after_checkpoint")?;
         Ok(())
     }
@@ -1229,6 +1336,7 @@ impl StoreAtomicStage<'_> {
         &mut self,
         atomic_id: AtomicId,
         content_root: residiuum_atomics::ContentRoot,
+        mode: StagePersistMode,
     ) -> Result<(), StoreError> {
         if self.catalog.is_sealed(atomic_id) {
             return Ok(());
@@ -1246,12 +1354,14 @@ impl StoreAtomicStage<'_> {
         )?;
         self.catalog.seals.insert(atomic_id, content_root);
         crate::failpoint::hit("store.atomic.seal.after_append")?;
-        persist_live_checkpoint(
-            self.store.paths(),
-            &self.catalog,
-            &mut self.covered,
-            self.limits,
-        )?;
+        if mode == StagePersistMode::StableCheckpointed {
+            persist_live_checkpoint(
+                self.store.paths(),
+                &self.catalog,
+                &mut self.covered,
+                self.limits,
+            )?;
+        }
         crate::failpoint::hit("store.atomic.seal.after_checkpoint")?;
         Ok(())
     }

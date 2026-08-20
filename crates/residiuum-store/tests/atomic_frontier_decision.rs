@@ -75,6 +75,10 @@ fn plan(
 }
 
 fn create_two_plan(heap: HeapId, atomic_id: AtomicId) -> AtomicPlan {
+    create_n_plan(heap, atomic_id, 2)
+}
+
+fn create_n_plan(heap: HeapId, atomic_id: AtomicId, count: usize) -> AtomicPlan {
     AtomicPlan::close(AtomicPlanParts {
         profile: AtomicProfile::LocalHeapV1,
         atomic_id,
@@ -83,22 +87,31 @@ fn create_two_plan(heap: HeapId, atomic_id: AtomicId) -> AtomicPlan {
         read_frontier: None,
         reads: vec![],
         predicates: vec![],
-        mutations: vec![
-            PlanMutation {
+        mutations: (0..count)
+            .map(|index| PlanMutation {
                 kind: MutationKind::Create,
                 collection_id: collection(),
-                key: CanonicalKey::string("left"),
-                encoded_value: Some(b"L".to_vec()),
+                key: CanonicalKey::string(if count == 2 {
+                    if index == 0 {
+                        "left".into()
+                    } else {
+                        "right".into()
+                    }
+                } else {
+                    format!("member-{index:04}")
+                }),
+                encoded_value: Some(if count == 2 {
+                    if index == 0 {
+                        b"L".to_vec()
+                    } else {
+                        b"R".to_vec()
+                    }
+                } else {
+                    format!("value-{index:04}").into_bytes()
+                }),
                 if_version: None,
-            },
-            PlanMutation {
-                kind: MutationKind::Create,
-                collection_id: collection(),
-                key: CanonicalKey::string("right"),
-                encoded_value: Some(b"R".to_vec()),
-                if_version: None,
-            },
-        ],
+            })
+            .collect(),
         active_rule_revisions: vec![],
         limits: ResourceLimits::hard_local_heap(),
     })
@@ -743,4 +756,43 @@ fn concurrent_point_scan_and_history_readers_never_observe_half_a_batch() {
     }
     assert!(any_before, "test failed to sample the prior generation");
     assert!(any_after, "test failed to sample the committed generation");
+}
+
+#[test]
+fn whole_plan_commit_uses_two_authoritative_boundaries_not_one_per_member() {
+    let _guard = test_guard();
+    clear_failpoints();
+
+    let syncs_for = |members: usize, id: u8| {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let mut store = Store::create_with_shards(&path, 4).unwrap();
+        let heap = HeapId::from_bytes(store.store_id()).unwrap();
+        let before = store.write_path_stats().authoritative_io.sync_operations;
+        let atomic_plan = if members > 1 {
+            create_n_plan(heap, atomic(id), members)
+        } else {
+            plan(
+                heap,
+                atomic(id),
+                MutationKind::Create,
+                CanonicalKey::string("one"),
+                Some(b"one"),
+                None,
+            )
+        };
+        store
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_evidence(&atomic_plan)
+            .unwrap();
+        store
+            .write_path_stats()
+            .authoritative_io
+            .sync_operations
+            .saturating_sub(before)
+    };
+
+    assert_eq!(syncs_for(1, 40), 2, "one-member Atomic boundaries");
+    assert_eq!(syncs_for(32, 41), 2, "32-member Atomic boundaries");
 }
