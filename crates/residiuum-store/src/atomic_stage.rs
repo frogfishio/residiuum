@@ -22,12 +22,14 @@ use crate::atomic_stage_recover::{
 use crate::error::StoreError;
 use crate::store::Store;
 use residiuum_atomics::{
-    encode_member, encode_prepare, members_match_prepare, prepare_from_closed_plan, AtomicId,
+    encode_decision, encode_member, encode_prepare, members_match_prepare,
+    ordered_member_manifest_root, prepare_from_closed_plan, prepare_hash, AtomicDecision, AtomicId,
     AtomicMember, AtomicPlan, AtomicPrepare, AtomicRefuseReason, AtomicsError, ChunkPlan,
     CoordinatorSeq, HeapId, MemberPhase, PlacementManifest, StagingHeap,
 };
 use residiuum_format::{
-    encode_atomic_member_envelope, encode_atomic_prepare_envelope, FrameKind, EMPTY_ENVELOPE,
+    encode_atomic_commit_envelope, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
+    FrameKind, EMPTY_ENVELOPE,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -342,6 +344,99 @@ impl StoreAtomicStage<'_> {
                 .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
         }
         Ok(())
+    }
+
+    /// ATM-3A decision primitive. This hidden qualification surface is not a
+    /// product commit API: no caller may receive a commit acknowledgement while
+    /// the durable decision is not yet ordinarily visible.
+    #[doc(hidden)]
+    pub fn persist_committed_decision(
+        &mut self,
+        atomic_id: AtomicId,
+    ) -> Result<AtomicDecision, StoreError> {
+        if self.catalog.blocked.contains(&atomic_id) || self.catalog.coverage_degraded {
+            return Err(StoreError::AtomicStage(
+                "atomic decision refused: evidence is blocked or coverage is incomplete".into(),
+            ));
+        }
+        if let Some(existing) = self.catalog.decisions.get(&atomic_id) {
+            return Ok(existing.clone());
+        }
+        let prepare = self
+            .catalog
+            .prepares
+            .get(&atomic_id)
+            .cloned()
+            .ok_or_else(|| StoreError::AtomicStage("decision without prepare".into()))?;
+        if self.catalog.seals.get(&atomic_id) != Some(&prepare.content_root) {
+            return Err(StoreError::AtomicStage(
+                "decision before stable member boundary".into(),
+            ));
+        }
+        let members = self
+            .catalog
+            .members
+            .get(&atomic_id)
+            .cloned()
+            .unwrap_or_default();
+        let intended = self
+            .catalog
+            .intended_members
+            .get(&atomic_id)
+            .copied()
+            .unwrap_or(0);
+        if intended == 0
+            || members.len() != intended as usize
+            || !members_match_prepare(&prepare, &members)
+            || members.iter().any(|member| {
+                !self.catalog.has_payload(atomic_id, member.ordinal)
+                    && !self
+                        .catalog
+                        .payload_refs
+                        .contains_key(&(atomic_id, member.ordinal))
+            })
+        {
+            return Err(StoreError::AtomicStage(
+                "decision requires the exact complete member manifest and payloads".into(),
+            ));
+        }
+        let position = self.catalog.next_commit_position()?;
+        let decision = AtomicDecision::committed(
+            atomic_id,
+            prepare_hash(&prepare).map_err(|e| StoreError::AtomicStage(e.to_string()))?,
+            ordered_member_manifest_root(prepare.heap_id, &members)
+                .map_err(|e| StoreError::AtomicStage(e.to_string()))?,
+            intended,
+            position,
+        )
+        .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let body =
+            encode_decision(&decision).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let envelope = encode_atomic_commit_envelope(
+            prepare.heap_id.as_bytes(),
+            atomic_id.as_bytes(),
+            prepare.content_root.as_bytes(),
+            Some(position),
+        )
+        .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        self.admit_catalog_change(&self.catalog.clone(), body.len() as u64)?;
+        crate::failpoint::hit("store.atomic.before_decision")?;
+        self.store.append_unindexed_atomic_frame(
+            FrameKind::BatchCommit,
+            &envelope,
+            &body,
+            decision_event_id(atomic_id),
+        )?;
+        crate::failpoint::hit("store.atomic.after_decision")?;
+        self.catalog.decisions.insert(atomic_id, decision.clone());
+        self.catalog.commit_next = position.saturating_add(1);
+        persist_live_checkpoint(
+            self.store.paths(),
+            &self.catalog,
+            &mut self.covered,
+            self.limits,
+        )?;
+        Ok(decision)
     }
 
     fn duplicate_target() -> StoreError {
@@ -782,6 +877,16 @@ impl StoreAtomicStage<'_> {
         }
         Ok(())
     }
+}
+
+fn decision_event_id(atomic_id: AtomicId) -> [u8; 16] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"residiuum.atomic-stage.decision");
+    hasher.update(atomic_id.as_bytes());
+    let hash = hasher.finalize();
+    let mut event_id = [0u8; 16];
+    event_id.copy_from_slice(&hash.as_bytes()[..16]);
+    event_id
 }
 
 impl From<AtomicsError> for StoreError {

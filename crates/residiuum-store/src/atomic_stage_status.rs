@@ -5,7 +5,7 @@
 //! never absence.
 
 use crate::atomic_stage_media::StageCatalog;
-use residiuum_atomics::{members_match_prepare, AtomicId};
+use residiuum_atomics::{members_match_prepare, AtomicId, DecisionCode};
 
 /// Public classification of one Atomic identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +18,11 @@ pub enum AtomicStageClass {
     Staged,
     /// First stable boundary is recorded.
     Sealed,
+    /// A durable committed decision is present. Publication is an ATM-3
+    /// derived phase and is not implied by this staging status alone.
+    Committed,
+    /// A durable terminal not-committed decision is present.
+    NotCommitted,
     /// Identity blocked by conflict or damage.
     Blocked,
 }
@@ -41,6 +46,10 @@ pub struct AtomicStageStatus {
     pub present_chunk_bodies: u32,
     /// A matching seal is catalogued.
     pub sealed: bool,
+    /// Durable decision, when present.
+    pub decision: Option<DecisionCode>,
+    /// Non-zero Heap commit position for a committed decision.
+    pub commit_position: Option<u64>,
     /// Identity is blocked.
     pub blocked: bool,
     /// Store coverage is degraded.
@@ -78,6 +87,7 @@ pub fn project_atomic(catalog: &StageCatalog, atomic_id: AtomicId) -> AtomicStag
             .filter(|(id, _, _)| *id == atomic_id),
     );
     let sealed = catalog.seals.contains_key(&atomic_id);
+    let decision = catalog.decisions.get(&atomic_id);
     let members_complete = prepare.is_some_and(|p| {
         let ms = members.cloned().unwrap_or_default();
         intended_members > 0 && present_members >= intended_members && members_match_prepare(p, &ms)
@@ -91,6 +101,10 @@ pub fn project_atomic(catalog: &StageCatalog, atomic_id: AtomicId) -> AtomicStag
     });
     let class = if blocked {
         AtomicStageClass::Blocked
+    } else if decision.is_some_and(|d| d.decision == DecisionCode::Committed) {
+        AtomicStageClass::Committed
+    } else if decision.is_some_and(|d| d.decision == DecisionCode::NotCommitted) {
+        AtomicStageClass::NotCommitted
     } else if prepare.is_none() {
         AtomicStageClass::Absent
     } else if sealed {
@@ -109,6 +123,8 @@ pub fn project_atomic(catalog: &StageCatalog, atomic_id: AtomicId) -> AtomicStag
         present_chunk_plans,
         present_chunk_bodies,
         sealed,
+        decision: decision.map(|d| d.decision),
+        commit_position: decision.and_then(|d| d.commit_position),
         blocked,
         coverage_degraded: catalog.coverage_degraded,
     }

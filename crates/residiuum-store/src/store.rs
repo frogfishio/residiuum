@@ -11591,12 +11591,15 @@ fn rebuild_active_from_bytes(
 
     let report = scan_forward(kept, limits);
     for (_offset, frame) in report.verified_frames() {
-        // Re-append items, payload chunks, and Atomic BatchPrepare (CR-ATMR5-006).
+        // Re-append items, payload chunks, and both Atomic coordinator roles.
+        // Dropping BatchCommit here would erase the ATM-3 linearization point
+        // while leaving it in the acceleration checkpoint.
         // Preserve flags/kind via append_parts so chunked puts survive reopen.
         match frame.header.known_kind() {
             Some(FrameKind::ItemEvent)
             | Some(FrameKind::PayloadChunk)
-            | Some(FrameKind::BatchPrepare) => {
+            | Some(FrameKind::BatchPrepare)
+            | Some(FrameKind::BatchCommit) => {
                 let mut header = frame.header.clone();
                 // writer_sequence is reassigned by append_parts.
                 header.writer_sequence = 0;

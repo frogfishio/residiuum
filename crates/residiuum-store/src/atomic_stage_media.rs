@@ -7,7 +7,8 @@
 
 use crate::error::StoreError;
 use residiuum_atomics::{
-    decode_prepare, encode_prepare, AtomicId, AtomicMember, AtomicPrepare, ChunkPlan, ContentRoot,
+    decode_prepare, encode_prepare, AtomicDecision, AtomicId, AtomicMember, AtomicPrepare,
+    ChunkPlan, ContentRoot,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -41,6 +42,12 @@ pub(crate) struct StageCatalog {
     /// Media locators for chunk bodies.
     pub chunk_refs: BTreeMap<(AtomicId, u32, u32), BodyRef>,
     pub seals: BTreeMap<AtomicId, ContentRoot>,
+    /// Durable terminal decisions. A committed decision is the ATM-3
+    /// linearization point; the checkpoint is only a rebuild accelerator.
+    pub decisions: BTreeMap<AtomicId, AtomicDecision>,
+    /// Next non-zero Heap commit position. Reconstructed above every admitted
+    /// committed decision during recovery.
+    pub commit_next: u64,
     /// Identities that must not be installed or reused (CR-ATMR5-002).
     pub blocked: BTreeSet<AtomicId>,
     /// Prepares observed as format-admitted `BatchPrepare` (CR-ATMR5-006).
@@ -111,6 +118,7 @@ impl StageCatalog {
             || !self.chunks.is_empty()
             || !self.chunk_refs.is_empty()
             || !self.seals.is_empty()
+            || !self.decisions.is_empty()
             || !self.blocked.is_empty()
             || !self.prepare_batch.is_empty()
             || !self.coord_seq.is_empty()
@@ -134,12 +142,43 @@ impl StageCatalog {
             .saturating_add(self.prepares.len() as u64 * 512)
             .saturating_add(members.saturating_mul(256))
             .saturating_add(self.seals.len() as u64 * 64)
+            .saturating_add(self.decisions.len() as u64 * 192)
             .saturating_add(self.blocked.len() as u64 * 32)
             .saturating_add(self.prepare_batch.len() as u64 * 32)
             .saturating_add(self.coord_seq.len() as u64 * 40)
             .saturating_add(self.findings.records.len() as u64 * 40)
             .saturating_add(u64::from(self.coverage_degraded))
             .saturating_add(self.missing_covered.iter().map(|p| p.len() as u64).sum())
+    }
+
+    /// Allocate the next Heap commit position while the exclusive store writer
+    /// is held. Allocation becomes authoritative only when its decision frame
+    /// is durably appended.
+    pub(crate) fn next_commit_position(&self) -> Result<u64, StoreError> {
+        let next = self.commit_next.max(1);
+        if self
+            .decisions
+            .values()
+            .filter_map(|decision| decision.commit_position)
+            .any(|position| position == next)
+        {
+            return Err(StoreError::AtomicStage(format!(
+                "duplicate Heap commit position {next}"
+            )));
+        }
+        Ok(next)
+    }
+
+    /// Reconstruct the high-water mark from authoritative admitted decisions.
+    pub(crate) fn reconstruct_commit_next(&mut self) {
+        self.commit_next = self
+            .decisions
+            .values()
+            .filter_map(|decision| decision.commit_position)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
     }
 
     /// Allocate or return the durable coordinator sequence for `atomic_id`.

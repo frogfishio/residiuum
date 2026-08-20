@@ -8,7 +8,8 @@
 
 use crate::atomic_stage_media::{decode_stage_sidecar, SidecarDecode, SidecarKind, StageCatalog};
 use residiuum_atomics::{
-    members_match_prepare, AtomicId, AtomicMember, AtomicPrepare, ChunkPlan, HeapId,
+    members_match_prepare, ordered_member_manifest_root, prepare_hash, AtomicDecision, AtomicId,
+    AtomicMember, AtomicPrepare, ChunkPlan, DecisionCode, HeapId,
 };
 use residiuum_format::{
     examine_atomic_frame, AtomicEvidenceClass, AtomicFrameRole, DecodedFrame, HoleReason,
@@ -33,6 +34,8 @@ pub enum StageEvidenceKind {
     ChunkPlan,
     /// ATCHK1 verified chunk body.
     ChunkBody,
+    /// Durable BatchCommit decision.
+    Decision,
     /// Verified frame that is not Atomic staging evidence.
     Other,
 }
@@ -144,11 +147,20 @@ pub fn ingest_classified_frame(
                 }
             }
             AtomicFrameRole::Commit => {
-                findings.push(
-                    StageEvidenceKind::Other,
-                    StageEvidenceClass::Unsupported,
-                    AtomicId::from_bytes(link.atomic_id).ok(),
-                );
+                if let Ok(decision) = residiuum_atomics::decode_decision(&frame.body) {
+                    admit_decision(
+                        catalog,
+                        bound_heap,
+                        link.heap_id,
+                        link.content_root,
+                        decision,
+                        findings,
+                    );
+                } else {
+                    let id = AtomicId::from_bytes(link.atomic_id).ok();
+                    block(catalog, id);
+                    findings.push(StageEvidenceKind::Decision, StageEvidenceClass::Corrupt, id);
+                }
             }
         },
         Some(AtomicEvidenceClass::Partial { linkage, .. }) => {
@@ -226,8 +238,125 @@ pub fn finalize_catalog(
                 );
             }
         }
+        if let Some(decision) = catalog.decisions.get(&id).cloned() {
+            let prepare_ok = prepare_hash(&prepare)
+                .ok()
+                .is_some_and(|hash| hash == decision.prepare_hash);
+            let root_ok = decision.member_root == prepare.ordered_member_manifest_root;
+            let count_ok = catalog
+                .intended_members
+                .get(&id)
+                .copied()
+                .is_some_and(|count| count == decision.member_count);
+            let committed_material_ok = decision.decision != DecisionCode::Committed
+                || (ordered_member_manifest_root(bound_heap, &members)
+                    .ok()
+                    .is_some_and(|root| root == decision.member_root)
+                    && usize::try_from(decision.member_count)
+                        .ok()
+                        .is_some_and(|count| count == members.len())
+                    && catalog.seals.get(&id) == Some(&prepare.content_root));
+            if !prepare_ok || !root_ok || !count_ok || !committed_material_ok {
+                catalog.blocked.insert(id);
+                findings.push(
+                    StageEvidenceKind::Decision,
+                    StageEvidenceClass::Conflict,
+                    Some(id),
+                );
+            }
+        }
     }
+    let mut positions = std::collections::BTreeMap::new();
+    for (id, decision) in &catalog.decisions {
+        if decision.decision != DecisionCode::Committed || catalog.blocked.contains(id) {
+            continue;
+        }
+        if let Some(position) = decision.commit_position {
+            if let Some(other) = positions.insert(position, *id) {
+                catalog.blocked.insert(other);
+                catalog.blocked.insert(*id);
+                findings.push(
+                    StageEvidenceKind::Decision,
+                    StageEvidenceClass::Conflict,
+                    Some(other),
+                );
+                findings.push(
+                    StageEvidenceKind::Decision,
+                    StageEvidenceClass::Conflict,
+                    Some(*id),
+                );
+            }
+        }
+    }
+    catalog.reconstruct_commit_next();
     sweep_orphans(catalog, findings);
+}
+
+fn admit_decision(
+    catalog: &mut StageCatalog,
+    bound_heap: HeapId,
+    envelope_heap: Option<[u8; 16]>,
+    envelope_content_root: [u8; 32],
+    decision: AtomicDecision,
+    findings: &mut StageFindings,
+) {
+    let id = decision.atomic_id;
+    if envelope_heap != Some(bound_heap.to_bytes()) {
+        findings.push(
+            StageEvidenceKind::Decision,
+            StageEvidenceClass::ForeignHeap,
+            Some(id),
+        );
+        return;
+    }
+    if catalog
+        .prepares
+        .get(&id)
+        .is_some_and(|prepare| prepare.content_root.to_bytes() != envelope_content_root)
+    {
+        catalog.blocked.insert(id);
+        findings.push(
+            StageEvidenceKind::Decision,
+            StageEvidenceClass::Conflict,
+            Some(id),
+        );
+        return;
+    }
+    if catalog.blocked.contains(&id) {
+        findings.push(
+            StageEvidenceKind::Decision,
+            StageEvidenceClass::Conflict,
+            Some(id),
+        );
+        return;
+    }
+    match catalog.decisions.get(&id) {
+        None => {
+            catalog
+                .intended_members
+                .entry(id)
+                .or_insert(decision.member_count);
+            catalog.decisions.insert(id, decision);
+            findings.push(
+                StageEvidenceKind::Decision,
+                StageEvidenceClass::Valid,
+                Some(id),
+            );
+        }
+        Some(existing) if existing == &decision => findings.push(
+            StageEvidenceKind::Decision,
+            StageEvidenceClass::Valid,
+            Some(id),
+        ),
+        Some(_) => {
+            catalog.blocked.insert(id);
+            findings.push(
+                StageEvidenceKind::Decision,
+                StageEvidenceClass::Conflict,
+                Some(id),
+            );
+        }
+    }
 }
 
 fn sweep_orphans(catalog: &mut StageCatalog, findings: &mut StageFindings) {
@@ -237,6 +366,7 @@ fn sweep_orphans(catalog: &mut StageCatalog, findings: &mut StageFindings) {
     orphans.extend(catalog.seals.keys().copied());
     orphans.extend(catalog.chunk_plans.keys().map(|(id, _)| *id));
     orphans.extend(catalog.chunks.keys().map(|(id, _, _)| *id));
+    orphans.extend(catalog.decisions.keys().copied());
     orphans.sort();
     orphans.dedup();
     for id in orphans {
@@ -278,6 +408,15 @@ fn sweep_orphans(catalog: &mut StageCatalog, findings: &mut StageFindings) {
             catalog.chunks.retain(|(oid, _, _), _| *oid != id);
             findings.push(
                 StageEvidenceKind::ChunkBody,
+                StageEvidenceClass::Corrupt,
+                Some(id),
+            );
+        }
+        // Retain an orphan decision as damaged lifetime evidence. In
+        // particular, never forget a named commit position and later reuse it.
+        if catalog.decisions.contains_key(&id) {
+            findings.push(
+                StageEvidenceKind::Decision,
                 StageEvidenceClass::Corrupt,
                 Some(id),
             );
@@ -635,6 +774,7 @@ pub(crate) fn encode_finding_kind(kind: StageEvidenceKind) -> u8 {
         StageEvidenceKind::Seal => 4,
         StageEvidenceKind::ChunkPlan => 5,
         StageEvidenceKind::ChunkBody => 6,
+        StageEvidenceKind::Decision => 9,
         StageEvidenceKind::Other => 7,
     }
 }
@@ -649,6 +789,7 @@ pub(crate) fn decode_finding_kind(byte: u8) -> Option<StageEvidenceKind> {
         4 => StageEvidenceKind::Seal,
         5 => StageEvidenceKind::ChunkPlan,
         6 => StageEvidenceKind::ChunkBody,
+        9 => StageEvidenceKind::Decision,
         7 => StageEvidenceKind::Other,
         _ => return None,
     })
@@ -681,6 +822,7 @@ fn kind_from_role(role: Option<AtomicFrameRole>) -> StageEvidenceKind {
     match role {
         Some(AtomicFrameRole::Prepare) => StageEvidenceKind::Prepare,
         Some(AtomicFrameRole::Member) => StageEvidenceKind::Member,
+        Some(AtomicFrameRole::Commit) => StageEvidenceKind::Decision,
         _ => StageEvidenceKind::Other,
     }
 }

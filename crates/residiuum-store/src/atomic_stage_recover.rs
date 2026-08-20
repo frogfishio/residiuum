@@ -17,8 +17,8 @@ use crate::atomic_stage_media::{decode_stage_sidecar, BodyRef, SidecarDecode, St
 use crate::error::StoreError;
 use crate::layout::StorePaths;
 use residiuum_atomics::{
-    decode_member, decode_prepare, encode_member, encode_prepare, AtomicId, ChunkPlan, ContentRoot,
-    HeapId,
+    decode_decision, decode_member, decode_prepare, encode_decision, encode_member, encode_prepare,
+    AtomicId, ChunkPlan, ContentRoot, HeapId,
 };
 use residiuum_format::{
     read_atomic_evidence, scan_forward, AtomicEvidenceClass, SafetyLimits, ScanRegion,
@@ -28,8 +28,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 10;
-const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V10";
+const CHECKPOINT_VERSION: u8 = 11;
+const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V11";
 const BLOCK_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-BLK-V1";
 /// Fixed leaf size for the covered-prefix block frontier (CR-ATMR6-001).
 const FRONTIER_BLOCK: u64 = 64 * 1024;
@@ -1335,6 +1335,14 @@ fn encode_checkpoint(
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(root.as_bytes());
     }
+    body.extend_from_slice(&(catalog.decisions.len() as u32).to_be_bytes());
+    for decision in catalog.decisions.values() {
+        let encoded =
+            encode_decision(decision).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        body.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+        body.extend_from_slice(&encoded);
+    }
+    body.extend_from_slice(&catalog.commit_next.to_be_bytes());
     body.extend_from_slice(&(catalog.blocked.len() as u32).to_be_bytes());
     for id in &catalog.blocked {
         body.extend_from_slice(id.as_bytes());
@@ -1517,6 +1525,23 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
         cur = &cur[64..];
         catalog.seals.insert(id, root);
     }
+    let n_decisions = read_u32(&mut cur)? as usize;
+    for _ in 0..n_decisions {
+        let n = read_u32(&mut cur)? as usize;
+        if cur.len() < n {
+            return None;
+        }
+        let decision = decode_decision(&cur[..n]).ok()?;
+        cur = &cur[n..];
+        if catalog
+            .decisions
+            .insert(decision.atomic_id, decision)
+            .is_some()
+        {
+            return None;
+        }
+    }
+    catalog.commit_next = read_u64(&mut cur)?;
     let n_blocked = read_u32(&mut cur)? as usize;
     for _ in 0..n_blocked {
         if cur.len() < 32 {
@@ -1678,7 +1703,7 @@ fn read_u64(cur: &mut &[u8]) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod checkpoint_v9_freeze {
+mod checkpoint_v11_freeze {
     use super::*;
     use crate::atomic_stage_media::{
         encode_stage_chunk_body, encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal,
@@ -1691,12 +1716,12 @@ mod checkpoint_v9_freeze {
     }
 
     #[test]
-    fn v9_empty_checkpoint_roundtrips() {
+    fn v11_empty_checkpoint_roundtrips() {
         let catalog = StageCatalog::default();
         let bytes = encode_checkpoint(&catalog, &[]).unwrap();
         assert!(bytes.starts_with(CHECKPOINT_MAGIC));
         assert_eq!(bytes[CHECKPOINT_MAGIC.len()], CHECKPOINT_VERSION);
-        let (decoded, covered) = decode_checkpoint(&bytes).expect("v9 empty");
+        let (decoded, covered) = decode_checkpoint(&bytes).expect("v11 empty");
         assert!(covered.is_empty());
         assert!(!decoded.has_outstanding_evidence());
     }
