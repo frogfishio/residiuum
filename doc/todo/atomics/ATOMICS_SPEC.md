@@ -377,6 +377,7 @@ AtomicPrepare {
     content_root
     frontier
     ordered_member_manifest_root
+    member_count
     read_set_root
     predicate_set_root
     active_rule_revision_root
@@ -421,6 +422,12 @@ AtomicDecision {
     abort_reason?
 }
 ```
+
+`member_count` is authoritative prepare evidence, not a derived checkpoint
+hint. Without it, a process death after the stable prepare but before the first
+member makes the exact recovery decision impossible to reconstruct. It MUST
+equal the closed manifest cardinality, including zero for assertion-only
+Atomics.
 
 Decision codes:
 

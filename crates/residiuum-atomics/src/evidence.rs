@@ -1,7 +1,7 @@
 //! Authoritative evidence and formal lifecycle phases (`ATOMICS_SPEC` §§9–11).
 //!
 //! These types are the semantic freeze. Persistent CBOR field numbers and
-//! codecs for prepare/member/decision/tombstone are ATM-0.7.
+//! codecs for prepare/member/decision/tombstone are ATM-0.8.
 //! No store append path lives here.
 
 use crate::id::{AtomicId, CollectionId, ContentRoot, HeapId, VersionId};
@@ -182,6 +182,9 @@ pub struct AtomicPrepare {
     pub frontier: [u8; 32],
     /// Ordered member manifest root.
     pub ordered_member_manifest_root: [u8; 32],
+    /// Exact intended member count. Required for deterministic recovery when
+    /// no member record survived beyond the durable prepare.
+    pub member_count: u32,
     /// Read-set root.
     pub read_set_root: [u8; 32],
     /// Predicate-set root.

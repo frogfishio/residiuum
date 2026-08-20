@@ -26,8 +26,9 @@ use residiuum_atomics::{
     ordered_member_manifest_root, plan_content_root, prepare_from_closed_plan, prepare_hash,
     validate_closed_plan, AtomicAbortReason, AtomicCohortOutcome, AtomicDecision, AtomicId,
     AtomicMember, AtomicMemberReceipt, AtomicOutcome, AtomicPlan, AtomicPrepare, AtomicReceipt,
-    AtomicRefuseReason, AtomicsError, ChunkPlan, CoordinatorSeq, DecisionCode, HeapId, MemberPhase,
-    MutationKind, ObjectIdentity, PlacementManifest, PredicateKind, StagingHeap, VersionId,
+    AtomicRefuseReason, AtomicStatus, AtomicsError, ChunkPlan, CoordinatorSeq, DecisionCode,
+    HeapId, LogicalStatus, MaterialStatus, MemberPhase, MutationKind, ObjectIdentity,
+    PlacementManifest, PredicateKind, StagingHeap, VersionId,
 };
 use residiuum_format::{
     encode_atomic_commit_envelope, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
@@ -167,13 +168,13 @@ impl Store {
         {
             return Ok(());
         }
-        let opened = if readonly {
+        let mut opened = if readonly {
             open_catalog_readonly(self.paths(), AtomicStageLimits::operable())?
         } else {
             open_catalog(self.paths(), AtomicStageLimits::operable())?
         };
-        self.record_atomic_stage_open(opened.report);
         if opened.catalog.coverage_degraded {
+            self.record_atomic_stage_open(opened.report);
             if opened
                 .catalog
                 .decisions
@@ -186,6 +187,16 @@ impl Store {
             }
             return Ok(());
         }
+
+        if !readonly {
+            opened.report.recovery_aborts = recover_prepared_without_decision(
+                self,
+                &mut opened.catalog,
+                &mut opened.covered,
+                AtomicStageLimits::operable(),
+            )?;
+        }
+        self.record_atomic_stage_open(opened.report);
 
         let mut committed: Vec<_> = opened
             .catalog
@@ -211,6 +222,62 @@ impl Store {
         }
         Ok(())
     }
+}
+
+/// Resolve every durably accepted prepare that has no terminal decision.
+///
+/// Recovery never resumes caller intent: the only deterministic outcome after
+/// process death is `not_committed/recovery_abort`. The append is authoritative;
+/// the checkpoint is refreshed once after the complete bounded pass.
+fn recover_prepared_without_decision(
+    store: &mut Store,
+    catalog: &mut StageCatalog,
+    covered: &mut Vec<CoveredFile>,
+    limits: AtomicStageLimits,
+) -> Result<u32, StoreError> {
+    let unresolved = catalog
+        .prepares
+        .iter()
+        .filter_map(|(atomic_id, prepare)| {
+            (!catalog.decisions.contains_key(atomic_id) && !catalog.blocked.contains(atomic_id))
+                .then_some((*atomic_id, prepare.clone()))
+        })
+        .collect::<Vec<_>>();
+    let mut resolved = 0u32;
+    for (atomic_id, prepare) in unresolved {
+        let intended = prepare.member_count;
+        let decision = AtomicDecision::not_committed(
+            atomic_id,
+            prepare_hash(&prepare).map_err(|error| StoreError::AtomicStage(error.to_string()))?,
+            prepare.ordered_member_manifest_root,
+            intended,
+            AtomicAbortReason::RecoveryAbort,
+        );
+        let body = encode_decision(&decision)
+            .map_err(|error| StoreError::AtomicStage(error.to_string()))?;
+        let envelope = encode_atomic_commit_envelope(
+            prepare.heap_id.as_bytes(),
+            atomic_id.as_bytes(),
+            prepare.content_root.as_bytes(),
+            None,
+        )
+        .map_err(|error| StoreError::AtomicStage(error.to_string()))?;
+        crate::failpoint::hit("store.atomic.recovery.before_decision")?;
+        store.append_unindexed_atomic_frame(
+            FrameKind::BatchCommit,
+            &envelope,
+            &body,
+            decision_event_id(atomic_id),
+        )?;
+        crate::failpoint::hit("store.atomic.recovery.after_decision")?;
+        catalog.evidence_heaps.insert(atomic_id, prepare.heap_id);
+        catalog.decisions.insert(atomic_id, decision);
+        resolved = resolved.saturating_add(1);
+    }
+    if resolved != 0 {
+        persist_live_checkpoint(store.paths(), catalog, covered, limits)?;
+    }
+    Ok(resolved)
 }
 
 impl StoreAtomicStage<'_> {
@@ -243,6 +310,95 @@ impl StoreAtomicStage<'_> {
             return crate::atomic_stage_status::project_atomic(&StageCatalog::default(), atomic_id);
         }
         crate::atomic_stage_status::project_atomic(&self.catalog, atomic_id)
+    }
+
+    /// ATM-4 logical/material status projection from authoritative evidence.
+    ///
+    /// `NotFound` is returned only with complete coverage. Damage never
+    /// guesses absence or a terminal decision.
+    #[doc(hidden)]
+    pub fn atomic_status(&self, atomic_id: AtomicId) -> Result<AtomicStatus, StoreError> {
+        if self.catalog.coverage_degraded {
+            return Ok(AtomicStatus::incomplete_coverage());
+        }
+        if self.catalog.evidence_heaps.get(&atomic_id).copied() != Some(self.heap.heap_id()) {
+            return Ok(AtomicStatus::not_found());
+        }
+        let projected = crate::atomic_stage_status::project_atomic(&self.catalog, atomic_id);
+        let content_root = self
+            .catalog
+            .prepares
+            .get(&atomic_id)
+            .map(|p| p.content_root);
+        let decision_conflict = self.findings.records.iter().any(|finding| {
+            finding.atomic_id == Some(atomic_id)
+                && finding.kind == StageEvidenceKind::Decision
+                && finding.class == StageEvidenceClass::Conflict
+        });
+        if decision_conflict {
+            return Ok(AtomicStatus {
+                logical: LogicalStatus::ConflictingDecisionEvidence,
+                material: MaterialStatus::Conflicting,
+                content_root,
+                receipt: None,
+            });
+        }
+        if projected.blocked {
+            return Ok(AtomicStatus {
+                logical: LogicalStatus::UnknownCommit,
+                material: MaterialStatus::Conflicting,
+                content_root,
+                receipt: None,
+            });
+        }
+        let Some(decision) = self.catalog.decisions.get(&atomic_id) else {
+            if self.catalog.prepares.contains_key(&atomic_id) {
+                let material = if projected.present_members == 0 && projected.intended_members != 0
+                {
+                    MaterialStatus::Missing
+                } else if projected.present_members == projected.intended_members
+                    && crate::atomic_stage_status::material_complete(&self.catalog, atomic_id)
+                {
+                    MaterialStatus::Complete
+                } else {
+                    MaterialStatus::Partial
+                };
+                return Ok(AtomicStatus {
+                    logical: LogicalStatus::UnknownCommit,
+                    material,
+                    content_root,
+                    receipt: None,
+                });
+            }
+            return Ok(AtomicStatus::not_found());
+        };
+        if decision.decision == DecisionCode::NotCommitted {
+            return Ok(AtomicStatus {
+                logical: LogicalStatus::NotCommitted,
+                material: MaterialStatus::Complete,
+                content_root,
+                receipt: None,
+            });
+        }
+        let complete = projected.present_members == projected.intended_members
+            && crate::atomic_stage_status::material_complete(&self.catalog, atomic_id)
+            && projected.sealed;
+        let material = if complete {
+            MaterialStatus::Complete
+        } else if projected.present_members == 0 {
+            MaterialStatus::Missing
+        } else {
+            MaterialStatus::Partial
+        };
+        let receipt = complete
+            .then(|| self.receipt_for_decision(atomic_id, decision, true))
+            .transpose()?;
+        Ok(AtomicStatus {
+            logical: LogicalStatus::Committed,
+            material,
+            content_root,
+            receipt,
+        })
     }
 
     /// Operator-only authenticated repair. Ordinary reopen and retry must not
@@ -570,12 +726,7 @@ impl StoreAtomicStage<'_> {
             .get(&atomic_id)
             .cloned()
             .unwrap_or_default();
-        let intended = self
-            .catalog
-            .intended_members
-            .get(&atomic_id)
-            .copied()
-            .unwrap_or(0);
+        let intended = prepare.member_count;
         if intended == 0
             || members.len() != intended as usize
             || !members_match_prepare(&prepare, &members)
@@ -712,12 +863,7 @@ impl StoreAtomicStage<'_> {
             .get(&atomic_id)
             .cloned()
             .ok_or_else(|| StoreError::AtomicStage("decision without prepare".into()))?;
-        let intended = self
-            .catalog
-            .intended_members
-            .get(&atomic_id)
-            .copied()
-            .ok_or_else(|| StoreError::AtomicStage("prepare member count missing".into()))?;
+        let intended = prepare.member_count;
         let decision = AtomicDecision::not_committed(
             atomic_id,
             prepare_hash(&prepare).map_err(|e| StoreError::AtomicStage(e.to_string()))?,
@@ -1007,15 +1153,27 @@ impl StoreAtomicStage<'_> {
             return decision.not_committed_outcome().map_err(StoreError::from);
         }
 
-        let prepare = self
-            .catalog
-            .prepares
-            .get(&plan.atomic_id())
-            .ok_or_else(|| StoreError::AtomicStage("committed receipt missing prepare".into()))?;
+        Ok(AtomicOutcome::Committed(self.receipt_for_decision(
+            plan.atomic_id(),
+            decision,
+            replayed,
+        )?))
+    }
+
+    fn receipt_for_decision(
+        &self,
+        atomic_id: AtomicId,
+        decision: &AtomicDecision,
+        replayed: bool,
+    ) -> Result<AtomicReceipt, StoreError> {
+        let prepare =
+            self.catalog.prepares.get(&atomic_id).ok_or_else(|| {
+                StoreError::AtomicStage("committed receipt missing prepare".into())
+            })?;
         let members = self
             .catalog
             .members
-            .get(&plan.atomic_id())
+            .get(&atomic_id)
             .ok_or_else(|| StoreError::AtomicStage("committed receipt missing members".into()))?
             .iter()
             .map(|member| AtomicMemberReceipt {
@@ -1030,8 +1188,8 @@ impl StoreAtomicStage<'_> {
         let commit_position = decision.commit_position.ok_or_else(|| {
             StoreError::AtomicStage("committed receipt missing commit position".into())
         })?;
-        Ok(AtomicOutcome::Committed(AtomicReceipt {
-            atomic_id: plan.atomic_id(),
+        Ok(AtomicReceipt {
+            atomic_id,
             heap_id: prepare.heap_id,
             content_root: prepare.content_root,
             commit_position,
@@ -1040,7 +1198,7 @@ impl StoreAtomicStage<'_> {
             decision_hash: decision_hash(decision)
                 .map_err(|error| StoreError::AtomicStage(error.to_string()))?,
             replayed,
-        }))
+        })
     }
 
     fn publish_decision(&mut self, atomic_id: AtomicId) -> Result<(), StoreError> {
@@ -1467,6 +1625,11 @@ impl StoreAtomicStage<'_> {
         intended_members: u32,
         mode: StagePersistMode,
     ) -> Result<(), StoreError> {
+        if prepare.member_count != intended_members {
+            return Err(StoreError::AtomicStage(
+                "prepare member count does not match the closed manifest".into(),
+            ));
+        }
         let _seq = self.catalog.assign_coord(prepare.atomic_id)?;
         let mut candidate = self.catalog.clone();
         candidate

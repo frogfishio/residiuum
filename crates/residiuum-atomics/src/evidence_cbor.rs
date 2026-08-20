@@ -29,6 +29,7 @@ const PREP_READ_SET_ROOT: u64 = 7;
 const PREP_PREDICATE_SET_ROOT: u64 = 8;
 const PREP_RULE_REV_ROOT: u64 = 9;
 const PREP_LIMITS: u64 = 10;
+const PREP_MEMBER_COUNT: u64 = 11;
 
 const MEM_ATOMIC_ID: u64 = 1;
 const MEM_ORDINAL: u64 = 2;
@@ -153,13 +154,17 @@ pub fn encode_prepare(prepare: &AtomicPrepare) -> Result<Vec<u8>, AtomicsError> 
             Value::Bytes(prepare.active_rule_revision_root.to_vec()),
         ),
         (PREP_LIMITS, Value::Map(encode_limits(prepare.limits))),
+        (
+            PREP_MEMBER_COUNT,
+            Value::Uint(u64::from(prepare.member_count)),
+        ),
     ])
 }
 
 /// Decode a prepare record. Unknown keys are refused.
 pub fn decode_prepare(bytes: &[u8]) -> Result<AtomicPrepare, AtomicsError> {
     let map = cbor::decode_map(bytes)?;
-    refuse_unknown_keys(&map, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10])?;
+    refuse_unknown_keys(&map, &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11])?;
     let scope =
         CoordinationScope::from_wire_code(require_u8(&map, PREP_SCOPE)?).ok_or_else(malformed)?;
     Ok(AtomicPrepare {
@@ -169,6 +174,7 @@ pub fn decode_prepare(bytes: &[u8]) -> Result<AtomicPrepare, AtomicsError> {
         content_root: ContentRoot::from_bytes(require_bstr32(&map, PREP_CONTENT_ROOT)?)?,
         frontier: require_bstr32(&map, PREP_FRONTIER)?,
         ordered_member_manifest_root: require_bstr32(&map, PREP_MANIFEST_ROOT)?,
+        member_count: require_u32(&map, PREP_MEMBER_COUNT)?,
         read_set_root: require_bstr32(&map, PREP_READ_SET_ROOT)?,
         predicate_set_root: require_bstr32(&map, PREP_PREDICATE_SET_ROOT)?,
         active_rule_revision_root: require_bstr32(&map, PREP_RULE_REV_ROOT)?,
@@ -478,6 +484,7 @@ mod tests {
             content_root: root(),
             frontier: [1u8; 32],
             ordered_member_manifest_root: [2u8; 32],
+            member_count: 1,
             read_set_root: [3u8; 32],
             predicate_set_root: [4u8; 32],
             active_rule_revision_root: [5u8; 32],

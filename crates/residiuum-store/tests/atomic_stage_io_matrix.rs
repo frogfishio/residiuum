@@ -234,7 +234,7 @@ fn fp_name(scenario: Scenario, boundary: Boundary) -> &'static str {
 }
 
 fn expected(scenario: Scenario, boundary: Boundary, mutant: Mutant) -> Expect {
-    match (scenario, boundary, mutant) {
+    let physical = match (scenario, boundary, mutant) {
         (Scenario::Prepare, Boundary::BeforeWrite, _) => Expect::absent(),
         (
             Scenario::Prepare,
@@ -320,7 +320,15 @@ fn expected(scenario: Scenario, boundary: Boundary, mutant: Mutant) -> Expect {
         (Scenario::Checkpoint, _, _) => Expect::staged(),
 
         (Scenario::Coordinator, _, _) => Expect::staged(),
+    };
+    recovered(physical)
+}
+
+fn recovered(mut physical: Expect) -> Expect {
+    if physical.class != AtomicStageClass::Absent {
+        physical.class = AtomicStageClass::NotCommitted;
     }
+    physical
 }
 
 fn assert_no_ordinary_leak(store: &Store) {
@@ -547,7 +555,7 @@ fn omit_sync_and_short_write_mutants_fail_semantically() {
     );
     assert_eq!(
         drive(Scenario::Prepare, Boundary::AfterFileSync, Mutant::Keep),
-        Expect::prepared(0, 0)
+        recovered(Expect::prepared(0, 0))
     );
     assert_eq!(
         drive(
@@ -555,11 +563,11 @@ fn omit_sync_and_short_write_mutants_fail_semantically() {
             Boundary::AfterFileSync,
             Mutant::OmitUnsyncedTail
         ),
-        Expect::prepared(1, 0)
+        recovered(Expect::prepared(1, 0))
     );
     assert_eq!(
         drive(Scenario::Payload, Boundary::AfterFileSync, Mutant::Keep),
-        Expect::staged()
+        recovered(Expect::staged())
     );
     assert_eq!(
         drive(
@@ -567,11 +575,11 @@ fn omit_sync_and_short_write_mutants_fail_semantically() {
             Boundary::AfterFileSync,
             Mutant::OmitUnsyncedTail
         ),
-        Expect::staged()
+        recovered(Expect::staged())
     );
     assert_eq!(
         drive(Scenario::Seal, Boundary::AfterFileSync, Mutant::Keep),
-        Expect::sealed()
+        recovered(Expect::sealed())
     );
     assert_eq!(
         drive(
@@ -579,7 +587,7 @@ fn omit_sync_and_short_write_mutants_fail_semantically() {
             Boundary::AfterCheckpoint,
             Mutant::OmitCheckpointPublish
         ),
-        Expect::sealed()
+        recovered(Expect::sealed())
     );
     assert_eq!(
         drive(
@@ -587,7 +595,7 @@ fn omit_sync_and_short_write_mutants_fail_semantically() {
             Boundary::AfterCheckpoint,
             Mutant::ShortWriteCheckpoint
         ),
-        Expect::staged()
+        recovered(Expect::staged())
     );
 }
 
@@ -599,7 +607,7 @@ fn payload_after_write_before_sync_omit_tail_is_prepared() {
             Boundary::AfterWrite,
             Mutant::OmitUnsyncedTail
         ),
-        Expect::prepared(1, 0)
+        recovered(Expect::prepared(1, 0))
     );
 }
 
@@ -651,7 +659,7 @@ fn member_frame_is_not_the_payload_sidecar() {
     );
     assert_eq!(
         drive(Scenario::Member, Boundary::AfterCheckpoint, Mutant::Keep),
-        Expect::prepared(1, 0)
+        recovered(Expect::prepared(1, 0))
     );
 }
 
@@ -683,5 +691,5 @@ fn subprocess_abort_matches_synced_prepare_projection() {
     assert!(!status.success(), "abort failpoint must kill child");
 
     let mut store = Store::open(&path).unwrap();
-    assert_eq!(classify(&mut store), Expect::prepared(0, 0));
+    assert_eq!(classify(&mut store), recovered(Expect::prepared(0, 0)));
 }

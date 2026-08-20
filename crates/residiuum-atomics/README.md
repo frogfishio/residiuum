@@ -17,7 +17,8 @@ ATM-0.4 is the hostile decoder corpus
 ([`spec/hostile-corpus.json`](spec/hostile-corpus.json)).
 ATM-0.5 is the serial in-memory oracle and shared history format.
 ATM-0.6 writes `target/atomics-evidence/atm-0/manifest.json` (semantic/byte freeze).
-ATM-0.7 freezes prepare/member/decision/tombstone codecs, member
+ATM-0.8 freezes prepare/member/decision/tombstone codecs, including the exact
+prepare member count required by dirty-open recovery, member
 `object_identity`, not-committed abort-reason preservation, and recursive
 canonical map validation ([`spec/evidence-vectors.json`](spec/evidence-vectors.json)).
 ATM-0.8 makes plan close order-independent for reads, predicates, mutations, and

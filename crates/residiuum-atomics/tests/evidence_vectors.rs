@@ -1,4 +1,4 @@
-//! ATM-0.7: durable evidence codecs, hashes, and hostile nested maps.
+//! ATM-0.8: durable evidence codecs, hashes, and hostile nested maps.
 
 use residiuum_atomics::{
     decision_hash, decode_decision, decode_member, decode_prepare, decode_tombstone,
@@ -155,6 +155,7 @@ fn member_identity_changes_manifest_root() {
         content_root: ContentRoot::from_bytes([7u8; 32]).unwrap(),
         frontier: [1u8; 32],
         ordered_member_manifest_root: a,
+        member_count: 1,
         read_set_root: [3u8; 32],
         predicate_set_root: [4u8; 32],
         active_rule_revision_root: [5u8; 32],

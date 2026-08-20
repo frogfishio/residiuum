@@ -42,6 +42,10 @@ pub fn prepare_from_closed_plan(
         content_root,
         frontier,
         ordered_member_manifest_root,
+        member_count: members
+            .len()
+            .try_into()
+            .map_err(|_| AtomicsError::Refused(AtomicRefuseReason::LimitExceeded))?,
         read_set_root: plan_read_set_root(plan)?,
         predicate_set_root: plan_predicate_set_root(plan)?,
         active_rule_revision_root: plan_rule_revision_root(plan),

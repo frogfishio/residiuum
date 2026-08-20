@@ -4,8 +4,9 @@
 
 use residiuum_atomics::{
     AtomicAbortReason, AtomicId, AtomicOutcome, AtomicPlan, AtomicPlanParts, AtomicProfile,
-    CanonicalKey, CollectionId, CoordinationScope, DecisionCode, HeapId, MutationKind,
-    PlanMutation, PlanPredicate, PredicateKind, ResourceLimits, VersionId,
+    CanonicalKey, CollectionId, CoordinationScope, DecisionCode, HeapId, LogicalStatus,
+    MaterialStatus, MutationKind, PlanMutation, PlanPredicate, PredicateKind, ResourceLimits,
+    VersionId,
 };
 use residiuum_format::{encode_subject_v2, SubjectObjectKind};
 use residiuum_store::{
@@ -654,7 +655,7 @@ fn overlapping_atomics_replay_in_heap_commit_order() {
 }
 
 #[test]
-fn order_witness_without_decision_never_publishes_and_retry_commits_once() {
+fn order_witness_without_decision_recovers_not_committed_and_never_reexecutes() {
     let _guard = test_guard();
     clear_failpoints();
     let dir = tempfile::tempdir().unwrap();
@@ -686,16 +687,19 @@ fn order_witness_without_decision_never_publishes_and_retry_commits_once() {
 
     let mut reopened = Store::open(&path).unwrap();
     assert_eq!(reopened.get_subject_bytes(&subject).unwrap(), None);
+    assert_eq!(reopened.open_report().atomic_stage_recovery_aborts, 1);
     let decision = reopened
         .atomic_stage_for_heap(heap)
         .unwrap()
         .decide_plan_evidence(&atomic_plan)
         .unwrap();
-    assert_eq!(decision.commit_position, Some(1));
+    assert_eq!(decision.decision, DecisionCode::NotCommitted);
+    assert_eq!(decision.commit_position, None);
     assert_eq!(
-        reopened.get_subject_bytes(&subject).unwrap(),
-        Some(b"committed".to_vec())
+        decision.abort_reason,
+        Some(AtomicAbortReason::RecoveryAbort)
     );
+    assert_eq!(reopened.get_subject_bytes(&subject).unwrap(), None);
 }
 
 #[test]
@@ -848,15 +852,26 @@ fn mandated_decision_publish_ack_crash_prefixes_have_only_legal_recovery_states(
             .unwrap()
             .decide_plan_evidence(&atomic_plan)
             .unwrap();
-        assert_eq!(replay.decision, DecisionCode::Committed);
-        assert_eq!(replay.commit_position, Some(1));
+        assert_eq!(
+            replay.decision,
+            if committed {
+                DecisionCode::Committed
+            } else {
+                DecisionCode::NotCommitted
+            }
+        );
+        assert_eq!(replay.commit_position, committed.then_some(1));
+        assert_eq!(
+            replay.abort_reason,
+            (!committed).then_some(AtomicAbortReason::RecoveryAbort)
+        );
         assert_eq!(
             reopened.get_subject_bytes(&left).unwrap(),
-            Some(b"L".to_vec())
+            committed.then(|| b"L".to_vec())
         );
         assert_eq!(
             reopened.get_subject_bytes(&right).unwrap(),
-            Some(b"R".to_vec())
+            committed.then(|| b"R".to_vec())
         );
     }
 }
@@ -1261,9 +1276,19 @@ fn atomic_cohort_crash_cuts_recover_only_legal_whole_decisions() {
             .unwrap()
             .decide_plan_cohort_outcomes(&plans)
             .unwrap();
-        assert!(retry
-            .iter()
-            .all(|outcome| matches!(outcome, Ok(AtomicOutcome::Committed(_)))));
+        assert!(retry.iter().all(|outcome| {
+            if committed {
+                matches!(outcome, Ok(AtomicOutcome::Committed(_)))
+            } else {
+                matches!(
+                    outcome,
+                    Ok(AtomicOutcome::NotCommitted {
+                        reason: AtomicAbortReason::RecoveryAbort,
+                        ..
+                    })
+                )
+            }
+        }));
     }
 }
 
@@ -1340,4 +1365,71 @@ fn decision_only_atomic_cohort_uses_one_boundary_and_no_positions() {
         panic!("later independent Atomic did not commit")
     };
     assert_eq!(receipt.commit_position, 1);
+}
+
+#[test]
+fn atomic_status_keeps_logical_and_material_truth_independent() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+
+    let missing = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .atomic_status(atomic(80))
+        .unwrap();
+    assert_eq!(missing.logical, LogicalStatus::NotFound);
+    assert_eq!(missing.material, MaterialStatus::Complete);
+    assert!(missing.receipt.is_none());
+
+    let committed_plan = plan(
+        heap,
+        atomic(81),
+        MutationKind::Create,
+        CanonicalKey::string("status-committed"),
+        Some(b"value"),
+        None,
+    );
+    store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_outcome(&committed_plan)
+        .unwrap();
+    let committed = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .atomic_status(atomic(81))
+        .unwrap();
+    assert_eq!(committed.logical, LogicalStatus::Committed);
+    assert_eq!(committed.material, MaterialStatus::Complete);
+    assert_eq!(committed.receipt.unwrap().commit_position, 1);
+
+    let occupied = CanonicalKey::string("status-occupied");
+    store
+        .put_subject_bytes(&subject(heap, &occupied), b"old", DurabilityMode::Durable)
+        .unwrap();
+    let rejected_plan = plan(
+        heap,
+        atomic(82),
+        MutationKind::Create,
+        occupied,
+        Some(b"new"),
+        None,
+    );
+    store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_outcome(&rejected_plan)
+        .unwrap();
+    let rejected = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .atomic_status(atomic(82))
+        .unwrap();
+    assert_eq!(rejected.logical, LogicalStatus::NotCommitted);
+    assert_eq!(rejected.material, MaterialStatus::Complete);
+    assert!(rejected.receipt.is_none());
 }

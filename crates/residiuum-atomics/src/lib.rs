@@ -3,7 +3,7 @@
 //! Pure crate: no file, network, thread, store, or SDK dependency. ATM-0.1
 //! freezes identity, scope, limits, vocabulary, outcomes, and formal lifecycle
 //! states. ATM-0.2 adds deterministic CBOR, content-root hashing, and
-//! canonical target order. ATM-0.7 freezes prepare/member/decision/tombstone
+//! canonical target order. ATM-0.8 freezes prepare/member/decision/tombstone
 //! codecs, member object identity, and not-committed abort-reason preservation.
 //! ATM-1.1 adds typed mutation/predicate encodings and closed-plan accounting.
 //! ATM-1.2 is the pure closed-plan validator shared with the serial oracle.

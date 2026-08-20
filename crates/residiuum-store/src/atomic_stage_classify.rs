@@ -191,6 +191,7 @@ pub fn finalize_catalog(catalog: &mut StageCatalog, findings: &mut StageFindings
         let Some(prepare) = catalog.prepares.get(&id).cloned() else {
             continue;
         };
+        catalog.intended_members.insert(id, prepare.member_count);
         let members = catalog.members.get(&id).cloned().unwrap_or_default();
         let terminal_not_committed = catalog
             .decisions
@@ -214,10 +215,7 @@ pub fn finalize_catalog(catalog: &mut StageCatalog, findings: &mut StageFindings
             // recovered member vector. This recovers the count when the
             // derived checkpoint was intentionally left behind by the
             // two-boundary whole-plan path.
-            catalog
-                .intended_members
-                .entry(id)
-                .or_insert(members.len() as u32);
+            catalog.intended_members.insert(id, prepare.member_count);
         }
         if let Some(root) = catalog.seals.get(&id).copied() {
             if root != prepare.content_root {
@@ -235,11 +233,7 @@ pub fn finalize_catalog(catalog: &mut StageCatalog, findings: &mut StageFindings
                 .ok()
                 .is_some_and(|hash| hash == decision.prepare_hash);
             let root_ok = decision.member_root == prepare.ordered_member_manifest_root;
-            let count_ok = catalog
-                .intended_members
-                .get(&id)
-                .copied()
-                .is_some_and(|count| count == decision.member_count);
+            let count_ok = prepare.member_count == decision.member_count;
             let committed_material_ok = decision.decision != DecisionCode::Committed
                 || (ordered_member_manifest_root(prepare.heap_id, &members)
                     .ok()

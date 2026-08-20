@@ -176,6 +176,8 @@ pub struct AtomicStageOpenReport {
     pub coverage_degraded: bool,
     /// Covered-prefix verification bytes (not charged against `max_scan_bytes`).
     pub bytes_verified: u64,
+    /// Accepted prepares deterministically closed as not committed on this open.
+    pub recovery_aborts: u32,
     /// Limits applied for this open (CR-ATMR6-004).
     pub limits: AtomicStageLimits,
 }

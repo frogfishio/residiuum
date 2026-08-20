@@ -1,4 +1,4 @@
-//! Write ATM-0.7 evidence vector fixtures. Run from repo root:
+//! Write ATM-0.8 evidence vector fixtures. Run from repo root:
 //! `cargo run -p residiuum-atomics --example dump_evidence`
 
 use residiuum_atomics::{
@@ -97,6 +97,7 @@ fn main() {
         content_root,
         frontier: [1u8; 32],
         ordered_member_manifest_root: manifest,
+        member_count: 1,
         read_set_root: [3u8; 32],
         predicate_set_root: [4u8; 32],
         active_rule_revision_root: [5u8; 32],

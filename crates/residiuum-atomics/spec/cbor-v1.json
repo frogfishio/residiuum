@@ -175,7 +175,8 @@
     "7": { "field": "read_set_root", "type": "bstr(32)", "required": true },
     "8": { "field": "predicate_set_root", "type": "bstr(32)", "required": true },
     "9": { "field": "active_rule_revision_root", "type": "bstr(32)", "required": true },
-    "10": { "field": "limits", "type": "map(limits_labels)", "required": true }
+    "10": { "field": "limits", "type": "map(limits_labels)", "required": true },
+    "11": { "field": "member_count", "type": "uint", "required": true, "rule": "exact intended count; required for deterministic dirty-open recovery" }
   },
   "member_labels": {
     "1": { "field": "atomic_id", "type": "bstr(32)", "required": true },

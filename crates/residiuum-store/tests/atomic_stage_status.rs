@@ -1,4 +1,4 @@
-//! CR-ATMR6-005: surviving prepare is not classified as absence.
+//! CR-ATMR6-005 / ATM-4: surviving prepare is terminally recovery-aborted.
 
 use residiuum_atomics::{
     AtomicId, AtomicMember, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CollectionId,
@@ -103,7 +103,7 @@ fn media_has_prepare(store: &Store) -> bool {
 }
 
 #[test]
-fn after_prepare_interrupt_is_prepared_not_absent() {
+fn after_prepare_interrupt_is_recovery_aborted_not_absent() {
     let _g = serial();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
@@ -127,13 +127,13 @@ fn after_prepare_interrupt_is_prepared_not_absent() {
     assert!(media_has_prepare(&store));
     let stage = store.atomic_stage().unwrap();
     let st = stage.examine(aid());
-    assert_eq!(st.class, AtomicStageClass::Prepared);
+    assert_eq!(st.class, AtomicStageClass::NotCommitted);
     assert_eq!(st.present_members, 0);
     assert!(stage.kernel().placement(aid()).is_none());
 }
 
 #[test]
-fn after_members_without_payload_is_still_prepared() {
+fn after_members_without_payload_is_recovery_aborted() {
     let _g = serial();
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::create(dir.path().join("s")).unwrap();
@@ -154,7 +154,7 @@ fn after_members_without_payload_is_still_prepared() {
     let mut store = Store::open(dir.path().join("s")).unwrap();
     let stage = store.atomic_stage().unwrap();
     let st = stage.examine(aid());
-    assert_eq!(st.class, AtomicStageClass::Prepared);
+    assert_eq!(st.class, AtomicStageClass::NotCommitted);
     assert_eq!(st.present_members, 2);
 }
 

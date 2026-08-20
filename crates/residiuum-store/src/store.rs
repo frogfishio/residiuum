@@ -835,6 +835,8 @@ pub struct StoreOpenMetrics {
     pub atomic_stage_files_tailed: u32,
     /// Atomics reconstructed into the Atomic-stage catalogue.
     pub atomic_stage_atomics: u32,
+    /// Accepted Atomics closed as not committed during dirty-open recovery.
+    pub atomic_stage_recovery_aborts: u32,
 }
 
 /// Structured startup report returned to applications after a successful open.
@@ -1595,6 +1597,19 @@ impl Store {
         // evidence. Reconstruct committed whole-delta generations only after
         // the decision catalogue and every referenced payload verify.
         store.recover_committed_atomic_publications()?;
+        // Atomic recovery records directly on the live Store because it also
+        // runs when a stage is opened later. Preserve that phase report when
+        // the surrounding startup accumulator is installed below.
+        open_metrics.atomic_stage_disposition = store.open_metrics.atomic_stage_disposition;
+        open_metrics.atomic_stage_bytes_scanned = store.open_metrics.atomic_stage_bytes_scanned;
+        open_metrics.atomic_stage_checkpoint_bytes =
+            store.open_metrics.atomic_stage_checkpoint_bytes;
+        open_metrics.atomic_stage_frames = store.open_metrics.atomic_stage_frames;
+        open_metrics.atomic_stage_dirents = store.open_metrics.atomic_stage_dirents;
+        open_metrics.atomic_stage_files_skipped = store.open_metrics.atomic_stage_files_skipped;
+        open_metrics.atomic_stage_files_tailed = store.open_metrics.atomic_stage_files_tailed;
+        open_metrics.atomic_stage_atomics = store.open_metrics.atomic_stage_atomics;
+        open_metrics.atomic_stage_recovery_aborts = store.open_metrics.atomic_stage_recovery_aborts;
         // Finish or cancel incomplete compaction jobs (DEF-024).
         let phase = Instant::now();
         let compaction_jobs = store.recover_compact_jobs()?;
@@ -2152,6 +2167,7 @@ impl Store {
         self.open_metrics.atomic_stage_files_skipped = report.files_skipped;
         self.open_metrics.atomic_stage_files_tailed = report.files_tailed;
         self.open_metrics.atomic_stage_atomics = report.atomics;
+        self.open_metrics.atomic_stage_recovery_aborts = report.recovery_aborts;
     }
 
     /// Number of live (non-deleted) subjects in the primary index.

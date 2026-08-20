@@ -62,11 +62,7 @@ pub fn project_atomic(catalog: &StageCatalog, atomic_id: AtomicId) -> AtomicStag
     let prepare = catalog.prepares.get(&atomic_id);
     let members = catalog.members.get(&atomic_id);
     let present_members = members.map(|ms| ms.len() as u32).unwrap_or(0);
-    let intended_members = catalog
-        .intended_members
-        .get(&atomic_id)
-        .copied()
-        .unwrap_or(present_members);
+    let intended_members = prepare.map(|p| p.member_count).unwrap_or(present_members);
     let present_payloads = unique_count(
         catalog.payloads.keys().filter(|(id, _)| *id == atomic_id),
         catalog
@@ -92,13 +88,7 @@ pub fn project_atomic(catalog: &StageCatalog, atomic_id: AtomicId) -> AtomicStag
         let ms = members.cloned().unwrap_or_default();
         intended_members > 0 && present_members >= intended_members && members_match_prepare(p, &ms)
     });
-    let material_complete = members.is_some_and(|ms| {
-        ms.iter().all(|m| {
-            catalog.has_payload(atomic_id, m.ordinal)
-                || catalog.payload_refs.contains_key(&(atomic_id, m.ordinal))
-                || chunk_complete(catalog, atomic_id, m.ordinal)
-        })
-    });
+    let material_complete = material_complete(catalog, atomic_id);
     let class = if blocked {
         AtomicStageClass::Blocked
     } else if decision.is_some_and(|d| d.decision == DecisionCode::Committed) {
@@ -128,6 +118,18 @@ pub fn project_atomic(catalog: &StageCatalog, atomic_id: AtomicId) -> AtomicStag
         blocked,
         coverage_degraded: catalog.coverage_degraded,
     }
+}
+
+pub(crate) fn material_complete(catalog: &StageCatalog, atomic_id: AtomicId) -> bool {
+    catalog.members.get(&atomic_id).is_some_and(|members| {
+        members.iter().all(|member| {
+            catalog.has_payload(atomic_id, member.ordinal)
+                || catalog
+                    .payload_refs
+                    .contains_key(&(atomic_id, member.ordinal))
+                || chunk_complete(catalog, atomic_id, member.ordinal)
+        })
+    })
 }
 
 fn chunk_complete(catalog: &StageCatalog, atomic_id: AtomicId, ordinal: u32) -> bool {

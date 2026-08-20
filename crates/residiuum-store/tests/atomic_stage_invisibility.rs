@@ -6,7 +6,9 @@ use residiuum_atomics::{
     PlanMutation, ResourceLimits, VersionId,
 };
 use residiuum_format::{read_atomic_evidence, AtomicEvidenceClass, AtomicFrameRole, SafetyLimits};
-use residiuum_store::{list_secondary_index_paths, DurabilityMode, Store, StoreError};
+use residiuum_store::{
+    list_secondary_index_paths, AtomicStageClass, DurabilityMode, Store, StoreError,
+};
 use std::fs;
 
 const FRONTIER: [u8; 32] = [0xA1; 32];
@@ -462,9 +464,13 @@ fn examination_and_rotation_keep_staged_invisible() {
     {
         let stage = store.atomic_stage().unwrap();
         assert!(stage.kernel().can_resolve(aid()));
+        assert_eq!(stage.examine(aid()).class, AtomicStageClass::NotCommitted);
     }
     let (roles, any_valid, any_commit) = collect_atomic_roles(&path);
     assert!(any_valid);
     assert!(roles.contains(&AtomicFrameRole::Prepare) || roles.contains(&AtomicFrameRole::Member));
-    assert!(!any_commit);
+    assert!(
+        any_commit,
+        "dirty-open recovery must write a terminal decision"
+    );
 }
