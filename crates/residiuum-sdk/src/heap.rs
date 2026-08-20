@@ -521,6 +521,15 @@ impl Heap {
         Ok(self.store.decide_atomic_plan_evidence(plan)?)
     }
 
+    /// Qualification-only ATM-3 outcome carrying exact per-member versions.
+    #[doc(hidden)]
+    pub fn decide_atomic_plan_outcome(
+        &self,
+        plan: &residiuum_atomics::AtomicPlan,
+    ) -> Result<residiuum_atomics::AtomicOutcome, Error> {
+        Ok(self.store.decide_atomic_plan_outcome(plan)?)
+    }
+
     /// Whether `other` is the same capability instance (pointer identity).
     pub fn same_capability(&self, other: &Heap) -> bool {
         self.cap.same_instance(&other.cap)

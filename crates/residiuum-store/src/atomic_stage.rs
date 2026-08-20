@@ -22,11 +22,12 @@ use crate::atomic_stage_recover::{
 use crate::error::StoreError;
 use crate::store::Store;
 use residiuum_atomics::{
-    encode_decision, encode_member, encode_prepare, members_match_prepare,
+    decision_hash, encode_decision, encode_member, encode_prepare, members_match_prepare,
     ordered_member_manifest_root, plan_content_root, prepare_from_closed_plan, prepare_hash,
-    AtomicAbortReason, AtomicDecision, AtomicId, AtomicMember, AtomicPlan, AtomicPrepare,
-    AtomicRefuseReason, AtomicsError, ChunkPlan, CoordinatorSeq, DecisionCode, HeapId, MemberPhase,
-    MutationKind, ObjectIdentity, PlacementManifest, PredicateKind, StagingHeap, VersionId,
+    AtomicAbortReason, AtomicDecision, AtomicId, AtomicMember, AtomicMemberReceipt, AtomicOutcome,
+    AtomicPlan, AtomicPrepare, AtomicReceipt, AtomicRefuseReason, AtomicsError, ChunkPlan,
+    CoordinatorSeq, DecisionCode, HeapId, MemberPhase, MutationKind, ObjectIdentity,
+    PlacementManifest, PredicateKind, StagingHeap, VersionId,
 };
 use residiuum_format::{
     encode_atomic_commit_envelope, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
@@ -762,6 +763,55 @@ impl StoreAtomicStage<'_> {
         // visible, but it has not crossed the caller acknowledgement boundary.
         crate::failpoint::hit("store.atomic.before_ack")?;
         Ok(decision)
+    }
+
+    /// ATM-3 qualification outcome with the frozen product receipt shape.
+    ///
+    /// This remains hidden until the full public admission/authority surface is
+    /// qualified, but it proves that a caller can retain exact CAS versions
+    /// without rereading every committed member.
+    #[doc(hidden)]
+    pub fn decide_plan_outcome(&mut self, plan: &AtomicPlan) -> Result<AtomicOutcome, StoreError> {
+        let replayed = self.catalog.decisions.contains_key(&plan.atomic_id());
+        let decision = self.decide_plan_evidence(plan)?;
+        if decision.decision == DecisionCode::NotCommitted {
+            return decision.not_committed_outcome().map_err(StoreError::from);
+        }
+
+        let prepare = self
+            .catalog
+            .prepares
+            .get(&plan.atomic_id())
+            .ok_or_else(|| StoreError::AtomicStage("committed receipt missing prepare".into()))?;
+        let members = self
+            .catalog
+            .members
+            .get(&plan.atomic_id())
+            .ok_or_else(|| StoreError::AtomicStage("committed receipt missing members".into()))?
+            .iter()
+            .map(|member| AtomicMemberReceipt {
+                collection_id: member.object_identity.collection_id,
+                key: member.object_identity.key.identity_bytes(),
+                before_version: member.before_version,
+                after_version: (member.member_kind != MutationKind::Delete)
+                    .then_some(member.event_id),
+                event_id: member.event_id,
+            })
+            .collect();
+        let commit_position = decision.commit_position.ok_or_else(|| {
+            StoreError::AtomicStage("committed receipt missing commit position".into())
+        })?;
+        Ok(AtomicOutcome::Committed(AtomicReceipt {
+            atomic_id: decision.atomic_id,
+            heap_id: prepare.heap_id,
+            content_root: prepare.content_root,
+            commit_position,
+            durability: decision.durability,
+            members,
+            decision_hash: decision_hash(&decision)
+                .map_err(|error| StoreError::AtomicStage(error.to_string()))?,
+            replayed,
+        }))
     }
 
     fn publish_decision(&mut self, atomic_id: AtomicId) -> Result<(), StoreError> {

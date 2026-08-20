@@ -1,7 +1,7 @@
 //! ATM-3D: real embedded SDK/RQL readers bind one guarded collection page.
 
 use residiuum_atomics::{
-    AtomicId, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey,
+    AtomicId, AtomicOutcome, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey,
     CollectionId as AtomicCollectionId, CoordinationScope, HeapId as AtomicHeapId, MutationKind,
     PlanMutation, ResourceLimits, VersionId,
 };
@@ -165,7 +165,28 @@ fn concurrent_rql_never_mixes_before_and_after_members() {
         limits: ResourceLimits::hard_local_heap(),
     })
     .unwrap();
-    client.decide_atomic_plan_evidence(&plan).unwrap();
+    let outcome = client.decide_atomic_plan_outcome(&plan).unwrap();
+    let AtomicOutcome::Committed(receipt) = outcome else {
+        panic!("valid SDK Atomic did not commit")
+    };
+    assert!(!receipt.replayed);
+    assert_eq!(receipt.members.len(), 2);
+    assert_eq!(
+        receipt.members[0].before_version.unwrap().as_bytes(),
+        &left.version
+    );
+    assert_eq!(
+        receipt.members[0].after_version,
+        Some(receipt.members[0].event_id)
+    );
+    assert_eq!(
+        receipt.members[1].before_version.unwrap().as_bytes(),
+        &right.version
+    );
+    assert_eq!(
+        receipt.members[1].after_version,
+        Some(receipt.members[1].event_id)
+    );
     committed.wait();
 
     for join in joins {

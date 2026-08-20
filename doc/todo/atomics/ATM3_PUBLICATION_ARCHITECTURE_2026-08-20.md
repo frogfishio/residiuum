@@ -194,8 +194,11 @@ ATM-3 is not yet accepted. The remaining delivery delta is explicit:
 2. integrate Heap lifecycle/authority mutations and predicates into the same
    serial frontier (until then `HeapAuthorityRevision` fails closed as
    `RuleRejected` rather than being silently accepted);
-3. expose and qualify the exact committed/not-committed receipt shape, including
-   per-member before/after versions, without enabling the public capability;
+3. ~~expose and qualify the exact committed/not-committed receipt shape, including
+   per-member before/after versions, without enabling the public capability~~.
+   The hidden Store/Heap/SDK qualification path now returns the frozen
+   `AtomicOutcome`: exact before/after versions, event IDs, decision hash,
+   durability, commit position and replay identity are proven through restart;
 4. finish maximum-plan resource measurement and update the ATM-3 evidence
    assembler. The publication algorithm itself is now O(member count), and
    existing hard admission ceilings remain enforced before media append.

@@ -566,6 +566,23 @@ impl HeapClient {
         }
     }
 
+    /// Qualification-only ATM-3 outcome carrying exact per-member versions.
+    #[doc(hidden)]
+    pub fn decide_atomic_plan_outcome(
+        &self,
+        plan: &residiuum_atomics::AtomicPlan,
+    ) -> Result<residiuum_atomics::AtomicOutcome, Error> {
+        match &self.backend {
+            HeapBackend::Embedded(heap) => heap.decide_atomic_plan_outcome(plan),
+            HeapBackend::Remote(_) => Err(Error::RemoteUnsupported(
+                "Atomic qualification outcome (embedded only)",
+            )),
+            HeapBackend::Unbound => Err(Error::Internal(
+                "HeapClient unbound; Atomic qualification outcome unavailable".into(),
+            )),
+        }
+    }
+
     /// Open a stable bounded read view (APB-6).
     ///
     /// **Embedded:** pins `authoritative_frontier` to the store segment

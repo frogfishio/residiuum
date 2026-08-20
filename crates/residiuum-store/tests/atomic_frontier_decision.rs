@@ -3,9 +3,9 @@
 #![cfg(feature = "legacy-raw-store")]
 
 use residiuum_atomics::{
-    AtomicAbortReason, AtomicId, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey,
-    CollectionId, CoordinationScope, DecisionCode, HeapId, MutationKind, PlanMutation,
-    PlanPredicate, PredicateKind, ResourceLimits, VersionId,
+    AtomicAbortReason, AtomicId, AtomicOutcome, AtomicPlan, AtomicPlanParts, AtomicProfile,
+    CanonicalKey, CollectionId, CoordinationScope, DecisionCode, HeapId, MutationKind,
+    PlanMutation, PlanPredicate, PredicateKind, ResourceLimits, VersionId,
 };
 use residiuum_format::{encode_subject_v2, SubjectObjectKind};
 use residiuum_store::{
@@ -278,6 +278,17 @@ fn unbound_heap_authority_predicate_fails_closed_and_replays_after_restart() {
         assert_eq!(original.commit_position, None);
         assert_eq!(original.abort_reason, Some(AtomicAbortReason::RuleRejected));
         assert_eq!(store.get_subject_bytes(&subject(heap, &key)).unwrap(), None);
+        assert_eq!(
+            store
+                .atomic_stage_for_heap(heap)
+                .unwrap()
+                .decide_plan_outcome(&atomic_plan)
+                .unwrap(),
+            AtomicOutcome::NotCommitted {
+                atomic_id,
+                reason: AtomicAbortReason::RuleRejected,
+            }
+        );
         (heap, atomic_plan, original)
     };
 
@@ -329,6 +340,124 @@ fn two_member_commit_is_visible_as_one_generation_and_survives_restart() {
         reopened.get_subject_bytes(&right).unwrap(),
         Some(b"R".to_vec())
     );
+}
+
+#[test]
+fn committed_outcome_reports_exact_member_versions_and_replay_identity() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let key_a = CanonicalKey::string("a");
+    let key_b = CanonicalKey::string("b");
+    let key_c = CanonicalKey::string("c");
+    let before_a = store
+        .put_subject_bytes(&subject(heap, &key_a), b"old-a", DurabilityMode::Durable)
+        .unwrap();
+    let before_b = store
+        .put_subject_bytes(&subject(heap, &key_b), b"old-b", DurabilityMode::Durable)
+        .unwrap();
+    let atomic_plan = AtomicPlan::close(AtomicPlanParts {
+        profile: AtomicProfile::LocalHeapV1,
+        atomic_id: atomic(32),
+        heap_id: heap,
+        scope: CoordinationScope::LocalHeap,
+        read_frontier: None,
+        reads: vec![],
+        predicates: vec![],
+        mutations: vec![
+            PlanMutation {
+                kind: MutationKind::Replace,
+                collection_id: collection(),
+                key: key_a.clone(),
+                encoded_value: Some(b"new-a".to_vec()),
+                if_version: Some(VersionId::from_bytes(before_a.event_id).unwrap()),
+            },
+            PlanMutation {
+                kind: MutationKind::Delete,
+                collection_id: collection(),
+                key: key_b.clone(),
+                encoded_value: None,
+                if_version: Some(VersionId::from_bytes(before_b.event_id).unwrap()),
+            },
+            PlanMutation {
+                kind: MutationKind::Create,
+                collection_id: collection(),
+                key: key_c.clone(),
+                encoded_value: Some(b"new-c".to_vec()),
+                if_version: None,
+            },
+        ],
+        active_rule_revisions: vec![],
+        limits: ResourceLimits::hard_local_heap(),
+    })
+    .unwrap();
+
+    let first = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_outcome(&atomic_plan)
+        .unwrap();
+    let AtomicOutcome::Committed(first_receipt) = first else {
+        panic!("valid plan did not commit")
+    };
+    assert!(!first_receipt.replayed);
+    assert_eq!(first_receipt.commit_position, 1);
+    assert_eq!(first_receipt.members.len(), 3);
+    assert!(first_receipt
+        .members
+        .windows(2)
+        .all(|pair| pair[0].key < pair[1].key));
+    let member = |key: &CanonicalKey| {
+        first_receipt
+            .members
+            .iter()
+            .find(|member| member.key == key.identity_bytes())
+            .unwrap()
+    };
+    let receipt_a = member(&key_a);
+    assert_eq!(
+        receipt_a.before_version.unwrap().as_bytes(),
+        &before_a.event_id
+    );
+    assert_eq!(receipt_a.after_version, Some(receipt_a.event_id));
+    let receipt_b = member(&key_b);
+    assert_eq!(
+        receipt_b.before_version.unwrap().as_bytes(),
+        &before_b.event_id
+    );
+    assert_eq!(receipt_b.after_version, None);
+    let receipt_c = member(&key_c);
+    assert_eq!(receipt_c.before_version, None);
+    assert_eq!(receipt_c.after_version, Some(receipt_c.event_id));
+    assert_eq!(
+        store.get_subject_bytes(&subject(heap, &key_a)).unwrap(),
+        Some(b"new-a".to_vec())
+    );
+    assert_eq!(
+        store.get_subject_bytes(&subject(heap, &key_b)).unwrap(),
+        None
+    );
+    assert_eq!(
+        store.get_subject_bytes(&subject(heap, &key_c)).unwrap(),
+        Some(b"new-c".to_vec())
+    );
+    drop(store);
+
+    let mut reopened = Store::open(&path).unwrap();
+    let replay = reopened
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_outcome(&atomic_plan)
+        .unwrap();
+    let AtomicOutcome::Committed(mut replay_receipt) = replay else {
+        panic!("exact retry did not replay committed outcome")
+    };
+    assert!(replay_receipt.replayed);
+    replay_receipt.replayed = false;
+    assert_eq!(replay_receipt, first_receipt);
 }
 
 #[test]
