@@ -8,8 +8,8 @@
 # Writes commit-scoped run records under target/atomics-evidence/runs/
 # <commit12>-<profile>.json plus a detached .sha256 sidecar (CR-R2-007).
 # Labels are package-specific (CR-ATMR4-010). A clean full matrix may make a
-# completed package an acceptance candidate. ATM-3 remains partial while its
-# lifecycle/authority-frontier deliverable is open.
+# completed package an acceptance candidate. Public atomics remain disabled;
+# capability-safe product exposure belongs to ATM-5.
 # Run-level label is the worst package label.
 # Dirty or failing runs are diagnostic. Capabilities::atomics must stay false.
 set -euo pipefail
@@ -426,9 +426,7 @@ if profile == "full":
     if not cmd_passed(cmds, "rustfmt --check crates/residiuum-store/src/atomic_stage.rs"):
         atm2_blockers.append("missing scoped store Atomic staging rustfmt --check")
 
-atm3_blockers = [
-    "Heap lifecycle/authority mutations and authority predicates are not yet integrated into the universal serialization frontier",
-]
+atm3_blockers = []
 if not cmd_passed(cmds, "atomic_frontier_decision"):
     atm3_blockers.append("missing store ATM-3 publication/crash/receipt/resource suite")
 if not cmd_passed(cmds, "atomic_rql_generation"):
@@ -511,7 +509,7 @@ run = {
         "Package-specific (CR-ATMR4-010). diagnostic = dirty or failing; "
         "ATM-1 acceptance_candidate = clean full ENC/ORA/AUT/RES + format all-targets; "
         "ATM-2 acceptance_candidate = clean full store/lane matrix; "
-        "ATM-3 stays partial while lifecycle/authority integration remains; "
+        "ATM-3 acceptance_candidate = clean publication/RQL frontier suites; "
         "run-level label is the worst of the three packages. "
         "Run payload is hashed in a sidecar; this file never contains its own digest."
     ),
@@ -689,6 +687,8 @@ atm3 = merge_pack(out / "atm-3" / "manifest.json", {
         "exact committed/not-committed outcomes and per-member CAS versions",
         "serial independent-outcome cohorts sharing one member and one decision boundary",
         "maximum 256-caller-member execution plus one-over pre-media refusal",
+        "Heap authority/lifecycle snapshot replacement and durable Atomic decisions share one serialization frontier",
+        "capability-bound HeapAuthorityRevision validation with raw-Store fail-closed behavior",
     ],
     "negative_controls": [
         n["name"] for n in executed_negatives if n["name"].startswith("executed:")

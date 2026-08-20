@@ -306,12 +306,20 @@ impl HeapStore {
                 "Atomic plan Heap does not match bound capability".into(),
             ));
         }
+        let slot = Arc::clone(self.cap.slot());
+        let _authority_guard = slot.lock_authority_frontier().map_err(|_| {
+            StoreError::HeapCapability("Heap authority frontier lock poisoned".into())
+        })?;
+        // The first gate is only an early rejection. This second check and the
+        // sampled revision are protected until the durable decision is stable.
+        self.gate()?;
+        let authority_revision = slot.load().atomic_authority_revision();
         let mut guard = self
             .physical
             .lock()
             .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
         guard
-            .atomic_stage_for_heap(atomic_heap)?
+            .atomic_stage_for_heap_with_authority(atomic_heap, authority_revision)?
             .decide_plan_evidence(plan)
     }
 
@@ -330,12 +338,18 @@ impl HeapStore {
                 "Atomic plan Heap does not match bound capability".into(),
             ));
         }
+        let slot = Arc::clone(self.cap.slot());
+        let _authority_guard = slot.lock_authority_frontier().map_err(|_| {
+            StoreError::HeapCapability("Heap authority frontier lock poisoned".into())
+        })?;
+        self.gate()?;
+        let authority_revision = slot.load().atomic_authority_revision();
         let mut guard = self
             .physical
             .lock()
             .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
         guard
-            .atomic_stage_for_heap(atomic_heap)?
+            .atomic_stage_for_heap_with_authority(atomic_heap, authority_revision)?
             .decide_plan_outcome(plan)
     }
 
@@ -350,12 +364,18 @@ impl HeapStore {
         self.require_right(Rights::WRITE)?;
         let atomic_heap = residiuum_atomics::HeapId::from_bytes(*self.cap.heap_id().as_bytes())
             .map_err(|error| StoreError::HeapCapability(error.to_string()))?;
+        let slot = Arc::clone(self.cap.slot());
+        let _authority_guard = slot.lock_authority_frontier().map_err(|_| {
+            StoreError::HeapCapability("Heap authority frontier lock poisoned".into())
+        })?;
+        self.gate()?;
+        let authority_revision = slot.load().atomic_authority_revision();
         let mut guard = self
             .physical
             .lock()
             .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
         guard
-            .atomic_stage_for_heap(atomic_heap)?
+            .atomic_stage_for_heap_with_authority(atomic_heap, authority_revision)?
             .decide_plan_cohort_outcomes(plans)
     }
 

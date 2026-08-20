@@ -46,6 +46,9 @@ pub struct StoreAtomicStage<'a> {
     report: AtomicStageOpenReport,
     findings: StageFindings,
     limits: AtomicStageLimits,
+    /// Authority revision sampled while the owning Heap frontier is locked.
+    /// Raw Store callers intentionally have no trusted authority binding.
+    authority_revision: Option<[u8; 32]>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -88,11 +91,35 @@ impl Store {
         self.atomic_stage_for_heap_with_limits(heap_id, AtomicStageLimits::operable())
     }
 
+    /// Open a Heap-bound stage with authority sampled under the caller-held
+    /// Heap authority frontier. This is the only path allowed to satisfy a
+    /// `HeapAuthorityRevision` predicate.
+    pub(crate) fn atomic_stage_for_heap_with_authority(
+        &mut self,
+        heap_id: HeapId,
+        authority_revision: [u8; 32],
+    ) -> Result<StoreAtomicStage<'_>, StoreError> {
+        self.atomic_stage_for_heap_with_limits_and_authority(
+            heap_id,
+            AtomicStageLimits::operable(),
+            Some(authority_revision),
+        )
+    }
+
     /// Named-Heap Atomic stage with explicit operable/test limits.
     pub fn atomic_stage_for_heap_with_limits(
         &mut self,
         heap_id: HeapId,
         limits: AtomicStageLimits,
+    ) -> Result<StoreAtomicStage<'_>, StoreError> {
+        self.atomic_stage_for_heap_with_limits_and_authority(heap_id, limits, None)
+    }
+
+    fn atomic_stage_for_heap_with_limits_and_authority(
+        &mut self,
+        heap_id: HeapId,
+        limits: AtomicStageLimits,
+        authority_revision: Option<[u8; 32]>,
     ) -> Result<StoreAtomicStage<'_>, StoreError> {
         if !self.holds_writer_lock() {
             return Err(StoreError::AtomicStage(
@@ -110,6 +137,7 @@ impl Store {
             report: opened.report,
             findings: opened.findings,
             limits,
+            authority_revision,
         })
     }
 
@@ -1135,10 +1163,17 @@ impl StoreAtomicStage<'_> {
         }
         for predicate in plan.predicates() {
             if predicate.kind == PredicateKind::HeapAuthorityRevision {
-                // Heap authority state is not yet bound into the Store's
-                // universal publication frontier. Silently accepting this
-                // predicate would claim validation that never happened.
-                return Ok(Some(AtomicAbortReason::RuleRejected));
+                let Some(encoded) = predicate.encoded.as_deref() else {
+                    return Ok(Some(AtomicAbortReason::RuleRejected));
+                };
+                let Some(current) = self.authority_revision else {
+                    // A raw Store has no trusted Heap authority context.
+                    return Ok(Some(AtomicAbortReason::RuleRejected));
+                };
+                if encoded != current {
+                    return Ok(Some(AtomicAbortReason::PreconditionConflict));
+                }
+                continue;
             }
             if !predicate.kind.is_public_builder_assert() {
                 return Ok(Some(AtomicAbortReason::RuleRejected));

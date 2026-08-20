@@ -75,6 +75,8 @@ pub use qualification::{
 };
 pub use rights::{Operation, OperationStatus, Rights};
 pub use security_time::{SecurityTimeFloor, TimeDecision, TrustedInstant};
+#[doc(hidden)]
+pub use snapshot::{AuthorityFrontierPoisoned, HeapAuthorityGuard};
 pub use snapshot::{HeapAdministrativeState, HeapSecuritySnapshot, HeapSlot};
 pub use wire::{
     AUDIENCE_DATA_V1, CERT_MAX_LIFETIME_S, CONTENT_TYPE_CERTIFICATE, CONTENT_TYPE_HOLDER_PROOF,

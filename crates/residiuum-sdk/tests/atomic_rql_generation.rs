@@ -1,9 +1,9 @@
 //! ATM-3D: real embedded SDK/RQL readers bind one guarded collection page.
 
 use residiuum_atomics::{
-    AtomicId, AtomicOutcome, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey,
-    CollectionId as AtomicCollectionId, CoordinationScope, HeapId as AtomicHeapId, MutationKind,
-    PlanMutation, ResourceLimits, VersionId,
+    AtomicAbortReason, AtomicId, AtomicOutcome, AtomicPlan, AtomicPlanParts, AtomicProfile,
+    CanonicalKey, CollectionId as AtomicCollectionId, CoordinationScope, HeapId as AtomicHeapId,
+    MutationKind, PlanMutation, PlanPredicate, PredicateKind, ResourceLimits, VersionId,
 };
 use residiuum_heap::{
     mint_capability, AuthorityEpoch, AuthorityGeneration, CertificateId, Constraints, DeploymentId,
@@ -73,7 +73,9 @@ fn concurrent_rql_never_mixes_before_and_after_members() {
     )
     .unwrap();
     publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
-    let mut client = HeapClient::from(deployment.open_heap(mint_cap_for(heap_id, deployment_id)));
+    let cap = mint_cap_for(heap_id, deployment_id);
+    let authority_revision = cap.slot().load().atomic_authority_revision();
+    let mut client = HeapClient::from(deployment.open_heap(cap));
     let mut collection = client.create_collection("docs").unwrap().collection;
     let collection_id = collection.id();
     let left = collection
@@ -144,7 +146,13 @@ fn concurrent_rql_never_mixes_before_and_after_members() {
         scope: CoordinationScope::LocalHeap,
         read_frontier: None,
         reads: vec![],
-        predicates: vec![],
+        predicates: vec![PlanPredicate {
+            kind: PredicateKind::HeapAuthorityRevision,
+            collection_id: None,
+            key: None,
+            version: None,
+            encoded: Some(authority_revision.to_vec()),
+        }],
         mutations: vec![
             PlanMutation {
                 kind: MutationKind::Replace,
@@ -203,7 +211,13 @@ fn concurrent_rql_never_mixes_before_and_after_members() {
             scope: CoordinationScope::LocalHeap,
             read_frontier: None,
             reads: vec![],
-            predicates: vec![],
+            predicates: vec![PlanPredicate {
+                kind: PredicateKind::HeapAuthorityRevision,
+                collection_id: None,
+                key: None,
+                version: None,
+                encoded: Some(authority_revision.to_vec()),
+            }],
             mutations: vec![PlanMutation {
                 kind: MutationKind::Replace,
                 collection_id: atomic_collection,
@@ -287,4 +301,43 @@ fn concurrent_rql_never_mixes_before_and_after_members() {
             .collect::<Vec<_>>(),
         vec![2, 2]
     );
+
+    // A structurally valid plan carrying any authority generation other than
+    // the snapshot protected by the Heap frontier receives a durable conflict
+    // and cannot publish its member.
+    let mut stale_id = [0; 32];
+    stale_id[0] = 4;
+    let stale_plan = AtomicPlan::close(AtomicPlanParts {
+        profile: AtomicProfile::LocalHeapV1,
+        atomic_id: AtomicId::from_bytes(stale_id).unwrap(),
+        heap_id: atomic_heap,
+        scope: CoordinationScope::LocalHeap,
+        read_frontier: None,
+        reads: vec![],
+        predicates: vec![PlanPredicate {
+            kind: PredicateKind::HeapAuthorityRevision,
+            collection_id: None,
+            key: None,
+            version: None,
+            encoded: Some([0xabu8; 32].to_vec()),
+        }],
+        mutations: vec![PlanMutation {
+            kind: MutationKind::Create,
+            collection_id: atomic_collection,
+            key: CanonicalKey::string("stale-authority"),
+            encoded_value: Some(encode_json(&serde_json::json!({"n": 3})).unwrap()),
+            if_version: None,
+        }],
+        active_rule_revisions: vec![],
+        limits: ResourceLimits::hard_local_heap(),
+    })
+    .unwrap();
+    assert!(matches!(
+        client.decide_atomic_plan_outcome(&stale_plan).unwrap(),
+        AtomicOutcome::NotCommitted {
+            reason: AtomicAbortReason::PreconditionConflict,
+            ..
+        }
+    ));
+    assert_eq!(collection.get("stale-authority").unwrap(), None);
 }

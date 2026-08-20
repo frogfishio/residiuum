@@ -1672,15 +1672,22 @@ impl HeapLifecycle {
         operation_id: [u8; 16],
         op: &str,
     ) -> Result<(), StoreError> {
-        let mut next = (*self.slot.load()).clone();
+        let authority_guard = self
+            .slot
+            .lock_authority_frontier()
+            .map_err(|_| StoreError::HeapAdmit("Heap authority frontier lock poisoned".into()))?;
+        let mut next = (*authority_guard.load()).clone();
         let prev_rev = next.security_revision.get();
         next.administrative_state = to;
         next.security_revision = SecurityRevision::new(prev_rev + 1)
             .map_err(|e| StoreError::HeapAdmit(e.to_string()))?;
-        self.slot.store(next);
+        authority_guard.store(next);
         failpoint::hit("heap_lifecycle.after_state_store")?;
         self.persist_transition_receipt(operation_id, op, to)?;
         failpoint::hit("heap_lifecycle.after_transition_receipt")?;
+        // The transition receipt is durable before an Atomic may validate
+        // against the new authority/lifecycle generation.
+        drop(authority_guard);
         Ok(())
     }
 

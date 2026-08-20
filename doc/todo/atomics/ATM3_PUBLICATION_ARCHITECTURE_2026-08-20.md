@@ -198,13 +198,19 @@ generation binding is green on the real embedded façade. Whole-plan I/O has an
 executable invariant: one- and 256-member commits both complete with exactly
 two authoritative syncs, proving sync count is independent of member count.
 
-ATM-3 is not yet accepted. The remaining delivery delta is explicit:
+ATM-3 implementation is complete. The delivery ledger is explicit:
 
 1. ~~implement grouped independent outcomes that can share the two physical
    boundaries without sharing validation, decision, or acknowledgement~~;
-2. integrate Heap lifecycle/authority mutations and predicates into the same
-   serial frontier (until then `HeapAuthorityRevision` fails closed as
-   `RuleRejected` rather than being silently accepted);
+2. ~~integrate Heap lifecycle/authority mutations and predicates into the same
+   serial frontier~~. `HeapSlot` now owns the authority frontier. Atomic
+   execution revalidates capability liveness after acquiring it, samples a
+   canonical authority revision, and retains the guard through the durable
+   decision. Snapshot replacement takes the same frontier, and lifecycle
+   transitions retain it until their transition receipt is durable. A
+   capability-bound matching predicate is admitted, a stale revision receives
+   durable `PreconditionConflict`, and raw Store use remains fail-closed as
+   `RuleRejected` because it has no trusted Heap authority context;
 3. ~~expose and qualify the exact committed/not-committed receipt shape, including
    per-member before/after versions, without enabling the public capability~~.
    The hidden Store/Heap/SDK qualification path now returns the frozen
@@ -214,7 +220,7 @@ ATM-3 is not yet accepted. The remaining delivery delta is explicit:
    assembler~~. The publication algorithm itself is now O(member count), and
    existing hard admission ceilings remain enforced before media append.
 
-Items 1, 3 and 4 are closed. The verifier now emits a distinct ATM-3 manifest and
+Items 1–4 are closed. The verifier now emits a distinct ATM-3 manifest and
 runs publication/crash/receipt/resource (`ATM-PUB`) plus capability-bound RQL
 reader (`ATM-RDR`) evidence. The maximum 256-caller-member plan commits with
 two authoritative syncs; a 257-member negative control is refused before any
@@ -222,7 +228,9 @@ authoritative write. That control exposed and fixed a missing executor call to
 the frozen closed-plan validator. Cohort qualification additionally proves two
 shared syncs, serial overlapping conflicts, independent refusals, exact replay,
 capability-bound SDK use, and legal recovery on both sides of the shared
-decision boundary. Only item 2 remains open.
+decision boundary. The public `Capabilities::atomics` flag remains false: the
+ATM-5 product builder, public async surface and application journey are a
+separate release gate, not unfinished ATM-3 storage semantics.
 
 `Capabilities::atomics` remains `false` until all slices and the ATM-3 exit gate
 are green.
