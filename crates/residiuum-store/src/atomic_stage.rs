@@ -25,7 +25,7 @@ use crate::atomic_stage_recover::{
     AtomicStageLimits, AtomicStageOpenReport, CoveredFile,
 };
 use crate::error::StoreError;
-use crate::store::Store;
+use crate::store::{active_rule_set_subject, Store};
 use residiuum_atomics::{
     compare_canonical_keys, decision_hash, decode_bounded_range_payload,
     decode_exact_scalar_payload, encode_decision, encode_member, encode_prepare,
@@ -1895,6 +1895,7 @@ impl StoreAtomicStage<'_> {
                 &mutation.key,
             )?);
         }
+        targets.push(active_rule_set_subject(plan.heap_id())?);
         targets.sort();
         targets.dedup();
         let mut hasher = blake3::Hasher::new();
@@ -1940,6 +1941,10 @@ impl StoreAtomicStage<'_> {
         plan: &AtomicPlan,
         overlay: &HashMap<Vec<u8>, AtomicOverlayCell>,
     ) -> Result<Option<AtomicAbortReason>, StoreError> {
+        let current_rule_revisions = match self.store.active_rule_revisions(plan.heap_id()) {
+            Ok(revisions) => revisions,
+            Err(_) => return Ok(Some(AtomicAbortReason::CoverageIncomplete)),
+        };
         for read in plan.reads() {
             let subject = atomic_subject(plan.heap_id(), read.collection_id, &read.key)?;
             let observed = self.observed_version(&subject, overlay);
@@ -1948,6 +1953,18 @@ impl StoreAtomicStage<'_> {
             }
         }
         for predicate in plan.predicates() {
+            if predicate.kind == PredicateKind::ActiveRuleRevisionEquality {
+                let Some(encoded) = predicate.encoded.as_deref() else {
+                    return Ok(Some(AtomicAbortReason::RuleRejected));
+                };
+                let Ok(revision) = <[u8; 32]>::try_from(encoded) else {
+                    return Ok(Some(AtomicAbortReason::RuleRejected));
+                };
+                if current_rule_revisions.binary_search(&revision).is_err() {
+                    return Ok(Some(AtomicAbortReason::PreconditionConflict));
+                }
+                continue;
+            }
             if predicate.kind == PredicateKind::HeapAuthorityRevision {
                 let Some(encoded) = predicate.encoded.as_deref() else {
                     return Ok(Some(AtomicAbortReason::RuleRejected));
@@ -2018,8 +2035,8 @@ impl StoreAtomicStage<'_> {
                 return Ok(Some(AtomicAbortReason::PreconditionConflict));
             }
         }
-        if !plan.active_rule_revisions().is_empty() {
-            return Ok(Some(AtomicAbortReason::RuleRejected));
+        if current_rule_revisions != plan.active_rule_revisions() {
+            return Ok(Some(AtomicAbortReason::PreconditionConflict));
         }
         Ok(None)
     }

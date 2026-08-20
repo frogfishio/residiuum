@@ -217,6 +217,7 @@ impl PredicateKind {
                 Self::ExactScalarEquality
                     | Self::BoundedKeyRangeAbsence
                     | Self::BoundedKeyRangePresence
+                    | Self::ActiveRuleRevisionEquality
                     | Self::HeapAuthorityRevision
             )
     }

@@ -3,7 +3,8 @@
 #![cfg(feature = "legacy-raw-store")]
 
 use residiuum_atomics::{
-    decode_bounded_range_payload, decode_exact_scalar_payload, encode_bounded_key_range_absence,
+    decode_bounded_range_payload, decode_exact_scalar_payload,
+    encode_active_rule_revision_equality, encode_bounded_key_range_absence,
     encode_exact_scalar_equality, AtomicAbortReason, AtomicCohortOutcome, AtomicId, AtomicOutcome,
     AtomicPlan, AtomicPlanParts, AtomicProfile, BoundedKeyRange, CanonicalKey, CanonicalKeyKind,
     CollectionId, CoordinationScope, ExactScalarEquality, HeapId, MutationKind, PlanMutation,
@@ -73,6 +74,60 @@ fn close_plan(
         limits: ResourceLimits::hard_local_heap(),
     })
     .unwrap()
+}
+
+fn close_rule_plan(
+    heap: HeapId,
+    id: AtomicId,
+    revisions: &[[u8; 32]],
+    mutations: Vec<PlanMutation>,
+) -> AtomicPlan {
+    AtomicPlan::close(AtomicPlanParts {
+        profile: AtomicProfile::LocalHeapV1,
+        atomic_id: id,
+        heap_id: heap,
+        scope: CoordinationScope::LocalHeap,
+        read_frontier: None,
+        reads: vec![],
+        predicates: revisions
+            .iter()
+            .copied()
+            .map(encode_active_rule_revision_equality)
+            .collect(),
+        mutations,
+        active_rule_revisions: revisions.to_vec(),
+        limits: ResourceLimits::hard_local_heap(),
+    })
+    .unwrap()
+}
+
+/// Independent active-rule decision check. It consumes only the closed plan,
+/// authoritative set at the candidate serial position, and returned outcome.
+fn rule_decision_is_explained(
+    active: &[[u8; 32]],
+    plan: &AtomicPlan,
+    outcome: &AtomicOutcome,
+) -> bool {
+    let exact = active == plan.active_rule_revisions()
+        && plan
+            .predicates()
+            .iter()
+            .filter(|predicate| predicate.kind == PredicateKind::ActiveRuleRevisionEquality)
+            .all(|predicate| {
+                predicate.encoded.as_deref().is_some_and(|revision| {
+                    active
+                        .binary_search_by(|candidate| candidate.as_slice().cmp(revision))
+                        .is_ok()
+                })
+            });
+    matches!(outcome, AtomicOutcome::Committed(_)) == exact
+        || matches!(
+            outcome,
+            AtomicOutcome::NotCommitted {
+                reason: AtomicAbortReason::PreconditionConflict,
+                ..
+            }
+        ) && !exact
 }
 
 fn replace(name: &str, version: VersionId, value: &[u8]) -> PlanMutation {
@@ -619,6 +674,46 @@ fn bounded_range_phantom_has_an_independent_serial_explanation() {
     assert!(
         find_serial_order(&initial, &weakened, &outcomes).is_none(),
         "negative control: moving the range off the phantom must make the recorded abort unjustifiable"
+    );
+}
+
+#[test]
+fn active_rule_activation_race_has_an_independent_serial_explanation() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::create(dir.path().join("s")).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let old = [1u8; 32];
+    let new = [2u8; 32];
+    store
+        .set_active_rule_revisions(heap, &[old], DurabilityMode::Durable)
+        .unwrap();
+    let stale = close_rule_plan(
+        heap,
+        atomic(17),
+        &[old],
+        vec![create("rule-race-result", b"must-not-publish")],
+    );
+
+    // An ordinary rule activation wins the physical order before decision.
+    store
+        .set_active_rule_revisions(heap, &[old, new], DurabilityMode::Durable)
+        .unwrap();
+    let outcome = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_outcome(&stale)
+        .unwrap();
+    assert!(rule_decision_is_explained(&[old, new], &stale, &outcome));
+    assert!(matches!(
+        outcome,
+        AtomicOutcome::NotCommitted {
+            reason: AtomicAbortReason::PreconditionConflict,
+            ..
+        }
+    ));
+    assert!(
+        !rule_decision_is_explained(&[old], &stale, &outcome),
+        "negative control: removing the winning activation must make the recorded abort unjustifiable"
     );
 }
 

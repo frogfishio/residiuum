@@ -57,10 +57,11 @@ pub use canonical::{
 };
 pub use cbor::MAX_CBOR_DEPTH;
 pub use encode::{
-    account_closed_plan, encode_assert_absent, encode_assert_present, encode_assert_version,
-    encode_bounded_key_range_absence, encode_bounded_key_range_presence, encode_create,
-    encode_delete, encode_exact_scalar_equality, encode_heap_authority_revision, encode_put,
-    encode_replace, serialize_canonical_value, CanonicalValue, PlanAccounting,
+    account_closed_plan, encode_active_rule_revision_equality, encode_assert_absent,
+    encode_assert_present, encode_assert_version, encode_bounded_key_range_absence,
+    encode_bounded_key_range_presence, encode_create, encode_delete, encode_exact_scalar_equality,
+    encode_heap_authority_revision, encode_put, encode_replace, serialize_canonical_value,
+    CanonicalValue, PlanAccounting,
 };
 pub use encoding::{
     encode_decimal_value, encode_signed_integer, validate_canonical_key, verify_decimal_value,
@@ -92,10 +93,10 @@ pub use plan::{
     MutationKind, PlanMutation, PlanPredicate, PredicateKind, ReadWitness, UnknownProfile,
 };
 pub use predicate::{
-    compare_canonical_keys, decode_bounded_range_payload, decode_exact_scalar_payload,
-    encode_bounded_range_payload, encode_exact_scalar_payload, range_coverage_domain,
-    BoundedKeyRange, ExactScalarEquality, RangeEntry, CANONICAL_KEY_ORDER_V1, MAX_RANGE_EXAMINED,
-    MAX_RANGE_RESULT_ENTRIES,
+    compare_canonical_keys, decode_active_rule_set, decode_bounded_range_payload,
+    decode_exact_scalar_payload, encode_active_rule_set, encode_bounded_range_payload,
+    encode_exact_scalar_payload, range_coverage_domain, BoundedKeyRange, ExactScalarEquality,
+    RangeEntry, CANONICAL_KEY_ORDER_V1, MAX_RANGE_EXAMINED, MAX_RANGE_RESULT_ENTRIES,
 };
 pub use prepare::{
     members_match_prepare, plan_predicate_set_root, plan_read_set_root, plan_rule_revision_root,

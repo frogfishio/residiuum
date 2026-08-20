@@ -8,10 +8,10 @@
 
 use crate::canonical::key_order_bytes;
 use crate::encode::{
-    encode_assert_absent, encode_assert_present, encode_assert_version,
-    encode_bounded_key_range_absence, encode_bounded_key_range_presence, encode_create,
-    encode_delete, encode_exact_scalar_equality, encode_heap_authority_revision, encode_put,
-    encode_replace, CanonicalValue,
+    encode_active_rule_revision_equality, encode_assert_absent, encode_assert_present,
+    encode_assert_version, encode_bounded_key_range_absence, encode_bounded_key_range_presence,
+    encode_create, encode_delete, encode_exact_scalar_equality, encode_heap_authority_revision,
+    encode_put, encode_replace, CanonicalValue,
 };
 use crate::encoding::EncodingProfile;
 use crate::error::AtomicsError;
@@ -580,6 +580,8 @@ impl AtomicBuilder {
     pub fn bind_rule_revision(&mut self, revision: [u8; 32]) -> &mut Self {
         if !self.rule_revisions.contains(&revision) {
             self.rule_revisions.push(revision);
+            self.predicates
+                .push(encode_active_rule_revision_equality(revision));
         }
         self
     }

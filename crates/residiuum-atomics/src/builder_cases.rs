@@ -318,6 +318,15 @@ fn rule_revisions_stay_off_the_authority_predicate() {
         .find(|p| p.kind == PredicateKind::HeapAuthorityRevision)
         .unwrap();
     assert_eq!(auth.encoded.as_deref(), Some(rev(7).as_slice()));
+    let rule = plan
+        .predicates()
+        .iter()
+        .find(|p| p.kind == PredicateKind::ActiveRuleRevisionEquality)
+        .unwrap();
+    assert!(rule.collection_id.is_none());
+    assert!(rule.key.is_none());
+    assert!(rule.version.is_none());
+    assert_eq!(rule.encoded.as_deref(), Some([3u8; 32].as_slice()));
 }
 
 #[test]

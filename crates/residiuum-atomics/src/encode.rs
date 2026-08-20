@@ -239,6 +239,17 @@ pub fn encode_heap_authority_revision(revision: [u8; 32]) -> PlanPredicate {
     }
 }
 
+/// Encode equality with one active RRE invariant revision.
+pub fn encode_active_rule_revision_equality(revision: [u8; 32]) -> PlanPredicate {
+    PlanPredicate {
+        kind: PredicateKind::ActiveRuleRevisionEquality,
+        collection_id: None,
+        key: None,
+        version: None,
+        encoded: Some(revision.to_vec()),
+    }
+}
+
 /// Requested vs worst-case generated-member accounting for a closed plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanAccounting {

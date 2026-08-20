@@ -44,15 +44,9 @@ legally acquire different content.
 
 ## 3. Predicate delta
 
-The following closed `PredicateKind`s exist in the canonical vocabulary but
-are not executable yet and currently produce `RuleRejected` or structural
-refusal:
-
-- exact scalar equality;
-- bounded key-range absence;
-- bounded key-range presence;
-- active rule revision equality;
-- collection lifecycle state.
+The remaining closed `PredicateKind` that is not executable is collection
+lifecycle state. Exact scalar, bounded key-range and active rule revision
+predicates are now executable under the contracts below.
 
 ATM-4D will define a versioned canonical payload inside `PlanPredicate.encoded`
 without changing the frozen outer plan/checkpoint shapes. Range payloads must
@@ -151,9 +145,27 @@ Index and forced-scan execution must agree on the same canonical predicate.
 
 ### ATM-4D.5 — remaining shared-frontier predicates
 
-- active rule revision;
-- collection/object lifecycle state;
-- authority/lifecycle/ordinary/Atomic races in the independent checker.
+- **Delivered active-rule contract:** kind 7 carries one canonical nonzero
+  32-byte invariant revision, while `active_rule_revisions` binds the complete
+  strictly sorted active set. The executor requires both membership of every
+  declared revision and exact equality with the authoritative Heap set;
+  membership alone cannot let a plan compiled before a new invariant was
+  activated commit afterward.
+- **Delivered active-rule authority:** the exact set is deterministic Heap
+  metadata, missing means empty, and explicit empty sets are not deletion
+  aliases. Activation/deactivation and Atomic validation serialize through the
+  physical writer order. Unreadable authority produces `coverage_incomplete`;
+  a stale set produces `precondition_conflict`.
+- **Delivered active-rule proof:** canonical hostile cases, multiple distinct
+  revisions in one plan, stale membership-only and activation-before-decision
+  conflicts, exact current-set commit, restart/terminal retry, and cross-Heap
+  isolation.
+- **Open public bridge:** capability-bound Heap/SDK rule administration must
+  expose activation/deactivation without leaking raw Store access, and must use
+  the same physical writer mutex. The raw Store mechanism is qualification
+  infrastructure, not the final client authority ceremony.
+- **Open:** collection/object lifecycle state and the combined
+  authority/lifecycle/ordinary/Atomic independent-checker race corpus.
 
 ## 5. Required anomaly corpus
 

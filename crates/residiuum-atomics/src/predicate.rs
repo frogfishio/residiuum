@@ -27,6 +27,7 @@ pub const MAX_RANGE_EXAMINED: u32 = 1_000_000;
 const DOMAIN_RANGE_COVERAGE: &[u8] = b"RESIDIUUM-AUTHORITATIVE-PRIMARY-KEY-COVERAGE-V1";
 const DOMAIN_RANGE_IDENTITY: &[u8] = b"RESIDIUUM-ATOMIC-RANGE-IDENTITY-V1";
 const DOMAIN_RANGE_RESULT: &[u8] = b"RESIDIUUM-ATOMIC-RANGE-RESULT-V1";
+const ACTIVE_RULE_SET_PROFILE_V1: u64 = 1;
 
 /// A compiled exact-scalar equality predicate.
 ///
@@ -406,6 +407,49 @@ pub fn range_coverage_domain() -> [u8; 32] {
     *blake3::hash(DOMAIN_RANGE_COVERAGE).as_bytes()
 }
 
+/// Encode the exact active invariant-revision set for one Heap.
+pub fn encode_active_rule_set(revisions: &[[u8; 32]]) -> Result<Vec<u8>, AtomicsError> {
+    let mut revisions = revisions.to_vec();
+    revisions.sort_unstable();
+    if revisions.contains(&[0; 32]) || revisions.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(malformed());
+    }
+    cbor::encode_map(&[
+        (1, Value::Uint(ACTIVE_RULE_SET_PROFILE_V1)),
+        (
+            2,
+            Value::Array(
+                revisions
+                    .iter()
+                    .map(|revision| Value::Bytes(revision.to_vec()))
+                    .collect(),
+            ),
+        ),
+    ])
+}
+
+/// Decode a canonical exact active invariant-revision set.
+pub fn decode_active_rule_set(bytes: &[u8]) -> Result<Vec<[u8; 32]>, AtomicsError> {
+    let map = cbor::decode_map(bytes).map_err(|_| malformed())?;
+    if map.len() != 2 || require_uint(&map, 1)? != ACTIVE_RULE_SET_PROFILE_V1 {
+        return Err(malformed());
+    }
+    let Value::Array(values) = require_value(&map, 2)? else {
+        return Err(malformed());
+    };
+    let revisions = values
+        .iter()
+        .map(|value| match value {
+            Value::Bytes(bytes) => bytes.as_slice().try_into().map_err(|_| malformed()),
+            _ => Err(malformed()),
+        })
+        .collect::<Result<Vec<[u8; 32]>, _>>()?;
+    if revisions.contains(&[0; 32]) || revisions.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(malformed());
+    }
+    Ok(revisions)
+}
+
 fn range_identity(
     collection_id: CollectionId,
     key_kind: CanonicalKeyKind,
@@ -672,6 +716,38 @@ mod tests {
                 version: vid(9),
             }])
             .unwrap());
+    }
+
+    #[test]
+    fn active_rule_set_is_sorted_canonical_and_round_trips() {
+        let encoded = encode_active_rule_set(&[[3; 32], [1; 32], [2; 32]]).unwrap();
+        assert_eq!(
+            decode_active_rule_set(&encoded).unwrap(),
+            vec![[1; 32], [2; 32], [3; 32]]
+        );
+        assert_eq!(
+            encoded,
+            encode_active_rule_set(&[[1; 32], [2; 32], [3; 32]]).unwrap()
+        );
+    }
+
+    #[test]
+    fn active_rule_set_refuses_zero_duplicates_and_noncanonical_order() {
+        assert_eq!(encode_active_rule_set(&[[0; 32]]).unwrap_err(), malformed());
+        assert_eq!(
+            encode_active_rule_set(&[[1; 32], [1; 32]]).unwrap_err(),
+            malformed()
+        );
+
+        let reversed = cbor::encode_map(&[
+            (1, Value::Uint(ACTIVE_RULE_SET_PROFILE_V1)),
+            (
+                2,
+                Value::Array(vec![Value::Bytes(vec![2; 32]), Value::Bytes(vec![1; 32])]),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(decode_active_rule_set(&reversed).unwrap_err(), malformed());
     }
 
     #[test]

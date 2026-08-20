@@ -430,23 +430,27 @@ fn validator_is_sensitive_to_single_field_flips() {
         AtomicRefuseReason::CrossHeapCollection,
     );
 
-    let compiled = local(
-        heap,
-        24,
-        defaults(),
-        Vec::new(),
-        vec![PlanPredicate {
+    let malformed_rule = AtomicPlan::close(AtomicPlanParts {
+        profile: AtomicProfile::LocalHeapV1,
+        atomic_id: aid(24),
+        heap_id: heap,
+        scope: CoordinationScope::LocalHeap,
+        read_frontier: None,
+        reads: Vec::new(),
+        predicates: vec![PlanPredicate {
             kind: PredicateKind::ActiveRuleRevisionEquality,
             collection_id: Some(cid(1)),
             key: Some(key("k")),
             version: None,
             encoded: Some(b"rql".to_vec()),
         }],
-    );
-    assert_refuse(
-        &mut oracle,
-        &compiled,
-        AtomicRefuseReason::UnsupportedPredicate,
+        mutations: Vec::new(),
+        active_rule_revisions: Vec::new(),
+        limits: defaults(),
+    });
+    assert_eq!(
+        malformed_rule.unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
     );
 }
 

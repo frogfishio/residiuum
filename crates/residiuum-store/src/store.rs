@@ -70,8 +70,9 @@ use crate::write_dedup::{
 use crate::writer_lock::{StoreOpenOptions, WriterLock, WriterLockObservation};
 use residiuum_format::{
     decode_descriptor_body, decode_store_descriptor_body, encode_frame_into,
-    encode_store_descriptor_frame, scan_forward, ActiveSegment, FrameFlags, FrameHeader, FrameKind,
-    FrameParts, SafetyLimits, SegmentId, WIRE_MAJOR, WIRE_MINOR,
+    encode_store_descriptor_frame, encode_subject_v2, scan_forward, ActiveSegment, FrameFlags,
+    FrameHeader, FrameKind, FrameParts, SafetyLimits, SegmentId, SubjectObjectKind, WIRE_MAJOR,
+    WIRE_MINOR,
 };
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
@@ -83,6 +84,20 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 type MutationIdentity = ([u8; 16], [u8; 32]);
+
+const ACTIVE_RULE_SET_SUBJECT_KEY: &[u8] = b"\xa1residiuum-active-rule-set-v1";
+
+pub(crate) fn active_rule_set_subject(
+    heap_id: residiuum_atomics::HeapId,
+) -> Result<Vec<u8>, StoreError> {
+    encode_subject_v2(
+        heap_id.as_bytes(),
+        SubjectObjectKind::HeapMetadata,
+        &[0; 16],
+        ACTIVE_RULE_SET_SUBJECT_KEY,
+    )
+    .map_err(|error| StoreError::AtomicStage(error.to_string()))
+}
 
 /// Draft meta format version written under `store-info/meta`.
 const META_VERSION: &str = "residiuum-store-9\n";
@@ -2800,6 +2815,36 @@ impl Store {
         match self.index.get(subject) {
             Some(IndexEntry::Live(lv)) => Some(lv.event_id),
             _ => None,
+        }
+    }
+
+    /// Replace the exact active RRE invariant-revision set for one Heap.
+    ///
+    /// The set is stored as ordinary authoritative metadata, so callers that
+    /// hold the physical writer order serialize activation with LocalHeap
+    /// Atomic validation. Empty sets are explicit rather than deletion aliases.
+    pub fn set_active_rule_revisions(
+        &mut self,
+        heap_id: residiuum_atomics::HeapId,
+        revisions: &[[u8; 32]],
+        mode: DurabilityMode,
+    ) -> Result<WriteReceipt, StoreError> {
+        let subject = active_rule_set_subject(heap_id)?;
+        let body = residiuum_atomics::encode_active_rule_set(revisions)
+            .map_err(|error| StoreError::AtomicStage(error.to_string()))?;
+        self.put_subject_bytes(&subject, &body, mode)
+    }
+
+    /// Read the exact authoritative active RRE invariant-revision set.
+    pub fn active_rule_revisions(
+        &self,
+        heap_id: residiuum_atomics::HeapId,
+    ) -> Result<Vec<[u8; 32]>, StoreError> {
+        let subject = active_rule_set_subject(heap_id)?;
+        match self.get_subject_bytes(&subject)? {
+            None => Ok(Vec::new()),
+            Some(body) => residiuum_atomics::decode_active_rule_set(&body)
+                .map_err(|error| StoreError::AtomicStage(error.to_string())),
         }
     }
 

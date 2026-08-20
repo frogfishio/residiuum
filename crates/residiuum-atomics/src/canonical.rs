@@ -82,6 +82,14 @@ pub(crate) fn close_plan(mut parts: AtomicPlanParts) -> Result<AtomicPlan, Atomi
     parts.reads.sort_by_key(|a| read_order(&heap_id, a));
     parts.predicates.sort_by_key(|a| pred_order(&heap_id, a));
     parts.active_rule_revisions.sort_unstable();
+    if parts.active_rule_revisions.contains(&[0; 32])
+        || parts
+            .active_rule_revisions
+            .windows(2)
+            .any(|pair| pair[0] == pair[1])
+    {
+        return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
+    }
     validate_mutation_shapes(&parts.mutations)?;
     validate_predicate_shapes(&parts.predicates)?;
     validate_plan_keys(&parts)?;
@@ -176,6 +184,12 @@ fn refuse_duplicate_predicates(predicates: &[PlanPredicate]) -> Result<(), Atomi
                 .and_then(crate::predicate::decode_bounded_range_payload)?
                 .range_identity()
                 .to_vec(),
+            // A rule revision is itself the globally-scoped predicate
+            // identity. Distinct active revisions must coexist in one plan.
+            PredicateKind::ActiveRuleRevisionEquality => p
+                .encoded
+                .clone()
+                .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?,
             _ => p.key.as_ref().map(key_order_bytes).unwrap_or_default(),
         };
         let ident = (p.kind.wire_code(), p.collection_id, key);
@@ -237,6 +251,14 @@ fn validate_predicate_shapes(predicates: &[PlanPredicate]) -> Result<(), Atomics
                     && p.key.is_none()
                     && p.version.is_none()
                     && p.encoded.as_ref().is_some_and(|e| e.len() == 32)
+            }
+            PredicateKind::ActiveRuleRevisionEquality => {
+                p.collection_id.is_none()
+                    && p.key.is_none()
+                    && p.version.is_none()
+                    && p.encoded
+                        .as_ref()
+                        .is_some_and(|e| e.len() == 32 && e.as_slice() != [0u8; 32].as_slice())
             }
             PredicateKind::ExactScalarEquality => {
                 p.collection_id.is_some()

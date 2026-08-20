@@ -67,5 +67,30 @@
       "examination_limit_exceeded": "coverage_incomplete",
       "candidate_partial_or_damaged_derived_index": "cannot prove the predicate"
     }
+  },
+  "active_rule_revision": {
+    "outer_predicate_kind": 7,
+    "outer_fields": {
+      "collection_id": "absent",
+      "key": "absent",
+      "version": "absent",
+      "encoded": "required bstr(32), nonzero invariant revision"
+    },
+    "plan_active_rule_revisions": "the exact strictly sorted, duplicate-free, nonzero active set",
+    "authoritative_record": {
+      "scope": "one Heap",
+      "subject": "SubjectV2 HeapMetadata / zero object id / residiuum-active-rule-set-v1",
+      "encoding": "deterministic CBOR map {1: profile=1, 2: strictly sorted array of bstr(32)}",
+      "missing": "empty active set",
+      "empty": "stored explicitly; never represented as a deletion alias"
+    },
+    "semantics": {
+      "predicate": "each kind-7 predicate revision must be present",
+      "plan_set": "the complete current authoritative set must equal plan_active_rule_revisions",
+      "activation_or_deactivation": "must serialize in the same physical Heap writer order as Atomic validation",
+      "malformed_or_unreadable_authority": "coverage_incomplete",
+      "stale_or_partial_set": "precondition_conflict",
+      "membership_only": "insufficient because a newly activated invariant must invalidate an older plan"
+    }
   }
 }
