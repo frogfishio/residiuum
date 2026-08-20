@@ -187,7 +187,11 @@ media permits and are never interpreted as the new composite-key format.
   disjoint/overlapping cohorts. Twenty-four deterministic randomized campaigns
   are checked, and witness omission is an executed mutation-sensitive negative
   control.
-- **Remaining:** read-your-plan construction overlay; exact scalar predicate;
+- **Delivered in ATM-4D.2 core:** the pure builder now resolves reads after a
+  planned create/put/replace/delete from a canonical bounded overlay and emits
+  no false external dependency witness. The host version-bearing read bridge
+  remains deliberately behind the ATM-5 capability composition boundary.
+- **Remaining:** host construction-session bridge; exact scalar predicate;
   bounded exact-range presence/absence and phantom proof; rule/lifecycle
   predicates; broader randomized concurrent/restart histories and two-Heap
   noninterference.

@@ -46,7 +46,7 @@ pub mod validate;
 
 pub use builder::{
     admit_closed_plan, AtomicBuilder, AtomicOptions, BoundCollection, CollectionRights,
-    TrustedAuthorityView,
+    ConstructionRead, TrustedAuthorityView,
 };
 pub use canonical::{
     decode_canonical_plan, encode_canonical_plan, plan_content_root, CANONICAL_TARGET_ORDER,

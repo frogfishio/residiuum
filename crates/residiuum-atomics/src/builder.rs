@@ -288,6 +288,9 @@ pub struct AtomicBuilder {
     mutations: Vec<crate::plan::PlanMutation>,
     predicates: Vec<crate::plan::PlanPredicate>,
     reads: Vec<ReadWitness>,
+    /// Latest planned mutation by canonical object identity. Values point into
+    /// `mutations`; payload bytes are not duplicated for read-your-plan.
+    overlay: BTreeMap<(CollectionId, Vec<u8>), usize>,
     required_rights: CollectionRights,
     bound_authority: Option<[u8; 32]>,
     rule_revisions: Vec<[u8; 32]>,
@@ -310,6 +313,7 @@ impl AtomicBuilder {
             mutations: Vec::new(),
             predicates: Vec::new(),
             reads: Vec::new(),
+            overlay: BTreeMap::new(),
             required_rights: CollectionRights::empty(),
             bound_authority: None,
             rule_revisions: Vec::new(),
@@ -340,7 +344,7 @@ impl AtomicBuilder {
             Some(&value),
             true,
         )?;
-        self.mutations.push(encode_create(id, key, value));
+        self.push_mutation(encode_create(id, key, value));
         Ok(self)
     }
 
@@ -352,7 +356,7 @@ impl AtomicBuilder {
         value: CanonicalValue,
     ) -> Result<&mut Self, AtomicsError> {
         let id = self.admit(collection, CollectionRights::PUT, &key, Some(&value), true)?;
-        self.mutations.push(encode_put(id, key, value));
+        self.push_mutation(encode_put(id, key, value));
         Ok(self)
     }
 
@@ -371,8 +375,7 @@ impl AtomicBuilder {
             Some(&value),
             true,
         )?;
-        self.mutations
-            .push(encode_replace(id, key, if_version, value));
+        self.push_mutation(encode_replace(id, key, if_version, value));
         Ok(self)
     }
 
@@ -384,8 +387,44 @@ impl AtomicBuilder {
         if_version: VersionId,
     ) -> Result<&mut Self, AtomicsError> {
         let id = self.admit(collection, CollectionRights::DELETE, &key, None, true)?;
-        self.mutations.push(encode_delete(id, key, if_version));
+        self.push_mutation(encode_delete(id, key, if_version));
         Ok(self)
+    }
+
+    /// Resolve a read against mutations already admitted to this plan.
+    ///
+    /// `External` tells the SDK/session to perform one version-bearing store
+    /// read and then record a witness. Planned values and deletes are returned
+    /// directly and MUST NOT create an external witness: they are consequences
+    /// of this plan, not dependencies on the pre-plan database state.
+    pub fn read_your_plan(
+        &mut self,
+        collection: &BoundCollection,
+        key: &CanonicalKey,
+    ) -> Result<ConstructionRead, AtomicsError> {
+        let id = self.admit(collection, CollectionRights::READ, key, None, false)?;
+        let identity = (id, key_order_bytes(key));
+        let Some(&ordinal) = self.overlay.get(&identity) else {
+            return Ok(ConstructionRead::External);
+        };
+        let mutation = &self.mutations[ordinal];
+        let ordinal = u32::try_from(ordinal)
+            .map_err(|_| AtomicsError::Refused(AtomicRefuseReason::LimitExceeded))?;
+        match mutation.kind {
+            MutationKind::Delete => Ok(ConstructionRead::Absent {
+                mutation_ordinal: ordinal,
+            }),
+            MutationKind::Create | MutationKind::Put | MutationKind::Replace => {
+                let encoded_value = mutation
+                    .encoded_value
+                    .clone()
+                    .ok_or(AtomicsError::Refused(AtomicRefuseReason::MalformedInput))?;
+                Ok(ConstructionRead::Present {
+                    encoded_value,
+                    mutation_ordinal: ordinal,
+                })
+            }
+        }
     }
 
     /// `assert_absent`.
@@ -532,6 +571,39 @@ impl AtomicBuilder {
         self.required_rights = self.required_rights.union(need);
         Ok(collection.collection_id)
     }
+
+    fn push_mutation(&mut self, mutation: PlanMutation) {
+        let ordinal = self.mutations.len();
+        self.overlay.insert(
+            (
+                mutation.collection_id,
+                key_order_bytes(&mutation.key).to_vec(),
+            ),
+            ordinal,
+        );
+        self.mutations.push(mutation);
+    }
+}
+
+/// Result of a construction-time read against the plan overlay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConstructionRead {
+    /// The plan has not touched this identity. Read it from the store and
+    /// record its exact version or absence witness.
+    External,
+    /// An earlier planned mutation establishes this value. The final event
+    /// version is returned only in the commit receipt.
+    Present {
+        /// Canonical collection-encoded bytes admitted by the builder.
+        encoded_value: Vec<u8>,
+        /// Canonical mutation ordinal which will establish the receipt member.
+        mutation_ordinal: u32,
+    },
+    /// An earlier planned delete makes this identity absent in the overlay.
+    Absent {
+        /// Canonical mutation ordinal which deletes the value.
+        mutation_ordinal: u32,
+    },
 }
 
 /// Revalidate a closed plan against trusted current authority and grants.

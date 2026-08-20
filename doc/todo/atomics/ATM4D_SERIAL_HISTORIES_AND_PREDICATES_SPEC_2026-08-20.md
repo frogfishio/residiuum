@@ -83,12 +83,16 @@ Index and forced-scan execution must agree on the same canonical predicate.
 
 ### ATM-4D.2 — construction overlay
 
-- a store/SDK plan-construction session that returns version-bearing reads;
-- reads after a planned create/replace/put observe the plan overlay;
-- reads after a planned delete observe absence;
-- emitted witnesses describe external dependencies, not contradictions created
-  by the plan itself;
-- bounded memory and cancellation behavior.
+- **Delivered core:** `AtomicBuilder::read_your_plan` resolves earlier planned
+  create/put/replace values and planned deletes by canonical object identity.
+  It returns `External` only when a version-bearing host read is required.
+  Planned reads emit no external witness and payload bytes are not duplicated
+  in the overlay; Heap, rights, encoding and authority checks still apply.
+- **Open host bridge:** a store/SDK plan-construction session must consume
+  `External`, perform a version-bearing read, record the exact version/absence
+  witness, decode planned bytes under the collection codec, and enforce bounded
+  memory/cancellation. Capability-to-`TrustedAuthorityView` minting remains an
+  ATM-5 composition boundary and must not be bypassed here.
 
 ### ATM-4D.3 — exact scalar predicate
 
@@ -147,4 +151,3 @@ Open:
 - scalar/range/lifecycle/rule predicate payloads and execution;
 - proof that every ordinary predicate-affecting mutation participates in the
   same Heap order through the final public API.
-

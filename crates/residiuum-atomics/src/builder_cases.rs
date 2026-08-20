@@ -4,8 +4,8 @@ use crate::{
     admit_closed_plan, plan_content_root, serialize_canonical_value, validate_closed_plan,
     AtomicBuilder, AtomicId, AtomicOptions, AtomicOutcome, AtomicRefuseReason, AtomicsError,
     BoundCollection, CanonicalKey, CanonicalKeyKind, CanonicalValue, CollectionId,
-    CollectionRights, CoordinationScope, EncodingProfile, HeapId, PredicateKind, ResourceLimits,
-    SerialOracle, TrustedAuthorityView, ValueEncoding, VersionId,
+    CollectionRights, ConstructionRead, CoordinationScope, EncodingProfile, HeapId, PredicateKind,
+    ResourceLimits, SerialOracle, TrustedAuthorityView, ValueEncoding, VersionId,
 };
 use std::time::{Duration, Instant};
 
@@ -222,6 +222,61 @@ fn duplicate_mutation_target_is_refused() {
     assert_eq!(
         b.create(&state, key("k"), val(b"2")).unwrap_err(),
         AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget)
+    );
+}
+
+#[test]
+fn construction_reads_use_planned_values_without_external_witnesses() {
+    let state = coll(1, 1, CollectionRights::ordinary(), 1);
+    let mut b = builder(1, 30);
+    assert_eq!(
+        b.read_your_plan(&state, &key("external")).unwrap(),
+        ConstructionRead::External
+    );
+    b.create(&state, key("created"), val(b"planned")).unwrap();
+    assert_eq!(
+        b.read_your_plan(&state, &key("created")).unwrap(),
+        ConstructionRead::Present {
+            encoded_value: b"planned".to_vec(),
+            mutation_ordinal: 0,
+        }
+    );
+    let plan = b.build().unwrap();
+    assert!(plan.reads().is_empty());
+    assert_eq!(plan.mutations().len(), 1);
+}
+
+#[test]
+fn construction_read_after_planned_delete_is_absent() {
+    let state = coll(1, 1, CollectionRights::ordinary(), 1);
+    let mut b = builder(1, 31);
+    b.delete(&state, key("gone"), vid(1)).unwrap();
+    assert_eq!(
+        b.read_your_plan(&state, &key("gone")).unwrap(),
+        ConstructionRead::Absent {
+            mutation_ordinal: 0,
+        }
+    );
+    assert!(b.build().unwrap().reads().is_empty());
+}
+
+#[test]
+fn construction_read_enforces_heap_rights_and_authority_binding() {
+    let local = coll(1, 1, CollectionRights::READ, 1);
+    let no_read = coll(1, 2, CollectionRights::CREATE, 1);
+    let foreign = coll(2, 1, CollectionRights::READ, 1);
+    let mut b = builder(1, 32);
+    assert_eq!(
+        b.read_your_plan(&no_read, &key("k")).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::AuthorizationFailure)
+    );
+    assert_eq!(
+        b.read_your_plan(&foreign, &key("k")).unwrap_err(),
+        AtomicsError::Refused(AtomicRefuseReason::CrossHeapCollection)
+    );
+    assert_eq!(
+        b.read_your_plan(&local, &key("k")).unwrap(),
+        ConstructionRead::External
     );
 }
 
