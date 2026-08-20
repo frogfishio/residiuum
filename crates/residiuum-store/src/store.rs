@@ -6070,10 +6070,10 @@ impl Store {
             ));
         }
         if options.reclaim_sources {
-            // Reclaim is destructive and must refuse before seal, job creation,
-            // or output publication until the Atomic replacement-generation
-            // protocol is qualified.
-            crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)?;
+            // Destructive reclaim is allowed only for a healthy terminal
+            // catalogue. The replacement authority generation is installed
+            // immediately before source retirement below.
+            self.refuse_if_atomic_relocation_is_unsafe()?;
         }
         self.refuse_if_atomic_relocation_is_unsafe()?;
 
@@ -6217,7 +6217,7 @@ impl Store {
     /// Requires the job to have `allow_history_loss` (set at plan time or via
     /// this call's force flag when the job already recorded it).
     pub fn reclaim_compact_job(&mut self, job_id: &[u8; 16]) -> Result<CompactReport, StoreError> {
-        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)?;
+        self.refuse_if_atomic_relocation_is_unsafe()?;
         let mut job = try_load_compact_job(&self.paths, job_id)?
             .ok_or(StoreError::CorruptMeta("compact job not found"))?;
         if !job.allow_history_loss {
@@ -6352,17 +6352,24 @@ impl Store {
     }
 
     fn reclaim_compact_job_inner(&mut self, job: &mut CompactJob) -> Result<(), StoreError> {
-        // Live-projection compaction does not yet carry Atomic authority into
-        // its rewritten generation. Retaining sources is safe; deleting them
-        // remains fenced until the ATM-4C replacement-generation protocol is
-        // installed.
-        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)?;
+        let job_id = job
+            .job_id_bytes()
+            .ok_or(StoreError::CorruptMeta("compact job id"))?;
+        if crate::atomic_stage_recover::install_compaction_authority_generation(
+            &self.paths,
+            &job_id,
+        )? {
+            // Rebind the live projection to payload locators in the replacement
+            // authority before old segment paths can disappear.
+            self.recover_committed_atomic_publications()?;
+        }
         // Source frames may be the only evidence left when the append succeeded
         // but the post-append ledger write was interrupted. Persist that
         // evidence before history-loss compaction is allowed to remove it.
         self.reconcile_write_dedup_from_media()?;
         self.write_dedup_recovery_required = false;
         let (reclaimed, retained, deleted_ids) = reclaim_source_segments(&self.paths, job)?;
+        crate::atomic_stage_recover::prune_deleted_superseded_media(&self.paths)?;
         for id in &deleted_ids {
             self.tier_placement.remove(id);
         }
@@ -7774,11 +7781,15 @@ impl Store {
         let mut item_events = 0u64;
         let mut holes = 0u64;
 
-        for path in all_segment_paths(
+        let mut salvage_paths = all_segment_paths(
             &self.paths,
             Some(&self.tier_placement),
             self.writer_shards(),
-        )? {
+        )?;
+        salvage_paths.extend(crate::atomic_stage_recover::authority_generation_paths(
+            &self.paths,
+        )?);
+        for path in salvage_paths {
             let bytes = fs::read(&path)?;
             files_scanned += 1;
             let report = scan_forward(&bytes, self.limits);
@@ -7953,11 +7964,15 @@ impl Store {
         drop(dest_store);
 
         let mut source_files = Vec::new();
-        for path in all_segment_paths(
+        let mut salvage_paths = all_segment_paths(
             &self.paths,
             Some(&self.tier_placement),
             self.writer_shards(),
-        )? {
+        )?;
+        salvage_paths.extend(crate::atomic_stage_recover::authority_generation_paths(
+            &self.paths,
+        )?);
+        for path in salvage_paths {
             let rel = examination_source_name(&self.paths.root, &path);
             source_files.push((rel, path));
         }

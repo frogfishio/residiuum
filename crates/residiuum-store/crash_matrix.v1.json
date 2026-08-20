@@ -1085,6 +1085,72 @@
           }
         },
         {
+          "name": "store.atomic.authority.before_collect",
+          "ci_subset": false,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "Old authenticated Atomic media remains authoritative; no replacement is published."
+          }
+        },
+        {
+          "name": "store.atomic.authority.before_publish",
+          "ci_subset": false,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "Collected replacement bytes are not authority; old media remains complete."
+          }
+        },
+        {
+          "name": "store.atomic.authority.after_publish",
+          "ci_subset": false,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "Replacement file is verified but old checkpoint and sources remain authoritative."
+          }
+        },
+        {
+          "name": "store.atomic.authority.before_checkpoint_swap",
+          "ci_subset": true,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "Materially verified replacement exists, but old checkpoint still selects complete source authority."
+          }
+        },
+        {
+          "name": "store.atomic.authority.after_checkpoint_swap",
+          "ci_subset": true,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "New checkpoint selects complete replacement and ignores every superseded source."
+          }
+        },
+        {
+          "name": "store.compact.after_source_delete",
+          "ci_subset": true,
+          "expected_on_reopen": {
+            "acknowledged_visible": true,
+            "no_fabricated_commit": true,
+            "salvageable": true,
+            "prior_durable_retained": true,
+            "notes": "Replacement checkpoint is already authoritative; partial source retirement is resumable."
+          }
+        },
+        {
           "name": "store.compact.after_create",
           "ci_subset": false,
           "expected_on_reopen": {

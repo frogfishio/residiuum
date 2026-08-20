@@ -300,10 +300,11 @@ treated as zero.
 ### 4.7 Atomic staging records (CR-ATMR6-006)
 
 These records are the shipped store-owned Atomic staging authority. They are
-not ordinary indexed `ItemEvent` puts. Compaction live-projection, source
-reclaim, and identity-reassign clone MUST NOT retire them. Until ATM-4
-delivers copy-through preservation, implementations MUST fail those
-operations closed while outstanding staging evidence exists.
+not ordinary indexed `ItemEvent` puts. Compaction live-projection MUST preserve
+them. Source reclaim is permitted only after a byte-exact authority generation
+has been independently reconstructed, materially compared with the current
+catalogue, durably published and selected by an authenticated checkpoint swap.
+Identity-reassign clone MUST fail closed while staging evidence exists.
 
 Outstanding evidence is any of:
 
@@ -317,12 +318,13 @@ Outstanding evidence is any of:
 - a verified Atomic `BatchPrepare` / member frame, or a sidecar magic, in the
   dirty active or pending-seal tail.
 
-`BodyRef.rel_path` and covered-file paths are store-relative. After a file is
-renamed or reclaimed they MUST NOT be trusted. This slice refuses rotation
-instead of silently relocating locators.
+`BodyRef.rel_path` and covered-file paths are store-relative. Relocation is
+accepted only when exactly one discovered candidate authenticates the complete
+covered prefix. After a reclaim checkpoint swap, superseded paths are ignored
+even while their files remain physically present.
 
-Recovery Shadow publication of an Atomic-bearing active is produced only
-during seal. Refusing seal therefore gates Recovery Shadow until ATM-4.
+Recovery Shadow mode transition remains fenced until its representation carries
+the same Atomic authority; the current value-only representation is insufficient.
 
 Backup profile `residiuum-backup-v1` copies `store-info/` (including
 `atomic-stage.ckpt` and `atomic-coord.ckpt`) plus `active/`, `segments/`,
@@ -330,15 +332,15 @@ Backup profile `residiuum-backup-v1` copies `store-info/` (including
 Identity-reassign clone MUST refuse while outstanding staging exists: prepare
 `heap_id` is the source store id and becomes foreign after reassignment.
 
-#### Checkpoint `ATCKP1` version 17
+#### Checkpoint `ATCKP1` version 18
 
 File: `store-info/atomic-stage.ckpt`. Domain separator
-`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V17`. Layout, all integers big-endian:
+`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V18`. Layout, all integers big-endian:
 
 | Field | Encoding |
 |---|---|
 | magic | `ATCKP1` |
-| version | `u8` = 17 |
+| version | `u8` = 18 |
 | covered files | `u32` count; each: `u16` path len, path UTF-8, `u8` atomic_evidence, `u64` covered_len, head `[32]`, tail `[32]`, `u32` block count, block hashes `[32]*`, leftover `u32` + hash `[32]`. Ordinary (`atomic_evidence=0`) entries carry no block hashes and are metadata-only; Atomic entries authenticate every byte. |
 | prepares | `u32` count; each: `u32` len + `encode_prepare` bytes |
 | members | `u32` count; each: heap_id `[16]` + `u32` len + `encode_member` bytes |
@@ -359,18 +361,29 @@ File: `store-info/atomic-stage.ckpt`. Domain separator
 | findings | `u32` count; each: kind `u8`, class `u8`, has_heap `u8`, optional heap_id `[16]`, has_id `u8`, optional atomic_id `[32]` |
 | missing_covered | `u32` count; each: `u16` len + UTF-8 |
 | intended_members | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, `u32` |
+| superseded media | `u32` count; each: `u16` len + safe store-relative UTF-8 path |
 | digest | BLAKE3-256(`domain` \\| body) |
 
 `BodyRef` is `u16` path len, path UTF-8, `u64` offset, `u32` len, hash `[32]`.
-Version 17 writers emit a zero checkpoint tombstone count after merging those
+Version 18 writers emit a zero checkpoint tombstone count after merging those
 rows into the bound lifetime index; the table remains decodable only for
 pre-publication transition/rebuild tolerance.
 Covered block size is 64 KiB. Finding kind 8 is global `Coverage` loss.
 Finding kinds 10 and 11 are respectively the order-frontier and lifetime
 tombstone roles. An attributable finding carries both Heap and Atomic identity;
 unbound corruption carries neither and degrades global coverage.
-Version ≠ 17 or domain mismatch MUST NOT be interpreted; recovery rebuilds
-from media. Older checkpoint versions are not readable by a v17 decoder.
+Version ≠ 18 or domain mismatch MUST NOT be interpreted; recovery rebuilds
+from media. Older checkpoint versions are not readable by a v18 decoder.
+
+Authority-only generations live under
+`store-info/atomic-authority/<compaction-job-id>.residiuum`. They are immutable
+streams of byte-identical verified Atomic frames, not ordinary data segments.
+The v18 checkpoint covers the current generation and records prior Atomic media
+as superseded. Publication ordering is generation file sync, generation
+directory sync, checkpoint atomic replace, checkpoint directory sync, then
+source deletion. Every crash cut therefore selects the complete old authority
+or the complete replacement. Superseded generation files and markers are
+pruned only after their paths no longer carry authority.
 
 #### Lifetime tombstone index `ATTSI2` version 2
 

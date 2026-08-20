@@ -62,6 +62,14 @@ handle does not silently make that decision merely to bypass a fence.
   removed. Every crash cut exposes either the old generation or the complete
   new generation.
 - Damaged, conflicted, undecided or incomplete Atomic evidence blocks reclaim.
+- The delivered v1 replacement is a dedicated immutable stream under
+  `store-info/atomic-authority/`, not a value-only compact segment. It contains
+  byte-identical verified Atomic frames and is reconstructed into an independent
+  catalogue before checkpoint publication.
+- The checkpoint swap is the authority linearization point. Its superseded-path
+  set prevents mixed old/new ingestion while deletion is incomplete; completed
+  deletion prunes obsolete generations and markers so repeated compaction stays
+  bounded.
 
 ### 3.3 Recovery Shadow
 
@@ -143,3 +151,27 @@ The `ATM-MNT` family must cover:
 
 The clean full verifier must label ATM-MNT as an acceptance candidate. Public
 Atomics remain disabled until ATM-5.
+
+## 5. Delivery status at 2026-08-20
+
+Delivered and locally qualified:
+
+- terminal complete Atomics survive destructive live-projection source reclaim;
+- replacement material is compared across decisions, roots, members,
+  payload/chunk hashes, positions, order frontiers, coordinator sequence,
+  findings and lifetime-tombstone cardinality before source deletion;
+- restart, status, receipt, value, same-root retry and repeated reclaim remain
+  exact;
+- failpoints immediately before/after checkpoint swap and after a source delete
+  reopen with complete authority and can resume reclaim;
+- an injected omitted Atomic frame refuses before source deletion;
+- same-identity backup/restore and evidence salvage include authority-only media;
+- superseded authority generations are pruned after successful reclaim.
+
+Still open in ATM-4C:
+
+- Recovery Shadow Atomic authority carriage and rebuild equivalence;
+- external configured tier-root online/offline coverage truth;
+- tombstone-index obsolete-page generation-swap crash qualification;
+- the expanded not-committed, chunked, damaged and multi-source ATM-MNT matrix
+  and canonical full-verifier registration.

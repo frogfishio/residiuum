@@ -58,7 +58,7 @@ profile. The product capability is still false, so no released SDK could have
 created supported Atomic data. New prepares require CBOR field 11
 `member_count: uint`; old experimental prepares that omit it are not silently
 upgraded because their exact intended cardinality is unknowable. The same
-pre-publication rule applies to `ATCKP1` v17, `ATCRD1` v2 and the heap-qualified
+pre-publication rule applies to `ATCKP1` v18, `ATCRD1` v2 and the heap-qualified
 sidecars: older experimental private layouts are rebuilt where authoritative
 media permits and are never interpreted as the new composite-key format.
 
@@ -95,7 +95,7 @@ media permits and are never interpreted as the new composite-key format.
   Heap/Atomic linkage when the envelope survives a damaged role body.
 - **Delivered:** `ATTOMB2` repeats the Atomic ID in its fixed header and checks
   it against canonical tombstone CBOR, so a damaged lifetime body remains
-  attributable. `ATCKP1` v17 persists the Heap-qualified finding.
+  attributable. `ATCKP1` v18 persists the Heap-qualified finding.
 - **Delivered:** committed status survives prepare/member/payload/chunk/seal,
   order, decision and tombstone damage with an independently exact logical
   result and honest `complete`, `partial`, `missing`, `conflicting` or
@@ -138,14 +138,19 @@ media permits and are never interpreted as the new composite-key format.
 - **Delivered:** evidence salvage retains source Heap authority as inactive
   foreign-Heap evidence; it is examinable but is not activated in the new
   lineage. Scrub is qualified read-only for healthy terminal evidence.
-- **Qualified fail-closed:** identity-reassign clone, source reclaim and
-  CompactShadow transition refuse before mutation while any issued Atomic
-  identity exists. Qualification exposed that the current value-only Recovery
-  Shadow loses Atomic authority, so the transition is now explicitly fenced.
-- **Remaining:** authenticated Atomic-preserving replacement generations for
-  source reclaim; Recovery Shadow authority carriage and rebuild; external
+- **Delivered:** destructive source reclaim publishes a dedicated byte-exact
+  Atomic authority generation, reconstructs and materially verifies it, then
+  checkpoint-swaps before deleting a source. Superseded paths close the
+  mixed-generation crash window and are pruned after deletion. Restart, retry,
+  receipt, backup/restore, salvage, repeated reclaim, omission negative control
+  and three destructive crash cuts are green.
+- **Qualified fail-closed:** identity-reassign clone and CompactShadow
+  transition refuse before mutation while any issued Atomic identity exists.
+  The current value-only Recovery Shadow loses Atomic authority, so the
+  transition remains explicitly fenced.
+- **Remaining:** Recovery Shadow authority carriage and rebuild; external
   tier-root discovery/offline truth; tombstone-index page generation reclaim;
-  crash/failpoint matrices for those destructive transitions.
+  the expanded not-committed/chunked/damaged/multi-source maintenance matrix.
 
 ### ATM-4D — serial histories and predicates
 
@@ -158,7 +163,7 @@ media permits and are never interpreted as the new composite-key format.
 ### ATM-4E — Heap-qualified identity key — delivered
 
 The catalogue and all dependent physical keys use the exact composite
-`(HeapId, AtomicId)`. `ATCKP1` v17, `ATCRD1` v2 and every non-prepare staging
+`(HeapId, AtomicId)`. `ATCKP1` v18, `ATCRD1` v2 and every non-prepare staging
 sidecar carry the Heap component. No hash-derived naming convention is used as
 an isolation boundary. Tombstones introduced by ATM-4A MUST use the same
 composite key.

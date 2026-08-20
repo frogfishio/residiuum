@@ -873,6 +873,7 @@ pub fn reclaim_source_segments(
         fs::remove_file(&path)?;
         reclaimed = reclaimed.saturating_add(size);
         deleted_ids.push(id);
+        crate::failpoint::hit("store.compact.after_source_delete")?;
     }
     sync_dir_best_effort(&paths.segments_dir());
 

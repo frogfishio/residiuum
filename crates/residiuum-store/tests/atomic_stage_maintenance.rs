@@ -10,17 +10,32 @@ use residiuum_format::{
     SubjectObjectKind,
 };
 use residiuum_store::{
-    atomic_coord_path, atomic_stage_checkpoint_path, outstanding_atomic_evidence,
-    restore_full_backup, CompactOptions, DurabilityMode, RestoreOptions, ScrubOptions, Store,
-    StoreError, StoreOpenOptions, TierClass, TierMoveMode, ATOMIC_STAGE_CHECKPOINT_FILE,
+    arm_failpoint_once_current_thread, atomic_coord_path, atomic_stage_checkpoint_path,
+    clear_failpoints, outstanding_atomic_evidence, restore_full_backup, CompactOptions,
+    DurabilityMode, FailpointAction, RestoreOptions, ScrubOptions, Store, StoreError,
+    StoreOpenOptions, TierClass, TierMoveMode, ATOMIC_STAGE_CHECKPOINT_FILE,
 };
 use std::fs;
+use std::sync::{Mutex, OnceLock};
 
 const FRONTIER: [u8; 32] = [0xA1; 32];
+
+fn fp_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 fn aid() -> AtomicId {
     let mut b = [0u8; 32];
     b[0] = 9;
+    AtomicId::from_bytes(b).unwrap()
+}
+
+fn second_aid() -> AtomicId {
+    let mut b = [0u8; 32];
+    b[0] = 10;
     AtomicId::from_bytes(b).unwrap()
 }
 
@@ -45,6 +60,20 @@ fn member() -> AtomicMember {
         before_version: None,
         after_content_hash: Some(*blake3::hash(b"secret").as_bytes()),
         event_id: vid(),
+    }
+}
+
+fn second_member() -> AtomicMember {
+    let mut event = [0u8; 16];
+    event[0] = 4;
+    AtomicMember {
+        atomic_id: second_aid(),
+        ordinal: 0,
+        object_identity: ObjectIdentity::new(cid(), CanonicalKey::String("k2".into())),
+        member_kind: MutationKind::Create,
+        before_version: None,
+        after_content_hash: Some(*blake3::hash(b"second").as_bytes()),
+        event_id: VersionId::from_bytes(event).unwrap(),
     }
 }
 
@@ -175,7 +204,7 @@ fn healthy_terminal_atomic_seals_compacts_without_reclaim_and_replays() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s");
     let mut store = Store::create(&path).unwrap();
-    let (heap_id, plan, subject) = committed_plan(&mut store);
+    let (heap_id, first_plan, subject) = committed_plan(&mut store);
 
     store.seal_active().unwrap();
     assert_committed_complete(&mut store, heap_id, &subject);
@@ -189,7 +218,7 @@ fn healthy_terminal_atomic_seals_compacts_without_reclaim_and_replays() {
     let replay = reopened
         .atomic_stage_for_heap(heap_id)
         .unwrap()
-        .decide_plan_evidence(&plan)
+        .decide_plan_evidence(&first_plan)
         .unwrap();
     assert_eq!(replay.commit_position, Some(1));
 }
@@ -225,6 +254,14 @@ fn terminal_atomic_full_backup_restore_preserves_status_value_and_retry() {
     let dst = dir.path().join("dst");
     let mut store = Store::create(&src).unwrap();
     let (heap_id, plan, subject) = committed_plan(&mut store);
+    let compact = store
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap();
+    assert_eq!(compact.phase, residiuum_store::CompactPhase::Reclaimed);
     store.backup_to(&bak).unwrap();
     drop(store);
 
@@ -241,24 +278,62 @@ fn terminal_atomic_full_backup_restore_preserves_status_value_and_retry() {
 }
 
 #[test]
-fn terminal_atomic_reclaim_and_identity_reassign_refuse_before_destination_publish() {
+fn terminal_atomic_reclaim_installs_authority_generation_and_identity_reassign_still_refuses() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("src");
     let bak = dir.path().join("bak");
     let clone = dir.path().join("clone");
     let mut store = Store::create(&src).unwrap();
-    let (_heap_id, _plan, _subject) = committed_plan(&mut store);
-    let jobs_before = store.list_compact_jobs().unwrap().len();
-    assert_refused(
-        store
-            .compact_live_with(CompactOptions {
-                reclaim_sources: true,
-                allow_history_loss: true,
-                ..CompactOptions::default()
-            })
-            .unwrap_err(),
+    let (heap_id, first_plan, subject) = committed_plan(&mut store);
+    let report = store
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap();
+    assert_eq!(report.phase, residiuum_store::CompactPhase::Reclaimed);
+    assert!(!report.sources_retained);
+    assert!(report.bytes_reclaimed > 0);
+    assert!(src.join("store-info").join("atomic-authority").is_dir());
+    assert_committed_complete(&mut store, heap_id, &subject);
+    drop(store);
+
+    let mut store = Store::open(&src).unwrap();
+    assert_committed_complete(&mut store, heap_id, &subject);
+    let replay = store
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&first_plan)
+        .unwrap();
+    assert_eq!(replay.commit_position, Some(1));
+    let second_member = second_member();
+    let second_plan = plan(heap_id, std::slice::from_ref(&second_member), b"second");
+    let second_decision = store
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&second_plan)
+        .unwrap();
+    assert_eq!(
+        second_decision.commit_position,
+        Some(2),
+        "replacement generation must preserve the Heap commit high-water mark"
     );
-    assert_eq!(store.list_compact_jobs().unwrap().len(), jobs_before);
+    let second = store
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap();
+    assert_eq!(second.phase, residiuum_store::CompactPhase::Reclaimed);
+    let authority_files = fs::read_dir(src.join("store-info").join("atomic-authority"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().is_file())
+        .count();
+    assert_eq!(authority_files, 1, "superseded generations must be pruned");
+    assert_committed_complete(&mut store, heap_id, &subject);
 
     store.backup_to(&bak).unwrap();
     let err = restore_full_backup(
@@ -271,6 +346,94 @@ fn terminal_atomic_reclaim_and_identity_reassign_refuse_before_destination_publi
     .unwrap_err();
     assert_refused(err);
     assert!(!clone.join("store-info").is_dir());
+}
+
+#[test]
+fn terminal_atomic_reclaim_crash_cuts_keep_one_complete_authority_generation() {
+    let _guard = fp_lock();
+    for failpoint in [
+        "store.atomic.authority.before_checkpoint_swap",
+        "store.atomic.authority.after_checkpoint_swap",
+        "store.compact.after_source_delete",
+    ] {
+        clear_failpoints();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("s");
+        let mut store = Store::create(&root).unwrap();
+        let (heap_id, plan, subject) = committed_plan(&mut store);
+        arm_failpoint_once_current_thread(failpoint, FailpointAction::Error);
+        let err = store
+            .compact_live_with(CompactOptions {
+                reclaim_sources: true,
+                allow_history_loss: true,
+                ..CompactOptions::default()
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("failpoint"), "{failpoint}: {err}");
+        clear_failpoints();
+        store.abandon_for_crash_test();
+        drop(store);
+
+        let mut reopened = Store::open(&root).unwrap();
+        assert_committed_complete(&mut reopened, heap_id, &subject);
+        let replay = reopened
+            .atomic_stage_for_heap(heap_id)
+            .unwrap()
+            .decide_plan_evidence(&plan)
+            .unwrap();
+        assert_eq!(replay.commit_position, Some(1), "{failpoint}");
+        let job = reopened
+            .list_compact_jobs()
+            .unwrap()
+            .into_iter()
+            .find(|job| job.reclaim_requested)
+            .expect("reclaim job");
+        let job_id = residiuum_store::unhex16(&job.job_id).unwrap();
+        let completed = reopened.reclaim_compact_job(&job_id).unwrap();
+        assert_eq!(completed.phase, residiuum_store::CompactPhase::Reclaimed);
+        assert_committed_complete(&mut reopened, heap_id, &subject);
+    }
+    clear_failpoints();
+}
+
+#[test]
+fn terminal_atomic_reclaim_refuses_an_incomplete_replacement_before_source_deletion() {
+    let _guard = fp_lock();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("s");
+    let mut store = Store::create(&root).unwrap();
+    let (heap_id, _plan, subject) = committed_plan(&mut store);
+    arm_failpoint_once_current_thread(
+        "store.atomic.authority.omit_frame",
+        FailpointAction::ShortWrite,
+    );
+    let err = store
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap_err();
+    clear_failpoints();
+    assert!(
+        err.to_string().contains("not materially identical"),
+        "unexpected refusal: {err}"
+    );
+    let job = store
+        .list_compact_jobs()
+        .unwrap()
+        .into_iter()
+        .find(|job| job.reclaim_requested)
+        .expect("reclaim job");
+    assert_eq!(job.bytes_reclaimed, 0);
+    assert!(job.sources_retained);
+    assert_committed_complete(&mut store, heap_id, &subject);
+
+    let job_id = residiuum_store::unhex16(&job.job_id).unwrap();
+    let completed = store.reclaim_compact_job(&job_id).unwrap();
+    assert_eq!(completed.phase, residiuum_store::CompactPhase::Reclaimed);
+    assert_committed_complete(&mut store, heap_id, &subject);
 }
 
 #[test]
@@ -341,6 +504,40 @@ fn salvage_keeps_source_atomic_as_inactive_foreign_heap_evidence() {
         .unwrap();
     assert_eq!(status.logical, LogicalStatus::Committed);
     assert_eq!(status.material, MaterialStatus::Complete);
+}
+
+#[test]
+fn salvage_after_source_reclaim_copies_the_current_authority_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src");
+    let dst = dir.path().join("dst");
+    let mut store = Store::create(&src).unwrap();
+    let (source_heap, _plan, _subject) = committed_plan(&mut store);
+    let compact = store
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap();
+    assert_eq!(compact.phase, residiuum_store::CompactPhase::Reclaimed);
+    let report = store.salvage_to(&dst).unwrap();
+    assert!(report.frames_copied > 0);
+    drop(store);
+
+    let mut salvaged = Store::open_with_options(
+        &dst,
+        StoreOpenOptions::default().tolerate_unidentified_inventory(),
+    )
+    .unwrap();
+    let status = salvaged
+        .atomic_stage_for_heap(source_heap)
+        .unwrap()
+        .atomic_status(aid())
+        .unwrap();
+    assert_eq!(status.logical, LogicalStatus::Committed);
+    assert_eq!(status.material, MaterialStatus::Complete);
+    assert!(status.receipt.is_some());
 }
 
 #[test]

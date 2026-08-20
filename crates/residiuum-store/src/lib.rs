@@ -175,7 +175,8 @@ pub use erasure::{
 pub use error::{LocatorFault, LocatorFaultKind, StoreError};
 pub use failpoint::{
     any_armed as failpoints_armed, arm as arm_failpoint, arm_n as arm_failpoint_n,
-    arm_once as arm_failpoint_once, clear as clear_failpoints, clear_all as clear_failpoints_all,
+    arm_once as arm_failpoint_once, arm_once_current_thread as arm_failpoint_once_current_thread,
+    clear as clear_failpoints, clear_all as clear_failpoints_all,
     clear_visits as clear_failpoint_visits, consume_short_write as consume_failpoint_short_write,
     disable_hit_proof as disable_failpoint_hit_proof, disarm as disarm_failpoint,
     enable_hit_proof as enable_failpoint_hit_proof, hit as hit_failpoint,

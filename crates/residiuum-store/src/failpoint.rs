@@ -67,6 +67,8 @@ struct Armed {
     action: Action,
     /// Remaining hits; `None` means fire every time until disarmed.
     remaining: Option<u32>,
+    /// Optional thread scope for parallel-safe in-process qualification.
+    thread: Option<std::thread::ThreadId>,
 }
 
 static REGISTRY: OnceLock<Mutex<HashMap<&'static str, Armed>>> = OnceLock::new();
@@ -139,6 +141,7 @@ pub fn arm(name: &'static str, action: Action) {
         Armed {
             action,
             remaining: None,
+            thread: None,
         },
     );
 }
@@ -146,6 +149,23 @@ pub fn arm(name: &'static str, action: Action) {
 /// Arm `name` to fire `action` at most `times` times, then auto-disarm.
 pub fn arm_once(name: &'static str, action: Action) {
     arm_n(name, action, 1);
+}
+
+/// Arm one hit only on the calling thread.
+///
+/// This preserves process-global failpoints for crash controllers while
+/// allowing parallel Rust tests to inject a boundary without stealing an
+/// unrelated worker's visit to the same production site.
+pub fn arm_once_current_thread(name: &'static str, action: Action) {
+    let mut g = registry().lock().expect("failpoint registry");
+    g.insert(
+        name,
+        Armed {
+            action,
+            remaining: Some(1),
+            thread: Some(std::thread::current().id()),
+        },
+    );
 }
 
 /// Arm `name` to fire `action` at most `n` times.
@@ -156,6 +176,7 @@ pub fn arm_n(name: &'static str, action: Action, n: u32) {
         Armed {
             action,
             remaining: Some(n),
+            thread: None,
         },
     );
 }
@@ -188,6 +209,12 @@ pub fn any_armed() -> bool {
 fn take_action(name: &'static str) -> Option<Action> {
     let mut g = registry().lock().expect("failpoint registry");
     let entry = g.get_mut(name)?;
+    if entry
+        .thread
+        .is_some_and(|thread| thread != std::thread::current().id())
+    {
+        return None;
+    }
     let action = entry.action;
     if let Some(ref mut rem) = entry.remaining {
         if *rem == 0 {
@@ -257,6 +284,12 @@ pub fn consume_short_write(name: &'static str) -> bool {
     let Some(entry) = g.get_mut(name) else {
         return false;
     };
+    if entry
+        .thread
+        .is_some_and(|thread| thread != std::thread::current().id())
+    {
+        return false;
+    }
     if entry.action != Action::ShortWrite {
         return false;
     }
@@ -316,6 +349,20 @@ mod tests {
         assert!(matches!(err, StoreError::Failpoint("test.error")));
         // second hit auto-disarmed
         assert!(hit("test.error").is_ok());
+        clear();
+    }
+
+    #[test]
+    fn current_thread_arm_is_not_stolen_by_parallel_worker() {
+        let _g = test_lock();
+        clear();
+        arm_once_current_thread("test.thread_scoped", Action::Error);
+        std::thread::spawn(|| assert!(hit("test.thread_scoped").is_ok()))
+            .join()
+            .unwrap();
+        let err = hit("test.thread_scoped").unwrap_err();
+        assert!(matches!(err, StoreError::Failpoint("test.thread_scoped")));
+        assert!(hit("test.thread_scoped").is_ok());
         clear();
     }
 

@@ -17,7 +17,9 @@ use crate::atomic_stage_media::{
     decode_stage_sidecar, stage_key, AtomicShardFrontier, BodyRef, RetainedDecisionTombstone,
     SidecarDecode, StageAtomicKey, StageCatalog,
 };
-use crate::atomic_tombstone_index::{refresh_index, validate_index, TombstoneIndexMeta};
+use crate::atomic_tombstone_index::{
+    lookup as lookup_tombstone, refresh_index, validate_index, TombstoneIndexMeta,
+};
 use crate::error::StoreError;
 use crate::layout::StorePaths;
 use residiuum_atomics::{
@@ -25,15 +27,17 @@ use residiuum_atomics::{
     encode_member, encode_prepare, encode_tombstone, AtomicId, ChunkPlan, ContentRoot, HeapId,
 };
 use residiuum_format::{
-    read_atomic_evidence, scan_forward, AtomicEvidenceClass, SafetyLimits, ScanRegion,
+    examine_atomic_frame, read_atomic_evidence, scan_forward, AtomicEvidenceClass, SafetyLimits,
+    ScanRegion,
 };
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 17;
-const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V17";
+const CHECKPOINT_VERSION: u8 = 18;
+const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V18";
 const BLOCK_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-BLK-V1";
 /// Fixed leaf size for the covered-prefix block frontier (CR-ATMR6-001).
 const FRONTIER_BLOCK: u64 = 64 * 1024;
@@ -52,10 +56,18 @@ const COORD_WRITE_POINTS: AtomicWriteFailpoints = AtomicWriteFailpoints {
     after_rename: "store.atomic.coord.after_rename",
     after_dir_sync: "store.atomic.coord.after_dir_sync",
 };
+const AUTHORITY_WRITE_POINTS: AtomicWriteFailpoints = AtomicWriteFailpoints {
+    after_write: "store.atomic.authority.after_write",
+    after_file_sync: "store.atomic.authority.after_file_sync",
+    after_rename: "store.atomic.authority.after_rename",
+    after_dir_sync: "store.atomic.authority.after_dir_sync",
+};
 /// On-disk catalogue under `store-info/`.
 pub const ATOMIC_STAGE_CHECKPOINT_FILE: &str = "atomic-stage.ckpt";
 /// Durable coordinator sequence log (CR-ATMR5-004).
 pub const ATOMIC_COORD_FILE: &str = "atomic-coord.ckpt";
+/// Immutable replacement generations used to make destructive maintenance safe.
+pub const ATOMIC_AUTHORITY_DIR: &str = "atomic-authority";
 
 /// Outstanding LocalHeap Atomics admitted before reclaim (CR-ATMR6-004).
 pub const ADMISSION_OUTSTANDING_ATOMICS: u32 = 8;
@@ -420,6 +432,342 @@ pub(crate) fn refuse_atomic_relocation_unless_terminal(
     Ok(())
 }
 
+/// Publish a byte-exact, independently reconstructed Atomic authority
+/// generation before destructive maintenance retires any source segment.
+///
+/// The immutable generation is durable first. The checkpoint swap is the
+/// linearization point: it covers the replacement and marks every previous
+/// Atomic-bearing path superseded. Therefore a crash before the swap retains
+/// the old authority, while a crash after it ignores old files even if source
+/// deletion had not completed.
+pub(crate) fn install_compaction_authority_generation(
+    paths: &StorePaths,
+    job_id: &[u8; 16],
+) -> Result<bool, StoreError> {
+    refuse_atomic_relocation_unless_terminal(paths)?;
+    let old = open_catalog_readonly(paths, AtomicStageLimits::operable())?;
+    if !old.catalog.has_outstanding_evidence() {
+        return Ok(false);
+    }
+
+    let mut atomic_files: Vec<_> = old
+        .covered
+        .iter()
+        .filter(|file| {
+            file.atomic_evidence
+                && !old
+                    .catalog
+                    .superseded_media
+                    .iter()
+                    .any(|path| path == &file.rel_path)
+        })
+        .cloned()
+        .collect();
+    atomic_files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    if atomic_files.is_empty() {
+        return Err(StoreError::AtomicStage(
+            "Atomic authority generation refused: catalogue has authority but no authenticated media"
+                .into(),
+        ));
+    }
+
+    crate::failpoint::hit("store.atomic.authority.before_collect")?;
+    let limits = AtomicStageLimits::operable();
+    let mut generation = Vec::new();
+    let mut omitted_test_frame = false;
+    for covered in &atomic_files {
+        let source = paths.root.join(&covered.rel_path);
+        if fs::metadata(&source)?.len() != covered.covered_len {
+            return Err(StoreError::AtomicStage(
+                "Atomic authority generation refused: covered source length changed".into(),
+            ));
+        }
+        verify_covered_blocks(&source, covered)?;
+        let bytes = fs::read(&source)?;
+        let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
+        for region in &report.regions {
+            let ScanRegion::VerifiedFrame { range, frame } = region else {
+                continue;
+            };
+            let atomic_frame = examine_atomic_frame(frame).is_some()
+                || !matches!(decode_stage_sidecar(&frame.body), SidecarDecode::NotSidecar);
+            if !atomic_frame {
+                continue;
+            }
+            if !omitted_test_frame
+                && crate::failpoint::consume_short_write("store.atomic.authority.omit_frame")
+            {
+                omitted_test_frame = true;
+                continue;
+            }
+            let lo = range.start as usize;
+            let hi = range.end as usize;
+            let frame_bytes = bytes.get(lo..hi).ok_or_else(|| {
+                StoreError::AtomicStage(
+                    "Atomic authority generation refused: verified frame range escaped source"
+                        .into(),
+                )
+            })?;
+            let next = generation
+                .len()
+                .checked_add(frame_bytes.len())
+                .ok_or_else(|| StoreError::AtomicStage("Atomic authority size overflow".into()))?;
+            if next as u64 > limits.max_scan_bytes {
+                return Err(Budget::fail(
+                    "authority generation bytes",
+                    next as u64,
+                    limits.max_scan_bytes,
+                ));
+            }
+            generation.extend_from_slice(frame_bytes);
+        }
+    }
+    if generation.is_empty() {
+        return Err(StoreError::AtomicStage(
+            "Atomic authority generation refused: authenticated media yielded no Atomic frames"
+                .into(),
+        ));
+    }
+
+    let generation_name = format!("{}.residiuum", crate::layout::hex16(job_id));
+    let generation_path = paths
+        .store_info()
+        .join(ATOMIC_AUTHORITY_DIR)
+        .join(generation_name);
+    crate::failpoint::hit("store.atomic.authority.before_publish")?;
+    write_atomic_with_failpoints(&generation_path, &generation, AUTHORITY_WRITE_POINTS)?;
+    crate::failpoint::hit("store.atomic.authority.after_publish")?;
+    if fs::read(&generation_path)? != generation {
+        return Err(StoreError::AtomicStage(
+            "Atomic authority generation verification failed after durable publish".into(),
+        ));
+    }
+
+    let generation_rel = rel_path(paths, &generation_path);
+    let mut fresh = StageCatalog::default();
+    let mut findings = StageFindings::default();
+    let mut budget = Budget::new(limits);
+    let generation_len = generation.len() as u64;
+    let atomic = ingest_file_tail(
+        &generation_path,
+        &generation_rel,
+        0,
+        generation_len,
+        &mut fresh,
+        &mut findings,
+        &mut budget,
+    )?;
+    if !atomic {
+        return Err(StoreError::AtomicStage(
+            "Atomic authority generation did not reconstruct Atomic evidence".into(),
+        ));
+    }
+    load_coordinator(paths, &mut fresh)?;
+    finalize_catalog(&mut fresh, &mut findings);
+    fresh.assign_missing_coord_seqs();
+    fresh.findings = findings;
+    verify_replacement_catalog(paths, &old.catalog, &fresh)?;
+
+    let replacement_cover = cover_file(
+        &generation_path,
+        generation_rel.clone(),
+        generation_len,
+        true,
+    )?;
+    fresh.superseded_media = old.catalog.superseded_media.clone();
+    for covered in atomic_files {
+        if covered.rel_path != generation_rel && !fresh.superseded_media.contains(&covered.rel_path)
+        {
+            fresh.superseded_media.push(covered.rel_path);
+        }
+    }
+    fresh.superseded_media.sort();
+    crate::failpoint::hit("store.atomic.authority.before_checkpoint_swap")?;
+    persist_checkpoint(
+        paths,
+        &mut fresh,
+        &[replacement_cover],
+        limits.max_checkpoint_bytes,
+    )?;
+    persist_coordinator(paths, &fresh)?;
+    crate::failpoint::hit("store.atomic.authority.after_checkpoint_swap")?;
+    Ok(true)
+}
+
+/// Retire obsolete authority-generation files and collapse superseded markers
+/// after source deletion. A crash before this housekeeping is harmless: the
+/// checkpoint continues to ignore every marked path. A successful pass keeps
+/// checkpoint size proportional to the current crash window, not compaction
+/// history.
+pub(crate) fn prune_deleted_superseded_media(paths: &StorePaths) -> Result<(), StoreError> {
+    if !atomic_stage_checkpoint_path(paths).is_file() {
+        return Ok(());
+    }
+    let limits = AtomicStageLimits::operable();
+    let mut opened = open_catalog(paths, limits)?;
+    let authority_prefix = format!("store-info/{ATOMIC_AUTHORITY_DIR}/");
+    for rel in &opened.catalog.superseded_media {
+        if !rel.starts_with(&authority_prefix) || !safe_store_relative_path(rel) {
+            continue;
+        }
+        let path = paths.root.join(rel);
+        if path.is_file() {
+            fs::remove_file(path)?;
+        }
+    }
+    opened
+        .catalog
+        .superseded_media
+        .retain(|rel| safe_store_relative_path(rel) && paths.root.join(rel).is_file());
+    persist_checkpoint(
+        paths,
+        &mut opened.catalog,
+        &opened.covered,
+        limits.max_checkpoint_bytes,
+    )?;
+    Ok(())
+}
+
+/// Current authority-only media that ordinary segment enumeration does not
+/// see. Evidence salvage includes these files byte-for-byte.
+pub(crate) fn authority_generation_paths(paths: &StorePaths) -> Result<Vec<PathBuf>, StoreError> {
+    if !atomic_stage_checkpoint_path(paths).is_file() {
+        return Ok(Vec::new());
+    }
+    let opened = open_catalog_readonly(paths, AtomicStageLimits::operable())?;
+    let prefix = format!("store-info/{ATOMIC_AUTHORITY_DIR}/");
+    Ok(opened
+        .covered
+        .into_iter()
+        .filter(|covered| {
+            covered.atomic_evidence
+                && covered.rel_path.starts_with(&prefix)
+                && !opened.catalog.superseded_media.contains(&covered.rel_path)
+        })
+        .map(|covered| paths.root.join(covered.rel_path))
+        .filter(|path| path.is_file())
+        .collect())
+}
+
+fn safe_store_relative_path(rel: &str) -> bool {
+    let path = Path::new(rel);
+    !path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
+fn verify_replacement_catalog(
+    paths: &StorePaths,
+    old: &StageCatalog,
+    fresh: &StageCatalog,
+) -> Result<(), StoreError> {
+    fn same_ref_material<K: Ord>(
+        left: &BTreeMap<K, BodyRef>,
+        right: &BTreeMap<K, BodyRef>,
+    ) -> bool {
+        left.len() == right.len()
+            && left.iter().all(|(key, value)| {
+                right
+                    .get(key)
+                    .is_some_and(|other| value.len == other.len && value.hash == other.hash)
+            })
+    }
+    let mut old_tombstones = old.tombstone_index.map_or(0, |index| index.record_count);
+    for (key, retained) in &old.tombstones {
+        let indexed = match old.tombstone_index {
+            Some(index) => lookup_tombstone(paths, index, *key)?,
+            None => None,
+        };
+        match indexed {
+            Some(existing) if existing == *retained => {}
+            Some(_) => {
+                return Err(StoreError::AtomicStage(
+                    "Atomic authority generation refused: tail tombstone conflicts with indexed lifetime authority"
+                        .into(),
+                ));
+            }
+            None => old_tombstones = old_tombstones.saturating_add(1),
+        }
+    }
+    let fresh_tombstones = fresh.tombstones.len() as u64;
+    let tombstone_material_matches = old_tombstones == fresh_tombstones
+        && fresh.tombstones.iter().all(|(key, retained)| {
+            if old.tombstones.get(key) == Some(retained) {
+                return true;
+            }
+            old.tombstone_index
+                .and_then(|index| lookup_tombstone(paths, index, *key).ok().flatten())
+                .is_some_and(|indexed| indexed == *retained)
+        });
+    let mut differences = Vec::new();
+    macro_rules! compare {
+        ($name:literal, $condition:expr) => {
+            if !$condition {
+                differences.push($name);
+            }
+        };
+    }
+    compare!("prepares", old.prepares == fresh.prepares);
+    compare!("members", old.members == fresh.members);
+    compare!(
+        "payload_refs",
+        same_ref_material(&old.payload_refs, &fresh.payload_refs)
+    );
+    compare!("chunk_plans", old.chunk_plans == fresh.chunk_plans);
+    compare!(
+        "chunk_refs",
+        same_ref_material(&old.chunk_refs, &fresh.chunk_refs)
+    );
+    compare!("seals", old.seals == fresh.seals);
+    compare!("decisions", old.decisions == fresh.decisions);
+    compare!("tombstones", tombstone_material_matches);
+    compare!("commit_next", old.commit_next == fresh.commit_next);
+    compare!(
+        "order_frontiers",
+        old.order_frontiers == fresh.order_frontiers
+    );
+    compare!("blocked", old.blocked == fresh.blocked);
+    compare!("prepare_batch", old.prepare_batch == fresh.prepare_batch);
+    compare!("coord_seq", old.coord_seq == fresh.coord_seq);
+    compare!("coord_next", old.coord_next == fresh.coord_next);
+    compare!(
+        "findings",
+        old.findings.records.len() == fresh.findings.records.len()
+            && old
+                .findings
+                .records
+                .iter()
+                .all(|finding| fresh.findings.records.contains(finding))
+    );
+    compare!(
+        "coverage_degraded",
+        old.coverage_degraded == fresh.coverage_degraded
+    );
+    compare!(
+        "missing_covered",
+        old.missing_covered == fresh.missing_covered
+    );
+    compare!(
+        "intended_members",
+        old.intended_members == fresh.intended_members
+    );
+    if !differences.is_empty() {
+        return Err(StoreError::AtomicStage(format!(
+            "Atomic authority generation refused: replacement catalogue is not materially identical ({}) [tombstones old={} fresh={}; findings old={} fresh={}]",
+            differences.join(","),
+            old_tombstones,
+            fresh_tombstones,
+            old.findings.records.len(),
+            fresh.findings.records.len(),
+        )));
+    }
+    Ok(())
+}
+
 fn checkpoint_indicates_outstanding(paths: &StorePaths) -> Result<bool, StoreError> {
     let path = atomic_stage_checkpoint_path(paths);
     if !path.is_file() {
@@ -566,7 +914,11 @@ fn open_catalog_inner(
     budget.charge_catalog(&catalog)?;
     let mut findings = std::mem::take(&mut catalog.findings);
 
-    let files = list_media_files(paths, &mut budget)?;
+    let mut files = list_media_files(paths, &mut budget)?;
+    files.retain(|path| {
+        let rel = rel_path(paths, path);
+        !catalog.superseded_media.iter().any(|old| old == &rel)
+    });
     heal_relocated_coverage(paths, &files, &mut catalog, &mut covered, &mut budget)?;
     let mut unmatched: Vec<CoveredFile> = covered.clone();
     let mut next_covered = Vec::new();
@@ -843,6 +1195,12 @@ fn list_media_files(paths: &StorePaths, budget: &mut Budget) -> Result<Vec<PathB
     collect_files(&paths.active_dir(), 0, budget, &mut out)?;
     collect_files(&paths.segments_dir(), 0, budget, &mut out)?;
     collect_files(&paths.pending_seal_dir(), 0, budget, &mut out)?;
+    collect_files(
+        &paths.store_info().join(ATOMIC_AUTHORITY_DIR),
+        0,
+        budget,
+        &mut out,
+    )?;
     let mut tier_files = Vec::new();
     collect_files(&paths.tiers_dir(), 0, budget, &mut tier_files)?;
     out.extend(tier_files.into_iter().filter(|path| {
@@ -1711,6 +2069,12 @@ fn encode_checkpoint(
         body.extend_from_slice(id.as_bytes());
         body.extend_from_slice(&n.to_be_bytes());
     }
+    body.extend_from_slice(&(catalog.superseded_media.len() as u32).to_be_bytes());
+    for rel in &catalog.superseded_media {
+        let bytes = rel.as_bytes();
+        body.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+        body.extend_from_slice(bytes);
+    }
     let mut hasher = blake3::Hasher::new();
     hasher.update(CHECKPOINT_DOMAIN);
     hasher.update(&body);
@@ -2118,6 +2482,22 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
         let n = read_u32(&mut cur)?;
         catalog.intended_members.insert(stage_key(heap_id, id), n);
     }
+    let n_superseded = read_u32(&mut cur)? as usize;
+    for _ in 0..n_superseded {
+        let n = read_u16(&mut cur)? as usize;
+        if cur.len() < n {
+            return None;
+        }
+        let rel = String::from_utf8(cur[..n].to_vec()).ok()?;
+        cur = &cur[n..];
+        if rel.is_empty()
+            || !safe_store_relative_path(&rel)
+            || catalog.superseded_media.contains(&rel)
+        {
+            return None;
+        }
+        catalog.superseded_media.push(rel);
+    }
     if !cur.is_empty() {
         return None;
     }
@@ -2152,7 +2532,7 @@ fn read_u64(cur: &mut &[u8]) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod checkpoint_v17_freeze {
+mod checkpoint_v18_freeze {
     use super::*;
     use crate::atomic_stage_media::{
         encode_stage_chunk_body, encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal,
@@ -2167,18 +2547,18 @@ mod checkpoint_v17_freeze {
     }
 
     #[test]
-    fn v17_empty_checkpoint_roundtrips() {
+    fn v18_empty_checkpoint_roundtrips() {
         let catalog = StageCatalog::default();
         let bytes = encode_checkpoint(&catalog, &[]).unwrap();
         assert!(bytes.starts_with(CHECKPOINT_MAGIC));
         assert_eq!(bytes[CHECKPOINT_MAGIC.len()], CHECKPOINT_VERSION);
-        let (decoded, covered) = decode_checkpoint(&bytes).expect("v17 empty");
+        let (decoded, covered) = decode_checkpoint(&bytes).expect("v18 empty");
         assert!(covered.is_empty());
         assert!(!decoded.has_outstanding_evidence());
     }
 
     #[test]
-    fn v17_finding_roundtrips_heap_qualified_role_and_identity() {
+    fn v18_finding_roundtrips_heap_qualified_role_and_identity() {
         let heap_id = HeapId::from_bytes([0x44; 16]).unwrap();
         let mut catalog = StageCatalog::default();
         catalog.findings.records.push(StageFinding {
@@ -2188,7 +2568,7 @@ mod checkpoint_v17_freeze {
             atomic_id: Some(aid()),
         });
         let bytes = encode_checkpoint(&catalog, &[]).unwrap();
-        let (decoded, _) = decode_checkpoint(&bytes).expect("v17 finding");
+        let (decoded, _) = decode_checkpoint(&bytes).expect("v18 finding");
         assert_eq!(decoded.findings, catalog.findings);
     }
 

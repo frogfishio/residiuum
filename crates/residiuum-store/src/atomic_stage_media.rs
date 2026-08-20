@@ -125,6 +125,12 @@ pub(crate) struct StageCatalog {
     pub coverage_degraded: bool,
     /// Covered paths that vanished after a checkpoint. Cleared only by scrub.
     pub missing_covered: Vec<String>,
+    /// Media made obsolete by an authenticated authority-generation swap.
+    ///
+    /// These paths may coexist with the replacement after the checkpoint
+    /// linearization point (or survive a crash during deletion), but recovery
+    /// must never ingest them as a second authority generation.
+    pub superseded_media: Vec<String>,
     /// Intended member counts from the issuing prepare (CR-ATMR6-005).
     pub intended_members: BTreeMap<StageAtomicKey, u32>,
 }
@@ -242,6 +248,7 @@ impl StageCatalog {
             .saturating_add(self.findings.records.len() as u64 * 56)
             .saturating_add(u64::from(self.coverage_degraded))
             .saturating_add(self.missing_covered.iter().map(|p| p.len() as u64).sum())
+            .saturating_add(self.superseded_media.iter().map(|p| p.len() as u64).sum())
     }
 
     /// Allocate the next Heap commit position while the exclusive store writer

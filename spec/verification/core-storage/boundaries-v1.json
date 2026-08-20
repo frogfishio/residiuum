@@ -2521,6 +2521,858 @@
       "harness": "in_process_failpoint",
       "historical_cell_id": "store.seal.before_authoritative_rename",
       "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-awo_reserve_after",
+      "operation_id": "atomic_control_doc",
+      "step": "awo.reserve.after",
+      "kind": "failpoint",
+      "failpoint": "awo.reserve.after",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary awo.reserve.after; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_after_decision",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.after_decision",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.after_decision",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.after_decision; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_after_order_frontier",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.after_order_frontier",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.after_order_frontier",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.after_order_frontier; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_after_publish",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.after_publish",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.after_publish",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.after_publish; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_after_tombstone",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.after_tombstone",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.after_tombstone",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.after_tombstone; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_authority_after_checkpoint_swap",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.authority.after_checkpoint_swap",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.authority.after_checkpoint_swap",
+      "fault": "error",
+      "ci_subset": true,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.authority.after_checkpoint_swap; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "historical_cell_id": "store.atomic.authority.after_checkpoint_swap",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_authority_after_publish",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.authority.after_publish",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.authority.after_publish",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.authority.after_publish; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "historical_cell_id": "store.atomic.authority.after_publish",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_authority_before_checkpoint_swap",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.authority.before_checkpoint_swap",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.authority.before_checkpoint_swap",
+      "fault": "error",
+      "ci_subset": true,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.authority.before_checkpoint_swap; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "historical_cell_id": "store.atomic.authority.before_checkpoint_swap",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_authority_before_collect",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.authority.before_collect",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.authority.before_collect",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.authority.before_collect; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "historical_cell_id": "store.atomic.authority.before_collect",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_authority_before_publish",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.authority.before_publish",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.authority.before_publish",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.authority.before_publish; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "historical_cell_id": "store.atomic.authority.before_publish",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_authority_omit_frame",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.authority.omit_frame",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.authority.omit_frame",
+      "fault": "short_write",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.authority.omit_frame; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_before_ack",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.before_ack",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.before_ack",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.before_ack; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_before_decision",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.before_decision",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.before_decision",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.before_decision; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_before_order_frontier",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.before_order_frontier",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.before_order_frontier",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.before_order_frontier; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_before_publish",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.before_publish",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.before_publish",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.before_publish; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_before_tombstone",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.before_tombstone",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.before_tombstone",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.before_tombstone; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_checkpoint_after_persist",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.checkpoint.after_persist",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.checkpoint.after_persist",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.checkpoint.after_persist; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_checkpoint_before_persist",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.checkpoint.before_persist",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.checkpoint.before_persist",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.checkpoint.before_persist; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_checkpoint_capacity",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.checkpoint.capacity",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.checkpoint.capacity",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.checkpoint.capacity; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_chunk_body_after_append",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.chunk_body.after_append",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.chunk_body.after_append",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.chunk_body.after_append; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_chunk_body_after_checkpoint",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.chunk_body.after_checkpoint",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.chunk_body.after_checkpoint",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.chunk_body.after_checkpoint; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_chunk_body_before_append",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.chunk_body.before_append",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.chunk_body.before_append",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.chunk_body.before_append; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_chunk_plan_after_append",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.chunk_plan.after_append",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.chunk_plan.after_append",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.chunk_plan.after_append; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_chunk_plan_after_checkpoint",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.chunk_plan.after_checkpoint",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.chunk_plan.after_checkpoint",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.chunk_plan.after_checkpoint; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_chunk_plan_before_append",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.chunk_plan.before_append",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.chunk_plan.before_append",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.chunk_plan.before_append; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_cohort_after_decision_boundary",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.cohort.after_decision_boundary",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.cohort.after_decision_boundary",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.cohort.after_decision_boundary; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_cohort_after_member_boundary",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.cohort.after_member_boundary",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.cohort.after_member_boundary",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.cohort.after_member_boundary; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_cohort_before_decision_boundary",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.cohort.before_decision_boundary",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.cohort.before_decision_boundary",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.cohort.before_decision_boundary; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_cohort_before_member_boundary",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.cohort.before_member_boundary",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.cohort.before_member_boundary",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.cohort.before_member_boundary; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_coord_after_persist",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.coord.after_persist",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.coord.after_persist",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.coord.after_persist; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_coord_before_persist",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.coord.before_persist",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.coord.before_persist",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.coord.before_persist; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_member_after_append",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.member.after_append",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.member.after_append",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.member.after_append; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_member_after_checkpoint",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.member.after_checkpoint",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.member.after_checkpoint",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.member.after_checkpoint; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_member_before_append",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.member.before_append",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.member.before_append",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.member.before_append; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_payload_after_append",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.payload.after_append",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.payload.after_append",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.payload.after_append; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_payload_after_checkpoint",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.payload.after_checkpoint",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.payload.after_checkpoint",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.payload.after_checkpoint; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_payload_before_append",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.payload.before_append",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.payload.before_append",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.payload.before_append; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_prepare_after_append",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.prepare.after_append",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.prepare.after_append",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.prepare.after_append; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_prepare_after_checkpoint",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.prepare.after_checkpoint",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.prepare.after_checkpoint",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.prepare.after_checkpoint; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_prepare_before_append",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.prepare.before_append",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.prepare.before_append",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.prepare.before_append; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_recovery_after_decision",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.recovery.after_decision",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.recovery.after_decision",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.recovery.after_decision; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_recovery_before_decision",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.recovery.before_decision",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.recovery.before_decision",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.recovery.before_decision; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_seal_after_append",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.seal.after_append",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.seal.after_append",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.seal.after_append; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_seal_after_checkpoint",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.seal.after_checkpoint",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.seal.after_checkpoint",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.seal.after_checkpoint; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_seal_before_append",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.seal.before_append",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.seal.before_append",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.seal.before_append; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-atomic_control_doc-store_atomic_tombstone_index_after_sync",
+      "operation_id": "atomic_control_doc",
+      "step": "store.atomic.tombstone_index.after_sync",
+      "kind": "failpoint",
+      "failpoint": "store.atomic.tombstone_index.after_sync",
+      "fault": "error",
+      "ci_subset": false,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.atomic.tombstone_index.after_sync; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "source_ref": "crates/residiuum-store/src"
+    },
+    {
+      "id": "CSQ-BND-FP-compact_live-store_compact_after_source_delete",
+      "operation_id": "compact_live",
+      "step": "store.compact.after_source_delete",
+      "kind": "failpoint",
+      "failpoint": "store.compact.after_source_delete",
+      "fault": "error",
+      "ci_subset": true,
+      "expected_on_reopen": {
+        "acknowledged_visible": true,
+        "no_fabricated_commit": true,
+        "salvageable": true,
+        "prior_durable_retained": true,
+        "notes": "Registered Atomic/maintenance source boundary store.compact.after_source_delete; detailed journey expectations live in ATM4C_MAINTENANCE_JOURNEYS_SPEC_2026-08-20.md."
+      },
+      "harness": "in_process_failpoint",
+      "historical_cell_id": "store.compact.after_source_delete",
+      "source_ref": "crates/residiuum-store/src"
     }
   ]
 }

@@ -714,6 +714,30 @@
         {
           "historical_cell_id": "store.seal.before_authoritative_rename",
           "boundary_id": "CSQ-BND-FP-seal_active-store_seal_before_authoritative_rename"
+        },
+        {
+          "historical_cell_id": "store.atomic.authority.after_checkpoint_swap",
+          "boundary_id": "CSQ-BND-FP-atomic_control_doc-store_atomic_authority_after_checkpoint_swap"
+        },
+        {
+          "historical_cell_id": "store.atomic.authority.after_publish",
+          "boundary_id": "CSQ-BND-FP-atomic_control_doc-store_atomic_authority_after_publish"
+        },
+        {
+          "historical_cell_id": "store.atomic.authority.before_checkpoint_swap",
+          "boundary_id": "CSQ-BND-FP-atomic_control_doc-store_atomic_authority_before_checkpoint_swap"
+        },
+        {
+          "historical_cell_id": "store.atomic.authority.before_collect",
+          "boundary_id": "CSQ-BND-FP-atomic_control_doc-store_atomic_authority_before_collect"
+        },
+        {
+          "historical_cell_id": "store.atomic.authority.before_publish",
+          "boundary_id": "CSQ-BND-FP-atomic_control_doc-store_atomic_authority_before_publish"
+        },
+        {
+          "historical_cell_id": "store.compact.after_source_delete",
+          "boundary_id": "CSQ-BND-FP-compact_live-store_compact_after_source_delete"
         }
       ]
     }
