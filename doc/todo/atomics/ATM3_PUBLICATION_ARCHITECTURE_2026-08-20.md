@@ -3,15 +3,18 @@
 Status: implementation baseline, 2026-08-20
 
 Implementation checkpoint (2026-08-20): ATM-3A and ATM-3B are committed.
-ATM-3C now has locator-backed whole-generation primary publication and writer-
-open reconstruction under qualification. Published puts resolve directly from
-authenticated `ATPAY1` frame locators; payload bodies are not retained in the
-primary index. Multi-member publication and the decision-before-publish and
-publish-before-ack failpoint cases are covered. This is not yet ATM-3
-acceptance: history-generation publication, read-only inspection recovery,
-the complete concurrent/crash proof, and grouped member-boundary optimization
-remain open. Universal ordinary-write ordering now has its first implemented
-and tested witness profile, described below.
+ATM-3C now has locator-backed whole-generation primary and history publication,
+plus writer-open and strictly read-only inspection reconstruction. Published
+puts resolve directly from authenticated `ATPAY1` frame locators; payload
+bodies are not retained in either derived projection. History merges committed
+members at the ordinary-write gap named by `ATORD1`, retains overwritten Atomic
+payload locators, and excludes prepared, aborted, and decision-less evidence.
+Multi-member publication, decision-before-publish, publish-before-ack, ordered
+history across reopen, and inspection-without-checkpoint-write cases are
+covered. This is not yet ATM-3 acceptance: the complete concurrent/crash proof
+and grouped member-boundary optimization remain open. Universal ordinary-write
+ordering now has its first implemented and tested witness profile, described
+below.
 
 Universal-order amendment (2026-08-20): checkpoint profile v13 adds an
 `ATORD1` decision witness. Immediately before a committed decision, the Store
@@ -144,12 +147,11 @@ remains independently authenticated.
 - ATM-3D: ordinary-write participation in the Heap order, scan/RQL concurrency
   proof, grouped stable boundaries, crash-prefix and resource qualification.
 
-Current ATM-3C implementation deliberately stops short of calling the primary
-projection sufficient. A later ordinary mutation of an Atomic target must be
-ordered against the Atomic decision during reconstruction, not guessed from
-the surviving current value. Until ATM-3D supplies that universal Heap order,
-the hidden qualification commit path must not be advertised as a product
-capability.
+The primary and history projections now share the same durable order witness,
+including later ordinary puts/deletes and overlapping Atomics after a full
+derived-index rebuild. ATM-3D must still prove concurrent scan/RQL generation
+binding, exhaustive crash prefixes, and resource bounds before the hidden
+qualification path can become a product capability.
 
 `Capabilities::atomics` remains `false` until all slices and the ATM-3 exit gate
 are green.

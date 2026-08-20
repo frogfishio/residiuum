@@ -1032,6 +1032,10 @@ pub struct Store {
     /// This is installed with the primary/durable index generation and rebuilt
     /// from committed decisions. Payload bytes are never retained here.
     atomic_value_refs: HashMap<[u8; 16], crate::atomic_stage_media::AtomicValueRef>,
+    /// Complete committed Atomic members retained for history reconstruction.
+    /// Locator-only payload references keep this O(number of Atomic events),
+    /// never O(payload bytes). Staged and aborted members are never installed.
+    atomic_history: HashMap<Vec<u8>, Vec<crate::atomic_stage_media::AtomicPublishMember>>,
     /// Secret continuation-token keyring (DEF-097). Never logged or exported.
     token_keyring: ContinuationKeyring,
     /// Optional PQH boundary instrumentation (write/sync/rotate/publish/lifecycle).
@@ -1331,6 +1335,7 @@ impl Store {
             enrichment_stage_totals: EnrichmentStageTotals::default(),
             chunk_locators: HashMap::new(),
             atomic_value_refs: HashMap::new(),
+            atomic_history: HashMap::new(),
             token_keyring,
             boundary_probe: crate::boundary_probe::BoundaryProbe::disabled(),
             diagnostic_io: DiagnosticIoSink::Real,
@@ -1482,6 +1487,7 @@ impl Store {
             enrichment_stage_totals: EnrichmentStageTotals::default(),
             chunk_locators: HashMap::new(),
             atomic_value_refs: HashMap::new(),
+            atomic_history: HashMap::new(),
             token_keyring,
             boundary_probe: crate::boundary_probe::BoundaryProbe::disabled(),
             diagnostic_io: DiagnosticIoSink::Real,
@@ -1762,6 +1768,7 @@ impl Store {
             enrichment_stage_totals: EnrichmentStageTotals::default(),
             chunk_locators: HashMap::new(),
             atomic_value_refs: HashMap::new(),
+            atomic_history: HashMap::new(),
             token_keyring,
             boundary_probe: crate::boundary_probe::BoundaryProbe::disabled(),
             diagnostic_io: DiagnosticIoSink::Real,
@@ -1792,6 +1799,7 @@ impl Store {
         } else {
             store.recompute_collection_catalogs_from_index();
         }
+        store.recover_committed_atomic_publications_readonly()?;
         // Intentionally no resume_or_start_active — no writer handle.
         Ok(store)
     }
@@ -5536,12 +5544,78 @@ impl Store {
 
     /// Event history for a **binary** subject (SubjectV2-capable).
     pub fn history_subject_bytes(&self, subject: &[u8]) -> Result<SubjectHistory, StoreError> {
-        subject_history_tiered(
+        let mut history = subject_history_tiered(
             &self.paths,
             self.limits,
             subject,
             Some(&self.tier_placement),
-        )
+        )?;
+        let Some(atomic) = self.atomic_history.get(subject) else {
+            return Ok(history);
+        };
+
+        // Place every Atomic at the exact ordinary-write gap captured by its
+        // durable order witness. Atomics sharing a gap are ordered by their
+        // Heap commit position (then event id for deterministic corruption-safe
+        // tie breaking).
+        let mut additions = Vec::with_capacity(atomic.len());
+        for published in atomic {
+            let before = history
+                .events
+                .iter()
+                .take_while(|event| {
+                    ordinary_event_precedes_frontier(event, published.order_frontier)
+                })
+                .count();
+            let body = match &published.payload {
+                Some(refer) => crate::atomic_stage_recover::resolve_published_payload(
+                    &self.paths,
+                    &refer.body,
+                    refer.atomic_id,
+                    refer.ordinal,
+                )?,
+                None => Vec::new(),
+            };
+            additions.push((
+                before,
+                published.commit_position,
+                published.member.event_id.to_bytes(),
+                HistoryEvent {
+                    kind: if published.member.member_kind == residiuum_atomics::MutationKind::Delete
+                    {
+                        EventKind::Delete
+                    } else {
+                        EventKind::Put
+                    },
+                    item_id: subject_item_id(subject),
+                    event_id: published.member.event_id.to_bytes(),
+                    // Atomic history has no synthetic ItemEvent frame. Zero is
+                    // an explicit non-locator; payload authority is ATPAY1.
+                    segment_id: [0; 16],
+                    writer_sequence: published.commit_position,
+                    offset: published.payload.as_ref().map_or(0, |p| p.body.offset),
+                    body,
+                    known_gap_before: history.has_known_holes,
+                },
+            ));
+        }
+        additions.sort_by_key(|(before, position, event_id, _)| (*before, *position, *event_id));
+        let ordinary = std::mem::take(&mut history.events);
+        let mut merged = Vec::with_capacity(ordinary.len() + additions.len());
+        let mut additions = additions.into_iter().peekable();
+        for ordinary_index in 0..=ordinary.len() {
+            while additions
+                .peek()
+                .is_some_and(|(before, _, _, _)| *before == ordinary_index)
+            {
+                merged.push(additions.next().expect("peeked").3);
+            }
+            if let Some(event) = ordinary.get(ordinary_index) {
+                merged.push(event.clone());
+            }
+        }
+        history.events = merged;
+        Ok(history)
     }
 
     /// Reconstruct the logical payload of one exact historical event (DEF-099).
@@ -7138,9 +7212,6 @@ impl Store {
         writer_sequence: u64,
         frame_offset: u64,
     ) {
-        if let Some(previous_event) = self.live_event_id(&subject) {
-            self.atomic_value_refs.remove(&previous_event);
-        }
         // DEF-095: durable projection is locator-first; do not pin full payloads
         // in both visibility and durable maps (was O(dataset) RSS dual-copy).
         let body = slim_put_body_for_index(body, false);
@@ -7179,10 +7250,18 @@ impl Store {
         let mut next_index = self.index.clone();
         let mut next_durable = self.durable_index.clone();
         let mut next_refs = self.atomic_value_refs.clone();
+        let mut next_history = self.atomic_history.clone();
         let mut affected_collections = std::collections::BTreeSet::new();
 
         for published in members {
             let event_id = published.member.event_id.to_bytes();
+            let subject_history = next_history.entry(published.subject.clone()).or_default();
+            if !subject_history
+                .iter()
+                .any(|existing| existing.member.event_id.to_bytes() == event_id)
+            {
+                subject_history.push(published.clone());
+            }
             let current = next_index.get(&published.subject);
             let current_event = current.map(|entry| match entry {
                 crate::index::IndexEntry::Live(value) => value.event_id,
@@ -7213,13 +7292,7 @@ impl Store {
                 continue;
             }
             if later_ordinary {
-                next_refs.remove(&event_id);
                 continue;
-            }
-            if let Some(crate::index::IndexEntry::Live(previous)) =
-                next_index.get(&published.subject)
-            {
-                next_refs.remove(&previous.event_id);
             }
             let item_id = next_index
                 .get(&published.subject)
@@ -7265,6 +7338,7 @@ impl Store {
         self.index = next_index;
         self.durable_index = next_durable;
         self.atomic_value_refs = next_refs;
+        self.atomic_history = next_history;
         self.recompute_collection_catalogs_from_index();
         for collection in affected_collections {
             self.secondary_projection_cache_clear(&collection);
@@ -10055,9 +10129,6 @@ impl Store {
                 None => subject_item_id(subject_bytes),
             };
             let event_id = self.next_event_id()?;
-            if let Some(previous_event) = self.live_event_id(subject_bytes) {
-                self.atomic_value_refs.remove(&previous_event);
-            }
             // Memory mode: body must stay resident (no durable frame to pread).
             self.index.apply_event(
                 subject_bytes.to_vec(),
@@ -11286,6 +11357,17 @@ pub(crate) fn cmp_disk_events_pub(a: &DiskEventPub, b: &DiskEventPub) -> Orderin
         .then(a.offset.cmp(&b.offset))
         .then(a.file.cmp(&b.file))
         .then(a.event_id.cmp(&b.event_id))
+}
+
+/// True when an ordinary event is strictly before an Atomic's witnessed
+/// frontier on the subject's home shard.
+fn ordinary_event_precedes_frontier(
+    event: &HistoryEvent,
+    frontier: crate::atomic_stage_media::AtomicShardFrontier,
+) -> bool {
+    segment_seq_from_id(&event.segment_id) < segment_seq_from_id(&frontier.segment_id)
+        || (event.segment_id == frontier.segment_id
+            && event.writer_sequence < frontier.next_writer_sequence)
 }
 
 /// Collect verified item events from all segment files; also reports holes.

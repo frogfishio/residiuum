@@ -15,9 +15,9 @@ use crate::atomic_stage_media::{
     payload_event_id, seal_event_id, AtomicPublishMember, AtomicValueRef, BodyRef, StageCatalog,
 };
 use crate::atomic_stage_recover::{
-    checkpoint_encoded_len, open_catalog, persist_live_checkpoint, rel_path, resolve_chunk_body,
-    resolve_payload_body, resolve_published_payload, verify_missing_coverage, AtomicStageLimits,
-    AtomicStageOpenReport, CoveredFile,
+    checkpoint_encoded_len, open_catalog, open_catalog_readonly, persist_live_checkpoint, rel_path,
+    resolve_chunk_body, resolve_payload_body, resolve_published_payload, verify_missing_coverage,
+    AtomicStageLimits, AtomicStageOpenReport, CoveredFile,
 };
 use crate::error::StoreError;
 use crate::store::Store;
@@ -100,6 +100,21 @@ impl Store {
     /// Reconstruct every committed Atomic projection after the ordinary index
     /// has opened. The decision catalogue is authority; publication is derived.
     pub(crate) fn recover_committed_atomic_publications(&mut self) -> Result<(), StoreError> {
+        self.recover_committed_atomic_publications_inner(false)
+    }
+
+    /// Read-only counterpart used by inspection opens. It rebuilds the same
+    /// committed projection but never refreshes Atomic checkpoint media.
+    pub(crate) fn recover_committed_atomic_publications_readonly(
+        &mut self,
+    ) -> Result<(), StoreError> {
+        self.recover_committed_atomic_publications_inner(true)
+    }
+
+    fn recover_committed_atomic_publications_inner(
+        &mut self,
+        readonly: bool,
+    ) -> Result<(), StoreError> {
         // Preserve the ordinary-store fast path. Atomic admission creates both
         // control files before a decision can exist, so their joint absence is
         // a sufficient negative check without scanning segment contents.
@@ -108,7 +123,11 @@ impl Store {
         {
             return Ok(());
         }
-        let opened = open_catalog(self.paths(), AtomicStageLimits::operable())?;
+        let opened = if readonly {
+            open_catalog_readonly(self.paths(), AtomicStageLimits::operable())?
+        } else {
+            open_catalog(self.paths(), AtomicStageLimits::operable())?
+        };
         self.record_atomic_stage_open(opened.report);
         if opened.catalog.coverage_degraded {
             if opened

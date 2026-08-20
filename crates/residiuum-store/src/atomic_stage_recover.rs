@@ -452,6 +452,25 @@ pub(crate) fn open_catalog(
     paths: &StorePaths,
     limits: AtomicStageLimits,
 ) -> Result<CatalogOpen, StoreError> {
+    open_catalog_inner(paths, limits, true)
+}
+
+/// Open or rebuild the catalogue without changing any store media.
+///
+/// Used by `Store::open_inspect`, whose contract forbids refreshing derived
+/// checkpoints or coordinator accelerators while a live writer may exist.
+pub(crate) fn open_catalog_readonly(
+    paths: &StorePaths,
+    limits: AtomicStageLimits,
+) -> Result<CatalogOpen, StoreError> {
+    open_catalog_inner(paths, limits, false)
+}
+
+fn open_catalog_inner(
+    paths: &StorePaths,
+    limits: AtomicStageLimits,
+    persist: bool,
+) -> Result<CatalogOpen, StoreError> {
     let mut budget = Budget::new(limits);
     let (mut catalog, mut covered, disposition) = match load_checkpoint(paths, &mut budget)? {
         Some((catalog, covered)) => (catalog, covered, AtomicStageDisposition::Checkpoint),
@@ -573,8 +592,10 @@ pub(crate) fn open_catalog(
     budget.report.conflicts = findings.count(StageEvidenceClass::Conflict);
     budget.report.foreign = findings.count(StageEvidenceClass::ForeignHeap);
     covered = next_covered;
-    persist_checkpoint(paths, &catalog, &covered, limits.max_checkpoint_bytes)?;
-    persist_coordinator(paths, &catalog)?;
+    if persist {
+        persist_checkpoint(paths, &catalog, &covered, limits.max_checkpoint_bytes)?;
+        persist_coordinator(paths, &catalog)?;
+    }
     Ok(CatalogOpen {
         catalog,
         covered,

@@ -10,7 +10,7 @@ use residiuum_atomics::{
 use residiuum_format::{encode_subject_v2, SubjectObjectKind};
 use residiuum_store::{
     arm_failpoint_once, clear_failpoints, AtomicStageClass, DurabilityMode, FailpointAction,
-    StageEvidenceClass, Store, StoreError,
+    ReadBudget, StageEvidenceClass, Store, StoreError,
 };
 use std::sync::Mutex;
 
@@ -490,4 +490,105 @@ fn order_witness_without_decision_never_publishes_and_retry_commits_once() {
         reopened.get_subject_bytes(&subject).unwrap(),
         Some(b"committed".to_vec())
     );
+}
+
+#[test]
+fn history_merges_committed_atomics_at_the_witnessed_ordinary_gap() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create_with_shards(&path, 4).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let key = CanonicalKey::string("history-order");
+    let subject = subject(heap, &key);
+    let first = store
+        .put_subject_bytes(&subject, b"ordinary-before", DurabilityMode::Durable)
+        .unwrap();
+    let committed = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_evidence(&plan(
+            heap,
+            atomic(12),
+            MutationKind::Replace,
+            key,
+            Some(b"atomic"),
+            Some(VersionId::from_bytes(first.event_id).unwrap()),
+        ))
+        .unwrap();
+    let atomic_event = store.live_event_id(&subject).unwrap();
+    store
+        .put_subject_bytes(&subject, b"ordinary-after", DurabilityMode::Durable)
+        .unwrap();
+
+    let assert_history = |store: &Store| {
+        let history = store.history_subject_bytes(&subject).unwrap();
+        let bodies: Vec<_> = history
+            .events
+            .iter()
+            .map(|event| event.body.as_slice())
+            .collect();
+        assert_eq!(
+            bodies,
+            vec![b"ordinary-before".as_slice(), b"atomic", b"ordinary-after"]
+        );
+        assert_eq!(history.events[1].event_id, atomic_event);
+        let selected = store
+            .get_payload_version_bytes(&subject, &atomic_event, ReadBudget::unlimited())
+            .unwrap();
+        assert_eq!(
+            selected.selected.unwrap().complete_body(),
+            Some(b"atomic".as_slice())
+        );
+    };
+    assert_eq!(committed.commit_position, Some(1));
+    assert_history(&store);
+    drop(store);
+
+    let reopened = Store::open(&path).unwrap();
+    assert_history(&reopened);
+}
+
+#[test]
+fn read_only_inspection_recovers_committed_values_and_history_without_checkpoint_writes() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut writer = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(writer.store_id()).unwrap();
+    let key = CanonicalKey::string("inspect-atomic");
+    let subject = subject(heap, &key);
+    writer
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_evidence(&plan(
+            heap,
+            atomic(13),
+            MutationKind::Create,
+            key,
+            Some(b"visible"),
+            None,
+        ))
+        .unwrap();
+
+    // A read-only open must not touch either derived Atomic sidecar.
+    arm_failpoint_once(
+        "store.atomic.checkpoint.after_write",
+        FailpointAction::Error,
+    );
+    arm_failpoint_once("store.atomic.coord.after_write", FailpointAction::Error);
+    let inspected = Store::open_inspect(&path).unwrap();
+    assert_eq!(HeapId::from_bytes(inspected.store_id()).unwrap(), heap);
+    assert_eq!(
+        inspected.get_subject_bytes(&subject).unwrap(),
+        Some(b"visible".to_vec())
+    );
+    let history = inspected.history_subject_bytes(&subject).unwrap();
+    assert_eq!(history.events.len(), 1);
+    assert_eq!(history.events[0].body, b"visible");
+    drop(inspected);
+    drop(writer);
+    clear_failpoints();
 }
