@@ -61,11 +61,13 @@ exact prepare hash, ordered member root, member count, and one non-zero Heap
 commit position.
 
 Publication is a derived, whole-Atomic projection. The store constructs a
-complete delta from authenticated prepare/member/payload evidence, applies it
-to a private clone of every affected read projection, and swaps the complete
-generation while holding the store publication guard. No reader can observe a
-partly mutated live index. A crash discards the derived generation; reopen
-reconstructs it from the decision and its complete evidence.
+complete delta from authenticated prepare/member/payload evidence and
+preflights every fallible semantic condition before publication. It then
+applies the O(member-count) delta to primary, history, locator, and derived
+projections while holding the physical publication guard. It does not clone
+the O(database-size) primary indexes or retained history. No reader can
+interleave with a partly applied delta. A crash discards the derived state;
+reopen reconstructs it from the decision and its complete evidence.
 
 We explicitly reject a design that writes ordinary member events after the
 decision. A crash between such events would let ordinary index rebuild expose
@@ -127,11 +129,12 @@ never depends on an unsealed active tail.
 ## Reader generations
 
 Point reads, scans, RQL, history, and derived-index readers bind one generation.
-The writer prepares replacement primary/history/derived projections privately,
-then installs all of them under one publication guard. A reader sees the prior
-generation or the replacement generation. It cannot retain one index from each
-generation. The first implementation may serialize readers briefly; later RCU
-or `Arc` generations may remove that contention without changing semantics.
+The first implementation serializes publication and readers on the physical
+store guard. A reader therefore completes against the prior state or begins
+against the committed state; it cannot retain one projection from each. SDK
+Core RQL materializes an embedded collection page under that same guard. Later
+RCU or `Arc` generations may remove the brief serialization without changing
+semantics.
 
 ## Committed but unpublished recovery
 
@@ -160,8 +163,8 @@ stored terminal decision.
 Canonical plan construction, value cooking, compression, rule compilation,
 and application/network waits occur before entering the store publication
 guard. Under the guard the engine performs bounded current-state validation,
-commit-position allocation, ordered durable appends, private delta assembly,
-and one generation install. Group commit may share the member and decision
+commit-position allocation, ordered durable appends, complete-delta preflight,
+and guarded O(member-count) publication. Group commit may share the member and decision
 stable boundaries across independent outcomes, but each decision and receipt
 remains independently authenticated.
 
@@ -183,7 +186,7 @@ are green, as is guarded concurrent point/scan/history observation. ATM-3D must
 still close the resource-bound qualification before the hidden qualification
 path can become a product capability. SDK/RQL generation binding is now green
 on the real embedded façade. Whole-plan I/O has an executable invariant: one-
-and 32-member commits both complete with exactly two authoritative syncs,
+and 256-member commits both complete with exactly two authoritative syncs,
 proving sync count is independent of member count.
 
 `Capabilities::atomics` remains `false` until all slices and the ATM-3 exit gate

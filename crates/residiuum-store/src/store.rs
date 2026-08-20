@@ -7246,41 +7246,61 @@ impl Store {
 
     /// Install a complete committed Atomic as one derived read generation.
     ///
-    /// Every fallible check and allocation happens against private clones.
-    /// The live primary index, durable projection, and Atomic locator table are
-    /// replaced only after the complete delta has been assembled.
+    /// The caller holds the physical publication mutex (or an exclusive raw
+    /// `&mut Store`), so readers cannot interleave with this loop. All semantic
+    /// fallibility is preflighted before mutation; applying the delta is
+    /// O(member count), not an O(database size) clone of every projection.
     pub(crate) fn publish_atomic_generation(
         &mut self,
         members: &[crate::atomic_stage_media::AtomicPublishMember],
         respect_later_ordinary: bool,
     ) -> Result<(), StoreError> {
-        let mut next_index = self.index.clone();
-        let mut next_durable = self.durable_index.clone();
-        let mut next_refs = self.atomic_value_refs.clone();
-        let mut next_history = self.atomic_history.clone();
+        for published in members {
+            if published.member.member_kind != residiuum_atomics::MutationKind::Delete
+                && published.payload.is_none()
+            {
+                return Err(StoreError::AtomicStage(
+                    "committed Atomic put is missing its payload locator".into(),
+                ));
+            }
+        }
+
         let mut affected_collections = std::collections::BTreeSet::new();
 
         for published in members {
             let event_id = published.member.event_id.to_bytes();
-            let subject_history = next_history.entry(published.subject.clone()).or_default();
+            let subject_history = self
+                .atomic_history
+                .entry(published.subject.clone())
+                .or_default();
             if !subject_history
                 .iter()
                 .any(|existing| existing.member.event_id.to_bytes() == event_id)
             {
                 subject_history.push(published.clone());
             }
-            let current = next_index.get(&published.subject);
-            let current_event = current.map(|entry| match entry {
-                crate::index::IndexEntry::Live(value) => value.event_id,
-                crate::index::IndexEntry::Deleted { event_id, .. } => *event_id,
-            });
-            let current_segment = current.map(crate::index::IndexEntry::segment_id);
-            let current_sequence = current.map(|entry| match entry {
-                crate::index::IndexEntry::Live(value) => value.writer_sequence,
-                crate::index::IndexEntry::Deleted {
-                    writer_sequence, ..
-                } => *writer_sequence,
-            });
+            let (current_event, current_segment, current_sequence, item_id) = self
+                .index
+                .get(&published.subject)
+                .map(|entry| {
+                    let (event_id, writer_sequence) = match entry {
+                        crate::index::IndexEntry::Live(value) => {
+                            (value.event_id, value.writer_sequence)
+                        }
+                        crate::index::IndexEntry::Deleted {
+                            event_id,
+                            writer_sequence,
+                            ..
+                        } => (*event_id, *writer_sequence),
+                    };
+                    (
+                        Some(event_id),
+                        Some(entry.segment_id()),
+                        Some(writer_sequence),
+                        entry.item_id(),
+                    )
+                })
+                .unwrap_or_else(|| (None, None, None, subject_item_id(&published.subject)));
             let already_published = current_event == Some(event_id);
             let later_ordinary = respect_later_ordinary
                 && current_segment
@@ -7294,36 +7314,28 @@ impl Store {
                     });
             if already_published {
                 if let Some(refer) = published.payload.clone() {
-                    next_refs.insert(event_id, refer);
+                    self.atomic_value_refs.insert(event_id, refer);
                 }
                 continue;
             }
             if later_ordinary {
                 continue;
             }
-            let item_id = next_index
-                .get(&published.subject)
-                .map(crate::index::IndexEntry::item_id)
-                .unwrap_or_else(|| subject_item_id(&published.subject));
             let (kind, frame_offset) = match published.member.member_kind {
                 residiuum_atomics::MutationKind::Delete => {
-                    next_refs.remove(&event_id);
+                    self.atomic_value_refs.remove(&event_id);
                     (EventKind::Delete, 0)
                 }
                 residiuum_atomics::MutationKind::Create
                 | residiuum_atomics::MutationKind::Put
                 | residiuum_atomics::MutationKind::Replace => {
-                    let refer = published.payload.clone().ok_or_else(|| {
-                        StoreError::AtomicStage(
-                            "committed Atomic put is missing its payload locator".into(),
-                        )
-                    })?;
+                    let refer = published.payload.clone().expect("preflighted payload");
                     let offset = refer.body.offset;
-                    next_refs.insert(event_id, refer);
+                    self.atomic_value_refs.insert(event_id, refer);
                     (EventKind::Put, offset)
                 }
             };
-            for projection in [&mut next_index, &mut next_durable] {
+            for projection in [&mut self.index, &mut self.durable_index] {
                 projection.apply_event(
                     published.subject.clone(),
                     kind,
@@ -7342,10 +7354,6 @@ impl Store {
             }
         }
 
-        self.index = next_index;
-        self.durable_index = next_durable;
-        self.atomic_value_refs = next_refs;
-        self.atomic_history = next_history;
         self.recompute_collection_catalogs_from_index();
         for collection in affected_collections {
             self.secondary_projection_cache_clear(&collection);

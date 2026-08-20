@@ -794,5 +794,5 @@ fn whole_plan_commit_uses_two_authoritative_boundaries_not_one_per_member() {
     };
 
     assert_eq!(syncs_for(1, 40), 2, "one-member Atomic boundaries");
-    assert_eq!(syncs_for(32, 41), 2, "32-member Atomic boundaries");
+    assert_eq!(syncs_for(256, 41), 2, "256-member Atomic boundaries");
 }
