@@ -33,6 +33,7 @@
 pub mod adaptive_write;
 
 mod atomic_file;
+mod atomic_range_index;
 mod atomic_stage;
 mod atomic_stage_classify;
 mod atomic_stage_media;
@@ -92,6 +93,7 @@ pub use atomic_file::{
     previous_path, read_with_previous, recover_previous_or_corrupt, sync_dir as sync_parent_dir,
     write_atomic, write_atomic_keep_previous, write_atomic_with, AtomicWriteOptions, PREV_SUFFIX,
 };
+pub use atomic_range_index::AtomicRangeIndexMetrics;
 pub use atomic_stage::{AtomicDetailRetentionPolicy, StoreAtomicStage};
 pub use atomic_stage_classify::{
     StageEvidenceClass, StageEvidenceKind, StageFinding, StageFindings,

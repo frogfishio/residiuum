@@ -267,7 +267,7 @@ pub fn finalize_catalog(catalog: &mut StageCatalog, findings: &mut StageFindings
             .decisions
             .get(&key)
             .is_some_and(|decision| decision.decision == DecisionCode::NotCommitted);
-        if members.is_empty() && !terminal_not_committed {
+        if members.is_empty() && prepare.member_count != 0 && !terminal_not_committed {
             findings.push_key(StageEvidenceKind::Member, StageEvidenceClass::Partial, key);
         } else if !terminal_not_committed
             && members.len() == prepare.member_count as usize

@@ -359,6 +359,172 @@ fn integer_range_uses_mathematical_not_subject_order() {
             .unwrap(),
         AtomicOutcome::Committed(_)
     ));
+    assert_eq!(store.atomic_range_index_metrics().builds, 1);
+    assert!(matches!(
+        store
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_outcome(&range_plan(heap, 14, &range, true, None))
+            .unwrap(),
+        AtomicOutcome::Committed(_)
+    ));
+    let accelerated = store.atomic_range_index_metrics();
+    assert_eq!(accelerated.hits, 1);
+    assert_eq!(accelerated.resident_projections, 1);
+}
+
+#[test]
+fn derived_range_projection_is_invalidated_by_an_ordinary_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::create(dir.path().join("s")).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let key_b = CanonicalKey::string("b");
+    let version_b = put(&mut store, heap, &key_b, b"b0");
+    let range = BoundedKeyRange::observed(
+        collection(),
+        CanonicalKey::string("a"),
+        true,
+        CanonicalKey::string("e"),
+        false,
+        100,
+        &[RangeEntry {
+            key: key_b,
+            version: version_b,
+        }],
+    )
+    .unwrap();
+    for id in [15, 16] {
+        assert!(matches!(
+            store
+                .atomic_stage_for_heap(heap)
+                .unwrap()
+                .decide_plan_outcome(&range_plan(heap, id, &range, true, None))
+                .unwrap(),
+            AtomicOutcome::Committed(_)
+        ));
+    }
+    let warm = store.atomic_range_index_metrics();
+    assert_eq!((warm.misses, warm.builds, warm.hits), (1, 1, 1));
+
+    put(&mut store, heap, &CanonicalKey::string("z"), b"outside");
+    let invalidated = store.atomic_range_index_metrics();
+    assert_eq!(invalidated.invalidations, 1);
+    assert_eq!(invalidated.resident_projections, 0);
+    assert!(matches!(
+        store
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_outcome(&range_plan(heap, 17, &range, true, None))
+            .unwrap(),
+        AtomicOutcome::Committed(_)
+    ));
+    let rebuilt = store.atomic_range_index_metrics();
+    assert_eq!((rebuilt.misses, rebuilt.builds, rebuilt.hits), (2, 2, 1));
+}
+
+fn prove_forced_and_cached_range_equivalence(
+    keys: Vec<CanonicalKey>,
+    lower: CanonicalKey,
+    upper: CanonicalKey,
+    injected: CanonicalKey,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::create(dir.path().join("s")).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let geometry = BoundedKeyRange::observed(
+        collection(),
+        lower.clone(),
+        true,
+        upper.clone(),
+        true,
+        100,
+        &[],
+    )
+    .unwrap();
+    let mut expected = Vec::new();
+    for (index, key) in keys.into_iter().enumerate() {
+        let version = put(&mut store, heap, &key, &[index as u8]);
+        if geometry.contains(&key).unwrap() {
+            expected.push(RangeEntry { key, version });
+        }
+    }
+    let observed =
+        BoundedKeyRange::observed(collection(), lower, true, upper, true, 100, &expected).unwrap();
+
+    for id in [20, 21] {
+        assert!(matches!(
+            store
+                .atomic_stage_for_heap(heap)
+                .unwrap()
+                .decide_plan_outcome(&range_plan(heap, id, &observed, true, None))
+                .unwrap(),
+            AtomicOutcome::Committed(_)
+        ));
+    }
+    put(&mut store, heap, &injected, b"phantom");
+    for id in [22, 23] {
+        not_committed(
+            store
+                .atomic_stage_for_heap(heap)
+                .unwrap()
+                .decide_plan_outcome(&range_plan(heap, id, &observed, true, None))
+                .unwrap(),
+            id,
+            AtomicAbortReason::PreconditionConflict,
+        );
+    }
+    let metrics = store.atomic_range_index_metrics();
+    assert_eq!(
+        (metrics.misses, metrics.builds, metrics.hits),
+        (2, 2, 2),
+        "both decisions must execute once through each range path"
+    );
+}
+
+#[test]
+fn forced_and_cached_paths_agree_for_every_key_order_profile() {
+    prove_forced_and_cached_range_equivalence(
+        vec![
+            CanonicalKey::string("a"),
+            CanonicalKey::string("c"),
+            CanonicalKey::string("z"),
+        ],
+        CanonicalKey::string("b"),
+        CanonicalKey::string("m"),
+        CanonicalKey::string("g"),
+    );
+    prove_forced_and_cached_range_equivalence(
+        vec![
+            CanonicalKey::opaque([0]),
+            CanonicalKey::opaque([2]),
+            CanonicalKey::opaque([255]),
+        ],
+        CanonicalKey::opaque([1]),
+        CanonicalKey::opaque([10]),
+        CanonicalKey::opaque([3]),
+    );
+    prove_forced_and_cached_range_equivalence(
+        vec![
+            CanonicalKey::integer(-129),
+            CanonicalKey::integer(-2),
+            CanonicalKey::integer(2),
+            CanonicalKey::integer(128),
+        ],
+        CanonicalKey::integer(-10),
+        CanonicalKey::integer(10),
+        CanonicalKey::integer(3),
+    );
+    prove_forced_and_cached_range_equivalence(
+        vec![
+            CanonicalKey::decimal(-11, 1),
+            CanonicalKey::decimal(-105, 2),
+            CanonicalKey::decimal(10, 1),
+            CanonicalKey::decimal(100, 2),
+        ],
+        CanonicalKey::decimal(-2, 0),
+        CanonicalKey::decimal(2, 0),
+        CanonicalKey::decimal(15, 1),
+    );
 }
 
 #[test]
@@ -367,8 +533,10 @@ fn range_refuses_to_claim_absence_beyond_its_work_or_tier_coverage() {
     let path = dir.path().join("s");
     let mut store = Store::create(&path).unwrap();
     let heap = HeapId::from_bytes(store.store_id()).unwrap();
-    put(&mut store, heap, &CanonicalKey::string("x"), b"one");
-    put(&mut store, heap, &CanonicalKey::string("y"), b"two");
+    let key_x = CanonicalKey::string("x");
+    let key_y = CanonicalKey::string("y");
+    let version_x = put(&mut store, heap, &key_x, b"one");
+    let version_y = put(&mut store, heap, &key_y, b"two");
     let bounded = BoundedKeyRange::observed(
         collection(),
         CanonicalKey::string("a"),
@@ -389,6 +557,35 @@ fn range_refuses_to_claim_absence_beyond_its_work_or_tier_coverage() {
         AtomicAbortReason::CoverageIncomplete,
     );
 
+    let complete = BoundedKeyRange::observed(
+        collection(),
+        CanonicalKey::string("a"),
+        true,
+        CanonicalKey::string("z"),
+        true,
+        100,
+        &[
+            RangeEntry {
+                key: key_x,
+                version: version_x,
+            },
+            RangeEntry {
+                key: key_y,
+                version: version_y,
+            },
+        ],
+    )
+    .unwrap();
+    assert!(matches!(
+        store
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_outcome(&range_plan(heap, 18, &complete, true, None))
+            .unwrap(),
+        AtomicOutcome::Committed(_)
+    ));
+    assert_eq!(store.atomic_range_index_metrics().resident_projections, 1);
+
     store.seal_active().unwrap();
     let segment = store
         .list_segment_summaries()
@@ -401,23 +598,13 @@ fn range_refuses_to_claim_absence_beyond_its_work_or_tier_coverage() {
         .unwrap();
     store.set_tier_available(TierClass::Archive, false).unwrap();
     assert!(store.tier_coverage().is_incomplete());
-    let unavailable = BoundedKeyRange::observed(
-        collection(),
-        CanonicalKey::string("a"),
-        true,
-        CanonicalKey::string("z"),
-        true,
-        100,
-        &[],
-    )
-    .unwrap();
-    not_committed(
-        store
-            .atomic_stage_for_heap(heap)
-            .unwrap()
-            .decide_plan_outcome(&range_plan(heap, 8, &unavailable, false, None))
-            .unwrap(),
-        8,
-        AtomicAbortReason::CoverageIncomplete,
+    let refusal = store
+        .atomic_stage_for_heap(heap)
+        .unwrap()
+        .decide_plan_outcome(&range_plan(heap, 19, &complete, true, None))
+        .unwrap_err();
+    assert!(
+        refusal.to_string().contains("coverage is incomplete"),
+        "cached projection must not bypass unavailable authority: {refusal}"
     );
 }

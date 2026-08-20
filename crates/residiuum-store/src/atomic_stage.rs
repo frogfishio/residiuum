@@ -6,6 +6,9 @@
 //! opened, created, or consulted. Ordinary `get` / scan / history stay empty.
 //! The live catalogue is opened once from a store-owned checkpoint plus tails.
 
+use crate::atomic_range_index::{
+    AtomicRangeProjection, AtomicRangeProjectionKey, DEFAULT_ATOMIC_RANGE_INDEX_BYTES,
+};
 use crate::atomic_stage_classify::{
     clear_coverage_loss, StageEvidenceClass, StageEvidenceKind, StageFindings,
 };
@@ -24,14 +27,16 @@ use crate::atomic_stage_recover::{
 use crate::error::StoreError;
 use crate::store::Store;
 use residiuum_atomics::{
-    decision_hash, decode_bounded_range_payload, decode_exact_scalar_payload, encode_decision,
-    encode_member, encode_prepare, members_match_prepare, ordered_member_manifest_root,
-    plan_content_root, prepare_from_closed_plan, prepare_hash, validate_closed_plan,
+    compare_canonical_keys, decision_hash, decode_bounded_range_payload,
+    decode_exact_scalar_payload, encode_decision, encode_member, encode_prepare,
+    members_match_prepare, ordered_member_manifest_root, plan_content_root,
+    prepare_from_closed_plan, prepare_hash, range_coverage_domain, validate_closed_plan,
     AtomicAbortReason, AtomicCohortOutcome, AtomicDecision, AtomicId, AtomicMember,
     AtomicMemberReceipt, AtomicOutcome, AtomicPlan, AtomicPrepare, AtomicReceipt,
-    AtomicRefuseReason, AtomicStatus, AtomicsError, CanonicalKey, ChunkPlan, CoordinatorSeq,
-    DecisionCode, HeapId, LogicalStatus, MaterialStatus, MemberPhase, MutationKind, ObjectIdentity,
-    PlacementManifest, PredicateKind, RangeEntry, StagingHeap, VersionId,
+    AtomicRefuseReason, AtomicStatus, AtomicsError, BoundedKeyRange, CanonicalKey, ChunkPlan,
+    CoordinatorSeq, DecisionCode, HeapId, LogicalStatus, MaterialStatus, MemberPhase, MutationKind,
+    ObjectIdentity, PlacementManifest, PredicateKind, RangeEntry, StagingHeap, VersionId,
+    CANONICAL_KEY_ORDER_V1,
 };
 use residiuum_format::{
     decode_subject_v2, encode_atomic_commit_envelope, encode_atomic_member_envelope,
@@ -132,6 +137,42 @@ fn now_unix_s() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn range_lower_bound(entries: &[RangeEntry], range: &BoundedKeyRange) -> Result<usize, StoreError> {
+    let mut low = 0usize;
+    let mut high = entries.len();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let order = compare_canonical_keys(&entries[middle].key, range.lower())
+            .map_err(|error| StoreError::AtomicStage(error.to_string()))?;
+        if order == std::cmp::Ordering::Less
+            || order == std::cmp::Ordering::Equal && !range.lower_inclusive()
+        {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    Ok(low)
+}
+
+fn range_upper_bound(entries: &[RangeEntry], range: &BoundedKeyRange) -> Result<usize, StoreError> {
+    let mut low = 0usize;
+    let mut high = entries.len();
+    while low < high {
+        let middle = low + (high - low) / 2;
+        let order = compare_canonical_keys(&entries[middle].key, range.upper())
+            .map_err(|error| StoreError::AtomicStage(error.to_string()))?;
+        if order == std::cmp::Ordering::Less
+            || order == std::cmp::Ordering::Equal && range.upper_inclusive()
+        {
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    Ok(low)
 }
 
 impl Store {
@@ -2037,84 +2078,34 @@ impl StoreAtomicStage<'_> {
         prefix.push(SubjectObjectKind::Collection as u8);
         prefix.extend_from_slice(collection_id.as_bytes());
 
-        let mut examined = 0u32;
-        let mut entries = Vec::with_capacity(range.expected_count() as usize);
-        for (subject, event_id) in self.store.index_live_versions_with_prefix(&prefix) {
-            examined = examined.saturating_add(1);
-            if examined > range.examination_limit() {
-                return Ok(Some(AtomicAbortReason::CoverageIncomplete));
+        let projection_key = AtomicRangeProjectionKey {
+            heap_id: self.heap.heap_id(),
+            collection_id,
+            key_kind: range.key_kind(),
+        };
+        let required_coverage = range_coverage_domain();
+        let projection = self
+            .store
+            .atomic_range_projection_get(projection_key)
+            .filter(|projection| {
+                projection.coverage_domain == required_coverage
+                    && projection.order_profile == CANONICAL_KEY_ORDER_V1
+            });
+        let entries = match projection {
+            Some(projection) => {
+                self.range_entries_with_overlay(&range, &projection, &prefix, overlay)?
             }
-            let decoded = match decode_subject_v2(subject) {
-                Ok(decoded)
-                    if decoded.heap_id == self.heap.heap_id().as_bytes()
-                        && decoded.object_kind == SubjectObjectKind::Collection
-                        && decoded.object_id == collection_id.as_bytes() =>
-                {
-                    decoded
-                }
-                _ => return Ok(Some(AtomicAbortReason::CoverageIncomplete)),
-            };
-            let key = match CanonicalKey::from_subject_bytes(range.key_kind(), decoded.key) {
-                Ok(key) => key,
-                Err(_) => return Ok(Some(AtomicAbortReason::CoverageIncomplete)),
-            };
-            let version = match overlay.get(subject) {
-                Some(cell) => cell.version,
-                None => match VersionId::from_bytes(event_id) {
-                    Ok(version) => Some(version),
-                    Err(_) => return Ok(Some(AtomicAbortReason::CoverageIncomplete)),
-                },
-            };
-            if let Some(version) = version {
-                if range
-                    .contains(&key)
-                    .map_err(|error| StoreError::AtomicStage(error.to_string()))?
-                {
-                    entries.push(RangeEntry { key, version });
-                    if entries.len() > range.expected_count() as usize {
-                        return Ok(Some(AtomicAbortReason::PreconditionConflict));
-                    }
-                }
-            }
-        }
-
-        // A prior plan in this physical cohort may create a subject not yet in
-        // the ordinary primary projection. Overlay replacements were handled
-        // during the authoritative walk; only overlay-only subjects remain.
-        for (subject, cell) in overlay {
-            if self.store.live_event_id(subject).is_some() {
-                continue;
-            }
-            let Ok(decoded) = decode_subject_v2(subject) else {
-                return Ok(Some(AtomicAbortReason::CoverageIncomplete));
-            };
-            if decoded.heap_id != self.heap.heap_id().as_bytes()
-                || decoded.object_kind != SubjectObjectKind::Collection
-                || decoded.object_id != collection_id.as_bytes()
-            {
-                continue;
-            }
-            examined = examined.saturating_add(1);
-            if examined > range.examination_limit() {
-                return Ok(Some(AtomicAbortReason::CoverageIncomplete));
-            }
-            let Some(version) = cell.version else {
-                continue;
-            };
-            let key = match CanonicalKey::from_subject_bytes(range.key_kind(), decoded.key) {
-                Ok(key) => key,
-                Err(_) => return Ok(Some(AtomicAbortReason::CoverageIncomplete)),
-            };
-            if range
-                .contains(&key)
-                .map_err(|error| StoreError::AtomicStage(error.to_string()))?
-            {
-                entries.push(RangeEntry { key, version });
-                if entries.len() > range.expected_count() as usize {
-                    return Ok(Some(AtomicAbortReason::PreconditionConflict));
-                }
-            }
-        }
+            None => self.forced_range_entries_and_maybe_cache(
+                &range,
+                projection_key,
+                required_coverage,
+                &prefix,
+                overlay,
+            )?,
+        };
+        let Some(entries) = entries else {
+            return Ok(Some(AtomicAbortReason::CoverageIncomplete));
+        };
 
         if range
             .matches_entries(&entries)
@@ -2124,6 +2115,217 @@ impl StoreAtomicStage<'_> {
         } else {
             Ok(Some(AtomicAbortReason::PreconditionConflict))
         }
+    }
+
+    fn range_entries_with_overlay(
+        &self,
+        range: &BoundedKeyRange,
+        projection: &AtomicRangeProjection,
+        prefix: &[u8],
+        overlay: &HashMap<Vec<u8>, AtomicOverlayCell>,
+    ) -> Result<Option<Vec<RangeEntry>>, StoreError> {
+        let mut examined = projection.examined_count;
+        if examined > range.examination_limit() {
+            return Ok(None);
+        }
+        let start = range_lower_bound(&projection.entries, range)?;
+        let end = range_upper_bound(&projection.entries, range)?;
+        let mut entries = Vec::with_capacity(range.expected_count() as usize);
+        for entry in &projection.entries[start..end] {
+            let subject = encode_subject_v2(
+                self.heap.heap_id().as_bytes(),
+                SubjectObjectKind::Collection,
+                range.collection_id().as_bytes(),
+                &entry.key.subject_bytes(),
+            )
+            .map_err(|error| StoreError::AtomicStage(error.to_string()))?;
+            let version = overlay
+                .get(&subject)
+                .map(|cell| cell.version)
+                .unwrap_or(Some(entry.version));
+            if let Some(version) = version {
+                entries.push(RangeEntry {
+                    key: entry.key.clone(),
+                    version,
+                });
+                if entries.len() > range.expected_count() as usize {
+                    return Ok(Some(entries));
+                }
+            }
+        }
+
+        // Overlay-only identities are prior-cohort creates not represented by
+        // the primary projection. They count against the same complete-domain
+        // work ceiling even when geometrically outside this predicate.
+        for (subject, cell) in overlay {
+            if !subject.starts_with(prefix) || self.store.live_event_id(subject).is_some() {
+                continue;
+            }
+            examined = examined.saturating_add(1);
+            if examined > range.examination_limit() {
+                return Ok(None);
+            }
+            let decoded = match decode_subject_v2(subject) {
+                Ok(decoded)
+                    if decoded.heap_id == self.heap.heap_id().as_bytes()
+                        && decoded.object_kind == SubjectObjectKind::Collection
+                        && decoded.object_id == range.collection_id().as_bytes() =>
+                {
+                    decoded
+                }
+                _ => return Ok(None),
+            };
+            let Some(version) = cell.version else {
+                continue;
+            };
+            let key = match CanonicalKey::from_subject_bytes(range.key_kind(), decoded.key) {
+                Ok(key) => key,
+                Err(_) => return Ok(None),
+            };
+            if range
+                .contains(&key)
+                .map_err(|error| StoreError::AtomicStage(error.to_string()))?
+            {
+                entries.push(RangeEntry { key, version });
+                if entries.len() > range.expected_count() as usize {
+                    return Ok(Some(entries));
+                }
+            }
+        }
+        Ok(Some(entries))
+    }
+
+    fn forced_range_entries_and_maybe_cache(
+        &self,
+        range: &BoundedKeyRange,
+        projection_key: AtomicRangeProjectionKey,
+        coverage_domain: [u8; 32],
+        prefix: &[u8],
+        overlay: &HashMap<Vec<u8>, AtomicOverlayCell>,
+    ) -> Result<Option<Vec<RangeEntry>>, StoreError> {
+        let mut examined = 0u32;
+        let mut matching = Vec::with_capacity(range.expected_count() as usize);
+        let mut projection_entries = Some(Vec::new());
+        let mut projection_charge = AtomicRangeProjection::base_charge();
+        for (subject, event_id) in self.store.index_live_versions_with_prefix(prefix) {
+            examined = examined.saturating_add(1);
+            if examined > range.examination_limit() {
+                return Ok(None);
+            }
+            let decoded = match decode_subject_v2(subject) {
+                Ok(decoded)
+                    if decoded.heap_id == self.heap.heap_id().as_bytes()
+                        && decoded.object_kind == SubjectObjectKind::Collection
+                        && decoded.object_id == range.collection_id().as_bytes() =>
+                {
+                    decoded
+                }
+                _ => return Ok(None),
+            };
+            let key = match CanonicalKey::from_subject_bytes(range.key_kind(), decoded.key) {
+                Ok(key) => key,
+                Err(_) => return Ok(None),
+            };
+            let version = match VersionId::from_bytes(event_id) {
+                Ok(version) => version,
+                Err(_) => return Ok(None),
+            };
+            let entry = RangeEntry { key, version };
+            if range
+                .contains(&entry.key)
+                .map_err(|error| StoreError::AtomicStage(error.to_string()))?
+            {
+                let overlaid = overlay
+                    .get(subject)
+                    .map(|cell| cell.version)
+                    .unwrap_or(Some(version));
+                if matching.len() <= range.expected_count() as usize {
+                    if let Some(version) = overlaid {
+                        matching.push(RangeEntry {
+                            key: entry.key.clone(),
+                            version,
+                        });
+                    }
+                }
+            }
+            if let Some(entries) = projection_entries.as_mut() {
+                projection_charge =
+                    projection_charge.saturating_add(AtomicRangeProjection::entry_charge(&entry));
+                if projection_charge > DEFAULT_ATOMIC_RANGE_INDEX_BYTES {
+                    projection_entries = None;
+                } else {
+                    entries.push(entry);
+                }
+            }
+        }
+
+        let base_examined = examined;
+        if !self.append_overlay_only(range, prefix, overlay, &mut examined, &mut matching)? {
+            return Ok(None);
+        }
+        if let Some(mut entries) = projection_entries {
+            entries.sort_by(|left, right| {
+                compare_canonical_keys(&left.key, &right.key)
+                    .expect("range projection has one frozen key kind")
+            });
+            if entries.windows(2).any(|pair| {
+                compare_canonical_keys(&pair[0].key, &pair[1].key).ok()
+                    != Some(std::cmp::Ordering::Less)
+            }) {
+                return Ok(None);
+            }
+            self.store.atomic_range_projection_put(
+                projection_key,
+                AtomicRangeProjection::new(coverage_domain, base_examined, entries),
+            );
+        } else {
+            self.store.atomic_range_projection_note_oversize();
+        }
+        Ok(Some(matching))
+    }
+
+    fn append_overlay_only(
+        &self,
+        range: &BoundedKeyRange,
+        prefix: &[u8],
+        overlay: &HashMap<Vec<u8>, AtomicOverlayCell>,
+        examined: &mut u32,
+        entries: &mut Vec<RangeEntry>,
+    ) -> Result<bool, StoreError> {
+        for (subject, cell) in overlay {
+            if !subject.starts_with(prefix) || self.store.live_event_id(subject).is_some() {
+                continue;
+            }
+            *examined = examined.saturating_add(1);
+            if *examined > range.examination_limit() {
+                return Ok(false);
+            }
+            let decoded = match decode_subject_v2(subject) {
+                Ok(decoded)
+                    if decoded.heap_id == self.heap.heap_id().as_bytes()
+                        && decoded.object_kind == SubjectObjectKind::Collection
+                        && decoded.object_id == range.collection_id().as_bytes() =>
+                {
+                    decoded
+                }
+                _ => return Ok(false),
+            };
+            let Some(version) = cell.version else {
+                continue;
+            };
+            let key = match CanonicalKey::from_subject_bytes(range.key_kind(), decoded.key) {
+                Ok(key) => key,
+                Err(_) => return Ok(false),
+            };
+            if range
+                .contains(&key)
+                .map_err(|error| StoreError::AtomicStage(error.to_string()))?
+                && entries.len() <= range.expected_count() as usize
+            {
+                entries.push(RangeEntry { key, version });
+            }
+        }
+        Ok(true)
     }
 
     fn duplicate_target() -> StoreError {

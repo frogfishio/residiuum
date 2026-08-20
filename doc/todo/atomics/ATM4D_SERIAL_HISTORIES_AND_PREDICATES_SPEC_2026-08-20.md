@@ -136,10 +136,18 @@ Index and forced-scan execution must agree on the same canonical predicate.
   non-conflict, integer physical-order negative, work/tier coverage refusal,
   predicate-only commit/retry mechanics, and an independent serial-history
   mutation-sensitive negative control.
-- **Open acceleration differential:** v1 deliberately uses the authoritative
-  forced scan. A derived range index may be added only after it carries this
-  exact order/coverage identity and differentially matches the forced scan;
-  candidate, stale, partial or damaged indexes remain ineligible.
+- **Delivered acceleration differential:** a bounded 64 MiB process-local
+  projection carries the exact heap, collection, key kind, mathematical order
+  profile, coverage-domain identity, complete examined count and ordered
+  `(key, version)` rows. Cache hits use binary semantic bounds and then apply
+  the same cohort overlay. Every primary publication invalidates the cache;
+  restart begins empty; offline authority refuses before lookup; oversized
+  projections transparently remain on the forced-scan path. Observable
+  hit/miss/build/invalidation/bypass counters prove which path qualification
+  exercised. Forced and cached execution agree for string, opaque, integer and
+  decimal commits and stale conflicts, including cohort create/delete and
+  unavailable-tier negative controls. Candidate, stale, partial, damaged or
+  identity-mismatched indexes remain ineligible.
 
 ### ATM-4D.5 — remaining shared-frontier predicates
 

@@ -17,6 +17,10 @@ use crate::compact::{
 };
 use crate::large_value::{AdmitDecision, LargeValuePolicy, PayloadLayout, LARGE_VALUE_PROFILE_ID};
 
+use crate::atomic_range_index::{
+    AtomicRangeIndexMetrics, AtomicRangeProjection, AtomicRangeProjectionCache,
+    AtomicRangeProjectionKey, DEFAULT_ATOMIC_RANGE_INDEX_BYTES,
+};
 use crate::atomic_stage_recover::AtomicStageDisposition;
 use crate::durability::DurabilityMode;
 use crate::envelope::{
@@ -919,6 +923,9 @@ pub struct Store {
     /// memory-mode visibility. Used for index-cache and on-disk catalog writes
     /// so the write path never rescans sealed segment bytes.
     durable_index: PrimaryIndex,
+    /// Complete, process-local semantic key projections used only to accelerate
+    /// exact Atomic range validation. Cleared at every primary publication.
+    atomic_range_index: Mutex<AtomicRangeProjectionCache>,
     /// Process-local validated order projections for secondary indexes.
     /// Derived only; every secondary-index write/delete invalidates its scope.
     ordered_secondary_cache: Mutex<HashMap<(String, String, bool, bool), Vec<Vec<u8>>>>,
@@ -1286,6 +1293,9 @@ impl Store {
             open_metrics: StoreOpenMetrics::default(),
             index: PrimaryIndex::new(),
             durable_index: PrimaryIndex::new(),
+            atomic_range_index: Mutex::new(AtomicRangeProjectionCache::new(
+                DEFAULT_ATOMIC_RANGE_INDEX_BYTES,
+            )),
             ordered_secondary_cache: Mutex::new(HashMap::new()),
             covering_secondary_cache: Mutex::new(CoveringSecondaryCache::new(
                 DEFAULT_COVERING_SECONDARY_CACHE_BYTES,
@@ -1438,6 +1448,9 @@ impl Store {
             open_metrics: StoreOpenMetrics::default(),
             index: PrimaryIndex::new(),
             durable_index: PrimaryIndex::new(),
+            atomic_range_index: Mutex::new(AtomicRangeProjectionCache::new(
+                DEFAULT_ATOMIC_RANGE_INDEX_BYTES,
+            )),
             ordered_secondary_cache: Mutex::new(HashMap::new()),
             covering_secondary_cache: Mutex::new(CoveringSecondaryCache::new(
                 DEFAULT_COVERING_SECONDARY_CACHE_BYTES,
@@ -1748,6 +1761,9 @@ impl Store {
             open_metrics: StoreOpenMetrics::default(),
             index: PrimaryIndex::new(),
             durable_index: PrimaryIndex::new(),
+            atomic_range_index: Mutex::new(AtomicRangeProjectionCache::new(
+                DEFAULT_ATOMIC_RANGE_INDEX_BYTES,
+            )),
             ordered_secondary_cache: Mutex::new(HashMap::new()),
             covering_secondary_cache: Mutex::new(CoveringSecondaryCache::new(
                 DEFAULT_COVERING_SECONDARY_CACHE_BYTES,
@@ -5285,6 +5301,46 @@ impl Store {
             .map(|(subject, live)| (subject.as_slice(), live.event_id))
     }
 
+    pub(crate) fn atomic_range_projection_get(
+        &self,
+        key: AtomicRangeProjectionKey,
+    ) -> Option<AtomicRangeProjection> {
+        self.atomic_range_index.lock().ok()?.get(key)
+    }
+
+    pub(crate) fn atomic_range_projection_put(
+        &self,
+        key: AtomicRangeProjectionKey,
+        projection: AtomicRangeProjection,
+    ) {
+        if let Ok(mut cache) = self.atomic_range_index.lock() {
+            cache.insert(key, projection);
+        }
+    }
+
+    pub(crate) fn atomic_range_projection_note_oversize(&self) {
+        if let Ok(mut cache) = self.atomic_range_index.lock() {
+            cache.note_oversize_bypass();
+        }
+    }
+
+    /// Process-local exact-range acceleration counters.
+    ///
+    /// These counters are diagnostic only. They make it possible to prove that
+    /// qualification exercised both the authoritative and accelerated paths.
+    pub fn atomic_range_index_metrics(&self) -> AtomicRangeIndexMetrics {
+        self.atomic_range_index
+            .lock()
+            .map(|cache| cache.metrics())
+            .unwrap_or_default()
+    }
+
+    fn invalidate_atomic_range_index(&self) {
+        if let Ok(mut cache) = self.atomic_range_index.lock() {
+            cache.clear();
+        }
+    }
+
     /// Count live subjects in one byte-prefix range without cloning keys.
     ///
     /// Used to prove that an order-serving secondary index has exactly one
@@ -7106,6 +7162,7 @@ impl Store {
         let clone_started = Instant::now();
         self.index = index.clone();
         self.durable_index = index;
+        self.invalidate_atomic_range_index();
         let clone_ns = elapsed_ns(clone_started);
         let catalog_started = Instant::now();
         self.recompute_collection_catalogs_from_index();
@@ -7125,6 +7182,7 @@ impl Store {
         self.index = index;
         self.chunk_locators = chunk_locators;
         self.durable_index = self.index.clone();
+        self.invalidate_atomic_range_index();
         self.recompute_collection_catalogs_from_index();
         // Allocator is sole authority for `segment_seq` — index must not touch it.
         self.derived_ops_since_checkpoint = 0;
@@ -7391,6 +7449,7 @@ impl Store {
             writer_sequence,
             frame_offset,
         );
+        self.invalidate_atomic_range_index();
     }
 
     /// Install a complete committed Atomic as one derived read generation.
@@ -7415,6 +7474,7 @@ impl Store {
         }
 
         let mut affected_collections = std::collections::BTreeSet::new();
+        let mut primary_changed = false;
 
         for published in members {
             let event_id = published.member.event_id.to_bytes();
@@ -7496,6 +7556,7 @@ impl Store {
                     frame_offset,
                 );
             }
+            primary_changed = true;
             if let Some(collection) =
                 crate::catalog::collection_name_from_subject(&published.subject)
             {
@@ -7503,6 +7564,9 @@ impl Store {
             }
         }
 
+        if primary_changed {
+            self.invalidate_atomic_range_index();
+        }
         self.recompute_collection_catalogs_from_index();
         for collection in affected_collections {
             self.secondary_projection_cache_clear(&collection);
@@ -10349,6 +10413,7 @@ impl Store {
                 0,
                 0,
             );
+            self.invalidate_atomic_range_index();
             // Visibility catalog only (not persisted).
             if let Some(name) = crate::catalog::collection_name_from_subject(subject_bytes) {
                 self.collection_catalog.insert(name);

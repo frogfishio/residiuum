@@ -151,15 +151,23 @@ pub(crate) fn project_atomic_with_tombstone(
 }
 
 pub(crate) fn material_complete(catalog: &StageCatalog, key: StageAtomicKey) -> bool {
-    catalog.members.get(&key).is_some_and(|members| {
-        members.iter().all(|member| {
+    let Some(prepare) = catalog.prepares.get(&key) else {
+        return false;
+    };
+    let members = catalog
+        .members
+        .get(&key)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    members.len() == prepare.member_count as usize
+        && members_match_prepare(prepare, members)
+        && members.iter().all(|member| {
             catalog.has_payload(key, member.ordinal)
                 || catalog
                     .payload_refs
                     .contains_key(&(key.0, key.1, member.ordinal))
                 || chunk_complete(catalog, key, member.ordinal)
         })
-    })
 }
 
 fn chunk_complete(catalog: &StageCatalog, key: StageAtomicKey, ordinal: u32) -> bool {

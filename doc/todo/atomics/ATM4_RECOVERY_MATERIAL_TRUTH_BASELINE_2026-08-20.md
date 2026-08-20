@@ -198,10 +198,11 @@ media permits and are never interpreted as the new composite-key format.
 - **Delivered in ATM-4D.4 authoritative core:** typed bounded-range payload,
   exact string/opaque/integer/decimal order, complete primary-domain execution
   with cohort overlay, range result commitments, phantom/version proof,
-  predicate-only commits and fail-closed work/tier coverage. Derived-index
-  acceleration remains barred until an exact forced-scan differential exists.
-- **Remaining:** host construction-session bridge; range-index acceleration
-  differential; rule/lifecycle
+  predicate-only commits and fail-closed work/tier coverage. A bounded,
+  publication-invalidated process-local range projection now carries the same
+  coverage/order identity and passes forced-scan differentials across every key
+  kind; oversized or unavailable-authority cases retain the authoritative path.
+- **Remaining:** host construction-session bridge; rule/lifecycle
   predicates; broader randomized concurrent/restart histories and two-Heap
   noninterference.
 - Detailed contract and delivery order:

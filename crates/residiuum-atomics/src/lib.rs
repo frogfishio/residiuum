@@ -93,8 +93,9 @@ pub use plan::{
 };
 pub use predicate::{
     compare_canonical_keys, decode_bounded_range_payload, decode_exact_scalar_payload,
-    encode_bounded_range_payload, encode_exact_scalar_payload, BoundedKeyRange,
-    ExactScalarEquality, RangeEntry, MAX_RANGE_EXAMINED, MAX_RANGE_RESULT_ENTRIES,
+    encode_bounded_range_payload, encode_exact_scalar_payload, range_coverage_domain,
+    BoundedKeyRange, ExactScalarEquality, RangeEntry, CANONICAL_KEY_ORDER_V1, MAX_RANGE_EXAMINED,
+    MAX_RANGE_RESULT_ENTRIES,
 };
 pub use prepare::{
     members_match_prepare, plan_predicate_set_root, plan_read_set_root, plan_rule_revision_root,

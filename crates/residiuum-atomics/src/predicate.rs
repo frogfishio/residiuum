@@ -15,7 +15,8 @@ use std::cmp::Ordering;
 
 const EXACT_SCALAR_PROFILE_V1: u64 = 1;
 const BOUNDED_RANGE_PROFILE_V1: u64 = 1;
-const CANONICAL_KEY_ORDER_V1: u64 = 1;
+/// Stable total-order profile used by exact bounded ranges.
+pub const CANONICAL_KEY_ORDER_V1: u64 = 1;
 
 /// Hard ceiling for one exact range result commitment.
 pub const MAX_RANGE_RESULT_ENTRIES: u32 = 4_096;
@@ -400,7 +401,8 @@ fn key_in_range(
     )
 }
 
-fn range_coverage_domain() -> [u8; 32] {
+/// Identity of the complete authoritative primary-key coverage domain.
+pub fn range_coverage_domain() -> [u8; 32] {
     *blake3::hash(DOMAIN_RANGE_COVERAGE).as_bytes()
 }
 
