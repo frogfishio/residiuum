@@ -168,6 +168,36 @@ pub struct BoundCollection {
 }
 
 impl BoundCollection {
+    /// Construct from fields verified by the capability kernel at one guarded
+    /// authority frontier.
+    ///
+    /// # Safety
+    ///
+    /// All authority fields must come from the same live, unforgeable
+    /// capability while its authority-frontier guard is held. Safe product
+    /// APIs must never accept these values from application input.
+    #[doc(hidden)]
+    pub unsafe fn from_verified_authority_parts(
+        heap_id: HeapId,
+        collection_id: CollectionId,
+        rights: CollectionRights,
+        authority_revision: [u8; 32],
+        encoding: EncodingProfile,
+    ) -> Result<Self, AtomicsError> {
+        if rights == CollectionRights::empty() {
+            return Err(AtomicsError::Refused(
+                AtomicRefuseReason::AuthorizationFailure,
+            ));
+        }
+        Ok(Self {
+            heap_id,
+            collection_id,
+            rights,
+            authority_revision,
+            encoding,
+        })
+    }
+
     /// Project a granted collection out of a trusted authority view.
     pub fn from_trusted(
         view: &TrustedAuthorityView,
@@ -330,6 +360,21 @@ impl AtomicBuilder {
     /// Union of rights required by operations admitted so far.
     pub const fn required_rights(&self) -> CollectionRights {
         self.required_rights
+    }
+
+    /// Bind the host read frontier before recording external witnesses.
+    /// Repeating the same frontier is idempotent; changing it is refused.
+    pub fn bind_read_frontier(&mut self, frontier: [u8; 32]) -> Result<&mut Self, AtomicsError> {
+        match self.options.read_frontier {
+            None => self.options.read_frontier = Some(frontier),
+            Some(existing) if existing == frontier => {}
+            Some(_) => {
+                return Err(AtomicsError::Refused(
+                    AtomicRefuseReason::StaleOrForeignCapability,
+                ))
+            }
+        }
+        Ok(self)
     }
 
     /// Create-if-absent.

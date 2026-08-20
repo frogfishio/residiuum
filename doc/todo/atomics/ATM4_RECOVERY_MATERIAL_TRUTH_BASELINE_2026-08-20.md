@@ -187,10 +187,11 @@ media permits and are never interpreted as the new composite-key format.
   disjoint/overlapping cohorts. Twenty-four deterministic randomized campaigns
   are checked, and witness omission is an executed mutation-sensitive negative
   control.
-- **Delivered in ATM-4D.2 core:** the pure builder now resolves reads after a
+- **Delivered in ATM-4D.2 / ATM-5A:** the pure builder resolves reads after a
   planned create/put/replace/delete from a canonical bounded overlay and emits
-  no false external dependency witness. The host version-bearing read bridge
-  remains deliberately behind the ATM-5 capability composition boundary.
+  no false external dependency witness. The capability-bound SDK bridge now
+  turns external reads into exact version/absence witnesses and binds their
+  store frontier.
 - **Delivered in ATM-4D.3 execution core:** deterministic typed exact-scalar
   payload, canonical validation, serialization-frontier and cohort-overlay
   execution, and independent serial-history negative control. The canonical
@@ -211,11 +212,10 @@ media permits and are never interpreted as the new composite-key format.
   ordinary-write and Atomic transitions are independently classified against
   the real capability-bound store and checked again after restart. Capability
   refusal before issuance is kept distinct from durable `NotCommitted`.
-- **Remaining:** the ATM-5 host construction session which turns external
-  reads into exact witnesses; canonical RQL/RRE compiler bridges; public
-  capability-gated rule and rename/retire administration. Broader stochastic
-  concurrency campaigns remain useful hardening, not an ATM-4D correctness
-  blocker.
+- **Remaining:** ATM-5 submission cancellation/deadline qualification;
+  canonical RQL/RRE compiler bridges; public capability-gated rule and
+  rename/retire administration. Broader stochastic concurrency campaigns
+  remain useful hardening, not an ATM-4D correctness blocker.
 - Detailed contract and delivery order:
   `ATM4D_SERIAL_HISTORIES_AND_PREDICATES_SPEC_2026-08-20.md`.
 

@@ -529,6 +529,14 @@ impl Heap {
         Ok(self.store.decide_atomic_plan_outcome(plan)?)
     }
 
+    /// Resolve one Heap-local Atomic identity from durable evidence.
+    pub fn atomic_status(
+        &self,
+        atomic_id: residiuum_atomics::AtomicId,
+    ) -> Result<residiuum_atomics::AtomicStatus, Error> {
+        Ok(self.store.atomic_status(atomic_id)?)
+    }
+
     /// Qualification-only ATM-3D independent-outcome durability cohort.
     #[doc(hidden)]
     pub fn decide_atomic_plan_cohort_outcomes(

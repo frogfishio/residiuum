@@ -377,6 +377,24 @@ impl HeapStore {
             .decide_plan_outcome(plan)
     }
 
+    /// Resolve one Atomic identity from durable Heap-scoped evidence.
+    pub fn atomic_status(
+        &self,
+        atomic_id: residiuum_atomics::AtomicId,
+    ) -> Result<residiuum_atomics::AtomicStatus, StoreError> {
+        self.gate()?;
+        self.require_right(Rights::READ)?;
+        let atomic_heap = residiuum_atomics::HeapId::from_bytes(*self.cap.heap_id().as_bytes())
+            .map_err(|error| StoreError::HeapCapability(error.to_string()))?;
+        let mut guard = self
+            .physical
+            .lock()
+            .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
+        guard
+            .atomic_stage_for_heap(atomic_heap)?
+            .atomic_status(atomic_id)
+    }
+
     /// Qualification-only ATM-3D cohort. Independent plan outcomes share the
     /// physical member and decision boundaries under this Heap's store guard.
     #[doc(hidden)]

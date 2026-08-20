@@ -1181,10 +1181,14 @@ fn ingest_file_tail(
     }
     let mut bytes = vec![0u8; want as usize];
     file.read_exact(&mut bytes)?;
+    let atomic_report = read_atomic_evidence(&bytes, SafetyLimits::draft_defaults());
     let atomic_related = contains_atomic_body_magic(&bytes)
-        || !read_atomic_evidence(&bytes, SafetyLimits::draft_defaults())
-            .examined
-            .is_empty();
+        || atomic_report.examined.iter().any(|examined| {
+            !matches!(
+                examined.class,
+                residiuum_format::AtomicEvidenceClass::Unsupported { .. }
+            )
+        });
     let report = scan_forward(&bytes, SafetyLimits::draft_defaults());
     if !atomic_related {
         return Ok(false);

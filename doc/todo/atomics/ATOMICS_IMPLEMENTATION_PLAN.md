@@ -2,7 +2,9 @@
 
 Status: **developer-ready v1.1; active critical-path programme**
 
-Inspected implementation baseline: clean `main` at `ec80380` (2026-08-10).
+Initial inspected implementation baseline: clean `main` at `ec80380`
+(2026-08-10). Current continuation record:
+[ATM5_ASYNC_SDK_BASELINE_2026-08-20.md](./ATM5_ASYNC_SDK_BASELINE_2026-08-20.md).
 
 Normative semantics: [ATOMICS_SPEC.md](./ATOMICS_SPEC.md)
 

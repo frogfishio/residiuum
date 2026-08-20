@@ -1,6 +1,6 @@
 # Atomics programme
 
-Status: **active critical-path architecture; developer delivery starts at ATM-0**
+Status: **active critical-path implementation; ATM-5 qualification in progress**
 
 Execution authority:
 
@@ -9,7 +9,13 @@ Execution authority:
 2. [ATOMICS_IMPLEMENTATION_PLAN.md](./ATOMICS_IMPLEMENTATION_PLAN.md) — current
    baseline, package ownership, PR order, gates, evidence, and governance.
 
-Current acceptance review:
+Current continuation point:
+
+- [ATM5_ASYNC_SDK_BASELINE_2026-08-20.md](./ATM5_ASYNC_SDK_BASELINE_2026-08-20.md)
+  — first public async construction/commit/status slice, evidence and exact
+  remaining release delta. Capability advertisement remains closed.
+
+Historical acceptance reviews:
 
 - [ATM1_ATM2_DEEP_REVIEW_CR_ATMR7_2026-08-20.md](./ATM1_ATM2_DEEP_REVIEW_CR_ATMR7_2026-08-20.md)
   — ATM-1 is accepted; ATM-2 remains partial at clean `5f90d59`; active changes
@@ -34,7 +40,11 @@ Current product truth:
 
 - key-local conditional writes and durable operation replay exist;
 - physical group commit exists but its members are logically independent;
-- Heap-local multi-record Atomics do not exist;
+- the Heap-local Atomic kernel, durable evidence, publication, recovery,
+  maintenance and serial-history proofs exist;
+- an embedded async smart-driver construction/commit/status surface now exists
+  for qualification, including exact external read witnesses and indivisible
+  weighted admission;
 - `Capabilities::atomics` remains `false` until ATM-5 acceptance; and
 - no cross-Heap, cross-partition, interactive, synchronous, or external-effect
   transaction is in scope.

@@ -26,6 +26,9 @@ use std::task::{Context, Poll, Waker};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+/// Heap-local multi-record Atomic construction and outcomes.
+pub mod atomics;
+
 const DEFAULT_QUEUE_BYTE_CAPACITY: usize = 64 * 1024 * 1024;
 /// Default count window holds two maximum product commit cohorts so the second
 /// can cook while the first crosses its durable media boundary.
@@ -713,6 +716,30 @@ impl HeapClient {
     /// Negotiated/implemented behavior of the shared connection.
     pub fn capabilities(&self) -> &Capabilities {
         self.connection.capabilities()
+    }
+
+    /// Start a Heap-bound Atomic construction session.
+    pub fn atomic(
+        &self,
+        options: residiuum_atomics::AtomicOptions,
+    ) -> Result<atomics::AtomicBuilder, Error> {
+        atomics::AtomicBuilder::new(self.clone(), options)
+    }
+
+    /// Submit one immutable Atomic as one bounded scheduler job.
+    pub async fn commit_atomic(
+        &self,
+        plan: residiuum_atomics::AtomicPlan,
+    ) -> Result<residiuum_atomics::AtomicOutcome, Error> {
+        atomics::commit(self, plan).await
+    }
+
+    /// Resolve one previously issued Atomic from durable evidence.
+    pub async fn atomic_status(
+        &self,
+        atomic_id: residiuum_atomics::AtomicId,
+    ) -> Result<residiuum_atomics::AtomicStatus, Error> {
+        atomics::status(self, atomic_id).await
     }
 
     /// Structured report from the one physical store open.
@@ -1940,6 +1967,19 @@ struct Scheduler {
     closed: AtomicBool,
 }
 
+struct WorkerByteCredit {
+    counters: Arc<Counters>,
+    bytes: usize,
+}
+
+impl Drop for WorkerByteCredit {
+    fn drop(&mut self) {
+        self.counters
+            .admitted_bytes
+            .fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
 struct MutationCompletion<T> {
     shared: Arc<ResponseShared<T>>,
     counters: Arc<Counters>,
@@ -2009,6 +2049,69 @@ impl Scheduler {
         F: FnOnce() -> Result<T, SdkError> + Send + 'static,
     {
         self.dispatch_worker(request_id, operation_id, deadline, operation)
+    }
+
+    /// Admit one worker operation with indivisible byte credit. The captured
+    /// RAII credit is released on completion, cancellation, queue refusal, or
+    /// worker shutdown; members of a compound operation are never scheduled
+    /// independently.
+    fn dispatch_weighted<T, F>(
+        &self,
+        request_id: RequestId,
+        deadline: Option<Instant>,
+        admission_bytes: usize,
+        operation: F,
+    ) -> ResponseFuture<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> Result<T, SdkError> + Send + 'static,
+    {
+        let reject = |code, message, counters: &Counters| {
+            counters.refused.fetch_add(1, Ordering::Relaxed);
+            let (future, responder) = response_pair();
+            responder.complete(Err(Error::for_request(
+                code,
+                ErrorClass::Admission,
+                message,
+                request_id,
+                None,
+                TerminalOutcome::Refused,
+                RetryDisposition::Never,
+            )));
+            future
+        };
+        if admission_bytes > self.queue_byte_capacity {
+            self.counters.byte_refused.fetch_add(1, Ordering::Relaxed);
+            return reject(
+                ErrorCode::ResourceLimit,
+                "operation exceeds embedded driver byte capacity",
+                &self.counters,
+            );
+        }
+        if !reserve_bounded_by(
+            &self.counters.admitted_bytes,
+            self.queue_byte_capacity,
+            admission_bytes,
+        ) {
+            self.counters.byte_refused.fetch_add(1, Ordering::Relaxed);
+            return reject(
+                ErrorCode::Overloaded,
+                "embedded driver byte capacity is full",
+                &self.counters,
+            );
+        }
+        self.counters.peak_admitted_bytes.fetch_max(
+            self.counters.admitted_bytes.load(Ordering::Acquire),
+            Ordering::Relaxed,
+        );
+        let credit = WorkerByteCredit {
+            counters: Arc::clone(&self.counters),
+            bytes: admission_bytes,
+        };
+        self.dispatch_worker(request_id, None, deadline, move || {
+            let _credit = credit;
+            operation()
+        })
     }
 
     fn dispatch_worker<T, F>(
@@ -2897,6 +3000,58 @@ mod tests {
             .unwrap()
             .take()
             .expect("mutation completion")(Ok(()));
+        while scheduler.inspect().admitted_bytes != 0 {
+            thread::yield_now();
+        }
+        drop(first);
+    }
+
+    #[test]
+    fn weighted_worker_operation_holds_one_indivisible_byte_credit() {
+        let scheduler = Scheduler::new(1, 8, 8).unwrap();
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let first_gate = Arc::clone(&gate);
+        let first = scheduler.dispatch_weighted(RequestId([1; 16]), None, 6, move || {
+            let (lock, cv) = &*first_gate;
+            let mut open = lock.lock().unwrap();
+            while !*open {
+                open = cv.wait(open).unwrap();
+            }
+            Ok(())
+        });
+        while scheduler.inspect().running == 0 {
+            thread::yield_now();
+        }
+
+        let refused = scheduler.dispatch_weighted(RequestId([2; 16]), None, 3, || Ok(()));
+        let state = refused.shared.state.lock().unwrap();
+        let error = state
+            .result
+            .as_ref()
+            .and_then(|result| result.as_ref().err())
+            .expect("combined byte pressure must refuse the whole operation");
+        assert_eq!(error.code, ErrorCode::Overloaded);
+        drop(state);
+
+        let oversized = scheduler.dispatch_weighted(RequestId([3; 16]), None, 9, || Ok(()));
+        let state = oversized.shared.state.lock().unwrap();
+        let error = state
+            .result
+            .as_ref()
+            .and_then(|result| result.as_ref().err())
+            .expect("oversized operation must be refused before dispatch");
+        assert_eq!(error.code, ErrorCode::ResourceLimit);
+        assert_eq!(error.retry, RetryDisposition::Never);
+        drop(state);
+
+        let inspection = scheduler.inspect();
+        assert_eq!(inspection.admitted_bytes, 6);
+        assert_eq!(inspection.peak_admitted_bytes, 6);
+        assert_eq!(inspection.byte_refused, 2);
+
+        let (lock, cv) = &*gate;
+        *lock.lock().unwrap() = true;
+        cv.notify_all();
         while scheduler.inspect().admitted_bytes != 0 {
             thread::yield_now();
         }

@@ -5,7 +5,8 @@ use residiuum_format::{
     encode_atomic_member_envelope, encode_atomic_prepare_envelope, encode_deterministic_uint_map,
     encode_frame, read_atomic_evidence, AtomicEvidenceClass, AtomicExamReason, AtomicFrameRole,
     AtomicGroupClass, CborValue, FrameHeader, FrameKind, FrameParts, SafetyLimits, EMPTY_ENVELOPE,
-    ENV_ATOMIC_CONTENT_ROOT, ENV_ATOMIC_ID, WIRE_MAJOR, WIRE_MINOR,
+    ENV_ATOMIC_CONTENT_ROOT, ENV_ATOMIC_ID, ENV_OPERATION_CONTENT_HASH, ENV_OPERATION_ID,
+    WIRE_MAJOR, WIRE_MINOR,
 };
 
 fn eid(n: u8) -> [u8; 16] {
@@ -163,6 +164,29 @@ fn batch_id_only_envelope_is_not_atomic_evidence() {
             reason: AtomicExamReason::NotAtomicEvidence
         }
     );
+}
+
+#[test]
+fn client_operation_batch_commit_is_not_atomic_evidence() {
+    let env = encode_deterministic_uint_map(&[
+        (ENV_OPERATION_ID, CborValue::Bytes(eid(8).to_vec())),
+        (
+            ENV_OPERATION_CONTENT_HASH,
+            CborValue::Bytes(root(8).to_vec()),
+        ),
+    ])
+    .unwrap();
+    let frame = encode_atomic_frame(FrameKind::BatchCommit, &env, &body_map(), eid(8)).unwrap();
+    let report = read_atomic_evidence(&frame, SafetyLimits::default());
+    assert_eq!(report.examined.len(), 1);
+    assert_eq!(
+        report.examined[0].class,
+        AtomicEvidenceClass::Unsupported {
+            reason: AtomicExamReason::NotAtomicEvidence
+        }
+    );
+    assert_eq!(report.valid().count(), 0);
+    assert!(report.groups.is_empty());
 }
 
 #[test]

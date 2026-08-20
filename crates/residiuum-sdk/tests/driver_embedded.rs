@@ -6,6 +6,7 @@ use residiuum_heap::{
     SecurityRevision, TrustedInstant, VerifiedCertificate,
 };
 use residiuum_sdk::driver::{
+    atomics::{AtomicId, AtomicOptions, AtomicOutcome, AtomicRead},
     Client, Collection, CreateCollectionOptions, DeleteOptions, EmbeddedOptions, ErrorCode,
     HeapClient, OperationContext, OperationId, PutManyEntry, PutOptions, ReplaceOptions,
     ScanOptions, MAX_SCAN_PAGE_SIZE,
@@ -165,6 +166,155 @@ fn compile_contract_handles_are_clone_send_sync() {
             .enrichment_enabled(false)
             .enrichment_enabled
     );
+}
+
+#[test]
+fn atomic_driver_runs_gremlin_three_record_journey_and_restart_resolution() {
+    let (directory, capability) = prepared_deployment();
+    let retained_capability = capability.clone();
+    let connection = block_on(Client::open_embedded(
+        EmbeddedOptions::new(directory.path())
+            .workers(2)
+            .queue_capacity(32),
+    ))
+    .unwrap();
+    assert!(
+        !connection.capabilities().atomics,
+        "release gate remains closed"
+    );
+    let heap = block_on(connection.open_heap(capability)).unwrap();
+    let states: Collection<Value> =
+        block_on(heap.create_collection("states", CreateCollectionOptions::default())).unwrap();
+    let turns: Collection<Value> =
+        block_on(heap.create_collection("turns", CreateCollectionOptions::default())).unwrap();
+    let locators: Collection<Value> =
+        block_on(heap.create_collection("locators", CreateCollectionOptions::default())).unwrap();
+    let initial = block_on(states.put("conversation-1", &json!({"turn": 0}))).unwrap();
+
+    let atomic_id = AtomicId::random().unwrap();
+    let mut atomic = heap.atomic(AtomicOptions::new(atomic_id)).unwrap();
+    assert!(matches!(
+        block_on(atomic.read(&states, "conversation-1")).unwrap(),
+        AtomicRead::Present {
+            version: Some(_),
+            ..
+        }
+    ));
+    atomic
+        .replace(
+            &states,
+            "conversation-1",
+            initial.storage.event_id,
+            &json!({"turn": 1}),
+        )
+        .unwrap()
+        .create(&turns, "turn-1", &json!({"text": "hello"}))
+        .unwrap()
+        .create(&locators, "turn-id-1", &json!({"turn_key": "turn-1"}))
+        .unwrap();
+    assert!(matches!(
+        block_on(atomic.read(&turns, "turn-1")).unwrap(),
+        AtomicRead::Present { version: None, .. }
+    ));
+    let plan = atomic.build().unwrap();
+    let committed = block_on(heap.commit_atomic(plan.clone())).unwrap();
+    let AtomicOutcome::Committed(receipt) = committed else {
+        panic!("three-record journey did not commit")
+    };
+    assert_eq!(receipt.members.len(), 3);
+    assert!(!receipt.replayed);
+    assert_eq!(
+        block_on(states.get("conversation-1")).unwrap().unwrap()["turn"],
+        1
+    );
+    assert_eq!(
+        block_on(turns.get("turn-1")).unwrap().unwrap()["text"],
+        "hello"
+    );
+    assert_eq!(
+        block_on(locators.get("turn-id-1")).unwrap().unwrap()["turn_key"],
+        "turn-1"
+    );
+
+    let AtomicOutcome::Committed(replayed) = block_on(heap.commit_atomic(plan.clone())).unwrap()
+    else {
+        panic!("same id/root did not replay")
+    };
+    assert!(replayed.replayed);
+    assert_eq!(replayed.commit_position, receipt.commit_position);
+    assert_eq!(
+        block_on(heap.atomic_status(atomic_id)).unwrap().logical,
+        residiuum_atomics::LogicalStatus::Committed
+    );
+
+    let stale_id = AtomicId::random().unwrap();
+    let mut stale = heap.atomic(AtomicOptions::new(stale_id)).unwrap();
+    stale
+        .replace(
+            &states,
+            "conversation-1",
+            initial.storage.event_id,
+            &json!({"turn": 2}),
+        )
+        .unwrap()
+        .create(&turns, "must-not-exist", &json!({"text": "partial"}))
+        .unwrap();
+    assert!(matches!(
+        block_on(heap.commit_atomic(stale.build().unwrap())).unwrap(),
+        AtomicOutcome::NotCommitted { .. }
+    ));
+    assert!(block_on(turns.get("must-not-exist")).unwrap().is_none());
+
+    block_on(connection.close()).unwrap();
+    drop(states);
+    drop(turns);
+    drop(locators);
+    drop(heap);
+    drop(connection);
+    let reopened = block_on(Client::open_embedded(EmbeddedOptions::new(
+        directory.path(),
+    )))
+    .unwrap();
+    let reopened_heap = block_on(reopened.open_heap(retained_capability)).unwrap();
+    assert_eq!(
+        block_on(reopened_heap.atomic_status(atomic_id))
+            .unwrap()
+            .logical,
+        residiuum_atomics::LogicalStatus::Committed
+    );
+    let AtomicOutcome::Committed(replayed_after_restart) =
+        block_on(reopened_heap.commit_atomic(plan)).unwrap()
+    else {
+        panic!("restart retry did not replay")
+    };
+    assert!(replayed_after_restart.replayed);
+}
+
+#[test]
+fn atomic_builder_refuses_collection_from_another_heap_before_build() {
+    let (directory, left_cap, right_cap) = prepared_two_heap_deployment();
+    let connection = block_on(Client::open_embedded(EmbeddedOptions::new(
+        directory.path(),
+    )))
+    .unwrap();
+    let left = block_on(connection.open_heap(left_cap)).unwrap();
+    let right = block_on(connection.open_heap(right_cap)).unwrap();
+    let left_collection: Collection<Value> =
+        block_on(left.create_collection("left-docs", CreateCollectionOptions::default())).unwrap();
+    let right_collection: Collection<Value> =
+        block_on(right.create_collection("right-docs", CreateCollectionOptions::default()))
+            .unwrap();
+    let mut atomic = left
+        .atomic(AtomicOptions::new(AtomicId::random().unwrap()))
+        .unwrap();
+    atomic
+        .create(&left_collection, "ok", &json!({"v": 1}))
+        .unwrap();
+    let error = match atomic.create(&right_collection, "no", &json!({"v": 2})) {
+        Ok(_) => panic!("foreign collection was admitted"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code, ErrorCode::PermissionDenied);
 }
 
 #[test]

@@ -82,11 +82,12 @@ Index and forced-scan execution must agree on the same canonical predicate.
   It returns `External` only when a version-bearing host read is required.
   Planned reads emit no external witness and payload bytes are not duplicated
   in the overlay; Heap, rights, encoding and authority checks still apply.
-- **Open host bridge:** a store/SDK plan-construction session must consume
-  `External`, perform a version-bearing read, record the exact version/absence
-  witness, decode planned bytes under the collection codec, and enforce bounded
-  memory/cancellation. Capability-to-`TrustedAuthorityView` minting remains an
-  ATM-5 composition boundary and must not be bypassed here.
+- **Delivered in ATM-5A:** the SDK plan-construction session consumes
+  `External`, performs a bounded version-bearing read, records the exact
+  version/absence witness, binds the store frontier and decodes planned bytes
+  under the collection codec. Capability authority is sampled from the exact
+  live Heap binding under its authority guard; application fields cannot mint
+  it. Submission deadline/cancellation qualification remains an ATM-5 gate.
 
 ### ATM-4D.3 — exact scalar predicate
 

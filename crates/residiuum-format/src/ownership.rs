@@ -2,6 +2,7 @@
 
 use crate::cbor_envelope::{decode_deterministic_uint_map, CborEnvelopeError, CborValue};
 use crate::envelope_keys::is_atomic_extension_key;
+use crate::envelope_keys::{ENV_OPERATION_CONTENT_HASH, ENV_OPERATION_ID};
 use thiserror::Error;
 
 pub use crate::envelope_keys::{
@@ -78,6 +79,10 @@ pub fn parse_ownership_envelope(bytes: &[u8]) -> Result<OwnershipEvidence, Owner
             other if is_atomic_extension_key(other) => {
                 // Reserved Atomic namespace (FORMAT_SPEC: understood
                 // extensions are ignored by readers that do not consume them).
+            }
+            ENV_OPERATION_ID | ENV_OPERATION_CONTENT_HASH => {
+                // Known client-operation namespace. It neither establishes nor
+                // conflicts with Heap ownership and is not Atomic evidence.
             }
             other => return Err(OwnershipError::UnknownKey(other)),
         }
