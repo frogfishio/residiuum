@@ -315,6 +315,12 @@ impl CanonicalKey {
         }
     }
 
+    /// Stable key identity bytes used by Atomic manifests and SubjectV2.
+    /// The leading kind tag prevents string/opaque/integer/decimal aliases.
+    pub fn identity_bytes(&self) -> Vec<u8> {
+        crate::canonical::key_order_bytes(self)
+    }
+
     /// UTF-8 string key.
     pub fn string(s: impl Into<String>) -> Self {
         Self::String(s.into())

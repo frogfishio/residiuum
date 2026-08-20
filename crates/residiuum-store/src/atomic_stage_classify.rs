@@ -192,13 +192,17 @@ pub fn finalize_catalog(catalog: &mut StageCatalog, findings: &mut StageFindings
             continue;
         };
         let members = catalog.members.get(&id).cloned().unwrap_or_default();
-        if members.is_empty() {
+        let terminal_not_committed = catalog
+            .decisions
+            .get(&id)
+            .is_some_and(|decision| decision.decision == DecisionCode::NotCommitted);
+        if members.is_empty() && !terminal_not_committed {
             findings.push(
                 StageEvidenceKind::Member,
                 StageEvidenceClass::Partial,
                 Some(id),
             );
-        } else if !members_match_prepare(&prepare, &members) {
+        } else if !terminal_not_committed && !members_match_prepare(&prepare, &members) {
             catalog.blocked.insert(id);
             findings.push(
                 StageEvidenceKind::Member,

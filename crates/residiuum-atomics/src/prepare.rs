@@ -111,7 +111,13 @@ fn bind_members_to_plan(plan: &AtomicPlan, members: &[AtomicMember]) -> Result<(
             return Err(AtomicsError::Refused(AtomicRefuseReason::MalformedInput));
         };
         let member = unused.swap_remove(pos);
-        if member.member_kind != mutation.kind || member.before_version != mutation.if_version {
+        let before_matches = match mutation.kind {
+            crate::MutationKind::Put => true,
+            crate::MutationKind::Create
+            | crate::MutationKind::Replace
+            | crate::MutationKind::Delete => member.before_version == mutation.if_version,
+        };
+        if member.member_kind != mutation.kind || !before_matches {
             return Err(AtomicsError::Refused(AtomicRefuseReason::InvalidValue));
         }
         match (&mutation.encoded_value, member.after_content_hash) {
@@ -355,6 +361,36 @@ mod tests {
             prepare_from_closed_plan(&plan, [1; 32], &[primary, extra]).unwrap_err(),
             AtomicsError::Refused(AtomicRefuseReason::MalformedInput)
         );
+    }
+
+    #[test]
+    fn blind_put_member_may_record_the_actual_before_version() {
+        let id = aid(6);
+        let value = b"next";
+        let plan = close(
+            id,
+            vec![PlanMutation {
+                kind: MutationKind::Put,
+                collection_id: cid(),
+                key: CanonicalKey::String("k".into()),
+                encoded_value: Some(value.to_vec()),
+                if_version: None,
+            }],
+            vec![],
+            vec![],
+            vec![],
+            None,
+        );
+        let member = AtomicMember {
+            atomic_id: id,
+            ordinal: 0,
+            object_identity: ObjectIdentity::new(cid(), CanonicalKey::String("k".into())),
+            member_kind: MutationKind::Put,
+            before_version: Some(vid(9)),
+            after_content_hash: Some(*blake3::hash(value).as_bytes()),
+            event_id: vid(10),
+        };
+        prepare_from_closed_plan(&plan, [1; 32], &[member]).unwrap();
     }
 
     #[test]

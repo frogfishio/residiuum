@@ -23,13 +23,14 @@ use crate::error::StoreError;
 use crate::store::Store;
 use residiuum_atomics::{
     encode_decision, encode_member, encode_prepare, members_match_prepare,
-    ordered_member_manifest_root, prepare_from_closed_plan, prepare_hash, AtomicDecision, AtomicId,
-    AtomicMember, AtomicPlan, AtomicPrepare, AtomicRefuseReason, AtomicsError, ChunkPlan,
-    CoordinatorSeq, HeapId, MemberPhase, PlacementManifest, StagingHeap,
+    ordered_member_manifest_root, plan_content_root, prepare_from_closed_plan, prepare_hash,
+    AtomicAbortReason, AtomicDecision, AtomicId, AtomicMember, AtomicPlan, AtomicPrepare,
+    AtomicRefuseReason, AtomicsError, ChunkPlan, CoordinatorSeq, HeapId, MemberPhase, MutationKind,
+    ObjectIdentity, PlacementManifest, PredicateKind, StagingHeap, VersionId,
 };
 use residiuum_format::{
     encode_atomic_commit_envelope, encode_atomic_member_envelope, encode_atomic_prepare_envelope,
-    FrameKind, EMPTY_ENVELOPE,
+    encode_subject_v2, FrameKind, SubjectObjectKind, EMPTY_ENVELOPE,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -170,6 +171,18 @@ impl StoreAtomicStage<'_> {
         frontier: [u8; 32],
         members: &[AtomicMember],
     ) -> Result<(CoordinatorSeq, PlacementManifest), StoreError> {
+        let prepare = self.ensure_prepare_record(plan, frontier, members)?;
+        self.install_prepared_members(&prepare, members)
+    }
+
+    /// Persist only the accepted prepare. Validation and member installation
+    /// deliberately remain separate for the ATM-3 serialization algorithm.
+    fn ensure_prepare_record(
+        &mut self,
+        plan: &AtomicPlan,
+        frontier: [u8; 32],
+        members: &[AtomicMember],
+    ) -> Result<AtomicPrepare, StoreError> {
         if plan.heap_id() != self.heap.heap_id() {
             return Err(StoreError::AtomicStage(
                 "atomic plan Heap does not match the capability-bound stage".into(),
@@ -200,6 +213,14 @@ impl StoreAtomicStage<'_> {
             self.admit_new_atomic()?;
             self.persist_prepare(&prepare, members.len() as u32)?;
         }
+        Ok(prepare)
+    }
+
+    fn install_prepared_members(
+        &mut self,
+        prepare: &AtomicPrepare,
+        members: &[AtomicMember],
+    ) -> Result<(CoordinatorSeq, PlacementManifest), StoreError> {
         if let Some(existing) = self.heap.placement(prepare.atomic_id) {
             if existing.content_root() == prepare.content_root
                 && members_match_prepare(&prepare, members)
@@ -469,6 +490,252 @@ impl StoreAtomicStage<'_> {
             self.limits,
         )?;
         Ok(decision)
+    }
+
+    /// Persist a terminal failed validation. This consumes the accepted Atomic
+    /// identity but allocates no Heap commit position and publishes no member.
+    #[doc(hidden)]
+    pub fn persist_not_committed_decision(
+        &mut self,
+        atomic_id: AtomicId,
+        reason: AtomicAbortReason,
+    ) -> Result<AtomicDecision, StoreError> {
+        if self.catalog.blocked.contains(&atomic_id) || self.catalog.coverage_degraded {
+            return Err(StoreError::AtomicStage(
+                "atomic decision refused: evidence is blocked or coverage is incomplete".into(),
+            ));
+        }
+        if let Some(existing) = self.catalog.decisions.get(&atomic_id) {
+            return Ok(existing.clone());
+        }
+        let prepare = self
+            .catalog
+            .prepares
+            .get(&atomic_id)
+            .cloned()
+            .ok_or_else(|| StoreError::AtomicStage("decision without prepare".into()))?;
+        let intended = self
+            .catalog
+            .intended_members
+            .get(&atomic_id)
+            .copied()
+            .ok_or_else(|| StoreError::AtomicStage("prepare member count missing".into()))?;
+        let decision = AtomicDecision::not_committed(
+            atomic_id,
+            prepare_hash(&prepare).map_err(|e| StoreError::AtomicStage(e.to_string()))?,
+            prepare.ordered_member_manifest_root,
+            intended,
+            reason,
+        );
+        let body =
+            encode_decision(&decision).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        let envelope = encode_atomic_commit_envelope(
+            prepare.heap_id.as_bytes(),
+            atomic_id.as_bytes(),
+            prepare.content_root.as_bytes(),
+            None,
+        )
+        .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        crate::failpoint::hit("store.atomic.before_decision")?;
+        self.store.append_unindexed_atomic_frame(
+            FrameKind::BatchCommit,
+            &envelope,
+            &body,
+            decision_event_id(atomic_id),
+        )?;
+        crate::failpoint::hit("store.atomic.after_decision")?;
+        self.catalog
+            .evidence_heaps
+            .insert(atomic_id, prepare.heap_id);
+        self.catalog.decisions.insert(atomic_id, decision.clone());
+        persist_live_checkpoint(
+            self.store.paths(),
+            &self.catalog,
+            &mut self.covered,
+            self.limits,
+        )?;
+        Ok(decision)
+    }
+
+    /// ATM-3B qualification path: accept one closed plan, validate it against
+    /// the locked Heap frontier, and persist an exact terminal decision.
+    /// Successful members remain invisible until ATM-3C publication.
+    #[doc(hidden)]
+    pub fn decide_plan_evidence(
+        &mut self,
+        plan: &AtomicPlan,
+    ) -> Result<AtomicDecision, StoreError> {
+        if plan.heap_id() != self.heap.heap_id() {
+            return Err(StoreError::AtomicStage(
+                "atomic plan Heap does not match the capability-bound stage".into(),
+            ));
+        }
+        let root = plan_content_root(plan).map_err(|e| StoreError::AtomicStage(e.to_string()))?;
+        if let Some(stored) = self.catalog.prepares.get(&plan.atomic_id()) {
+            if stored.content_root != root {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
+            }
+            if let Some(decision) = self.catalog.decisions.get(&plan.atomic_id()) {
+                return Ok(decision.clone());
+            }
+        }
+
+        let members = self.members_for_frontier(plan)?;
+        let frontier = self.frontier_for_plan(plan)?;
+        let prepare = self.ensure_prepare_record(plan, frontier, &members)?;
+        if let Some(reason) = self.validate_at_frontier(plan)? {
+            return self.persist_not_committed_decision(prepare.atomic_id, reason);
+        }
+
+        self.install_prepared_members(&prepare, &members)?;
+        for (member, mutation) in members.iter().zip(plan.mutations()) {
+            let payload = mutation.encoded_value.clone().unwrap_or_default();
+            self.append_staged(member.clone(), payload)?;
+        }
+        self.seal_member_boundary(prepare.atomic_id)?;
+        self.persist_committed_decision(prepare.atomic_id)
+    }
+
+    fn members_for_frontier(&self, plan: &AtomicPlan) -> Result<Vec<AtomicMember>, StoreError> {
+        plan.mutations()
+            .iter()
+            .enumerate()
+            .map(|(ordinal, mutation)| {
+                let ordinal = u32::try_from(ordinal).map_err(|_| {
+                    StoreError::AtomicStage("atomic member ordinal overflow".into())
+                })?;
+                let subject =
+                    atomic_subject(plan.heap_id(), mutation.collection_id, &mutation.key)?;
+                let observed = self
+                    .store
+                    .live_event_id(&subject)
+                    .and_then(|bytes| VersionId::from_bytes(bytes).ok());
+                let before_version = match mutation.kind {
+                    MutationKind::Put => observed,
+                    MutationKind::Create => None,
+                    MutationKind::Replace | MutationKind::Delete => mutation.if_version,
+                };
+                let after_content_hash = mutation
+                    .encoded_value
+                    .as_deref()
+                    .map(|value| *blake3::hash(value).as_bytes());
+                Ok(AtomicMember {
+                    atomic_id: plan.atomic_id(),
+                    ordinal,
+                    object_identity: ObjectIdentity::new(
+                        mutation.collection_id,
+                        mutation.key.clone(),
+                    ),
+                    member_kind: mutation.kind,
+                    before_version,
+                    after_content_hash,
+                    event_id: atomic_member_event_id(plan.atomic_id(), ordinal)?,
+                })
+            })
+            .collect()
+    }
+
+    fn frontier_for_plan(&self, plan: &AtomicPlan) -> Result<[u8; 32], StoreError> {
+        let mut targets = Vec::new();
+        for read in plan.reads() {
+            targets.push(atomic_subject(
+                plan.heap_id(),
+                read.collection_id,
+                &read.key,
+            )?);
+        }
+        for predicate in plan.predicates() {
+            if let (Some(collection), Some(key)) = (predicate.collection_id, predicate.key.as_ref())
+            {
+                targets.push(atomic_subject(plan.heap_id(), collection, key)?);
+            }
+        }
+        for mutation in plan.mutations() {
+            targets.push(atomic_subject(
+                plan.heap_id(),
+                mutation.collection_id,
+                &mutation.key,
+            )?);
+        }
+        targets.sort();
+        targets.dedup();
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"RESIDIUUM-ATOMIC-HEAP-FRONTIER-V1");
+        for subject in targets {
+            hasher.update(&(subject.len() as u32).to_be_bytes());
+            hasher.update(&subject);
+            match self.store.live_event_id(&subject) {
+                Some(version) => {
+                    hasher.update(&[1]);
+                    hasher.update(&version);
+                }
+                None => {
+                    hasher.update(&[0]);
+                }
+            }
+        }
+        Ok(*hasher.finalize().as_bytes())
+    }
+
+    fn validate_at_frontier(
+        &self,
+        plan: &AtomicPlan,
+    ) -> Result<Option<AtomicAbortReason>, StoreError> {
+        for read in plan.reads() {
+            let subject = atomic_subject(plan.heap_id(), read.collection_id, &read.key)?;
+            let observed = self
+                .store
+                .live_event_id(&subject)
+                .and_then(|bytes| VersionId::from_bytes(bytes).ok());
+            if observed != read.observed_version {
+                return Ok(Some(AtomicAbortReason::PreconditionConflict));
+            }
+        }
+        for predicate in plan.predicates() {
+            if predicate.kind == PredicateKind::HeapAuthorityRevision {
+                continue;
+            }
+            if !predicate.kind.is_public_builder_assert() {
+                return Ok(Some(AtomicAbortReason::RuleRejected));
+            }
+            let (Some(collection), Some(key)) = (predicate.collection_id, predicate.key.as_ref())
+            else {
+                return Ok(Some(AtomicAbortReason::PreconditionConflict));
+            };
+            let subject = atomic_subject(plan.heap_id(), collection, key)?;
+            let observed = self
+                .store
+                .live_event_id(&subject)
+                .and_then(|bytes| VersionId::from_bytes(bytes).ok());
+            let valid = match predicate.kind {
+                PredicateKind::AssertAbsent => observed.is_none(),
+                PredicateKind::AssertPresent => observed.is_some(),
+                PredicateKind::AssertVersion => observed == predicate.version,
+                _ => false,
+            };
+            if !valid {
+                return Ok(Some(AtomicAbortReason::PreconditionConflict));
+            }
+        }
+        for mutation in plan.mutations() {
+            let subject = atomic_subject(plan.heap_id(), mutation.collection_id, &mutation.key)?;
+            let observed = self
+                .store
+                .live_event_id(&subject)
+                .and_then(|bytes| VersionId::from_bytes(bytes).ok());
+            let valid = match mutation.kind {
+                MutationKind::Create => observed.is_none(),
+                MutationKind::Put => true,
+                MutationKind::Replace | MutationKind::Delete => observed == mutation.if_version,
+            };
+            if !valid {
+                return Ok(Some(AtomicAbortReason::PreconditionConflict));
+            }
+        }
+        if !plan.active_rule_revisions().is_empty() {
+            return Ok(Some(AtomicAbortReason::RuleRejected));
+        }
+        Ok(None)
     }
 
     fn duplicate_target() -> StoreError {
@@ -925,6 +1192,30 @@ fn decision_event_id(atomic_id: AtomicId) -> [u8; 16] {
     let mut event_id = [0u8; 16];
     event_id.copy_from_slice(&hash.as_bytes()[..16]);
     event_id
+}
+
+fn atomic_member_event_id(atomic_id: AtomicId, ordinal: u32) -> Result<VersionId, StoreError> {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"RESIDIUUM-ATOMIC-MEMBER-EVENT-V1");
+    hasher.update(atomic_id.as_bytes());
+    hasher.update(&ordinal.to_be_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&hasher.finalize().as_bytes()[..16]);
+    VersionId::from_bytes(bytes).map_err(|e| StoreError::AtomicStage(e.to_string()))
+}
+
+fn atomic_subject(
+    heap_id: HeapId,
+    collection_id: residiuum_atomics::CollectionId,
+    key: &residiuum_atomics::CanonicalKey,
+) -> Result<Vec<u8>, StoreError> {
+    encode_subject_v2(
+        heap_id.as_bytes(),
+        SubjectObjectKind::Collection,
+        collection_id.as_bytes(),
+        &key.identity_bytes(),
+    )
+    .map_err(|e| StoreError::AtomicStage(format!("atomic SubjectV2 encode: {e}")))
 }
 
 impl From<AtomicsError> for StoreError {
