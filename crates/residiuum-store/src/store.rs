@@ -5855,6 +5855,12 @@ impl Store {
         crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)
     }
 
+    /// Release the writer without seal/flush. Crash-media tests only (CR-ATMR6-007).
+    pub fn abandon_for_crash_test(&mut self) {
+        self.orderly_close_prepared = true;
+        self.writer_lock.take();
+    }
+
     /// Compact live state into a new sealed segment (sources retained).
     ///
     /// Runs the DEF-024 phase pipeline through **activate** and leaves sources

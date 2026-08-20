@@ -991,6 +991,7 @@ fn load_checkpoint(
 }
 
 fn persist_coordinator(paths: &StorePaths, catalog: &StageCatalog) -> Result<(), StoreError> {
+    crate::failpoint::hit("store.atomic.coord.before_persist")?;
     let mut body = Vec::new();
     body.extend_from_slice(COORD_MAGIC);
     body.push(COORD_VERSION);
@@ -1010,7 +1011,9 @@ fn persist_coordinator(paths: &StorePaths, catalog: &StageCatalog) -> Result<(),
     hasher.update(COORD_DOMAIN);
     hasher.update(&body);
     body.extend_from_slice(hasher.finalize().as_bytes());
-    write_atomic(&atomic_coord_path(paths), &body)
+    write_atomic(&atomic_coord_path(paths), &body)?;
+    crate::failpoint::hit("store.atomic.coord.after_persist")?;
+    Ok(())
 }
 
 fn load_coordinator(paths: &StorePaths, catalog: &mut StageCatalog) -> Result<(), StoreError> {
@@ -1094,12 +1097,15 @@ fn persist_checkpoint(
     if crate::failpoint::hit("store.atomic.checkpoint.capacity").is_err() {
         return Ok(());
     }
+    crate::failpoint::hit("store.atomic.checkpoint.before_persist")?;
     let bytes = encode_checkpoint(catalog, covered)?;
     if bytes.len() as u64 > AtomicStageLimits::operable().max_checkpoint_bytes {
         // Do not strand acknowledged media behind a sidecar ceiling.
         return Ok(());
     }
-    write_atomic(&atomic_stage_checkpoint_path(paths), &bytes)
+    write_atomic(&atomic_stage_checkpoint_path(paths), &bytes)?;
+    crate::failpoint::hit("store.atomic.checkpoint.after_persist")?;
+    Ok(())
 }
 
 fn encode_body_ref(body: &mut Vec<u8>, refer: &BodyRef) {
