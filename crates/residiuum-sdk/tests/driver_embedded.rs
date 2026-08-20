@@ -289,6 +289,21 @@ fn atomic_driver_runs_gremlin_three_record_journey_and_restart_resolution() {
         block_on(locators.get("turn-id-1")).unwrap().unwrap()["turn_key"],
         "turn-1"
     );
+    let first_store_stats = connection.inspect().atomics.store.unwrap();
+    assert_eq!(first_store_stats.executions, 1);
+    assert_eq!(first_store_stats.committed, 1);
+    assert_eq!(first_store_stats.members, 3);
+    assert_eq!(first_store_stats.durability_cohorts, 1);
+    assert_eq!(first_store_stats.max_cohort_members, 3);
+    assert_eq!(first_store_stats.authoritative_sync_operations, 2);
+    assert!(first_store_stats.authoritative_write_operations > 0);
+    assert!(first_store_stats.authoritative_write_bytes > 0);
+    assert!(first_store_stats.catalog_open_ns > 0);
+    assert!(first_store_stats.decision_publish_ns > 0);
+    assert!(first_store_stats.validation_ns > 0);
+    assert!(first_store_stats.member_boundary_ns > 0);
+    assert!(first_store_stats.decision_boundary_ns > 0);
+    assert!(first_store_stats.publication_ns > 0);
 
     let AtomicOutcome::Committed(replayed) = block_on(heap.commit_atomic(plan.clone())).unwrap()
     else {
@@ -296,6 +311,17 @@ fn atomic_driver_runs_gremlin_three_record_journey_and_restart_resolution() {
     };
     assert!(replayed.replayed);
     assert_eq!(replayed.commit_position, receipt.commit_position);
+    let replay_store_stats = connection.inspect().atomics.store.unwrap();
+    assert_eq!(replay_store_stats.executions, 2);
+    assert_eq!(replay_store_stats.committed, 2);
+    assert_eq!(replay_store_stats.replayed, 1);
+    assert_eq!(replay_store_stats.members, 6);
+    assert_eq!(replay_store_stats.durability_cohorts, 1);
+    assert_eq!(
+        replay_store_stats.authoritative_sync_operations,
+        first_store_stats.authoritative_sync_operations,
+        "durable replay must not create another physical sync"
+    );
     assert_eq!(
         block_on(heap.atomic_status(atomic_id)).unwrap().logical,
         residiuum_atomics::LogicalStatus::Committed
@@ -625,6 +651,10 @@ fn atomic_external_sigkill_after_decision_before_ack_resolves_and_replays() {
     )))
     .unwrap();
     let heap = block_on(connection.open_heap(capability)).unwrap();
+    let recovery_stats = connection.inspect().atomics.store.unwrap();
+    assert!(recovery_stats.recovered_atomics >= 1);
+    assert!(recovery_stats.recovery_frames > 0);
+    assert!(recovery_stats.recovery_ns > 0);
     let status = block_on(heap.atomic_status(crash_atomic_id())).unwrap();
     assert_eq!(status.logical, residiuum_atomics::LogicalStatus::Committed);
     assert!(status.receipt.is_some());

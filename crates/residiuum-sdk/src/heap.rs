@@ -461,6 +461,11 @@ impl ResidiuumDeployment {
         self.host.operation_commit_stats()
     }
 
+    /// Physical Atomic execution and open-recovery counters.
+    pub fn atomic_store_stats(&self) -> Result<residiuum_store::AtomicStoreStats, Error> {
+        Ok(self.host.atomic_store_stats()?)
+    }
+
     /// Redacted sustained-write lifecycle counters; performs no store scan.
     pub fn write_path_stats(&self) -> Result<residiuum_store::StoreWritePathStats, Error> {
         Ok(self.host.write_path_stats()?)

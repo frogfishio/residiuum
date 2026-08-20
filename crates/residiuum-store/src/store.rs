@@ -838,6 +838,8 @@ pub struct StoreOpenMetrics {
     pub compaction_jobs_examined: u64,
     /// Recovery-mode reload.
     pub recovery_mode_ns: u64,
+    /// Atomic decision-catalogue recovery and committed-publication rebuild.
+    pub atomic_recovery_ns: u64,
     /// Atomic-stage catalogue path (CR-ATMR5-001). `NotRun` until `atomic_stage`.
     pub atomic_stage_disposition: AtomicStageDisposition,
     /// Bytes read while opening the Atomic-stage catalogue.
@@ -1640,7 +1642,9 @@ impl Store {
         // ATM-3: ordinary index recovery intentionally ignores staged Atomic
         // evidence. Reconstruct committed whole-delta generations only after
         // the decision catalogue and every referenced payload verify.
+        let phase = Instant::now();
         store.recover_committed_atomic_publications()?;
+        open_metrics.atomic_recovery_ns = elapsed_ns(phase);
         // Atomic recovery records directly on the live Store because it also
         // runs when a stage is opened later. Preserve that phase report when
         // the surrounding startup accumulator is installed below.

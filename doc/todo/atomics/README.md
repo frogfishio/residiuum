@@ -11,6 +11,9 @@ Execution authority:
 
 Current continuation point:
 
+- [ATM5E_STORE_TELEMETRY_BASELINE_2026-08-20.md](./ATM5E_STORE_TELEMETRY_BASELINE_2026-08-20.md)
+  — store-derived physical I/O/sync/cohort, recovery and bounded phase
+  telemetry exposed through the smart client.
 - [ATM5D_STABLE_VOCABULARY_BASELINE_2026-08-20.md](./ATM5D_STABLE_VOCABULARY_BASELINE_2026-08-20.md)
   — complete §22 public vocabulary, precise structural mappings and
   evidence-safe outcome/status classification.

@@ -46,7 +46,7 @@ use residiuum_format::{
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const DEFAULT_ATOMIC_DETAIL_RETENTION_SECS: u64 = 90 * 24 * 60 * 60;
 
@@ -62,6 +62,16 @@ pub struct StoreAtomicStage<'a> {
     /// Authority revision sampled while the owning Heap frontier is locked.
     /// Raw Store callers intentionally have no trusted authority binding.
     authority_revision: Option<[u8; 32]>,
+    phase_timing: AtomicPhaseTiming,
+}
+
+/// Per-execution timings transferred into constant-space host counters.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct AtomicPhaseTiming {
+    pub validation_ns: u64,
+    pub member_boundary_ns: u64,
+    pub decision_boundary_ns: u64,
+    pub publication_ns: u64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -248,6 +258,7 @@ impl Store {
             findings: opened.findings,
             limits,
             authority_revision,
+            phase_timing: AtomicPhaseTiming::default(),
         })
     }
 
@@ -454,6 +465,10 @@ fn recover_missing_decision_tombstones(
 }
 
 impl StoreAtomicStage<'_> {
+    pub(crate) fn phase_timing(&self) -> AtomicPhaseTiming {
+        self.phase_timing
+    }
+
     fn retained_tombstone(
         &self,
         key: StageAtomicKey,
@@ -1397,6 +1412,7 @@ impl StoreAtomicStage<'_> {
         &mut self,
         plan: &AtomicPlan,
     ) -> Result<AtomicDecision, StoreError> {
+        let validation_started = Instant::now();
         if plan.heap_id() != self.heap.heap_id() {
             return Err(StoreError::AtomicStage(
                 "atomic plan Heap does not match the capability-bound stage".into(),
@@ -1416,6 +1432,7 @@ impl StoreAtomicStage<'_> {
             if retained.tombstone.content_root != root {
                 return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
             }
+            self.phase_timing.validation_ns = elapsed_ns(validation_started);
             return Err(StoreError::AtomicStage(
                 "Atomic detail was lawfully retired; use outcome/status summary".into(),
             ));
@@ -1427,7 +1444,13 @@ impl StoreAtomicStage<'_> {
             if let Some(decision) = self.catalog.decisions.get(&key) {
                 let decision = decision.clone();
                 if decision.decision == DecisionCode::Committed {
+                    self.phase_timing.validation_ns = elapsed_ns(validation_started);
+                    let publication_started = Instant::now();
                     self.publish_decision(plan.atomic_id())?;
+                    self.phase_timing.publication_ns = elapsed_ns(publication_started);
+                }
+                if self.phase_timing.validation_ns == 0 {
+                    self.phase_timing.validation_ns = elapsed_ns(validation_started);
                 }
                 return Ok(decision);
             }
@@ -1438,18 +1461,30 @@ impl StoreAtomicStage<'_> {
         let mode = StagePersistMode::BufferedCohort;
         let prepare = self.ensure_prepare_record(plan, frontier, &members, mode)?;
         if let Some(reason) = self.validate_at_frontier(plan)? {
-            return self.persist_not_committed_decision_inner(prepare.atomic_id, reason, mode);
+            self.phase_timing.validation_ns = elapsed_ns(validation_started);
+            let decision_started = Instant::now();
+            let decision =
+                self.persist_not_committed_decision_inner(prepare.atomic_id, reason, mode);
+            self.phase_timing.decision_boundary_ns = elapsed_ns(decision_started);
+            return decision;
         }
+        self.phase_timing.validation_ns = elapsed_ns(validation_started);
 
+        let member_started = Instant::now();
         self.install_prepared_members(&prepare, &members, mode)?;
         for (member, mutation) in members.iter().zip(plan.mutations()) {
             let payload = mutation.encoded_value.clone().unwrap_or_default();
             self.append_staged_inner(member.clone(), payload, mode)?;
         }
         self.seal_member_boundary_inner(prepare.atomic_id, mode)?;
+        self.phase_timing.member_boundary_ns = elapsed_ns(member_started);
+        let decision_started = Instant::now();
         let decision = self.persist_committed_decision_inner(prepare.atomic_id, mode)?;
+        self.phase_timing.decision_boundary_ns = elapsed_ns(decision_started);
         crate::failpoint::hit("store.atomic.before_publish")?;
+        let publication_started = Instant::now();
         self.publish_decision(prepare.atomic_id)?;
+        self.phase_timing.publication_ns = elapsed_ns(publication_started);
         crate::failpoint::hit("store.atomic.after_publish")?;
         // The receipt has been fully determined and the complete generation is
         // visible, but it has not crossed the caller acknowledgement boundary.
@@ -2902,6 +2937,10 @@ impl StoreAtomicStage<'_> {
         }
         Ok(())
     }
+}
+
+fn elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 fn decision_event_id(heap_id: HeapId, atomic_id: AtomicId) -> [u8; 16] {

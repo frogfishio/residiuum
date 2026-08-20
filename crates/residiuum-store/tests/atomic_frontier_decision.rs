@@ -4,9 +4,10 @@
 
 use residiuum_atomics::{
     encode_exact_scalar_equality, AtomicAbortReason, AtomicId, AtomicOutcome, AtomicPlan,
-    AtomicPlanParts, AtomicProfile, CanonicalKey, CollectionId, CoordinationScope, DecisionCode,
-    ExactScalarEquality, HeapId, LogicalStatus, MaterialStatus, MutationKind, PlanMutation,
-    PlanPredicate, PredicateKind, ResourceLimits, ValueEncoding, VersionId,
+    AtomicPlanParts, AtomicProfile, AtomicRefuseReason, AtomicsError, CanonicalKey, CollectionId,
+    CoordinationScope, DecisionCode, ExactScalarEquality, HeapId, LogicalStatus, MaterialStatus,
+    MutationKind, PlanMutation, PlanPredicate, PredicateKind, ResourceLimits, ValueEncoding,
+    VersionId,
 };
 use residiuum_format::{encode_subject_v2, SubjectObjectKind};
 use residiuum_store::{
@@ -1046,7 +1047,10 @@ fn one_over_maximum_caller_plan_is_refused_before_media_append() {
         .decide_plan_outcome(&atomic_plan)
         .unwrap_err();
     assert!(
-        matches!(error, StoreError::AtomicStage(ref message) if message.contains("LimitExceeded")),
+        matches!(
+            error,
+            StoreError::Atomic(AtomicsError::Refused(AtomicRefuseReason::LimitExceeded))
+        ),
         "expected structural limit refusal, got {error}"
     );
     assert_eq!(

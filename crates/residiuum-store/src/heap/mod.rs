@@ -1,6 +1,7 @@
 //! Capability-gated store façades (`HEAP_SPEC` §30.4–§30.5 / HP-003–HP-004).
 
 mod admin_op_dedup;
+mod atomic_stats;
 mod catalog;
 mod commit_coordinator;
 mod heap_store;
@@ -20,6 +21,7 @@ pub use admin_op_dedup::{
     record_admin_op_dedup, resolve_admin_op_dedup, save_admin_op_dedup, AdminOpDedupRecord,
     AdminOpDedupTable, CreatedCollectionAdmin, ADMIN_OP_DEDUP_FILE, COLLECTION_CREATE_OP,
 };
+pub use atomic_stats::AtomicStoreStats;
 pub use catalog::{
     create_object, delete_rebuildable_catalogs, load_staged_genesis, publish_staged_genesis,
     rebuild_and_persist_all_catalogs, rebuild_heap_entry_from_chain,

@@ -186,6 +186,7 @@ pub use failpoint::{
     require_visited as require_failpoint_visited, short_write_len as failpoint_short_write_len,
     visit_count as failpoint_visit_count, Action as FailpointAction,
 };
+pub use heap::AtomicStoreStats;
 /// Capability-gated heap façades (HP-003). Prefer these over the legacy raw store
 /// for qualified heap isolation; the unscoped store remains available behind the
 /// default `legacy-raw-store` feature.

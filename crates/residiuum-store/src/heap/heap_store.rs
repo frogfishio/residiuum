@@ -14,7 +14,9 @@ use residiuum_heap::{refresh_capability_or_terminate, HeapCap, Rights};
 use serde_json::Value as JsonValue;
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
+use super::atomic_stats::AtomicStoreCounters;
 use super::commit_coordinator::OperationCommitCoordinator;
 
 /// Why a collection key could not contribute a complete body during heap scan.
@@ -248,6 +250,7 @@ impl CollectionScanPage {
 pub struct HeapStore {
     physical: Arc<Mutex<PhysicalStore>>,
     commits: Arc<OperationCommitCoordinator>,
+    atomics: Arc<AtomicStoreCounters>,
     cap: HeapCap,
     /// When present and lease-active, puts/deletes admit through AWO (AWO-3).
     adaptive: Option<AdaptiveWriteHandle>,
@@ -257,12 +260,14 @@ impl HeapStore {
     pub(super) fn from_host_with_adaptive(
         physical: Arc<Mutex<PhysicalStore>>,
         commits: Arc<OperationCommitCoordinator>,
+        atomics: Arc<AtomicStoreCounters>,
         cap: HeapCap,
         adaptive: Option<AdaptiveWriteHandle>,
     ) -> Self {
         Self {
             physical,
             commits,
+            atomics,
             cap,
             adaptive,
         }
@@ -368,13 +373,31 @@ impl HeapStore {
         })?;
         self.gate()?;
         let authority_revision = slot.load().atomic_authority_revision();
+        let lock_started = Instant::now();
         let mut guard = self
             .physical
             .lock()
             .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
-        guard
-            .atomic_stage_for_heap_with_authority(atomic_heap, authority_revision)?
-            .decide_plan_outcome(plan)
+        self.atomics.record_lock_wait(lock_started.elapsed());
+        let before = guard.write_path_stats().authoritative_io;
+        let open_started = Instant::now();
+        let mut stage =
+            guard.atomic_stage_for_heap_with_authority(atomic_heap, authority_revision)?;
+        self.atomics.record_catalog_open(open_started.elapsed());
+        let execution_started = Instant::now();
+        let result = stage.decide_plan_outcome(plan);
+        let phases = stage.phase_timing();
+        drop(stage);
+        let after = guard.write_path_stats().authoritative_io;
+        self.atomics.record_execution(
+            plan.mutations().len(),
+            execution_started.elapsed(),
+            before,
+            after,
+            phases,
+            result.as_ref().ok(),
+        );
+        result
     }
 
     /// Resolve one Atomic identity from durable Heap-scoped evidence.

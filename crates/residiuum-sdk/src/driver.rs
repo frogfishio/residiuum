@@ -617,6 +617,9 @@ pub struct ClientInspection {
 /// Constant-space Atomic submission and observer counters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AtomicInspection {
+    /// Physical-store execution, durability and open-recovery counters. `None`
+    /// only when the store mutex was poisoned during inspection.
+    pub store: Option<residiuum_store::AtomicStoreStats>,
     /// Plans presented to the scheduler.
     pub submitted: u64,
     /// Plans whose engine operation is currently admitted or running.
@@ -753,6 +756,7 @@ impl Client {
         inspection.operation_commits = self.deployment.operation_commit_stats();
         inspection.write_path = self.deployment.write_path_stats().ok();
         inspection.decoded_json_cache = self.deployment.decoded_json_cache_stats();
+        inspection.atomics.store = self.deployment.atomic_store_stats().ok();
         inspection
     }
 
@@ -2708,6 +2712,7 @@ impl Scheduler {
             write_path: None,
             decoded_json_cache: None,
             atomics: AtomicInspection {
+                store: None,
                 submitted: self.counters.atomic_submitted.load(Ordering::Relaxed),
                 inflight: self.counters.atomic_inflight.load(Ordering::Acquire),
                 committed: self.counters.atomic_committed.load(Ordering::Relaxed),

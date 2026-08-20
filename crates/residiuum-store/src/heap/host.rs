@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use super::atomic_stats::{AtomicStoreCounters, AtomicStoreStats};
 use super::commit_coordinator::{OperationCommitCoordinator, OperationCommitStats};
 use super::HeapStore;
 
@@ -19,6 +20,7 @@ use super::HeapStore;
 pub struct StoreHost {
     physical: Arc<Mutex<PhysicalStore>>,
     commits: Arc<OperationCommitCoordinator>,
+    atomics: Arc<AtomicStoreCounters>,
     root: PathBuf,
     /// Optional AWO handle (None for ordinary create/open).
     adaptive: Option<AdaptiveWriteHandle>,
@@ -33,6 +35,7 @@ impl StoreHost {
         let physical = Arc::new(Mutex::new(store));
         Ok(Self {
             commits: OperationCommitCoordinator::start(Arc::clone(&physical)),
+            atomics: Arc::new(AtomicStoreCounters::default()),
             physical,
             root: path.to_path_buf(),
             adaptive: None,
@@ -47,6 +50,7 @@ impl StoreHost {
         let physical = Arc::new(Mutex::new(store));
         Ok(Self {
             commits: OperationCommitCoordinator::start(Arc::clone(&physical)),
+            atomics: Arc::new(AtomicStoreCounters::default()),
             physical,
             root: path.to_path_buf(),
             adaptive: None,
@@ -65,6 +69,7 @@ impl StoreHost {
         let physical = Arc::new(Mutex::new(store));
         Ok(Self {
             commits: OperationCommitCoordinator::start(Arc::clone(&physical)),
+            atomics: Arc::new(AtomicStoreCounters::default()),
             physical,
             root: path.to_path_buf(),
             adaptive: None,
@@ -149,6 +154,7 @@ impl StoreHost {
     pub fn from_shared(physical: Arc<Mutex<PhysicalStore>>, root: impl Into<PathBuf>) -> Self {
         Self {
             commits: OperationCommitCoordinator::start(Arc::clone(&physical)),
+            atomics: Arc::new(AtomicStoreCounters::default()),
             physical,
             root: root.into(),
             adaptive: None,
@@ -163,6 +169,7 @@ impl StoreHost {
         HeapStore::from_host_with_adaptive(
             Arc::clone(&self.physical),
             Arc::clone(&self.commits),
+            Arc::clone(&self.atomics),
             cap,
             self.adaptive.clone(),
         )
@@ -192,6 +199,16 @@ impl StoreHost {
     /// Deployment-wide durable group-commit counters; performs no store scan.
     pub fn operation_commit_stats(&self) -> OperationCommitStats {
         self.commits.stats()
+    }
+
+    /// Deployment-wide physical Atomic execution and open-recovery counters.
+    pub fn atomic_store_stats(&self) -> Result<AtomicStoreStats, StoreError> {
+        let open = self
+            .physical
+            .lock()
+            .map_err(|_| StoreError::CorruptMeta("store lock poisoned"))?
+            .open_metrics();
+        Ok(self.atomics.snapshot(open))
     }
 
     /// Redacted sustained-write lifecycle counters; performs no store scan.
