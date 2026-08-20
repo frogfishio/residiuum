@@ -482,6 +482,9 @@ fn require_valid(
         Some(AtomicEvidenceClass::Valid(_)) => Err(LaneError::Corrupt("unexpected atomic role")),
         Some(AtomicEvidenceClass::Partial { .. }) => Err(LaneError::Corrupt("partial evidence")),
         Some(AtomicEvidenceClass::Corrupt { .. }) => Err(LaneError::Corrupt("corrupt evidence")),
+        Some(AtomicEvidenceClass::AttributedCorrupt { .. }) => {
+            Err(LaneError::Corrupt("attributed corrupt evidence"))
+        }
         Some(AtomicEvidenceClass::Unsupported { .. }) => {
             Err(LaneError::Corrupt("unsupported evidence"))
         }

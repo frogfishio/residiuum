@@ -246,8 +246,9 @@ fn missing_abort_reason_is_refused() {
     assert!(
         rec.examined.iter().any(|e| matches!(
             e.class,
-            residiuum_format::AtomicEvidenceClass::Corrupt {
-                reason: AtomicExamReason::BodyCorrupt
+            residiuum_format::AtomicEvidenceClass::AttributedCorrupt {
+                reason: AtomicExamReason::BodyCorrupt,
+                ..
             }
         )),
         "{:?}",
@@ -265,8 +266,9 @@ fn commit_position_on_not_committed_is_refused() {
     assert!(
         rec.examined.iter().any(|e| matches!(
             e.class,
-            residiuum_format::AtomicEvidenceClass::Corrupt {
-                reason: AtomicExamReason::BodyCorrupt
+            residiuum_format::AtomicEvidenceClass::AttributedCorrupt {
+                reason: AtomicExamReason::BodyCorrupt,
+                ..
             }
         )),
         "{:?}",

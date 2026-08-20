@@ -40,9 +40,9 @@ never be inferred from a decision.
    same caller-selected Atomic ID independently across restart. Conflicting
    material in one Heap blocks only that composite identity and does not poison
    the same Atomic ID in another Heap.
-7. Every new terminal decision now carries an `ATTOMB1` lifetime tombstone in
+7. Every new terminal decision now carries an `ATTOMB2` lifetime tombstone in
    the same durable prefix. Recovery backfills a missing tombstone from an
-   exact surviving decision. The authenticated v16 checkpoint binds a derived,
+   exact surviving decision. The authenticated v17 checkpoint binds a derived,
    fixed-page Merkle index over the composite-key summaries. Tombstone-only
    status and same-root replay work after
    detailed not-committed evidence is lawfully retired and after restart.
@@ -58,7 +58,7 @@ profile. The product capability is still false, so no released SDK could have
 created supported Atomic data. New prepares require CBOR field 11
 `member_count: uint`; old experimental prepares that omit it are not silently
 upgraded because their exact intended cardinality is unknowable. The same
-pre-publication rule applies to `ATCKP1` v16, `ATCRD1` v2 and the heap-qualified
+pre-publication rule applies to `ATCKP1` v17, `ATCRD1` v2 and the heap-qualified
 sidecars: older experimental private layouts are rebuilt where authoritative
 media permits and are never interpreted as the new composite-key format.
 
@@ -81,13 +81,41 @@ media permits and are never interpreted as the new composite-key format.
   a crash-qualified generation swap. This is physical space reclamation only;
   lookup, insertion and restart costs do not grow with obsolete-page count.
 
-### ATM-4B — material truth and damage
+### ATM-4B — material truth and damage — delivered and qualified
 
-- distinguish complete, partial, missing, conflicting and coverage-incomplete
-  material for every prepare/member/payload/seal/decision/tombstone cut;
-- retain healthy-member examination under partial committed damage;
-- refuse damaged-index absence and uniqueness claims;
-- add byte-flip, truncation, hole and conflicting-decision mutants.
+- **Delivered:** frozen two-axis truth table in
+  `ATM4B_MATERIAL_DAMAGE_TRUTH_SPEC_2026-08-20.md`; an exact durable decision is
+  never rewritten by later material damage, and complete material never
+  invents a decision.
+- **Delivered:** Heap-qualified persisted findings with distinct prepare,
+  member, payload, chunk-plan, chunk-body, seal, order-frontier, decision and
+  tombstone roles. Unattributable damage degrades global coverage rather than
+  a guessed identity.
+- **Delivered:** format-level `AttributedCorrupt` retains authenticated
+  Heap/Atomic linkage when the envelope survives a damaged role body.
+- **Delivered:** `ATTOMB2` repeats the Atomic ID in its fixed header and checks
+  it against canonical tombstone CBOR, so a damaged lifetime body remains
+  attributable. `ATCKP1` v17 persists the Heap-qualified finding.
+- **Delivered:** committed status survives prepare/member/payload/chunk/seal,
+  order, decision and tombstone damage with an independently exact logical
+  result and honest `complete`, `partial`, `missing`, `conflicting` or
+  `coverage_incomplete` material result.
+- **Delivered:** a damaged detailed decision is reconstructed only when the
+  surviving prepare and lifetime tombstone reproduce its exact decision hash;
+  complete detail returns the byte-equivalent replay receipt.
+- **Delivered:** a one-member cut in a two-member commit retains the healthy
+  sibling for examination across checkpoint reopen and full `Store::open`.
+  Degraded Atomic publication is skipped and counted rather than preventing
+  access to the entire healthy store; missing values are never fabricated.
+- **Delivered:** damaged lifetime-index lookup cannot prove absence or hide a
+  detailed decision. Missing authenticated coverage returns
+  `unknown_commit/coverage_incomplete`, never `not_found`.
+- **Qualified:** head/middle/tail physical flips, tombstone
+  truncations, missing covered media, conflicting payload/seal/order/chunk
+  material, damaged prepare/member/decision/tombstone, conflicting decisions
+  in both file orders, checkpoint persistence and an executed negative
+  control. The delivery commit's clean full verifier run is the acceptance
+  record.
 
 ### ATM-4C — maintenance journeys
 
@@ -108,7 +136,7 @@ media permits and are never interpreted as the new composite-key format.
 ### ATM-4E — Heap-qualified identity key — delivered
 
 The catalogue and all dependent physical keys use the exact composite
-`(HeapId, AtomicId)`. `ATCKP1` v16, `ATCRD1` v2 and every non-prepare staging
+`(HeapId, AtomicId)`. `ATCKP1` v17, `ATCRD1` v2 and every non-prepare staging
 sidecar carry the Heap component. No hash-derived naming convention is used as
 an isolation boundary. Tombstones introduced by ATM-4A MUST use the same
 composite key.

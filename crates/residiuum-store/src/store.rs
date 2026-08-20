@@ -837,6 +837,8 @@ pub struct StoreOpenMetrics {
     pub atomic_stage_atomics: u32,
     /// Accepted Atomics closed as not committed during dirty-open recovery.
     pub atomic_stage_recovery_aborts: u32,
+    /// Committed Atomic publications skipped because authority/material was degraded.
+    pub atomic_stage_publication_degraded: u32,
 }
 
 /// Structured startup report returned to applications after a successful open.
@@ -1610,6 +1612,8 @@ impl Store {
         open_metrics.atomic_stage_files_tailed = store.open_metrics.atomic_stage_files_tailed;
         open_metrics.atomic_stage_atomics = store.open_metrics.atomic_stage_atomics;
         open_metrics.atomic_stage_recovery_aborts = store.open_metrics.atomic_stage_recovery_aborts;
+        open_metrics.atomic_stage_publication_degraded =
+            store.open_metrics.atomic_stage_publication_degraded;
         // Finish or cancel incomplete compaction jobs (DEF-024).
         let phase = Instant::now();
         let compaction_jobs = store.recover_compact_jobs()?;
@@ -2168,6 +2172,7 @@ impl Store {
         self.open_metrics.atomic_stage_files_tailed = report.files_tailed;
         self.open_metrics.atomic_stage_atomics = report.atomics;
         self.open_metrics.atomic_stage_recovery_aborts = report.recovery_aborts;
+        self.open_metrics.atomic_stage_publication_degraded = report.publication_degraded;
     }
 
     /// Number of live (non-deleted) subjects in the primary index.

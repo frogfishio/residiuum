@@ -79,7 +79,10 @@ pub(crate) fn project_atomic_with_tombstone(
     let prepare = catalog.prepares.get(&key);
     let members = catalog.members.get(&key);
     let present_members = members.map(|ms| ms.len() as u32).unwrap_or(0);
-    let intended_members = prepare.map(|p| p.member_count).unwrap_or(present_members);
+    let intended_members = prepare
+        .map(|p| p.member_count)
+        .or_else(|| catalog.intended_members.get(&key).copied())
+        .unwrap_or(present_members);
     let present_payloads = catalog
         .payloads
         .keys()
@@ -167,4 +170,14 @@ fn chunk_complete(catalog: &StageCatalog, key: StageAtomicKey, ordinal: u32) -> 
         catalog.has_chunk(key, ordinal, i)
             || catalog.chunk_refs.contains_key(&(key.0, key.1, ordinal, i))
     })
+}
+
+pub(crate) fn material_complete_for_member(
+    catalog: &StageCatalog,
+    key: StageAtomicKey,
+    ordinal: u32,
+) -> bool {
+    catalog.has_payload(key, ordinal)
+        || catalog.payload_refs.contains_key(&(key.0, key.1, ordinal))
+        || chunk_complete(catalog, key, ordinal)
 }

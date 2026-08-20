@@ -234,17 +234,13 @@ impl Store {
             open_catalog(self.paths(), AtomicStageLimits::operable())?
         };
         if opened.catalog.coverage_degraded {
-            self.record_atomic_stage_open(opened.report);
-            if opened
+            opened.report.publication_degraded = opened
                 .catalog
                 .decisions
                 .values()
-                .any(|decision| decision.decision == DecisionCode::Committed)
-            {
-                return Err(StoreError::AtomicStage(
-                    "committed Atomic publication refused: evidence coverage is incomplete".into(),
-                ));
-            }
+                .filter(|decision| decision.decision == DecisionCode::Committed)
+                .count() as u32;
+            self.record_atomic_stage_open(opened.report);
             return Ok(());
         }
 
@@ -262,8 +258,6 @@ impl Store {
                 AtomicStageLimits::operable(),
             )?;
         }
-        self.record_atomic_stage_open(opened.report);
-
         let mut committed: Vec<_> = opened
             .catalog
             .decisions
@@ -272,9 +266,29 @@ impl Store {
             .collect();
         committed.sort_by_key(|(key, position)| (*key.0.as_bytes(), *position, key.1));
         for (key, _) in committed {
+            let publication_complete = opened.catalog.prepares.get(&key).is_some_and(|prepare| {
+                opened
+                    .catalog
+                    .members
+                    .get(&key)
+                    .is_some_and(|members| members_match_prepare(prepare, members))
+                    && crate::atomic_stage_status::material_complete(&opened.catalog, key)
+                    && opened.catalog.seals.get(&key) == Some(&prepare.content_root)
+                    && opened
+                        .catalog
+                        .order_frontiers
+                        .get(&key)
+                        .is_some_and(|frontiers| !frontiers.is_empty())
+            });
+            if opened.catalog.blocked.contains(&key) || !publication_complete {
+                opened.report.publication_degraded =
+                    opened.report.publication_degraded.saturating_add(1);
+                continue;
+            }
             let delta = publication_delta(self.paths(), &opened.catalog, key)?;
             self.publish_atomic_generation(&delta, true)?;
         }
+        self.record_atomic_stage_open(opened.report);
         Ok(())
     }
 }
@@ -460,11 +474,14 @@ impl StoreAtomicStage<'_> {
     /// guesses absence or a terminal decision.
     #[doc(hidden)]
     pub fn atomic_status(&self, atomic_id: AtomicId) -> Result<AtomicStatus, StoreError> {
-        if self.catalog.coverage_degraded {
-            return Ok(AtomicStatus::incomplete_coverage());
-        }
         let key = self.key(atomic_id);
-        let retained = self.retained_tombstone(key)?;
+        // The lifetime index is derived authority. A damaged index cannot
+        // prove absence and must not hide an exact detailed decision that is
+        // already present in the authenticated catalogue.
+        let (retained, index_degraded) = match self.retained_tombstone(key) {
+            Ok(retained) => (retained, false),
+            Err(_) => (None, true),
+        };
         let projected = crate::atomic_stage_status::project_atomic_with_tombstone(
             &self.catalog,
             key,
@@ -477,13 +494,19 @@ impl StoreAtomicStage<'_> {
             .get(&key)
             .map(|p| p.content_root)
             .or_else(|| retained.as_ref().map(|t| t.tombstone.content_root));
-        if projected.blocked
-            && self.findings.records.iter().any(|finding| {
-                finding.atomic_id == Some(atomic_id)
-                    && finding.kind == StageEvidenceKind::Decision
-                    && finding.class == StageEvidenceClass::Conflict
-            })
-        {
+        let belongs_to_key = |finding: &&crate::StageFinding| {
+            finding.heap_id == Some(key.0) && finding.atomic_id == Some(key.1)
+        };
+        let decision_conflict =
+            self.findings
+                .records
+                .iter()
+                .filter(belongs_to_key)
+                .any(|finding| {
+                    finding.kind == StageEvidenceKind::Decision
+                        && finding.class == StageEvidenceClass::Conflict
+                });
+        if decision_conflict {
             return Ok(AtomicStatus {
                 logical: LogicalStatus::ConflictingDecisionEvidence,
                 material: MaterialStatus::Conflicting,
@@ -491,40 +514,92 @@ impl StoreAtomicStage<'_> {
                 receipt: None,
             });
         }
-        if projected.blocked {
-            return Ok(AtomicStatus {
-                logical: LogicalStatus::UnknownCommit,
-                material: MaterialStatus::Conflicting,
-                content_root,
-                receipt: None,
+        let coverage_incomplete = self.catalog.coverage_degraded || index_degraded;
+        let material_conflict =
+            self.findings
+                .records
+                .iter()
+                .filter(belongs_to_key)
+                .any(|finding| {
+                    !matches!(
+                        finding.kind,
+                        StageEvidenceKind::Decision | StageEvidenceKind::Tombstone
+                    ) && finding.class == StageEvidenceClass::Conflict
+                });
+        let material_damage = self
+            .findings
+            .records
+            .iter()
+            .filter(belongs_to_key)
+            .any(|finding| {
+                !matches!(
+                    finding.kind,
+                    StageEvidenceKind::Decision | StageEvidenceKind::Tombstone
+                ) && matches!(
+                    finding.class,
+                    StageEvidenceClass::Corrupt | StageEvidenceClass::Partial
+                )
             });
-        }
+        let material_for_members = || {
+            if coverage_incomplete {
+                MaterialStatus::CoverageIncomplete
+            } else if material_conflict {
+                MaterialStatus::Conflicting
+            } else if projected.present_members == 0 && projected.intended_members != 0 {
+                MaterialStatus::Missing
+            } else if !material_damage
+                && projected.present_members == projected.intended_members
+                && crate::atomic_stage_status::material_complete(&self.catalog, key)
+                && projected.sealed
+            {
+                MaterialStatus::Complete
+            } else {
+                MaterialStatus::Partial
+            }
+        };
         let Some(decision) = self.catalog.decisions.get(&key) else {
             if let Some(retained) = retained.as_ref() {
+                let material = if coverage_incomplete {
+                    MaterialStatus::CoverageIncomplete
+                } else if material_conflict {
+                    MaterialStatus::Conflicting
+                } else if retained.tombstone.decision == DecisionCode::Committed {
+                    material_for_members()
+                } else if material_damage {
+                    if !self.catalog.prepares.contains_key(&key) && projected.present_members == 0 {
+                        MaterialStatus::Missing
+                    } else {
+                        MaterialStatus::Partial
+                    }
+                } else {
+                    MaterialStatus::Complete
+                };
+                let receipt = if retained.tombstone.decision == DecisionCode::Committed
+                    && material == MaterialStatus::Complete
+                {
+                    self.reconstruct_retained_decision(key, retained)?
+                        .map(|decision| self.receipt_for_decision(atomic_id, &decision, true))
+                        .transpose()?
+                } else {
+                    None
+                };
                 return Ok(AtomicStatus {
                     logical: match retained.tombstone.decision {
                         DecisionCode::Committed => LogicalStatus::Committed,
                         DecisionCode::NotCommitted => LogicalStatus::NotCommitted,
                     },
-                    material: if retained.tombstone.decision == DecisionCode::Committed {
-                        MaterialStatus::Missing
-                    } else {
-                        MaterialStatus::Complete
-                    },
+                    material,
                     content_root: Some(retained.tombstone.content_root),
-                    receipt: None,
+                    receipt,
                 });
             }
             if self.catalog.prepares.contains_key(&key) {
-                let material = if projected.present_members == 0 && projected.intended_members != 0
-                {
-                    MaterialStatus::Missing
-                } else if projected.present_members == projected.intended_members
-                    && crate::atomic_stage_status::material_complete(&self.catalog, key)
-                {
-                    MaterialStatus::Complete
+                let material = if coverage_incomplete {
+                    MaterialStatus::CoverageIncomplete
+                } else if material_conflict {
+                    MaterialStatus::Conflicting
                 } else {
-                    MaterialStatus::Partial
+                    material_for_members()
                 };
                 return Ok(AtomicStatus {
                     logical: LogicalStatus::UnknownCommit,
@@ -533,26 +608,54 @@ impl StoreAtomicStage<'_> {
                     receipt: None,
                 });
             }
+            if projected.blocked
+                || self
+                    .findings
+                    .records
+                    .iter()
+                    .filter(belongs_to_key)
+                    .any(|finding| finding.class != StageEvidenceClass::Valid)
+            {
+                return Ok(AtomicStatus {
+                    logical: LogicalStatus::UnknownCommit,
+                    material: if coverage_incomplete {
+                        MaterialStatus::CoverageIncomplete
+                    } else if material_conflict {
+                        MaterialStatus::Conflicting
+                    } else {
+                        MaterialStatus::Missing
+                    },
+                    content_root,
+                    receipt: None,
+                });
+            }
+            if coverage_incomplete {
+                return Ok(AtomicStatus::incomplete_coverage());
+            }
             return Ok(AtomicStatus::not_found());
         };
         if decision.decision == DecisionCode::NotCommitted {
             return Ok(AtomicStatus {
                 logical: LogicalStatus::NotCommitted,
-                material: MaterialStatus::Complete,
+                material: if coverage_incomplete {
+                    MaterialStatus::CoverageIncomplete
+                } else if material_conflict {
+                    MaterialStatus::Conflicting
+                } else if material_damage {
+                    if !self.catalog.prepares.contains_key(&key) && projected.present_members == 0 {
+                        MaterialStatus::Missing
+                    } else {
+                        MaterialStatus::Partial
+                    }
+                } else {
+                    MaterialStatus::Complete
+                },
                 content_root,
                 receipt: None,
             });
         }
-        let complete = projected.present_members == projected.intended_members
-            && crate::atomic_stage_status::material_complete(&self.catalog, key)
-            && projected.sealed;
-        let material = if complete {
-            MaterialStatus::Complete
-        } else if projected.present_members == 0 {
-            MaterialStatus::Missing
-        } else {
-            MaterialStatus::Partial
-        };
+        let material = material_for_members();
+        let complete = material == MaterialStatus::Complete;
         let receipt = complete
             .then(|| self.receipt_for_decision(atomic_id, decision, true))
             .transpose()?;
@@ -1534,14 +1637,77 @@ impl StoreAtomicStage<'_> {
             return Err(AtomicsError::Refused(AtomicRefuseReason::AtomicIdConflict).into());
         }
         match stone.decision {
-            DecisionCode::NotCommitted => stone
-                .not_committed_outcome()
-                .map_err(StoreError::from),
-            DecisionCode::Committed => Err(StoreError::AtomicStage(
-                "committed decision is known but detailed member receipt is unavailable; use atomic_status"
-                    .into(),
-            )),
+            DecisionCode::NotCommitted => stone.not_committed_outcome().map_err(StoreError::from),
+            DecisionCode::Committed => {
+                let key = self.key(plan.atomic_id());
+                let Some(decision) = self.reconstruct_retained_decision(key, retained)? else {
+                    return Err(StoreError::AtomicStage(
+                        "committed decision is known but detailed member receipt is unavailable; use atomic_status"
+                            .into(),
+                    ));
+                };
+                Ok(AtomicOutcome::Committed(self.receipt_for_decision(
+                    plan.atomic_id(),
+                    &decision,
+                    true,
+                )?))
+            }
         }
+    }
+
+    /// Reconstruct detailed decision bytes only when the surviving prepare and
+    /// lifetime summary reproduce the tombstone's authenticated decision hash.
+    /// This restores exact committed receipts after decision-frame damage; it
+    /// never guesses through retired or incomplete detail.
+    fn reconstruct_retained_decision(
+        &self,
+        key: StageAtomicKey,
+        retained: &RetainedDecisionTombstone,
+    ) -> Result<Option<AtomicDecision>, StoreError> {
+        let Some(prepare) = self.catalog.prepares.get(&key) else {
+            return Ok(None);
+        };
+        if retained.tombstone.content_root != prepare.content_root {
+            return Err(StoreError::AtomicStage(
+                "lifetime tombstone conflicts with surviving prepare".into(),
+            ));
+        }
+        let prepare_hash =
+            prepare_hash(prepare).map_err(|error| StoreError::AtomicStage(error.to_string()))?;
+        let decision = match retained.tombstone.decision {
+            DecisionCode::Committed => {
+                let Some(position) = retained.tombstone.commit_position else {
+                    return Err(StoreError::AtomicStage(
+                        "committed tombstone is missing its commit position".into(),
+                    ));
+                };
+                AtomicDecision::committed(
+                    key.1,
+                    prepare_hash,
+                    prepare.ordered_member_manifest_root,
+                    prepare.member_count,
+                    position,
+                )
+                .map_err(|error| StoreError::AtomicStage(error.to_string()))?
+            }
+            DecisionCode::NotCommitted => AtomicDecision::not_committed(
+                key.1,
+                prepare_hash,
+                prepare.ordered_member_manifest_root,
+                prepare.member_count,
+                retained.tombstone.abort_reason.ok_or_else(|| {
+                    StoreError::AtomicStage("not-committed tombstone is missing its reason".into())
+                })?,
+            ),
+        };
+        let reconstructed_hash =
+            decision_hash(&decision).map_err(|error| StoreError::AtomicStage(error.to_string()))?;
+        if reconstructed_hash != retained.tombstone.decision_hash {
+            return Err(StoreError::AtomicStage(
+                "lifetime tombstone decision hash conflicts with surviving detail".into(),
+            ));
+        }
+        Ok(Some(decision))
     }
 
     fn receipt_for_decision(

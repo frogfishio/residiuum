@@ -250,7 +250,7 @@
     "ATMAP1": { "role": "frozen chunk-plan sidecar body", "layout": "heap_id[16] || atomic_id[32] || ordinal_u32be || total_u32be || hashes[32]*total" },
     "ATCHK1": { "role": "chunk-body sidecar body", "layout": "heap_id[16] || atomic_id[32] || ordinal_u32be || index_u32be || bytes" },
     "ATORD1": { "role": "ordinary-order frontier sidecar body", "layout": "heap_id[16] || atomic_id[32] || shard_count_u16be || (shard_u16be || segment_id[16] || next_writer_sequence_u64be)*" },
-    "ATTOMB1": { "role": "lifetime decision tombstone sidecar body", "layout": "heap_id[16] || decided_at_unix_s_u64be || encoded_len_u32be || canonical_tombstone_cbor", "retention": "until complete Heap purge" },
+    "ATTOMB2": { "role": "lifetime decision tombstone sidecar body", "layout": "heap_id[16] || atomic_id[32] || decided_at_unix_s_u64be || encoded_len_u32be || canonical_tombstone_cbor", "retention": "until complete Heap purge", "invariant": "fixed atomic_id equals canonical tombstone atomic_id; duplication preserves damage attribution" },
     "ATPREP1": { "role": "legacy prepare sidecar; writers must not emit" }
   }
 }

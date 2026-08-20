@@ -245,12 +245,13 @@ fn mere_cbor_body_is_never_valid() {
     let env = encode_atomic_prepare_envelope(&vec_heap(), &vec_aid(), &vec_root()).unwrap();
     let frame = encode_atomic_frame(FrameKind::BatchPrepare, &env, &body_map(), eid(11)).unwrap();
     let report = read_atomic_evidence(&frame, SafetyLimits::default());
-    assert_eq!(
+    assert!(matches!(
         report.examined[0].class,
-        AtomicEvidenceClass::Corrupt {
-            reason: AtomicExamReason::BodyCorrupt
+        AtomicEvidenceClass::AttributedCorrupt {
+            reason: AtomicExamReason::BodyCorrupt,
+            ..
         }
-    );
+    ));
     assert_eq!(report.valid().count(), 0);
 }
 
@@ -266,12 +267,13 @@ fn mutating_prepare_atomic_id_is_body_mismatch() {
     let env = encode_atomic_prepare_envelope(&vec_heap(), &vec_aid(), &vec_root()).unwrap();
     let frame = encode_atomic_frame(FrameKind::BatchPrepare, &env, &body, eid(12)).unwrap();
     let report = read_atomic_evidence(&frame, SafetyLimits::default());
-    assert_eq!(
+    assert!(matches!(
         report.examined[0].class,
-        AtomicEvidenceClass::Corrupt {
-            reason: AtomicExamReason::BodyMismatch
+        AtomicEvidenceClass::AttributedCorrupt {
+            reason: AtomicExamReason::BodyMismatch,
+            ..
         }
-    );
+    ));
 }
 
 #[test]
@@ -288,12 +290,13 @@ fn mutating_member_ordinal_is_body_mismatch() {
         encode_atomic_member_envelope(&vec_heap(), &vec_aid(), 0, &vec_root(), Some(1)).unwrap();
     let frame = encode_atomic_frame(FrameKind::ItemEvent, &env, &body, eid(13)).unwrap();
     let report = read_atomic_evidence(&frame, SafetyLimits::default());
-    assert_eq!(
+    assert!(matches!(
         report.examined[0].class,
-        AtomicEvidenceClass::Corrupt {
-            reason: AtomicExamReason::BodyMismatch
+        AtomicEvidenceClass::AttributedCorrupt {
+            reason: AtomicExamReason::BodyMismatch,
+            ..
         }
-    );
+    ));
 }
 
 #[test]
@@ -308,12 +311,13 @@ fn mutating_decision_id_is_body_mismatch() {
     let env = encode_atomic_commit_envelope(&vec_heap(), &vec_aid(), &vec_root(), Some(1)).unwrap();
     let frame = encode_atomic_frame(FrameKind::BatchCommit, &env, &body, eid(14)).unwrap();
     let report = read_atomic_evidence(&frame, SafetyLimits::default());
-    assert_eq!(
+    assert!(matches!(
         report.examined[0].class,
-        AtomicEvidenceClass::Corrupt {
-            reason: AtomicExamReason::BodyMismatch
+        AtomicEvidenceClass::AttributedCorrupt {
+            reason: AtomicExamReason::BodyMismatch,
+            ..
         }
-    );
+    ));
 }
 
 #[test]
@@ -376,12 +380,13 @@ fn cross_linked_member_is_body_mismatch() {
     )
     .unwrap();
     let report = read_atomic_evidence(&frame, SafetyLimits::default());
-    assert_eq!(
+    assert!(matches!(
         report.examined[0].class,
-        AtomicEvidenceClass::Corrupt {
-            reason: AtomicExamReason::BodyMismatch
+        AtomicEvidenceClass::AttributedCorrupt {
+            reason: AtomicExamReason::BodyMismatch,
+            ..
         }
-    );
+    ));
 }
 
 #[test]

@@ -161,6 +161,9 @@ run_store_atmr5_full() {
   run_cmd ATM-CRS "store atomic_stage_status" \
     cargo test -p residiuum-store --offline --test atomic_stage_status \
     --features legacy-raw-store
+  run_cmd ATM-DMG "store ATM-4B material damage truth" \
+    cargo test -p residiuum-store --offline --test atomic_stage_damage_truth \
+    --features legacy-raw-store
   run_cmd ATM-CRS "store million-identity tombstone index" \
     cargo test -p residiuum-store --offline --features legacy-raw-store \
     million_identity_bulk_build_and_point_lookup --lib -- --ignored
@@ -188,6 +191,7 @@ run_store_atmr5_full() {
     crates/residiuum-store/tests/atomic_stage_io_matrix.rs \
     crates/residiuum-store/tests/atomic_stage_seal.rs \
     crates/residiuum-store/tests/atomic_stage_status.rs \
+    crates/residiuum-store/tests/atomic_stage_damage_truth.rs \
     crates/residiuum-store/tests/atomic_stage_limits.rs \
     crates/residiuum-store/tests/atomic_stage_maintenance.rs
 }
@@ -288,6 +292,10 @@ run_negatives() {
   esac
   case "$PROFILE" in
     crash|full)
+      run_cmd ATM-DMG "executed:negative_control_physical_member_head_middle_tail_flips_change_material_truth" \
+        cargo test -p residiuum-store --offline --test atomic_stage_damage_truth \
+        --features legacy-raw-store -- \
+        negative_control_physical_member_head_middle_tail_flips_change_material_truth --exact
       run_cmd ATM-CRS "executed:negative_control_detects_a_leaked_staged_member" \
         cargo test -p residiuum-atomic-lane --offline --test crash_reopen -- \
         negative_control_detects_a_leaked_staged_member --exact
@@ -437,12 +445,17 @@ if not cmd_passed(cmds, "atomic_rql_generation"):
     atm3_blockers.append("missing capability-bound SDK/RQL generation suite")
 
 deferred = [
-    {"family": "ATM-DMG", "result": "not_in_scope", "reason": "ATM-4 damage/material truth"},
     {"family": "ATM-RET", "result": "not_in_scope", "reason": "ATM-4 tombstone/retention"},
     {"family": "ATM-MNT", "result": "not_in_scope", "reason": "ATM-4 maintenance journeys"},
     {"family": "ATM-APP", "result": "not_in_scope", "reason": "ATM-5 async SDK / Gremlin journey"},
     {"family": "ATM-PERF", "result": "not_in_scope", "reason": "ATM-5 cost/regression disclosure"},
 ]
+if not cmd_passed(cmds, "atomic_stage_damage_truth"):
+    deferred.insert(0, {
+        "family": "ATM-DMG",
+        "result": "not_in_scope",
+        "reason": "ATM-4 damage/material truth",
+    })
 
 families = {}
 executed_negatives = []

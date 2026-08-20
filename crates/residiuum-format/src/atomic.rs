@@ -102,6 +102,15 @@ pub enum AtomicEvidenceClass {
         /// Why it is corrupt.
         reason: AtomicExamReason,
     },
+    /// Damaged role body whose Heap-qualified envelope remains authenticated.
+    /// This is distinct from unbound corruption so recovery can degrade the
+    /// named identity without poisoning unrelated Heaps.
+    AttributedCorrupt {
+        /// Surviving authenticated envelope linkage.
+        linkage: AtomicLinkage,
+        /// Why the role body is corrupt.
+        reason: AtomicExamReason,
+    },
     /// Not Atomic evidence (legacy batch, empty envelope).
     Unsupported {
         /// Why it is unsupported.
@@ -515,7 +524,7 @@ fn classify_linkage(
                 linkage: Some(linkage),
                 reason,
             },
-            _ => AtomicEvidenceClass::Corrupt { reason },
+            _ => AtomicEvidenceClass::AttributedCorrupt { linkage, reason },
         };
     }
     AtomicEvidenceClass::Valid(AtomicLinkage {

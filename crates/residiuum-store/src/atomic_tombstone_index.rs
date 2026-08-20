@@ -1,6 +1,6 @@
 //! Copy-on-write authenticated lifetime Atomic decision index (ATM-4A).
 //!
-//! `ATTOMB1` media remains authority. Updates append only the changed B+tree
+//! `ATTOMB2` media remains authority. Updates append only the changed B+tree
 //! leaf and ancestor path, sync those pages, then let the Atomic checkpoint
 //! publish the new root. A crash leaves the old root valid; the next writer
 //! discards any uncommitted suffix.

@@ -330,15 +330,15 @@ Backup profile `residiuum-backup-v1` copies `store-info/` (including
 Identity-reassign clone MUST refuse while outstanding staging exists: prepare
 `heap_id` is the source store id and becomes foreign after reassignment.
 
-#### Checkpoint `ATCKP1` version 16
+#### Checkpoint `ATCKP1` version 17
 
 File: `store-info/atomic-stage.ckpt`. Domain separator
-`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V16`. Layout, all integers big-endian:
+`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V17`. Layout, all integers big-endian:
 
 | Field | Encoding |
 |---|---|
 | magic | `ATCKP1` |
-| version | `u8` = 16 |
+| version | `u8` = 17 |
 | covered files | `u32` count; each: `u16` path len, path UTF-8, `u8` atomic_evidence, `u64` covered_len, head `[32]`, tail `[32]`, `u32` block count, block hashes `[32]*`, leftover `u32` + hash `[32]`. Ordinary (`atomic_evidence=0`) entries carry no block hashes and are metadata-only; Atomic entries authenticate every byte. |
 | prepares | `u32` count; each: `u32` len + `encode_prepare` bytes |
 | members | `u32` count; each: heap_id `[16]` + `u32` len + `encode_member` bytes |
@@ -356,23 +356,26 @@ File: `store-info/atomic-stage.ckpt`. Domain separator
 | chunk plans | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, ordinal `u32`, total `u32`, hash count `u32`, hashes `[32]*` |
 | chunk refs | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, ordinal `u32`, index `u32`, `BodyRef` |
 | coverage_degraded | `u8` |
-| findings | `u32` count; each: kind `u8`, class `u8`, has_id `u8`, optional atomic_id `[32]` |
+| findings | `u32` count; each: kind `u8`, class `u8`, has_heap `u8`, optional heap_id `[16]`, has_id `u8`, optional atomic_id `[32]` |
 | missing_covered | `u32` count; each: `u16` len + UTF-8 |
 | intended_members | `u32` count; each: heap_id `[16]`, atomic_id `[32]`, `u32` |
 | digest | BLAKE3-256(`domain` \\| body) |
 
 `BodyRef` is `u16` path len, path UTF-8, `u64` offset, `u32` len, hash `[32]`.
-Version 16 writers emit a zero checkpoint tombstone count after merging those
+Version 17 writers emit a zero checkpoint tombstone count after merging those
 rows into the bound lifetime index; the table remains decodable only for
 pre-publication transition/rebuild tolerance.
 Covered block size is 64 KiB. Finding kind 8 is global `Coverage` loss.
-Version ≠ 16 or domain mismatch MUST NOT be interpreted; recovery rebuilds
-from media. Older checkpoint versions are not readable by a v16 decoder.
+Finding kinds 10 and 11 are respectively the order-frontier and lifetime
+tombstone roles. An attributable finding carries both Heap and Atomic identity;
+unbound corruption carries neither and degrades global coverage.
+Version ≠ 17 or domain mismatch MUST NOT be interpreted; recovery rebuilds
+from media. Older checkpoint versions are not readable by a v17 decoder.
 
 #### Lifetime tombstone index `ATTSI2` version 2
 
 File: `store-info/atomic-tombstones.idx`. This is a derived accelerator;
-`ATTOMB1` records remain authority. The checkpoint binds its committed-prefix
+`ATTOMB2` records remain authority. The checkpoint binds its committed-prefix
 length, record count and root-page hash. Missing or invalid index media invalidates the
 checkpoint and triggers bounded media reconstruction; it never proves
 `NotFound`.
@@ -418,10 +421,14 @@ prepares are `BatchPrepare` frames, not `ATPREP1`.
 | `ATMAP1` | heap_id `[16]` + atomic_id `[32]` + ordinal `u32` + total `u32` + hashes `[32]*total` |
 | `ATCHK1` | heap_id `[16]` + atomic_id `[32]` + ordinal `u32` + index `u32` + chunk bytes |
 | `ATORD1` | heap_id `[16]` + atomic_id `[32]` + shard count `u16` + shard frontier rows |
-| `ATTOMB1` | heap_id `[16]` + decided_at Unix seconds `u64` + encoded length `u32` + canonical `encode_tombstone` bytes |
+| `ATTOMB2` | heap_id `[16]` + atomic_id `[32]` + decided_at Unix seconds `u64` + encoded length `u32` + canonical `encode_tombstone` bytes |
 | `ATPREP1` | legacy `encode_prepare` bytes only; writers MUST NOT emit it |
 
-`ATTOMB1` is lifetime decision authority, not a derived acceleration record.
+`ATTOMB2` is lifetime decision authority, not a derived acceleration record.
+The fixed-header Atomic ID must equal the canonical tombstone Atomic ID. Its
+duplication is intentional: damage to the encoded body remains attributable to
+the exact Heap-qualified identity and cannot poison unrelated Heaps or collapse
+into global absence.
 It is appended in the same durable prefix as its terminal decision, uses the
 composite `(heap_id, atomic_id)` physical identity, and is removed only by a
 complete Heap purge. The timestamp controls detail retention only and does not

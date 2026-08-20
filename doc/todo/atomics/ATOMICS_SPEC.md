@@ -656,10 +656,10 @@ history policy requires the evidence.
 After detail removal, same-ID/same-root retry returns the retained decision
 summary. It does not execute again.
 
-The LocalHeap private store representation is `ATTOMB1`:
+The LocalHeap private store representation is `ATTOMB2`:
 
 ```text
-ATTOMB1 || heap_id[16] || decided_at_unix_s:u64be ||
+ATTOMB2 || heap_id[16] || atomic_id[32] || decided_at_unix_s:u64be ||
     encoded_len:u32be || canonical DecisionTombstone CBOR
 ```
 

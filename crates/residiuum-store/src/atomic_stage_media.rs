@@ -19,7 +19,7 @@ const PREPARE_MAGIC: &[u8] = b"ATPREP1";
 const CHUNK_PLAN_MAGIC: &[u8] = b"ATMAP1";
 const CHUNK_BODY_MAGIC: &[u8] = b"ATCHK1";
 const ORDER_FRONTIER_MAGIC: &[u8] = b"ATORD1";
-const TOMBSTONE_MAGIC: &[u8] = b"ATTOMB1";
+const TOMBSTONE_MAGIC: &[u8] = b"ATTOMB2";
 
 /// Physical Atomic identity. Caller-chosen Atomic IDs are scoped to a Heap;
 /// neither component alone is a store-wide identity.
@@ -98,7 +98,7 @@ pub(crate) struct StageCatalog {
     /// Compact terminal authority retained until complete Heap purge.
     pub tombstones: BTreeMap<StageAtomicKey, RetainedDecisionTombstone>,
     /// Authenticated, paged lifetime tombstone accelerator. The checkpoint
-    /// binds this descriptor; ATTOMB1 media remains the rebuild authority.
+    /// binds this descriptor; ATTOMB2 media remains the rebuild authority.
     pub tombstone_index: Option<TombstoneIndexMeta>,
     /// Runtime-only: new authoritative tombstones must be merged before the
     /// next checkpoint can bind the index. Never encoded in the checkpoint.
@@ -220,7 +220,7 @@ impl StageCatalog {
             .saturating_add(self.blocked.len() as u64 * 32)
             .saturating_add(self.prepare_batch.len() as u64 * 32)
             .saturating_add(self.coord_seq.len() as u64 * 40)
-            .saturating_add(self.findings.records.len() as u64 * 40)
+            .saturating_add(self.findings.records.len() as u64 * 56)
             .saturating_add(u64::from(self.coverage_degraded))
             .saturating_add(self.missing_covered.iter().map(|p| p.len() as u64).sum())
     }
@@ -483,9 +483,10 @@ pub(crate) fn encode_stage_tombstone(
 ) -> Result<Vec<u8>, StoreError> {
     let encoded = encode_tombstone(&retained.tombstone)
         .map_err(|e| StoreError::AtomicStage(e.to_string()))?;
-    let mut out = Vec::with_capacity(TOMBSTONE_MAGIC.len() + 16 + 8 + 4 + encoded.len());
+    let mut out = Vec::with_capacity(TOMBSTONE_MAGIC.len() + 16 + 32 + 8 + 4 + encoded.len());
     out.extend_from_slice(TOMBSTONE_MAGIC);
     out.extend_from_slice(heap_id.as_bytes());
+    out.extend_from_slice(retained.tombstone.atomic_id.as_bytes());
     out.extend_from_slice(&retained.decided_at_unix_s.to_be_bytes());
     out.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
     out.extend_from_slice(&encoded);
@@ -648,7 +649,7 @@ pub(crate) enum SidecarDecode {
 /// Classify a PayloadChunk body as a staging sidecar or not-ours.
 pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
     if body.starts_with(TOMBSTONE_MAGIC) {
-        let header = TOMBSTONE_MAGIC.len() + 16 + 8 + 4;
+        let header = TOMBSTONE_MAGIC.len() + 16 + 32 + 8 + 4;
         if body.len() < header {
             return SidecarDecode::Partial {
                 kind: SidecarKind::Tombstone,
@@ -661,7 +662,18 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
                 atomic_id: None,
             };
         };
-        let time_at = heap_at + 16;
+        let id_at = heap_at + 16;
+        let atomic_id =
+            match AtomicId::from_bytes(body[id_at..id_at + 32].try_into().unwrap_or([0; 32])) {
+                Ok(id) => id,
+                Err(_) => {
+                    return SidecarDecode::Corrupt {
+                        kind: SidecarKind::Tombstone,
+                        atomic_id: None,
+                    }
+                }
+            };
+        let time_at = id_at + 32;
         let decided_at_unix_s =
             u64::from_be_bytes(body[time_at..time_at + 8].try_into().unwrap_or([0; 8]));
         let len_at = time_at + 8;
@@ -670,7 +682,7 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
         if body.len() != header.saturating_add(encoded_len) {
             return SidecarDecode::Corrupt {
                 kind: SidecarKind::Tombstone,
-                atomic_id: None,
+                atomic_id: Some(atomic_id),
             };
         }
         let tombstone = match decode_tombstone(&body[header..]) {
@@ -678,10 +690,16 @@ pub(crate) fn decode_stage_sidecar(body: &[u8]) -> SidecarDecode {
             Err(_) => {
                 return SidecarDecode::Corrupt {
                     kind: SidecarKind::Tombstone,
-                    atomic_id: None,
+                    atomic_id: Some(atomic_id),
                 }
             }
         };
+        if tombstone.atomic_id != atomic_id {
+            return SidecarDecode::Corrupt {
+                kind: SidecarKind::Tombstone,
+                atomic_id: Some(atomic_id),
+            };
+        }
         return SidecarDecode::Tombstone {
             heap_id,
             retained: RetainedDecisionTombstone {

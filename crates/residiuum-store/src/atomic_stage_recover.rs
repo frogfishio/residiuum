@@ -32,8 +32,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 const CHECKPOINT_MAGIC: &[u8] = b"ATCKP1";
-const CHECKPOINT_VERSION: u8 = 16;
-const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V16";
+const CHECKPOINT_VERSION: u8 = 17;
+const CHECKPOINT_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V17";
 const BLOCK_DOMAIN: &[u8] = b"RESIDIUUM-STORE-ATOMIC-STAGE-BLK-V1";
 /// Fixed leaf size for the covered-prefix block frontier (CR-ATMR6-001).
 const FRONTIER_BLOCK: u64 = 64 * 1024;
@@ -182,6 +182,10 @@ pub struct AtomicStageOpenReport {
     pub bytes_verified: u64,
     /// Accepted prepares deterministically closed as not committed on this open.
     pub recovery_aborts: u32,
+    /// Committed Atomic publications intentionally left untouched because
+    /// their authority or material was degraded. The store remains open for
+    /// healthy data and status examination; no missing value is invented.
+    pub publication_degraded: u32,
     /// Limits applied for this open (CR-ATMR6-004).
     pub limits: AtomicStageLimits,
 }
@@ -317,7 +321,7 @@ pub fn atomic_coord_path(paths: &StorePaths) -> PathBuf {
 }
 
 const ATOMIC_BODY_MAGICS: [&[u8]; 7] = [
-    b"ATPAY1", b"ATSEAL1", b"ATPREP1", b"ATMAP1", b"ATCHK1", b"ATORD1", b"ATTOMB1",
+    b"ATPAY1", b"ATSEAL1", b"ATPREP1", b"ATMAP1", b"ATCHK1", b"ATORD1", b"ATTOMB2",
 ];
 
 /// True when durable Atomic staging evidence exists that seal, compact,
@@ -1007,7 +1011,8 @@ fn record_frame_locator(
         } => {
             catalog
                 .payload_refs
-                .insert((heap_id, atomic_id, ordinal), refer);
+                .entry((heap_id, atomic_id, ordinal))
+                .or_insert(refer);
         }
         SidecarDecode::ChunkBody {
             heap_id,
@@ -1018,7 +1023,8 @@ fn record_frame_locator(
         } => {
             catalog
                 .chunk_refs
-                .insert((heap_id, atomic_id, ordinal, index), refer);
+                .entry((heap_id, atomic_id, ordinal, index))
+                .or_insert(refer);
         }
         _ => {}
     }
@@ -1539,6 +1545,13 @@ fn encode_checkpoint(
     for finding in &catalog.findings.records {
         body.push(encode_finding_kind(finding.kind));
         body.push(encode_finding_class(finding.class));
+        match finding.heap_id {
+            Some(heap_id) => {
+                body.push(1);
+                body.extend_from_slice(heap_id.as_bytes());
+            }
+            None => body.push(0),
+        }
         match finding.atomic_id {
             Some(id) => {
                 body.push(1);
@@ -1902,13 +1915,27 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
     cur = &cur[1..];
     let n_findings = read_u32(&mut cur)? as usize;
     for _ in 0..n_findings {
-        if cur.len() < 3 {
+        if cur.len() < 4 {
             return None;
         }
         let kind = decode_finding_kind(cur[0])?;
         let class = decode_finding_class(cur[1])?;
-        let has_id = cur[2];
+        let has_heap = cur[2];
         cur = &cur[3..];
+        let heap_id = match has_heap {
+            0 => None,
+            1 => {
+                if cur.len() < 16 {
+                    return None;
+                }
+                let heap_id = HeapId::from_bytes(cur[..16].try_into().ok()?).ok()?;
+                cur = &cur[16..];
+                Some(heap_id)
+            }
+            _ => return None,
+        };
+        let has_id = *cur.first()?;
+        cur = &cur[1..];
         let atomic_id = match has_id {
             0 => None,
             1 => {
@@ -1924,6 +1951,7 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<(StageCatalog, Vec<CoveredFile>)> {
         let finding = StageFinding {
             kind,
             class,
+            heap_id,
             atomic_id,
         };
         if !catalog.findings.records.contains(&finding) {
@@ -1985,7 +2013,7 @@ fn read_u64(cur: &mut &[u8]) -> Option<u64> {
 }
 
 #[cfg(test)]
-mod checkpoint_v16_freeze {
+mod checkpoint_v17_freeze {
     use super::*;
     use crate::atomic_stage_media::{
         encode_stage_chunk_body, encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal,
@@ -2000,14 +2028,29 @@ mod checkpoint_v16_freeze {
     }
 
     #[test]
-    fn v16_empty_checkpoint_roundtrips() {
+    fn v17_empty_checkpoint_roundtrips() {
         let catalog = StageCatalog::default();
         let bytes = encode_checkpoint(&catalog, &[]).unwrap();
         assert!(bytes.starts_with(CHECKPOINT_MAGIC));
         assert_eq!(bytes[CHECKPOINT_MAGIC.len()], CHECKPOINT_VERSION);
-        let (decoded, covered) = decode_checkpoint(&bytes).expect("v16 empty");
+        let (decoded, covered) = decode_checkpoint(&bytes).expect("v17 empty");
         assert!(covered.is_empty());
         assert!(!decoded.has_outstanding_evidence());
+    }
+
+    #[test]
+    fn v17_finding_roundtrips_heap_qualified_role_and_identity() {
+        let heap_id = HeapId::from_bytes([0x44; 16]).unwrap();
+        let mut catalog = StageCatalog::default();
+        catalog.findings.records.push(StageFinding {
+            kind: crate::atomic_stage_classify::StageEvidenceKind::Tombstone,
+            class: StageEvidenceClass::Corrupt,
+            heap_id: Some(heap_id),
+            atomic_id: Some(aid()),
+        });
+        let bytes = encode_checkpoint(&catalog, &[]).unwrap();
+        let (decoded, _) = decode_checkpoint(&bytes).expect("v17 finding");
+        assert_eq!(decoded.findings, catalog.findings);
     }
 
     #[test]
@@ -2082,7 +2125,7 @@ mod checkpoint_v16_freeze {
             tombstone: decision.tombstone(root, decision_hash(&decision).unwrap()),
         };
         let encoded = encode_stage_tombstone(heap_id, retained).unwrap();
-        assert!(encoded.starts_with(b"ATTOMB1"));
+        assert!(encoded.starts_with(b"ATTOMB2"));
         assert!(matches!(
             decode_stage_sidecar(&encoded),
             SidecarDecode::Tombstone { heap_id: got_heap, retained: got }

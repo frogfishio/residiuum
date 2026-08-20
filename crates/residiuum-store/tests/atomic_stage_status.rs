@@ -284,7 +284,7 @@ fn tombstone_survives_lawful_detail_retirement_restart_and_replay() {
     drop(store);
 
     // The index is derived. Corruption invalidates the checkpoint and forces
-    // reconstruction from ATTOMB1 media; it must never turn the decision into
+    // reconstruction from ATTOMB2 media; it must never turn the decision into
     // absence.
     let index_path = path.join("store-info/atomic-tombstones.idx");
     let mut bytes = fs::read(&index_path).unwrap();
