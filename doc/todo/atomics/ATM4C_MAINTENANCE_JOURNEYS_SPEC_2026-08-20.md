@@ -167,11 +167,23 @@ Delivered and locally qualified:
 - an injected omitted Atomic frame refuses before source deletion;
 - same-identity backup/restore and evidence salvage include authority-only media;
 - superseded authority generations are pruned after successful reclaim.
+- not-committed authority survives reclaim with its exact abort reason, no
+  receipt, exact same-root retry and no consumed commit position;
+- chunk plans and every chunk-body hash survive replacement reconstruction,
+  source deletion, restart, value publication and same-root retry;
+- attributable member damage with a healthy sibling is classified as partial
+  and refuses reclaim before a compaction job or source mutation exists;
+- Atomics spread across multiple sealed source segments are collected into one
+  verified generation without collapsing identity or commit order; the next
+  commit resumes at the exact global Heap frontier;
+- replacement comparison ignores only benign `Valid` scan observations, which
+  are reconstruction provenance rather than durable damage. Every adverse
+  finding is compared as an order-independent multiset.
 
 Still open in ATM-4C:
 
 - Recovery Shadow Atomic authority carriage and rebuild equivalence;
 - external configured tier-root online/offline coverage truth;
 - tombstone-index obsolete-page generation-swap crash qualification;
-- the expanded not-committed, chunked, damaged and multi-source ATM-MNT matrix
-  and canonical full-verifier registration.
+- canonical crash-matrix expansion for multi-source deletion cuts beyond the
+  already registered first-source cut.

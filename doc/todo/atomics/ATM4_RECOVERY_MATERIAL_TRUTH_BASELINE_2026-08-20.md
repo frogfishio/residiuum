@@ -144,13 +144,19 @@ media permits and are never interpreted as the new composite-key format.
   mixed-generation crash window and are pruned after deletion. Restart, retry,
   receipt, backup/restore, salvage, repeated reclaim, omission negative control
   and three destructive crash cuts are green.
+- **Delivered:** the expanded reclaim matrix covers exact not-committed
+  rejection/no-position semantics, chunk maps and bodies, attributable partial
+  damage refusing before mutation, and multiple sealed source segments while
+  preserving the global Heap commit frontier. Benign valid scan observations
+  are normalized out of replacement comparison; adverse findings remain an
+  exact order-independent multiset.
 - **Qualified fail-closed:** identity-reassign clone and CompactShadow
   transition refuse before mutation while any issued Atomic identity exists.
   The current value-only Recovery Shadow loses Atomic authority, so the
   transition remains explicitly fenced.
 - **Remaining:** Recovery Shadow authority carriage and rebuild; external
   tier-root discovery/offline truth; tombstone-index page generation reclaim;
-  the expanded not-committed/chunked/damaged/multi-source maintenance matrix.
+  and expanded multi-source deletion crash cuts.
 
 ### ATM-4D — serial histories and predicates
 

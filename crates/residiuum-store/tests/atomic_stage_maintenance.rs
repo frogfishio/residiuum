@@ -1,13 +1,13 @@
 //! CR-ATMR6-006: freeze staging records; fail-closed maintenance.
 
 use residiuum_atomics::{
-    AtomicId, AtomicMember, AtomicPlan, AtomicPlanParts, AtomicProfile, CanonicalKey, CollectionId,
-    CoordinationScope, HeapId, LogicalStatus, MaterialStatus, MutationKind, ObjectIdentity,
-    PlanMutation, ResourceLimits, VersionId,
+    AtomicAbortReason, AtomicId, AtomicMember, AtomicPlan, AtomicPlanParts, AtomicProfile,
+    CanonicalKey, ChunkPlan, CollectionId, CoordinationScope, DecisionCode, HeapId, LogicalStatus,
+    MaterialStatus, MutationKind, ObjectIdentity, PlanMutation, ResourceLimits, VersionId,
 };
 use residiuum_format::{
-    encode_subject_v2, read_atomic_evidence, AtomicEvidenceClass, AtomicFrameRole, SafetyLimits,
-    SubjectObjectKind,
+    encode_frame, encode_subject_v2, examine_atomic_frame, read_atomic_evidence, scan_forward,
+    AtomicEvidenceClass, AtomicFrameRole, FrameParts, SafetyLimits, ScanRegion, SubjectObjectKind,
 };
 use residiuum_store::{
     arm_failpoint_once_current_thread, atomic_coord_path, atomic_stage_checkpoint_path,
@@ -39,6 +39,12 @@ fn second_aid() -> AtomicId {
     AtomicId::from_bytes(b).unwrap()
 }
 
+fn third_aid() -> AtomicId {
+    let mut b = [0u8; 32];
+    b[0] = 11;
+    AtomicId::from_bytes(b).unwrap()
+}
+
 fn cid() -> CollectionId {
     let mut b = [0u8; 16];
     b[0] = 2;
@@ -63,6 +69,20 @@ fn member() -> AtomicMember {
     }
 }
 
+fn sibling_member() -> AtomicMember {
+    let mut event = [0u8; 16];
+    event[0] = 6;
+    AtomicMember {
+        atomic_id: aid(),
+        ordinal: 1,
+        object_identity: ObjectIdentity::new(cid(), CanonicalKey::String("sibling".into())),
+        member_kind: MutationKind::Create,
+        before_version: None,
+        after_content_hash: Some(*blake3::hash(b"secret").as_bytes()),
+        event_id: VersionId::from_bytes(event).unwrap(),
+    }
+}
+
 fn second_member() -> AtomicMember {
     let mut event = [0u8; 16];
     event[0] = 4;
@@ -73,6 +93,20 @@ fn second_member() -> AtomicMember {
         member_kind: MutationKind::Create,
         before_version: None,
         after_content_hash: Some(*blake3::hash(b"second").as_bytes()),
+        event_id: VersionId::from_bytes(event).unwrap(),
+    }
+}
+
+fn third_member() -> AtomicMember {
+    let mut event = [0u8; 16];
+    event[0] = 5;
+    AtomicMember {
+        atomic_id: third_aid(),
+        ordinal: 0,
+        object_identity: ObjectIdentity::new(cid(), CanonicalKey::String("k3".into())),
+        member_kind: MutationKind::Create,
+        before_version: None,
+        after_content_hash: Some(*blake3::hash(b"third").as_bytes()),
         event_id: VersionId::from_bytes(event).unwrap(),
     }
 }
@@ -151,6 +185,63 @@ fn assert_committed_complete(store: &mut Store, heap_id: HeapId, subject: &[u8])
     assert_eq!(status.logical, LogicalStatus::Committed);
     assert_eq!(status.material, MaterialStatus::Complete);
     assert!(status.receipt.is_some());
+}
+
+fn subject(heap_id: HeapId, key: &str) -> Vec<u8> {
+    encode_subject_v2(
+        heap_id.as_bytes(),
+        SubjectObjectKind::Collection,
+        cid().as_bytes(),
+        &CanonicalKey::String(key.into()).subject_bytes(),
+    )
+    .unwrap()
+}
+
+fn media_files(store: &Store) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for dir in [store.paths().active_dir(), store.paths().segments_dir()] {
+        if let Ok(entries) = fs::read_dir(dir) {
+            files.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_file()),
+            );
+        }
+    }
+    files.sort();
+    files
+}
+
+/// Keep the outer frame authenticated and attributable while making the
+/// selected Atomic body undecodable.
+fn corrupt_atomic_body(store: &Store, role: AtomicFrameRole) {
+    for path in media_files(store) {
+        let mut bytes = fs::read(&path).unwrap();
+        let scan = scan_forward(&bytes, SafetyLimits::draft_defaults());
+        for region in scan.regions {
+            let ScanRegion::VerifiedFrame { frame, range } = region else {
+                continue;
+            };
+            let Some(AtomicEvidenceClass::Valid(link)) = examine_atomic_frame(&frame) else {
+                continue;
+            };
+            if link.role != role {
+                continue;
+            }
+            let replacement = encode_frame(&FrameParts {
+                header: frame.header,
+                envelope: frame.envelope,
+                body: vec![0xFF; frame.body.len()],
+            })
+            .unwrap();
+            assert_eq!(replacement.len(), range.end as usize - range.start as usize);
+            bytes[range.start as usize..range.end as usize].copy_from_slice(&replacement);
+            fs::write(path, bytes).unwrap();
+            return;
+        }
+    }
+    panic!("Atomic role {role:?} not found");
 }
 
 fn media_has_prepare_or_member(root: &std::path::Path) -> bool {
@@ -346,6 +437,241 @@ fn terminal_atomic_reclaim_installs_authority_generation_and_identity_reassign_s
     .unwrap_err();
     assert_refused(err);
     assert!(!clone.join("store-info").is_dir());
+}
+
+#[test]
+fn not_committed_reclaim_preserves_exact_rejection_and_does_not_consume_position() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("s");
+    let mut store = Store::create(&root).unwrap();
+    let heap_id = HeapId::from_bytes(store.store_id()).unwrap();
+    let occupied = subject(heap_id, "k");
+    store
+        .put_subject_bytes(&occupied, b"old", DurabilityMode::Durable)
+        .unwrap();
+    let rejected_member = member();
+    let rejected_plan = plan(heap_id, std::slice::from_ref(&rejected_member), b"secret");
+    let rejected = store
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&rejected_plan)
+        .unwrap();
+    assert_eq!(rejected.decision, DecisionCode::NotCommitted);
+    assert_eq!(rejected.commit_position, None);
+    assert_eq!(
+        rejected.abort_reason,
+        Some(AtomicAbortReason::PreconditionConflict)
+    );
+
+    let compact = store
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap();
+    assert_eq!(compact.phase, residiuum_store::CompactPhase::Reclaimed);
+    drop(store);
+
+    let mut reopened = Store::open(&root).unwrap();
+    let status = reopened
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .atomic_status(aid())
+        .unwrap();
+    assert_eq!(status.logical, LogicalStatus::NotCommitted);
+    assert_eq!(status.material, MaterialStatus::Complete);
+    assert!(status.receipt.is_none());
+    let replay = reopened
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&rejected_plan)
+        .unwrap();
+    assert_eq!(replay, rejected);
+    assert_eq!(
+        reopened.get_subject_bytes(&occupied).unwrap().as_deref(),
+        Some(b"old".as_slice())
+    );
+
+    let success_member = second_member();
+    let success_plan = plan(heap_id, std::slice::from_ref(&success_member), b"second");
+    let success = reopened
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&success_plan)
+        .unwrap();
+    assert_eq!(success.commit_position, Some(1));
+}
+
+#[test]
+fn chunked_committed_reclaim_preserves_map_payload_status_and_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("s");
+    let mut store = Store::create(&root).unwrap();
+    let heap_id = HeapId::from_bytes(store.store_id()).unwrap();
+    let m = member();
+    let closed = plan(heap_id, std::slice::from_ref(&m), b"secret");
+    let chunk0 = b"se";
+    let chunk1 = b"cret";
+    let chunk_plan = ChunkPlan {
+        total: 2,
+        chunk_hashes: vec![
+            *blake3::hash(chunk0).as_bytes(),
+            *blake3::hash(chunk1).as_bytes(),
+        ],
+    };
+    {
+        let mut stage = store.atomic_stage_for_heap(heap_id).unwrap();
+        stage
+            .begin_prepare(&closed, FRONTIER, std::slice::from_ref(&m))
+            .unwrap();
+        stage
+            .commit_chunk_manifest(aid(), 0, chunk_plan.clone())
+            .unwrap();
+        stage.append_chunk(m.clone(), 0, chunk0.to_vec()).unwrap();
+        stage.append_chunk(m, 1, chunk1.to_vec()).unwrap();
+        stage.seal_member_boundary(aid()).unwrap();
+        let decision = stage.persist_committed_decision(aid()).unwrap();
+        assert_eq!(decision.commit_position, Some(1));
+        let replay = stage.decide_plan_evidence(&closed).unwrap();
+        assert_eq!(replay, decision);
+    }
+    let key_subject = subject(heap_id, "k");
+    assert_committed_complete(&mut store, heap_id, &key_subject);
+
+    let compact = store
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap();
+    assert_eq!(compact.phase, residiuum_store::CompactPhase::Reclaimed);
+    drop(store);
+
+    let mut reopened = Store::open(&root).unwrap();
+    assert_committed_complete(&mut reopened, heap_id, &key_subject);
+    let mut stage = reopened.atomic_stage_for_heap(heap_id).unwrap();
+    assert_eq!(stage.kernel().chunk_plan(aid(), 0), Some(&chunk_plan));
+    let replay = stage.decide_plan_evidence(&closed).unwrap();
+    assert_eq!(replay.commit_position, Some(1));
+}
+
+#[test]
+fn damaged_terminal_atomic_refuses_reclaim_before_job_or_source_mutation() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("s");
+    let mut store = Store::create(&root).unwrap();
+    let heap_id = HeapId::from_bytes(store.store_id()).unwrap();
+    let members = [member(), sibling_member()];
+    let closed = plan(heap_id, &members, b"secret");
+    let decision = store
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&closed)
+        .unwrap();
+    assert_eq!(decision.commit_position, Some(1));
+    store.seal_active().unwrap();
+    corrupt_atomic_body(&store, AtomicFrameRole::Member);
+    fs::remove_file(atomic_stage_checkpoint_path(store.paths())).unwrap();
+    drop(store);
+
+    let mut reopened = Store::open(&root).expect("attributable damage must not kneel the store");
+    let status = reopened
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .atomic_status(aid())
+        .unwrap();
+    assert_eq!(status.logical, LogicalStatus::Committed);
+    assert_eq!(status.material, MaterialStatus::Partial);
+    let sources_before = reopened.list_segment_ids();
+    let jobs_before = reopened.list_compact_jobs().unwrap();
+    assert_refused(
+        reopened
+            .compact_live_with(CompactOptions {
+                reclaim_sources: true,
+                allow_history_loss: true,
+                ..CompactOptions::default()
+            })
+            .unwrap_err(),
+    );
+    assert_eq!(reopened.list_segment_ids(), sources_before);
+    assert_eq!(reopened.list_compact_jobs().unwrap(), jobs_before);
+}
+
+#[test]
+fn multi_source_reclaim_preserves_every_atomic_and_global_commit_frontier() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("s");
+    let mut store = Store::create(&root).unwrap();
+    let heap_id = HeapId::from_bytes(store.store_id()).unwrap();
+    let first_member = member();
+    let first_plan = plan(heap_id, std::slice::from_ref(&first_member), b"secret");
+    let first = store
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&first_plan)
+        .unwrap();
+    assert_eq!(first.commit_position, Some(1));
+    store.seal_active().unwrap();
+
+    let second_member = second_member();
+    let second_plan = plan(heap_id, std::slice::from_ref(&second_member), b"second");
+    let second = store
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&second_plan)
+        .unwrap();
+    assert_eq!(second.commit_position, Some(2));
+    store.seal_active().unwrap();
+    assert!(store.list_segment_ids().len() >= 2);
+
+    let compact = store
+        .compact_live_with(CompactOptions {
+            reclaim_sources: true,
+            allow_history_loss: true,
+            ..CompactOptions::default()
+        })
+        .unwrap();
+    assert_eq!(compact.phase, residiuum_store::CompactPhase::Reclaimed);
+    drop(store);
+
+    let mut reopened = Store::open(&root).unwrap();
+    for (id, closed, key, value, position) in [
+        (aid(), &first_plan, "k", b"secret".as_slice(), 1),
+        (second_aid(), &second_plan, "k2", b"second".as_slice(), 2),
+    ] {
+        let status = reopened
+            .atomic_stage_for_heap(heap_id)
+            .unwrap()
+            .atomic_status(id)
+            .unwrap();
+        assert_eq!(status.logical, LogicalStatus::Committed);
+        assert_eq!(status.material, MaterialStatus::Complete);
+        assert_eq!(status.receipt.unwrap().commit_position, position);
+        assert_eq!(
+            reopened
+                .get_subject_bytes(&subject(heap_id, key))
+                .unwrap()
+                .as_deref(),
+            Some(value)
+        );
+        let replay = reopened
+            .atomic_stage_for_heap(heap_id)
+            .unwrap()
+            .decide_plan_evidence(closed)
+            .unwrap();
+        assert_eq!(replay.commit_position, Some(position));
+    }
+
+    let third_member = third_member();
+    let third_plan = plan(heap_id, std::slice::from_ref(&third_member), b"third");
+    let third = reopened
+        .atomic_stage_for_heap(heap_id)
+        .unwrap()
+        .decide_plan_evidence(&third_plan)
+        .unwrap();
+    assert_eq!(third.commit_position, Some(3));
 }
 
 #[test]

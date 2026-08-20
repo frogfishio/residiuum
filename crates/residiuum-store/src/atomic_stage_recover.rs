@@ -676,6 +676,28 @@ fn verify_replacement_catalog(
                     .is_some_and(|other| value.len == other.len && value.hash == other.hash)
             })
     }
+    fn same_adverse_findings(left: &StageFindings, right: &StageFindings) -> bool {
+        let left = left
+            .records
+            .iter()
+            .filter(|finding| finding.class != StageEvidenceClass::Valid)
+            .collect::<Vec<_>>();
+        let right = right
+            .records
+            .iter()
+            .filter(|finding| finding.class != StageEvidenceClass::Valid)
+            .collect::<Vec<_>>();
+        left.len() == right.len()
+            && left.iter().all(|finding| {
+                left.iter()
+                    .filter(|candidate| *candidate == finding)
+                    .count()
+                    == right
+                        .iter()
+                        .filter(|candidate| *candidate == finding)
+                        .count()
+            })
+    }
     let mut old_tombstones = old.tombstone_index.map_or(0, |index| index.record_count);
     for (key, retained) in &old.tombstones {
         let indexed = match old.tombstone_index {
@@ -736,12 +758,7 @@ fn verify_replacement_catalog(
     compare!("coord_next", old.coord_next == fresh.coord_next);
     compare!(
         "findings",
-        old.findings.records.len() == fresh.findings.records.len()
-            && old
-                .findings
-                .records
-                .iter()
-                .all(|finding| fresh.findings.records.contains(finding))
+        same_adverse_findings(&old.findings, &fresh.findings)
     );
     compare!(
         "coverage_degraded",
@@ -2570,6 +2587,33 @@ mod checkpoint_v18_freeze {
         let bytes = encode_checkpoint(&catalog, &[]).unwrap();
         let (decoded, _) = decode_checkpoint(&bytes).expect("v18 finding");
         assert_eq!(decoded.findings, catalog.findings);
+    }
+
+    #[test]
+    fn replacement_comparison_normalizes_only_valid_scan_observations() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = StorePaths::new(dir.path());
+        let heap_id = HeapId::from_bytes([0x44; 16]).unwrap();
+        let valid = StageFinding {
+            kind: crate::atomic_stage_classify::StageEvidenceKind::ChunkBody,
+            class: StageEvidenceClass::Valid,
+            heap_id: Some(heap_id),
+            atomic_id: Some(aid()),
+        };
+        let corrupt = StageFinding {
+            class: StageEvidenceClass::Corrupt,
+            ..valid.clone()
+        };
+
+        let old = StageCatalog::default();
+        let mut fresh = StageCatalog::default();
+        fresh.findings.records.push(valid);
+        verify_replacement_catalog(&paths, &old, &fresh)
+            .expect("valid reconstruction provenance is not material damage");
+
+        fresh.findings.records.push(corrupt);
+        let err = verify_replacement_catalog(&paths, &old, &fresh).unwrap_err();
+        assert!(err.to_string().contains("findings"));
     }
 
     #[test]

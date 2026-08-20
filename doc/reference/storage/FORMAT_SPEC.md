@@ -305,6 +305,12 @@ them. Source reclaim is permitted only after a byte-exact authority generation
 has been independently reconstructed, materially compared with the current
 catalogue, durably published and selected by an authenticated checkpoint swap.
 Identity-reassign clone MUST fail closed while staging evidence exists.
+Material comparison MUST treat `Valid` classifier observations as scan
+provenance rather than authority: a replacement can legitimately observe the
+same complete records through a different physical encoding. All non-valid
+findings MUST remain equal as an order-independent multiset, and blocked
+identities, coverage degradation and missing covered media MUST compare
+exactly.
 
 Outstanding evidence is any of:
 
