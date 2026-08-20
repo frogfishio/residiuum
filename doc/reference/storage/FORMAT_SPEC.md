@@ -369,27 +369,33 @@ Covered block size is 64 KiB. Finding kind 8 is global `Coverage` loss.
 Version ≠ 16 or domain mismatch MUST NOT be interpreted; recovery rebuilds
 from media. Older checkpoint versions are not readable by a v16 decoder.
 
-#### Lifetime tombstone index `ATTSI1` version 1
+#### Lifetime tombstone index `ATTSI2` version 2
 
 File: `store-info/atomic-tombstones.idx`. This is a derived accelerator;
-`ATTOMB1` records remain authority. The checkpoint binds its exact length,
-record count and Merkle root. Missing or invalid index media invalidates the
+`ATTOMB1` records remain authority. The checkpoint binds its committed-prefix
+length, record count and root-page hash. Missing or invalid index media invalidates the
 checkpoint and triggers bounded media reconstruction; it never proves
 `NotFound`.
 
-The 96-byte header contains magic `ATTSI1`, version `1`, record count `u64`,
-records per page `u32` (496), page count `u32`, Merkle leaf power `u32`, root
-`[32]`, and a domain-separated header digest `[32]`. It is followed by fixed
-64-KiB pages and then a complete breadth-first binary Merkle tree of `[32]`
-nodes. Each page contains `ATPG1`, its page number and row count, sorted
-fixed-width rows, zero padding and a domain-separated page digest. A row is
+The 64-byte header contains magic `ATTSI2`, version `2`, page size `u32`
+(4096), leaf and internal capacities, reserved zero bytes and a
+domain-separated header digest. It is followed by append-only authenticated
+4-KiB B+tree pages. Leaf pages carry sorted fixed-width rows. A row is
 `heap_id [16]`, `atomic_id [32]`, decision time `u64`, content root `[32]`,
 decision `u8`, abort reason `u8`, reserved zero `[2]`, commit position `u64`
 (`0` means absent), and decision hash `[32]`.
 
-Point lookup binary-searches the global sorted row order and authenticates
-each visited page against the checkpoint-bound Merkle root. It does not load
-the lifetime set into memory.
+Internal rows carry child maximum key `[48]`, child file offset `u64` and
+child hash `[32]`. Every page ends with a domain-separated digest. A child
+descriptor authenticates both its page and key range; the checkpoint root hash
+authenticates the complete traversed path.
+
+Insertion is copy-on-write: write the changed leaf and ancestor path, sync the
+new prefix, then publish its length and root in `ATCKP1`. Physical bytes beyond
+the checkpoint length are an uncommitted crash suffix and MUST be ignored by
+readers and truncated by the next exclusive writer. The prior checkpoint/root
+therefore remains valid after an interrupted update. First build and media
+reconstruction use a linear bottom-up bulk loader.
 
 #### Coordinator `ATCRD1` version 2
 

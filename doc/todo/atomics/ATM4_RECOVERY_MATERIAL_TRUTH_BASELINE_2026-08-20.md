@@ -64,21 +64,22 @@ media permits and are never interpreted as the new composite-key format.
 
 ## Remaining delivery blocks
 
-### ATM-4A — lifetime identity and detail retention — in progress
+### ATM-4A — lifetime identity and detail retention — delivered except ATM-4C dependency
 
 - **Delivered:** compact Heap-qualified tombstone beside every terminal
   decision; recovery backfill; tombstone-only status/replay; 90-day and
   stronger-obligation calculation; legal-hold refusal; restart proof for
-  lawfully retired not-committed detail; authenticated 64-KiB paged lifetime
-  index with bounded point lookup and a constant-size checkpoint descriptor.
+  lawfully retired not-committed detail; authenticated copy-on-write 4-KiB
+  B+tree with bounded point lookup and a constant-size checkpoint descriptor;
+  O(tree-height) insertion; crash-suffix rollback to the prior root; linear
+  bulk reconstruction; one-million-identity scale proof.
 - **Remaining:** committed-detail reclamation must wait for ATM-4C to provide a
   qualified material/publication representation. The current staging
   payload/member locators are still live database material and MUST NOT be
   deleted merely because decision detail expires.
-- **Remaining:** qualify incremental index maintenance at production lifetime
-  cardinality. Point reads and ordinary unchanged checkpoints are bounded;
-  adding a new key currently rebuilds the derived sorted index. This is an
-  update-cost delta, not a status-correctness or checkpoint-growth gap.
+- **Remaining with ATM-4C:** reclaim superseded copy-on-write index pages using
+  a crash-qualified generation swap. This is physical space reclamation only;
+  lookup, insertion and restart costs do not grow with obsolete-page count.
 
 ### ATM-4B — material truth and damage
 

@@ -161,6 +161,9 @@ run_store_atmr5_full() {
   run_cmd ATM-CRS "store atomic_stage_status" \
     cargo test -p residiuum-store --offline --test atomic_stage_status \
     --features legacy-raw-store
+  run_cmd ATM-CRS "store million-identity tombstone index" \
+    cargo test -p residiuum-store --offline --features legacy-raw-store \
+    million_identity_bulk_build_and_point_lookup --lib -- --ignored
   run_cmd ATM-CRS "store atomic_stage_limits" \
     cargo test -p residiuum-store --offline --test atomic_stage_limits \
     --features legacy-raw-store

@@ -300,6 +300,42 @@ fn tombstone_survives_lawful_detail_retirement_restart_and_replay() {
 }
 
 #[test]
+fn index_pages_durable_before_checkpoint_leave_the_prior_root_recoverable() {
+    let _g = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let mut store = Store::create(&path).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let m = member(0, 3, b"secret");
+    let p = plan(heap, std::slice::from_ref(&m), &[b"secret"]);
+    arm_failpoint_once(
+        "store.atomic.prepare.after_checkpoint",
+        FailpointAction::Error,
+    );
+    {
+        let mut stage = store.atomic_stage().unwrap();
+        let _ = stage.begin_prepare(&p, FRONTIER, std::slice::from_ref(&m));
+    }
+    clear_failpoints();
+    drop(store);
+
+    arm_failpoint_once(
+        "store.atomic.tombstone_index.after_sync",
+        FailpointAction::Error,
+    );
+    assert!(Store::open(&path).is_err());
+    clear_failpoints();
+
+    let mut store = Store::open(&path).unwrap();
+    let stage = store.atomic_stage().unwrap();
+    assert_eq!(
+        stage.atomic_status(aid()).unwrap().logical,
+        LogicalStatus::NotCommitted
+    );
+    assert_ne!(stage.examine(aid()).class, AtomicStageClass::Absent);
+}
+
+#[test]
 fn detail_retirement_obeys_minimum_window_and_legal_hold() {
     let _g = serial();
     let dir = tempfile::tempdir().unwrap();
