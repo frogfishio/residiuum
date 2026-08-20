@@ -14,20 +14,20 @@ mod one_heap;
 mod recovery_store;
 mod replica_store;
 
+pub(crate) use admin_op_dedup::create_collection_idempotent;
 pub use admin_op_dedup::{
-    admin_op_binding, admin_op_dedup_path, collection_create_binding, create_collection_idempotent,
-    load_admin_op_dedup, record_admin_op_dedup, resolve_admin_op_dedup, save_admin_op_dedup,
-    AdminOpDedupRecord, AdminOpDedupTable, CreatedCollectionAdmin, ADMIN_OP_DEDUP_FILE,
-    COLLECTION_CREATE_OP,
+    admin_op_binding, admin_op_dedup_path, collection_create_binding, load_admin_op_dedup,
+    record_admin_op_dedup, resolve_admin_op_dedup, save_admin_op_dedup, AdminOpDedupRecord,
+    AdminOpDedupTable, CreatedCollectionAdmin, ADMIN_OP_DEDUP_FILE, COLLECTION_CREATE_OP,
 };
 pub use catalog::{
     create_object, delete_rebuildable_catalogs, load_staged_genesis, publish_staged_genesis,
     rebuild_and_persist_all_catalogs, rebuild_heap_entry_from_chain,
-    rebuild_object_entry_from_chain, rename_heap, rename_object, retire_heap, retire_object,
-    stage_heap_genesis, staging_is_non_discoverable, try_load_collections_catalog,
-    try_load_heap_catalog, try_load_streams_catalog, AdminReceipt, HeapCatalogEntry,
-    HeapMetaLayout, ObjectCatalogEntry, ObjectKind, StagedGenesis, COLLECTIONS_CATALOG_FILE,
-    HEAP_CATALOG_FILE, STREAMS_CATALOG_FILE,
+    rebuild_object_entry_from_chain, rebuild_object_entry_from_chain_strict, rename_heap,
+    rename_object, retire_heap, retire_object, stage_heap_genesis, staging_is_non_discoverable,
+    try_load_collections_catalog, try_load_heap_catalog, try_load_streams_catalog, AdminReceipt,
+    HeapCatalogEntry, HeapMetaLayout, ObjectCatalogEntry, ObjectKind, StagedGenesis,
+    COLLECTIONS_CATALOG_FILE, HEAP_CATALOG_FILE, STREAMS_CATALOG_FILE,
 };
 pub use commit_coordinator::OperationCommitStats;
 pub use heap_store::{

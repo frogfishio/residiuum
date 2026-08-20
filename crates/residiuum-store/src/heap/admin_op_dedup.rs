@@ -182,7 +182,7 @@ pub struct CreatedCollectionAdmin {
 /// Create a collection with durable `(HeapId, operation_id)` fingerprint/replay.
 ///
 /// Shared by embedded SDK and qualified wire op 106.
-pub fn create_collection_idempotent(
+pub(crate) fn create_collection_idempotent(
     layout: &HeapMetaLayout,
     heap_id: &[u8; 16],
     operation_id: [u8; 16],

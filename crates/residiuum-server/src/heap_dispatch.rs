@@ -21,9 +21,8 @@ use residiuum_sdk::{
     Parameters, Pred, QueryRunOptions, RqlFullExecuteOptions,
 };
 use residiuum_store::{
-    create_collection_idempotent, hex16, rebuild_object_entry_from_chain,
-    try_load_collections_catalog, unhex16, HeapMetaLayout, HeapStore, ObjectKind, StoreError,
-    WriteCondition, WriteReceipt,
+    hex16, rebuild_object_entry_from_chain, try_load_collections_catalog, unhex16, HeapMetaLayout,
+    HeapStore, ObjectKind, StoreError, WriteCondition, WriteReceipt,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -426,7 +425,7 @@ fn dispatch_collection_create(
         return err_code(id, "validation_failed");
     }
     let heap_id = *ctx.store.capability().heap_id().as_bytes();
-    match create_collection_idempotent(ctx.layout, &heap_id, operation_id, &name) {
+    match ctx.store.create_collection_idempotent(operation_id, &name) {
         Ok(created) => {
             let coll = match CollectionId::from_bytes_unchecked_nonzero(created.object_id) {
                 Ok(c) => c,

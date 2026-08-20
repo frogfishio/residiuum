@@ -218,6 +218,7 @@ impl PredicateKind {
                     | Self::BoundedKeyRangeAbsence
                     | Self::BoundedKeyRangePresence
                     | Self::ActiveRuleRevisionEquality
+                    | Self::CollectionLifecycleState
                     | Self::HeapAuthorityRevision
             )
     }

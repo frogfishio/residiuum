@@ -545,6 +545,48 @@ pub fn rebuild_object_entry_from_chain(
     Ok(tip)
 }
 
+/// Reconstruct an object tip only when every discovered descriptor frame forms
+/// one complete contiguous chain. Unlike catalogue salvage, this never returns
+/// a valid prefix in the presence of a damaged suffix and is therefore suitable
+/// as Atomic predicate authority.
+pub fn rebuild_object_entry_from_chain_strict(
+    layout: &HeapMetaLayout,
+    heap_id: &[u8; 16],
+    kind: ObjectKind,
+    object_id: &[u8; 16],
+) -> Result<Option<ObjectCatalogEntry>, StoreError> {
+    let entry = rebuild_object_entry_from_chain(layout, heap_id, kind, object_id)?;
+    let frames = list_chain_frames(&layout.object_chain_dir(heap_id, kind, object_id))?;
+    match &entry {
+        None if frames.is_empty() => {
+            if layout.object_head_path(heap_id, kind, object_id).exists() {
+                return Err(StoreError::HeapAdmit(
+                    "object head exists without descriptor chain".into(),
+                ));
+            }
+        }
+        Some(entry) if u64::try_from(frames.len()).ok() == Some(entry.sequence) => {
+            let head = layout.object_head_path(heap_id, kind, object_id);
+            if head.exists() {
+                let encoded = fs::read_to_string(&head)?;
+                let hinted = unhex32(encoded.trim())
+                    .ok_or_else(|| StoreError::HeapAdmit("bad object head hint".into()))?;
+                if hinted != entry.descriptor_hash {
+                    return Err(StoreError::HeapAdmit(
+                        "object head does not match verified chain tip".into(),
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(StoreError::HeapAdmit(
+                "object descriptor chain is not complete and contiguous".into(),
+            ));
+        }
+    }
+    Ok(entry)
+}
+
 fn list_object_ids(
     layout: &HeapMetaLayout,
     heap_id: &[u8; 16],

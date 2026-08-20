@@ -1,9 +1,10 @@
 //! ATM-1.3: typed builder, rights, authority binding, cross-Heap negatives.
 
 use crate::{
-    admit_closed_plan, plan_content_root, serialize_canonical_value, validate_closed_plan,
-    AtomicBuilder, AtomicId, AtomicOptions, AtomicOutcome, AtomicRefuseReason, AtomicsError,
-    BoundCollection, BoundedKeyRange, CanonicalKey, CanonicalKeyKind, CanonicalValue, CollectionId,
+    admit_closed_plan, decode_collection_lifecycle_payload, plan_content_root,
+    serialize_canonical_value, validate_closed_plan, AtomicBuilder, AtomicId, AtomicOptions,
+    AtomicOutcome, AtomicRefuseReason, AtomicsError, BoundCollection, BoundedKeyRange,
+    CanonicalKey, CanonicalKeyKind, CanonicalValue, CollectionId, CollectionLifecycleState,
     CollectionRights, ConstructionRead, CoordinationScope, EncodingProfile, HeapId, PredicateKind,
     RangeEntry, ResourceLimits, SerialOracle, TrustedAuthorityView, ValueEncoding, VersionId,
 };
@@ -327,6 +328,26 @@ fn rule_revisions_stay_off_the_authority_predicate() {
     assert!(rule.key.is_none());
     assert!(rule.version.is_none());
     assert_eq!(rule.encoded.as_deref(), Some([3u8; 32].as_slice()));
+}
+
+#[test]
+fn lifecycle_binding_is_collection_scoped_authorized_and_canonical() {
+    let state = coll(1, 9, CollectionRights::READ, 7);
+    let mut b = builder(1, 44);
+    b.bind_collection_lifecycle(&state, CollectionLifecycleState::Active)
+        .unwrap();
+    let plan = b.build().unwrap();
+    let lifecycle = plan
+        .predicates()
+        .iter()
+        .find(|predicate| predicate.kind == PredicateKind::CollectionLifecycleState)
+        .unwrap();
+    assert_eq!(lifecycle.collection_id, Some(cid(9)));
+    assert!(lifecycle.key.is_none());
+    assert_eq!(
+        decode_collection_lifecycle_payload(lifecycle.encoded.as_deref().unwrap()).unwrap(),
+        CollectionLifecycleState::Active
+    );
 }
 
 #[test]

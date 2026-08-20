@@ -260,6 +260,14 @@ fn validate_predicate_shapes(predicates: &[PlanPredicate]) -> Result<(), Atomics
                         .as_ref()
                         .is_some_and(|e| e.len() == 32 && e.as_slice() != [0u8; 32].as_slice())
             }
+            PredicateKind::CollectionLifecycleState => {
+                p.collection_id.is_some()
+                    && p.key.is_none()
+                    && p.version.is_none()
+                    && p.encoded.as_deref().is_some_and(|bytes| {
+                        crate::predicate::decode_collection_lifecycle_payload(bytes).is_ok()
+                    })
+            }
             PredicateKind::ExactScalarEquality => {
                 p.collection_id.is_some()
                     && p.key.is_some()
@@ -289,7 +297,6 @@ fn validate_predicate_shapes(predicates: &[PlanPredicate]) -> Result<(), Atomics
                             }
                     })
             }
-            _ => true,
         };
         if !ok {
             // Public asserts must be well-formed before prepare; a missing

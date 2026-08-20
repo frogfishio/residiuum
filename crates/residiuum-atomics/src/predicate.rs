@@ -28,6 +28,62 @@ const DOMAIN_RANGE_COVERAGE: &[u8] = b"RESIDIUUM-AUTHORITATIVE-PRIMARY-KEY-COVER
 const DOMAIN_RANGE_IDENTITY: &[u8] = b"RESIDIUUM-ATOMIC-RANGE-IDENTITY-V1";
 const DOMAIN_RANGE_RESULT: &[u8] = b"RESIDIUUM-ATOMIC-RANGE-RESULT-V1";
 const ACTIVE_RULE_SET_PROFILE_V1: u64 = 1;
+const COLLECTION_LIFECYCLE_PROFILE_V1: u64 = 1;
+
+/// Authoritative lifecycle state of one immutable collection identity.
+///
+/// Collection identities are never reused and retirement is monotonic in v1,
+/// so state equality has no delete/recreate ABA alias. Renames deliberately do
+/// not change this state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CollectionLifecycleState {
+    /// No authoritative descriptor chain exists for this identity.
+    Absent,
+    /// The collection exists and accepts ordinary data operations.
+    Active,
+    /// The immutable identity is retained but administratively retired.
+    Retired,
+}
+
+impl CollectionLifecycleState {
+    const fn wire_code(self) -> u64 {
+        match self {
+            Self::Absent => 0,
+            Self::Active => 1,
+            Self::Retired => 2,
+        }
+    }
+
+    const fn from_wire_code(code: u64) -> Option<Self> {
+        match code {
+            0 => Some(Self::Absent),
+            1 => Some(Self::Active),
+            2 => Some(Self::Retired),
+            _ => None,
+        }
+    }
+}
+
+/// Encode the exact expected collection lifecycle state.
+pub fn encode_collection_lifecycle_payload(
+    expected: CollectionLifecycleState,
+) -> Result<Vec<u8>, AtomicsError> {
+    cbor::encode_map(&[
+        (1, Value::Uint(COLLECTION_LIFECYCLE_PROFILE_V1)),
+        (2, Value::Uint(expected.wire_code())),
+    ])
+}
+
+/// Decode an exact expected collection lifecycle state.
+pub fn decode_collection_lifecycle_payload(
+    bytes: &[u8],
+) -> Result<CollectionLifecycleState, AtomicsError> {
+    let map = cbor::decode_map(bytes).map_err(|_| malformed())?;
+    if map.len() != 2 || require_uint(&map, 1)? != COLLECTION_LIFECYCLE_PROFILE_V1 {
+        return Err(malformed());
+    }
+    CollectionLifecycleState::from_wire_code(require_uint(&map, 2)?).ok_or_else(malformed)
+}
 
 /// A compiled exact-scalar equality predicate.
 ///
@@ -748,6 +804,38 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(decode_active_rule_set(&reversed).unwrap_err(), malformed());
+    }
+
+    #[test]
+    fn collection_lifecycle_payload_round_trips_every_closed_state() {
+        for state in [
+            CollectionLifecycleState::Absent,
+            CollectionLifecycleState::Active,
+            CollectionLifecycleState::Retired,
+        ] {
+            let encoded = encode_collection_lifecycle_payload(state).unwrap();
+            assert_eq!(
+                decode_collection_lifecycle_payload(&encoded).unwrap(),
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn collection_lifecycle_payload_refuses_unknown_state_and_shape() {
+        let unknown = cbor::encode_map(&[
+            (1, Value::Uint(COLLECTION_LIFECYCLE_PROFILE_V1)),
+            (2, Value::Uint(3)),
+        ])
+        .unwrap();
+        assert_eq!(
+            decode_collection_lifecycle_payload(&unknown).unwrap_err(),
+            malformed()
+        );
+        assert_eq!(
+            decode_collection_lifecycle_payload(&[0]).unwrap_err(),
+            malformed()
+        );
     }
 
     #[test]

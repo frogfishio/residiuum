@@ -92,5 +92,32 @@
       "stale_or_partial_set": "precondition_conflict",
       "membership_only": "insufficient because a newly activated invariant must invalidate an older plan"
     }
+  },
+  "collection_lifecycle_state": {
+    "outer_predicate_kind": 8,
+    "outer_fields": {
+      "collection_id": "required immutable collection identity",
+      "key": "absent",
+      "version": "absent",
+      "encoded": "required deterministic lifecycle payload"
+    },
+    "payload_fields": {
+      "1": { "name": "profile", "type": "uint", "required": true, "value": 1 },
+      "2": { "name": "expected_state", "type": "uint", "required": true }
+    },
+    "state_codes": {
+      "0": "absent; no authoritative descriptor chain",
+      "1": "active",
+      "2": "retired"
+    },
+    "authority": "integrity-verified collection descriptor chain, never a rebuildable catalogue",
+    "semantics": {
+      "identity_reuse": "forbidden",
+      "retirement": "monotonic in profile v1",
+      "rename": "preserves lifecycle state and does not conflict",
+      "create_or_retire": "must serialize under the same physical writer mutex as Atomic validation",
+      "malformed_or_unreadable_chain": "coverage_incomplete",
+      "state_mismatch": "precondition_conflict"
+    }
   }
 }

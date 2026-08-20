@@ -289,6 +289,30 @@ impl HeapStore {
         }
     }
 
+    /// Create or replay a collection administration operation under the same
+    /// physical writer mutex used by LocalHeap Atomic decisions.
+    pub fn create_collection_idempotent(
+        &self,
+        operation_id: [u8; 16],
+        name: &str,
+    ) -> Result<super::CreatedCollectionAdmin, StoreError> {
+        self.gate()?;
+        let slot = Arc::clone(self.cap.slot());
+        let _authority_guard = slot.lock_authority_frontier().map_err(|_| {
+            StoreError::HeapCapability("Heap authority frontier lock poisoned".into())
+        })?;
+        self.gate()?;
+        let mut guard = self
+            .physical
+            .lock()
+            .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
+        guard.create_collection_idempotent_ordered(
+            self.cap.heap_id().as_bytes(),
+            operation_id,
+            name,
+        )
+    }
+
     /// Qualification-only ATM-3 bridge. The public SDK transaction builder is
     /// delivered later; this keeps the proof on the real capability, physical
     /// mutex, collection scan, and RQL path rather than a raw-Store surrogate.

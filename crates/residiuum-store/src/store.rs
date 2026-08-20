@@ -2848,6 +2848,94 @@ impl Store {
         }
     }
 
+    /// Read one collection's authoritative descriptor-chain lifecycle state.
+    pub fn collection_lifecycle_state(
+        &self,
+        heap_id: residiuum_atomics::HeapId,
+        collection_id: residiuum_atomics::CollectionId,
+    ) -> Result<residiuum_atomics::CollectionLifecycleState, StoreError> {
+        let layout = crate::heap::HeapMetaLayout::new(self.path());
+        let entry = crate::heap::rebuild_object_entry_from_chain_strict(
+            &layout,
+            heap_id.as_bytes(),
+            crate::heap::ObjectKind::Collection,
+            collection_id.as_bytes(),
+        )?;
+        Ok(match entry.map(|entry| entry.state) {
+            None => residiuum_atomics::CollectionLifecycleState::Absent,
+            Some(residiuum_format::ObjectDescriptorState::Active) => {
+                residiuum_atomics::CollectionLifecycleState::Active
+            }
+            Some(residiuum_format::ObjectDescriptorState::Retired) => {
+                residiuum_atomics::CollectionLifecycleState::Retired
+            }
+        })
+    }
+
+    /// Create a collection while the caller owns this physical Store order.
+    pub fn create_collection_idempotent_ordered(
+        &mut self,
+        heap_id: &[u8; 16],
+        operation_id: [u8; 16],
+        name: &str,
+    ) -> Result<crate::heap::CreatedCollectionAdmin, StoreError> {
+        crate::heap::create_collection_idempotent(
+            &crate::heap::HeapMetaLayout::new(self.path()),
+            heap_id,
+            operation_id,
+            name,
+        )
+    }
+
+    /// Qualification/admin primitive: create a specified immutable collection
+    /// identity while the caller owns this physical Store order.
+    pub fn create_collection_ordered(
+        &mut self,
+        heap_id: &[u8; 16],
+        collection_id: [u8; 16],
+        creation_event_id: [u8; 16],
+        name: &str,
+    ) -> Result<crate::heap::AdminReceipt, StoreError> {
+        crate::heap::create_object(
+            &crate::heap::HeapMetaLayout::new(self.path()),
+            heap_id,
+            crate::heap::ObjectKind::Collection,
+            collection_id,
+            creation_event_id,
+            name,
+        )
+    }
+
+    /// Rename a collection under this physical Store order.
+    pub fn rename_collection_ordered(
+        &mut self,
+        heap_id: &[u8; 16],
+        collection_id: &[u8; 16],
+        new_name: &str,
+    ) -> Result<crate::heap::AdminReceipt, StoreError> {
+        crate::heap::rename_object(
+            &crate::heap::HeapMetaLayout::new(self.path()),
+            heap_id,
+            crate::heap::ObjectKind::Collection,
+            collection_id,
+            new_name,
+        )
+    }
+
+    /// Retire a collection under this physical Store order.
+    pub fn retire_collection_ordered(
+        &mut self,
+        heap_id: &[u8; 16],
+        collection_id: &[u8; 16],
+    ) -> Result<crate::heap::AdminReceipt, StoreError> {
+        crate::heap::retire_object(
+            &crate::heap::HeapMetaLayout::new(self.path()),
+            heap_id,
+            crate::heap::ObjectKind::Collection,
+            collection_id,
+        )
+    }
+
     fn check_write_condition(
         &self,
         subject: &[u8],

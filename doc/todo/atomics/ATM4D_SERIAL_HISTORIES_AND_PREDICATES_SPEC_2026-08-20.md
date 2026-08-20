@@ -44,9 +44,9 @@ legally acquire different content.
 
 ## 3. Predicate delta
 
-The remaining closed `PredicateKind` that is not executable is collection
-lifecycle state. Exact scalar, bounded key-range and active rule revision
-predicates are now executable under the contracts below.
+Every closed LocalHeap v1 `PredicateKind` is now executable. Exact scalar,
+bounded key-range, active-rule revision and collection-lifecycle predicates use
+the frozen contracts below; no compiled predicate is a host closure.
 
 ATM-4D will define a versioned canonical payload inside `PlanPredicate.encoded`
 without changing the frozen outer plan/checkpoint shapes. Range payloads must
@@ -164,8 +164,36 @@ Index and forced-scan execution must agree on the same canonical predicate.
   expose activation/deactivation without leaking raw Store access, and must use
   the same physical writer mutex. The raw Store mechanism is qualification
   infrastructure, not the final client authority ceremony.
-- **Open:** collection/object lifecycle state and the combined
-  authority/lifecycle/ordinary/Atomic independent-checker race corpus.
+- **Delivered lifecycle contract:** kind 8 binds one immutable collection ID to
+  exactly `absent`, `active` or `retired`. Authority comes from the verified
+  descriptor chain, never its rebuildable catalogue. IDs are never reused and
+  retirement is monotonic, so state equality has no ABA alias. Rename preserves
+  state and deliberately does not cause a false conflict.
+- **Delivered lifecycle order:** ordered create, rename and retire primitives
+  execute while the physical Store order is owned. Embedded SDK collection
+  creation now enters through `HeapStore` and the same physical mutex as Atomic
+  decisions instead of writing descriptor files beside that order. Qualified
+  remote op 106 now uses the same `HeapStore` entry rather than its former raw
+  layout call.
+- **Delivered lifecycle proof:** create-versus-absent and
+  retire-versus-active races conflict; rename-versus-active commits; descriptor
+  state and terminal conflict survive restart; the same collection ID remains
+  isolated across Heaps. A damaged descriptor suffix is
+  `coverage_incomplete`, never a valid active prefix. An independent
+  state-machine checker plus mutation controls proves the recorded
+  create/retire aborts become unjustifiable when the winning lifecycle
+  transition is removed. Concurrent embedded same-name creation has exactly one
+  winner, demonstrating the administration path actually enters the shared
+  writer order.
+- **Open product bridge:** the future public Atomic construction session should
+  add an `active` lifecycle binding automatically for every data collection it
+  admits. Public capability-gated rename/retire APIs do not exist yet; when
+  introduced they must call the ordered Store primitives rather than the raw
+  descriptor functions.
+- **Open combined corpus:** exercise authority revision, lifecycle transition,
+  ordinary data mutation and Atomic decision in one independently checked
+  randomized history. Each dependency is already individually executable and
+  tested; this is the remaining composed proof.
 
 ## 5. Required anomaly corpus
 

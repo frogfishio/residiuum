@@ -250,6 +250,22 @@ pub fn encode_active_rule_revision_equality(revision: [u8; 32]) -> PlanPredicate
     }
 }
 
+/// Encode equality with one collection's authoritative lifecycle state.
+pub fn encode_collection_lifecycle_state(
+    collection_id: CollectionId,
+    expected: crate::predicate::CollectionLifecycleState,
+) -> Result<PlanPredicate, AtomicsError> {
+    Ok(PlanPredicate {
+        kind: PredicateKind::CollectionLifecycleState,
+        collection_id: Some(collection_id),
+        key: None,
+        version: None,
+        encoded: Some(crate::predicate::encode_collection_lifecycle_payload(
+            expected,
+        )?),
+    })
+}
+
 /// Requested vs worst-case generated-member accounting for a closed plan.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlanAccounting {

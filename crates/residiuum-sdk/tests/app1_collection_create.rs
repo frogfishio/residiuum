@@ -7,7 +7,7 @@ use residiuum_heap::{
 };
 use residiuum_sdk::{ErrorCode, ResidiuumDeployment};
 use residiuum_store::{publish_staged_genesis, stage_heap_genesis, HeapMetaLayout};
-use std::sync::Arc;
+use std::sync::{Arc, Barrier};
 use tempfile::tempdir;
 
 fn mint_cap_for(heap: HeapId, deployment: DeploymentId) -> residiuum_heap::HeapCap {
@@ -101,6 +101,48 @@ fn embedded_create_list_open_and_duplicate_name() {
         Ok(_) => panic!("duplicate name must fail"),
         Err(err) => assert_eq!(err.code(), ErrorCode::AlreadyExists),
     }
+}
+
+#[test]
+fn concurrent_embedded_create_of_one_name_has_exactly_one_winner() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    let deployment = ResidiuumDeployment::create(root).unwrap();
+    let layout = HeapMetaLayout::new(root);
+    let dep = *DeploymentId::new_random().unwrap().as_bytes();
+    let heap_bytes = *HeapId::new_random().unwrap().as_bytes();
+    let staged = stage_heap_genesis(&layout, dep, heap_bytes, uuid(), "heap-create-race").unwrap();
+    publish_staged_genesis(&layout, &staged.staging_id, &staged.descriptor_hash).unwrap();
+    let heap = Arc::new(deployment.open_heap(mint_cap_for(
+        HeapId::from_bytes_unchecked_nonzero(heap_bytes).unwrap(),
+        DeploymentId::from_bytes_unchecked_nonzero(dep).unwrap(),
+    )));
+    let barrier = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+    for _ in 0..2 {
+        let heap = Arc::clone(&heap);
+        let barrier = Arc::clone(&barrier);
+        workers.push(std::thread::spawn(move || {
+            barrier.wait();
+            heap.create_collection("one-name")
+                .map(|created| created.collection.id())
+                .map_err(|error| error.code())
+        }));
+    }
+    barrier.wait();
+    let results: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter(|result| matches!(result, Err(ErrorCode::AlreadyExists)))
+            .count(),
+        1
+    );
+    assert_eq!(heap.list_collections().unwrap().len(), 1);
 }
 
 #[test]

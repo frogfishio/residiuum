@@ -10,8 +10,8 @@ use crate::canonical::key_order_bytes;
 use crate::encode::{
     encode_active_rule_revision_equality, encode_assert_absent, encode_assert_present,
     encode_assert_version, encode_bounded_key_range_absence, encode_bounded_key_range_presence,
-    encode_create, encode_delete, encode_exact_scalar_equality, encode_heap_authority_revision,
-    encode_put, encode_replace, CanonicalValue,
+    encode_collection_lifecycle_state, encode_create, encode_delete, encode_exact_scalar_equality,
+    encode_heap_authority_revision, encode_put, encode_replace, CanonicalValue,
 };
 use crate::encoding::EncodingProfile;
 use crate::error::AtomicsError;
@@ -586,6 +586,18 @@ impl AtomicBuilder {
         self
     }
 
+    /// Bind one collection's authoritative lifecycle state.
+    pub fn bind_collection_lifecycle(
+        &mut self,
+        collection: &BoundCollection,
+        expected: crate::predicate::CollectionLifecycleState,
+    ) -> Result<&mut Self, AtomicsError> {
+        let id = self.admit_collection(collection, CollectionRights::READ)?;
+        self.predicates
+            .push(encode_collection_lifecycle_state(id, expected)?);
+        Ok(self)
+    }
+
     /// Close, cost, and structurally validate. Refusals append no evidence.
     pub fn build(self) -> Result<AtomicPlan, AtomicsError> {
         refuse_if_past_deadline(self.options.deadline, self.options.limits, self.started)?;
@@ -617,6 +629,27 @@ impl AtomicBuilder {
         value: Option<&CanonicalValue>,
         as_mutation: bool,
     ) -> Result<CollectionId, AtomicsError> {
+        let collection_id = self.admit_collection(collection, need)?;
+        collection.encoding.admit_key(key)?;
+        if let Some(value) = value {
+            collection.encoding.admit_value_bytes(value.as_bytes())?;
+        }
+        if as_mutation {
+            let kb = key_order_bytes(key);
+            if self.mutations.iter().any(|m| {
+                m.collection_id == collection.collection_id && key_order_bytes(&m.key) == kb
+            }) {
+                return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget));
+            }
+        }
+        Ok(collection_id)
+    }
+
+    fn admit_collection(
+        &mut self,
+        collection: &BoundCollection,
+        need: CollectionRights,
+    ) -> Result<CollectionId, AtomicsError> {
         refuse_if_past_deadline(self.options.deadline, self.options.limits, self.started)?;
         if collection.heap_id != self.heap_id {
             return Err(AtomicsError::Refused(
@@ -628,10 +661,6 @@ impl AtomicBuilder {
                 AtomicRefuseReason::AuthorizationFailure,
             ));
         }
-        collection.encoding.admit_key(key)?;
-        if let Some(value) = value {
-            collection.encoding.admit_value_bytes(value.as_bytes())?;
-        }
         match self.bound_authority {
             None => self.bound_authority = Some(collection.authority_revision),
             Some(rev) if rev != collection.authority_revision => {
@@ -640,14 +669,6 @@ impl AtomicBuilder {
                 ));
             }
             Some(_) => {}
-        }
-        if as_mutation {
-            let kb = key_order_bytes(key);
-            if self.mutations.iter().any(|m| {
-                m.collection_id == collection.collection_id && key_order_bytes(&m.key) == kb
-            }) {
-                return Err(AtomicsError::Refused(AtomicRefuseReason::DuplicateTarget));
-            }
         }
         self.required_rights = self.required_rights.union(need);
         Ok(collection.collection_id)
@@ -805,6 +826,7 @@ fn right_for_mutation(mutation: &PlanMutation) -> CollectionRights {
 fn right_for_predicate(predicate: &PlanPredicate) -> Option<(CollectionId, CollectionRights)> {
     if !predicate.kind.is_public_builder_assert()
         && predicate.kind != PredicateKind::ExactScalarEquality
+        && predicate.kind != PredicateKind::CollectionLifecycleState
         && !matches!(
             predicate.kind,
             PredicateKind::BoundedKeyRangeAbsence | PredicateKind::BoundedKeyRangePresence

@@ -28,15 +28,15 @@ use crate::error::StoreError;
 use crate::store::{active_rule_set_subject, Store};
 use residiuum_atomics::{
     compare_canonical_keys, decision_hash, decode_bounded_range_payload,
-    decode_exact_scalar_payload, encode_decision, encode_member, encode_prepare,
-    members_match_prepare, ordered_member_manifest_root, plan_content_root,
-    prepare_from_closed_plan, prepare_hash, range_coverage_domain, validate_closed_plan,
-    AtomicAbortReason, AtomicCohortOutcome, AtomicDecision, AtomicId, AtomicMember,
-    AtomicMemberReceipt, AtomicOutcome, AtomicPlan, AtomicPrepare, AtomicReceipt,
+    decode_collection_lifecycle_payload, decode_exact_scalar_payload, encode_decision,
+    encode_member, encode_prepare, members_match_prepare, ordered_member_manifest_root,
+    plan_content_root, prepare_from_closed_plan, prepare_hash, range_coverage_domain,
+    validate_closed_plan, AtomicAbortReason, AtomicCohortOutcome, AtomicDecision, AtomicId,
+    AtomicMember, AtomicMemberReceipt, AtomicOutcome, AtomicPlan, AtomicPrepare, AtomicReceipt,
     AtomicRefuseReason, AtomicStatus, AtomicsError, BoundedKeyRange, CanonicalKey, ChunkPlan,
-    CoordinatorSeq, DecisionCode, HeapId, LogicalStatus, MaterialStatus, MemberPhase, MutationKind,
-    ObjectIdentity, PlacementManifest, PredicateKind, RangeEntry, StagingHeap, VersionId,
-    CANONICAL_KEY_ORDER_V1,
+    CollectionLifecycleState, CoordinatorSeq, DecisionCode, HeapId, LogicalStatus, MaterialStatus,
+    MemberPhase, MutationKind, ObjectIdentity, PlacementManifest, PredicateKind, RangeEntry,
+    StagingHeap, VersionId, CANONICAL_KEY_ORDER_V1,
 };
 use residiuum_format::{
     decode_subject_v2, encode_atomic_commit_envelope, encode_atomic_member_envelope,
@@ -1926,6 +1926,33 @@ impl StoreAtomicStage<'_> {
             hasher.update(&(encoded.len() as u32).to_be_bytes());
             hasher.update(encoded);
         }
+        for predicate in plan
+            .predicates()
+            .iter()
+            .filter(|predicate| predicate.kind == PredicateKind::CollectionLifecycleState)
+        {
+            let collection_id = predicate.collection_id.ok_or_else(|| {
+                StoreError::AtomicStage("lifecycle predicate omitted collection identity".into())
+            })?;
+            hasher.update(&[PredicateKind::CollectionLifecycleState.wire_code()]);
+            hasher.update(collection_id.as_bytes());
+            match self
+                .store
+                .collection_lifecycle_state(plan.heap_id(), collection_id)
+            {
+                Ok(state) => hasher.update(&[
+                    1,
+                    match state {
+                        CollectionLifecycleState::Absent => 0,
+                        CollectionLifecycleState::Active => 1,
+                        CollectionLifecycleState::Retired => 2,
+                    },
+                ]),
+                // Bind an unavailable authority marker; validation below turns
+                // this into a terminal coverage-incomplete outcome.
+                Err(_) => hasher.update(&[0]),
+            };
+        }
         Ok(*hasher.finalize().as_bytes())
     }
 
@@ -1961,6 +1988,28 @@ impl StoreAtomicStage<'_> {
                     return Ok(Some(AtomicAbortReason::RuleRejected));
                 };
                 if current_rule_revisions.binary_search(&revision).is_err() {
+                    return Ok(Some(AtomicAbortReason::PreconditionConflict));
+                }
+                continue;
+            }
+            if predicate.kind == PredicateKind::CollectionLifecycleState {
+                let (Some(collection_id), Some(encoded)) =
+                    (predicate.collection_id, predicate.encoded.as_deref())
+                else {
+                    return Ok(Some(AtomicAbortReason::RuleRejected));
+                };
+                let expected = match decode_collection_lifecycle_payload(encoded) {
+                    Ok(expected) => expected,
+                    Err(_) => return Ok(Some(AtomicAbortReason::RuleRejected)),
+                };
+                let observed = match self
+                    .store
+                    .collection_lifecycle_state(plan.heap_id(), collection_id)
+                {
+                    Ok(observed) => observed,
+                    Err(_) => return Ok(Some(AtomicAbortReason::CoverageIncomplete)),
+                };
+                if observed != expected {
                     return Ok(Some(AtomicAbortReason::PreconditionConflict));
                 }
                 continue;

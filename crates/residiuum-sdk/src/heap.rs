@@ -12,9 +12,8 @@ use crate::subject::{validate_collection_name, validate_key};
 use blake3::Hasher;
 use residiuum_heap::{CollectionId, HeapCap, HeapId, StreamId};
 use residiuum_store::{
-    create_collection_idempotent, rebuild_heap_entry_from_chain, rebuild_object_entry_from_chain,
-    try_load_collections_catalog, try_load_streams_catalog, HeapMetaLayout, HeapStore, ObjectKind,
-    StoreError, StoreHost,
+    rebuild_heap_entry_from_chain, rebuild_object_entry_from_chain, try_load_collections_catalog,
+    try_load_streams_catalog, HeapMetaLayout, HeapStore, ObjectKind, StoreError, StoreHost,
 };
 use serde::Serialize;
 use std::collections::VecDeque;
@@ -663,7 +662,6 @@ impl Heap {
         operation_id: Option<[u8; 16]>,
     ) -> Result<CreatedCollection, Error> {
         validate_collection_name(name)?;
-        let heap_id = *self.cap.heap_id().as_bytes();
         let op_id = match operation_id {
             Some(id) => id,
             None => {
@@ -671,7 +669,9 @@ impl Heap {
                 *eid.as_bytes()
             }
         };
-        let admin = create_collection_idempotent(&self.layout, &heap_id, op_id, name)
+        let admin = self
+            .store
+            .create_collection_idempotent(op_id, name)
             .map_err(map_create_object_err)?;
         let collection_id = CollectionId::from_bytes_unchecked_nonzero(admin.object_id)
             .map_err(|e| Error::Internal(e.to_string()))?;
