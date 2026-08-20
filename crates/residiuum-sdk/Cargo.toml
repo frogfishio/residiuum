@@ -34,6 +34,7 @@ residiuum-client.workspace = true
 # Public `Store` only with `legacy-flat-sdk` → `residiuum-store/legacy-raw-store` (CPR-001 / HP-003).
 residiuum-store = { workspace = true }
 residiuum-heap.workspace = true
+residiuum-atomics.workspace = true
 residiuum-format.workspace = true
 residiuum-cluster = { workspace = true, optional = true }
 sda-core.workspace = true

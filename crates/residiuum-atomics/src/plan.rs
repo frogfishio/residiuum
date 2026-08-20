@@ -315,10 +315,28 @@ impl CanonicalKey {
         }
     }
 
-    /// Stable key identity bytes used by Atomic manifests and SubjectV2.
+    /// Stable key identity bytes used by Atomic manifests and ordering.
     /// The leading kind tag prevents string/opaque/integer/decimal aliases.
     pub fn identity_bytes(&self) -> Vec<u8> {
         crate::canonical::key_order_bytes(self)
+    }
+
+    /// Heap-profile payload bytes used as the SubjectV2 application key.
+    ///
+    /// Key kind is frozen by the collection contract, so SubjectV2 does not
+    /// add the manifest's cross-kind ordering tag. This preserves the existing
+    /// SDK string-key identity (`"k"` is stored as UTF-8 `b"k"`).
+    pub fn subject_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::String(value) => value.as_bytes().to_vec(),
+            Self::Opaque(bytes) | Self::Integer(bytes) => bytes.clone(),
+            Self::Decimal { coefficient, scale } => {
+                let mut bytes = Vec::with_capacity(8 + coefficient.len());
+                bytes.extend_from_slice(&scale.to_be_bytes());
+                bytes.extend_from_slice(coefficient);
+                bytes
+            }
+        }
     }
 
     /// UTF-8 string key.
@@ -644,5 +662,13 @@ mod tests {
         );
         assert_eq!(plan.scope(), CoordinationScope::LocalHeap);
         assert!(plan.limits().is_within(ResourceLimits::hard_local_heap()));
+    }
+
+    #[test]
+    fn manifest_identity_tag_is_not_part_of_subject_key_payload() {
+        let key = CanonicalKey::string("sdk-key");
+        assert_eq!(key.subject_bytes(), b"sdk-key");
+        assert_ne!(key.identity_bytes(), key.subject_bytes());
+        assert_eq!(&key.identity_bytes()[1..], key.subject_bytes());
     }
 }

@@ -289,6 +289,32 @@ impl HeapStore {
         }
     }
 
+    /// Qualification-only ATM-3 bridge. The public SDK transaction builder is
+    /// delivered later; this keeps the proof on the real capability, physical
+    /// mutex, collection scan, and RQL path rather than a raw-Store surrogate.
+    #[doc(hidden)]
+    pub fn decide_atomic_plan_evidence(
+        &self,
+        plan: &residiuum_atomics::AtomicPlan,
+    ) -> Result<residiuum_atomics::AtomicDecision, StoreError> {
+        self.gate()?;
+        self.require_right(Rights::WRITE)?;
+        let atomic_heap = residiuum_atomics::HeapId::from_bytes(*self.cap.heap_id().as_bytes())
+            .map_err(|error| StoreError::HeapCapability(error.to_string()))?;
+        if plan.heap_id() != atomic_heap {
+            return Err(StoreError::HeapCapability(
+                "Atomic plan Heap does not match bound capability".into(),
+            ));
+        }
+        let mut guard = self
+            .physical
+            .lock()
+            .map_err(|_| StoreError::HeapCapability("store lock poisoned".into()))?;
+        guard
+            .atomic_stage_for_heap(atomic_heap)?
+            .decide_plan_evidence(plan)
+    }
+
     /// Decode and validate a SubjectV2 buffer for this bound heap.
     ///
     /// Qualified heap data paths require SubjectV2 (version byte `0x02`). Legacy

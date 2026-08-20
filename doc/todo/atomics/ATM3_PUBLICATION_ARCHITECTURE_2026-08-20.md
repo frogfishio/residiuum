@@ -18,8 +18,18 @@ below.
 
 The guarded-reader proof now runs point, full logical scan, and history readers
 concurrently with a two-member commit. Every sampled view is either the prior
-generation or the complete committed generation. The SDK/RQL façade proof is
-still open and is intentionally not inferred from this store-core result.
+generation or the complete committed generation. The SDK/RQL façade proof also
+executes against SDK-created documents through a capability-bound Heap. Embedded
+Core RQL now obtains a complete collection page under one physical-store lock
+instead of composing a key inventory with independently locked point reads; a
+two-record replacement therefore yields either both old documents or both new
+documents, never a mixed page.
+
+That integration proof also froze the distinction between two key encodings:
+Atomic manifest identity/order bytes retain their leading kind tag, while the
+SubjectV2 application-key field receives the collection's Heap-profile payload
+bytes. Thus an SDK UTF-8 key and an Atomic `CanonicalKey::String` address the
+same physical record without weakening cross-kind manifest identity.
 
 Universal-order amendment (2026-08-20): checkpoint profile v13 adds an
 `ATORD1` decision witness. Immediately before a committed decision, the Store
@@ -170,10 +180,11 @@ The primary and history projections now share the same durable order witness,
 including later ordinary puts/deletes and overlapping Atomics after a full
 derived-index rebuild. The five mandated decision/publication/ack crash cuts
 are green, as is guarded concurrent point/scan/history observation. ATM-3D must
-still prove SDK/RQL generation binding and resource bounds before the hidden
-qualification path can become a product capability. Whole-plan I/O now has an
-executable invariant: one- and two-member commits both complete with exactly
-two authoritative syncs, proving sync count is independent of member count.
+still close the resource-bound qualification before the hidden qualification
+path can become a product capability. SDK/RQL generation binding is now green
+on the real embedded façade. Whole-plan I/O has an executable invariant: one-
+and 32-member commits both complete with exactly two authoritative syncs,
+proving sync count is independent of member count.
 
 `Capabilities::atomics` remains `false` until all slices and the ATM-3 exit gate
 are green.

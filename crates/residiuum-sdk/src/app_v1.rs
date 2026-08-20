@@ -548,6 +548,24 @@ impl HeapClient {
         !matches!(self.backend, HeapBackend::Unbound)
     }
 
+    /// Qualification-only ATM-3 bridge. Product transaction construction and
+    /// receipts remain gated until later Atomic packages.
+    #[doc(hidden)]
+    pub fn decide_atomic_plan_evidence(
+        &self,
+        plan: &residiuum_atomics::AtomicPlan,
+    ) -> Result<residiuum_atomics::AtomicDecision, Error> {
+        match &self.backend {
+            HeapBackend::Embedded(heap) => heap.decide_atomic_plan_evidence(plan),
+            HeapBackend::Remote(_) => Err(Error::RemoteUnsupported(
+                "Atomic qualification commit (embedded only)",
+            )),
+            HeapBackend::Unbound => Err(Error::Internal(
+                "HeapClient unbound; Atomic qualification commit unavailable".into(),
+            )),
+        }
+    }
+
     /// Open a stable bounded read view (APB-6).
     ///
     /// **Embedded:** pins `authoritative_frontier` to the store segment
@@ -2427,6 +2445,72 @@ impl crate::query_bytecode_v1::HostCapabilities for CollectionClient {
             }
             Err(error) => Err(error),
         }
+    }
+
+    fn scan_json_covered_page(
+        &mut self,
+        collection_id: CollectionId,
+        limit: Option<usize>,
+        after_key: Option<&str>,
+    ) -> Result<Vec<(String, crate::query_bytecode_v1::HostDocument)>, Error> {
+        use crate::query_bytecode_v1::HostDocument;
+
+        if collection_id != self.collection_id {
+            return Err(Error::QueryInvalid(
+                "HostCapabilities: collection_id mismatch on CollectionClient".into(),
+            ));
+        }
+        let CollectionBackend::Embedded(collection) = &self.backend else {
+            return <Self as crate::query_bytecode_v1::HostCapabilities>::list_keys(
+                self,
+                collection_id,
+                limit,
+                after_key,
+            )?
+            .into_iter()
+            .map(|key| {
+                let document =
+                    <Self as crate::query_bytecode_v1::HostCapabilities>::get_json_covered(
+                        self,
+                        collection_id,
+                        &key,
+                    )?;
+                Ok((key, document))
+            })
+            .collect();
+        };
+
+        let page = collection.scan_page_raw(
+            limit.unwrap_or(256).clamp(1, 4_096),
+            after_key.map(str::as_bytes),
+        )?;
+        let mut rows = Vec::with_capacity(page.entries.len() + page.incomplete.len());
+        for (key, body, _version) in page.entries {
+            let key = String::from_utf8(key)
+                .map_err(|_| Error::Internal("RQL scan returned non-UTF-8 key".into()))?;
+            let document = match crate::value::decode_json(&body) {
+                Ok(value) => HostDocument::Present {
+                    value: value.into(),
+                    logical_bytes: crate::value::encoded_json_payload_len(&body),
+                },
+                Err(error) => HostDocument::Hole {
+                    code: error.code().as_str().to_string(),
+                },
+            };
+            rows.push((key, document));
+        }
+        for hole in page.incomplete {
+            let key = String::from_utf8(hole.key)
+                .map_err(|_| Error::Internal("RQL hole returned non-UTF-8 key".into()))?;
+            rows.push((
+                key,
+                HostDocument::Hole {
+                    code: hole.reason.as_str().to_string(),
+                },
+            ));
+        }
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(rows)
     }
 
     fn get_json_covered_many(

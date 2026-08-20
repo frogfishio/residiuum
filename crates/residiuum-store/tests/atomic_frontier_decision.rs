@@ -40,7 +40,7 @@ fn subject(heap: HeapId, key: &CanonicalKey) -> Vec<u8> {
         heap.as_bytes(),
         SubjectObjectKind::Collection,
         collection().as_bytes(),
-        &key.identity_bytes(),
+        &key.subject_bytes(),
     )
     .unwrap()
 }

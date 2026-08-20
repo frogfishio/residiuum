@@ -1434,7 +1434,7 @@ fn atomic_subject(
         heap_id.as_bytes(),
         SubjectObjectKind::Collection,
         collection_id.as_bytes(),
-        &key.identity_bytes(),
+        &key.subject_bytes(),
     )
     .map_err(|e| StoreError::AtomicStage(format!("atomic SubjectV2 encode: {e}")))
 }

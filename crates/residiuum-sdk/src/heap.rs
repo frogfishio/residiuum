@@ -511,6 +511,16 @@ impl Heap {
         Arc::clone(&self.store)
     }
 
+    /// Qualification-only ATM-3 bridge used to prove the real SDK/RQL reader
+    /// path before the public transaction builder is introduced.
+    #[doc(hidden)]
+    pub fn decide_atomic_plan_evidence(
+        &self,
+        plan: &residiuum_atomics::AtomicPlan,
+    ) -> Result<residiuum_atomics::AtomicDecision, Error> {
+        Ok(self.store.decide_atomic_plan_evidence(plan)?)
+    }
+
     /// Whether `other` is the same capability instance (pointer identity).
     pub fn same_capability(&self, other: &Heap) -> bool {
         self.cap.same_instance(&other.cap)
