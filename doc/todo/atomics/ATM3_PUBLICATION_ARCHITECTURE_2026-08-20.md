@@ -126,6 +126,13 @@ The same path repairs a crash after decision and before in-memory publication.
 Publication has no second authority and therefore needs no "published" durable
 bit.
 
+The implementation exposes the mandatory crash cuts at `before_decision`,
+`after_decision`, `before_publish`, `after_publish`, and `before_ack`. Every cut
+before the durable decision may recover as not committed; every cut after that
+linearization point must reconstruct the entire committed generation. An
+acknowledgement failure never authorizes rollback, and exact retry returns the
+stored terminal decision.
+
 ## Lock and latency rule
 
 Canonical plan construction, value cooking, compression, rule compilation,

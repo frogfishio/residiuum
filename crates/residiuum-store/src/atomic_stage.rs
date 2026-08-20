@@ -690,6 +690,9 @@ impl StoreAtomicStage<'_> {
         crate::failpoint::hit("store.atomic.before_publish")?;
         self.publish_decision(prepare.atomic_id)?;
         crate::failpoint::hit("store.atomic.after_publish")?;
+        // The receipt has been fully determined and the complete generation is
+        // visible, but it has not crossed the caller acknowledgement boundary.
+        crate::failpoint::hit("store.atomic.before_ack")?;
         Ok(decision)
     }
 

@@ -592,3 +592,65 @@ fn read_only_inspection_recovers_committed_values_and_history_without_checkpoint
     drop(writer);
     clear_failpoints();
 }
+
+#[test]
+fn mandated_decision_publish_ack_crash_prefixes_have_only_legal_recovery_states() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let cuts = [
+        ("store.atomic.before_decision", false),
+        ("store.atomic.after_decision", true),
+        ("store.atomic.before_publish", true),
+        ("store.atomic.after_publish", true),
+        ("store.atomic.before_ack", true),
+    ];
+
+    for (case, (cut, committed)) in cuts.into_iter().enumerate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let mut store = Store::create_with_shards(&path, 4).unwrap();
+        let heap = HeapId::from_bytes(store.store_id()).unwrap();
+        let left = subject(heap, &CanonicalKey::string("left"));
+        let right = subject(heap, &CanonicalKey::string("right"));
+        let atomic_plan = create_two_plan(heap, atomic(20 + case as u8));
+        arm_failpoint_once(cut, FailpointAction::Error);
+
+        let outcome = store
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_evidence(&atomic_plan);
+        assert!(matches!(outcome, Err(StoreError::Failpoint(name)) if name == cut));
+        clear_failpoints();
+        drop(store);
+
+        let mut reopened = Store::open(&path).unwrap();
+        let observed = (
+            reopened.get_subject_bytes(&left).unwrap(),
+            reopened.get_subject_bytes(&right).unwrap(),
+        );
+        assert_eq!(
+            observed,
+            if committed {
+                (Some(b"L".to_vec()), Some(b"R".to_vec()))
+            } else {
+                (None, None)
+            },
+            "illegal recovered state at {cut}"
+        );
+        let replay = reopened
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_evidence(&atomic_plan)
+            .unwrap();
+        assert_eq!(replay.decision, DecisionCode::Committed);
+        assert_eq!(replay.commit_position, Some(1));
+        assert_eq!(
+            reopened.get_subject_bytes(&left).unwrap(),
+            Some(b"L".to_vec())
+        );
+        assert_eq!(
+            reopened.get_subject_bytes(&right).unwrap(),
+            Some(b"R".to_vec())
+        );
+    }
+}
