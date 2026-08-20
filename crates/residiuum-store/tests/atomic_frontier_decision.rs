@@ -12,7 +12,8 @@ use residiuum_store::{
     arm_failpoint_once, clear_failpoints, AtomicStageClass, DurabilityMode, FailpointAction,
     ReadBudget, StageEvidenceClass, Store, StoreError,
 };
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 
 static FAILPOINT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -653,4 +654,93 @@ fn mandated_decision_publish_ack_crash_prefixes_have_only_legal_recovery_states(
             Some(b"R".to_vec())
         );
     }
+}
+
+#[test]
+fn concurrent_point_scan_and_history_readers_never_observe_half_a_batch() {
+    let _guard = test_guard();
+    clear_failpoints();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s");
+    let store = Store::create_with_shards(&path, 4).unwrap();
+    let heap = HeapId::from_bytes(store.store_id()).unwrap();
+    let left = subject(heap, &CanonicalKey::string("left"));
+    let right = subject(heap, &CanonicalKey::string("right"));
+    let shared = Arc::new(Mutex::new(store));
+    let start = Arc::new(Barrier::new(5));
+    let sampled_before = Arc::new(Barrier::new(5));
+    let published = Arc::new(AtomicBool::new(false));
+    let mut readers = Vec::new();
+
+    for _ in 0..4 {
+        let shared = Arc::clone(&shared);
+        let start = Arc::clone(&start);
+        let sampled_before = Arc::clone(&sampled_before);
+        let published = Arc::clone(&published);
+        let left = left.clone();
+        let right = right.clone();
+        readers.push(std::thread::spawn(move || {
+            start.wait();
+            let mut saw_before = false;
+            let mut saw_after = false;
+            for sample in 0..10_000 {
+                let store = shared.lock().unwrap();
+                let points = (
+                    store.get_subject_bytes(&left).unwrap(),
+                    store.get_subject_bytes(&right).unwrap(),
+                );
+                let scan = store.scan_live_logical().unwrap();
+                let scan_left = scan.entries.iter().any(|(key, _)| key == &left);
+                let scan_right = scan.entries.iter().any(|(key, _)| key == &right);
+                let histories = (
+                    store.history_subject_bytes(&left).unwrap().events.len(),
+                    store.history_subject_bytes(&right).unwrap().events.len(),
+                );
+                drop(store);
+
+                match points {
+                    (None, None) => saw_before = true,
+                    (Some(ref l), Some(ref r)) if l == b"L" && r == b"R" => saw_after = true,
+                    other => panic!("point reader observed partial Atomic: {other:?}"),
+                }
+                assert_eq!(scan_left, scan_right, "scan observed partial Atomic");
+                assert!(
+                    histories == (0, 0) || histories == (1, 1),
+                    "history reader observed partial Atomic: {histories:?}"
+                );
+                if sample == 0 {
+                    sampled_before.wait();
+                }
+                if published.load(Ordering::Acquire) && saw_before && saw_after {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            (saw_before, saw_after)
+        }));
+    }
+
+    start.wait();
+    // Readers establish the pre-publication generation before the writer takes
+    // the same physical publication guard for the complete decision.
+    sampled_before.wait();
+    {
+        let mut store = shared.lock().unwrap();
+        store
+            .atomic_stage_for_heap(heap)
+            .unwrap()
+            .decide_plan_evidence(&create_two_plan(heap, atomic(30)))
+            .unwrap();
+    }
+    published.store(true, Ordering::Release);
+
+    let mut any_before = false;
+    let mut any_after = false;
+    for reader in readers {
+        let (before, after) = reader.join().unwrap();
+        any_before |= before;
+        any_after |= after;
+    }
+    assert!(any_before, "test failed to sample the prior generation");
+    assert!(any_after, "test failed to sample the committed generation");
 }

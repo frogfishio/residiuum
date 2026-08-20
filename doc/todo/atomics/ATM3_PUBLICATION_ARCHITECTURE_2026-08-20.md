@@ -16,6 +16,11 @@ and grouped member-boundary optimization remain open. Universal ordinary-write
 ordering now has its first implemented and tested witness profile, described
 below.
 
+The guarded-reader proof now runs point, full logical scan, and history readers
+concurrently with a two-member commit. Every sampled view is either the prior
+generation or the complete committed generation. The SDK/RQL façade proof is
+still open and is intentionally not inferred from this store-core result.
+
 Universal-order amendment (2026-08-20): checkpoint profile v13 adds an
 `ATORD1` decision witness. Immediately before a committed decision, the Store
 captures `(shard, active segment id, next writer sequence)` for every physical
@@ -156,9 +161,10 @@ remains independently authenticated.
 
 The primary and history projections now share the same durable order witness,
 including later ordinary puts/deletes and overlapping Atomics after a full
-derived-index rebuild. ATM-3D must still prove concurrent scan/RQL generation
-binding, exhaustive crash prefixes, and resource bounds before the hidden
-qualification path can become a product capability.
+derived-index rebuild. The five mandated decision/publication/ack crash cuts
+are green, as is guarded concurrent point/scan/history observation. ATM-3D must
+still prove SDK/RQL generation binding, member-boundary I/O, and resource bounds
+before the hidden qualification path can become a product capability.
 
 `Capabilities::atomics` remains `false` until all slices and the ATM-3 exit gate
 are green.
