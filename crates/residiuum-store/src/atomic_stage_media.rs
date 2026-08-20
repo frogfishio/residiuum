@@ -100,6 +100,26 @@ impl StageCatalog {
         live.max(refs)
     }
 
+    /// True when this catalogue still holds staging facts that rotation or
+    /// compaction must not retire (CR-ATMR6-006).
+    pub(crate) fn has_outstanding_evidence(&self) -> bool {
+        !self.prepares.is_empty()
+            || !self.members.is_empty()
+            || !self.payloads.is_empty()
+            || !self.payload_refs.is_empty()
+            || !self.chunk_plans.is_empty()
+            || !self.chunks.is_empty()
+            || !self.chunk_refs.is_empty()
+            || !self.seals.is_empty()
+            || !self.blocked.is_empty()
+            || !self.prepare_batch.is_empty()
+            || !self.coord_seq.is_empty()
+            || !self.findings.records.is_empty()
+            || self.coverage_degraded
+            || !self.missing_covered.is_empty()
+            || !self.intended_members.is_empty()
+    }
+
     /// Approximate retained catalogue bytes (not a wire encoding).
     pub(crate) fn work_bytes(&self) -> u64 {
         let refs: u64 =

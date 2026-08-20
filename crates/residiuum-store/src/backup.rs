@@ -355,6 +355,16 @@ pub fn restore_full_backup(
     }
 
     let src_store = backup_store_path(package_root);
+    if opts.reassign_identity {
+        let package_paths = StorePaths::new(&src_store);
+        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&package_paths)
+            .map_err(|err| match err {
+                StoreError::AtomicStage(detail) => StoreError::AtomicStage(format!(
+                    "identity-reassign clone refused while outstanding Atomic staging evidence exists ({detail})"
+                )),
+                other => other,
+            })?;
+    }
     // Copy only listed files (manifest is source of truth).
     for entry in &manifest.files {
         let rel = entry

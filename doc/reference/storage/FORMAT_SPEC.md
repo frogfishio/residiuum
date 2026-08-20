@@ -297,6 +297,90 @@ treated as zero.
 
 `reserved` MUST be zero when written and ignored after suffix verification.
 
+### 4.7 Atomic staging records (CR-ATMR6-006)
+
+These records are the shipped store-owned Atomic staging authority. They are
+not ordinary indexed `ItemEvent` puts. Compaction live-projection, source
+reclaim, and identity-reassign clone MUST NOT retire them. Until ATM-4
+delivers copy-through preservation, implementations MUST fail those
+operations closed while outstanding staging evidence exists.
+
+Outstanding evidence is any of:
+
+- `store-info/atomic-stage.ckpt` that authenticates and names prepares,
+  members, seals, payload/chunk locators, blocked identities, findings,
+  intended members, coverage degradation, or covered media;
+- that checkpoint file present but unreadable;
+- `store-info/atomic-coord.ckpt` that authenticates with one or more issued
+  sequences;
+- a verified Atomic `BatchPrepare` / member frame, or a sidecar magic, in the
+  dirty active or pending-seal tail.
+
+`BodyRef.rel_path` and covered-file paths are store-relative. After a file is
+renamed or reclaimed they MUST NOT be trusted. This slice refuses rotation
+instead of silently relocating locators.
+
+Recovery Shadow publication of an Atomic-bearing active is produced only
+during seal. Refusing seal therefore gates Recovery Shadow until ATM-4.
+
+Backup profile `residiuum-backup-v1` copies `store-info/` (including
+`atomic-stage.ckpt` and `atomic-coord.ckpt`) plus `active/`, `segments/`,
+`chunks/`, `recovery/`, and `tiers/`. Same-identity restore preserves staging.
+Identity-reassign clone MUST refuse while outstanding staging exists: prepare
+`heap_id` is the source store id and becomes foreign after reassignment.
+
+#### Checkpoint `ATCKP1` version 9
+
+File: `store-info/atomic-stage.ckpt`. Domain separator
+`RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V9`. Layout, all integers big-endian:
+
+| Field | Encoding |
+|---|---|
+| magic | `ATCKP1` |
+| version | `u8` = 9 |
+| covered files | `u32` count; each: `u16` path len, path UTF-8, `u64` covered_len, head `[32]`, tail `[32]`, `u32` block count, block hashes `[32]*`, leftover `u32` + hash `[32]` |
+| prepares | `u32` count; each: `u32` len + `encode_prepare` bytes |
+| members | `u32` count; each: `u32` len + `encode_member` bytes |
+| payload refs | `u32` count; each: atomic_id `[32]`, ordinal `u32`, `BodyRef` |
+| seals | `u32` count; each: atomic_id `[32]`, content_root `[32]` |
+| blocked | `u32` count; each: atomic_id `[32]` |
+| prepare_batch | `u32` count; each: atomic_id `[32]` |
+| coord_next | `u64` |
+| coord_seq | `u32` count; each: atomic_id `[32]`, seq `u64` |
+| chunk plans | `u32` count; each: atomic_id `[32]`, ordinal `u32`, total `u32`, hash count `u32`, hashes `[32]*` |
+| chunk refs | `u32` count; each: atomic_id `[32]`, ordinal `u32`, index `u32`, `BodyRef` |
+| coverage_degraded | `u8` |
+| findings | `u32` count; each: kind `u8`, class `u8`, has_id `u8`, optional atomic_id `[32]` |
+| missing_covered | `u32` count; each: `u16` len + UTF-8 |
+| intended_members | `u32` count; each: atomic_id `[32]`, `u32` |
+| digest | BLAKE3-256(`domain` \\| body) |
+
+`BodyRef` is `u16` path len, path UTF-8, `u64` offset, `u32` len, hash `[32]`.
+Covered block size is 64 KiB. Version ≠ 9 or domain mismatch MUST NOT be
+interpreted; recovery rebuilds from media. Older checkpoint versions are not
+readable by a v9 decoder.
+
+#### Coordinator `ATCRD1` version 1
+
+File: `store-info/atomic-coord.ckpt`. Domain
+`RESIDIUUM-STORE-ATOMIC-COORD-V1`:
+
+`ATCRD1` + `u8` version 1 + `u64` next + `u32` count + (`u64` seq + atomic_id
+`[32]`)* + BLAKE3-256(domain \\| body). Sequences are unique and nonzero.
+
+#### Sidecar bodies inside `PayloadChunk` frames
+
+Ordinary recovery skips these bodies (`decode_piece_body` fail-closed). New
+prepares are `BatchPrepare` frames, not `ATPREP1`.
+
+| Magic | Body after magic |
+|---|---|
+| `ATPAY1` | atomic_id `[32]` + ordinal `u32` + payload bytes |
+| `ATSEAL1` | atomic_id `[32]` + content_root `[32]` |
+| `ATMAP1` | atomic_id `[32]` + ordinal `u32` + total `u32` + hashes `[32]*total` |
+| `ATCHK1` | atomic_id `[32]` + ordinal `u32` + index `u32` + chunk bytes |
+| `ATPREP1` | legacy `encode_prepare` bytes only; writers MUST NOT emit it |
+
 ## 5. Frame validity
 
 A frame is `verified-complete` under wire version 1 only if:

@@ -92,15 +92,16 @@ pub use atomic_file::{
     write_atomic, write_atomic_keep_previous, write_atomic_with, AtomicWriteOptions, PREV_SUFFIX,
 };
 pub use atomic_stage::StoreAtomicStage;
-pub use atomic_stage_status::{AtomicStageClass, AtomicStageStatus};
 pub use atomic_stage_classify::{
     StageEvidenceClass, StageEvidenceKind, StageFinding, StageFindings,
 };
 pub use atomic_stage_recover::{
-    atomic_coord_path, atomic_stage_checkpoint_path, AtomicStageDisposition, AtomicStageLimits,
+    atomic_coord_path, atomic_stage_checkpoint_path, outstanding_atomic_evidence,
+    refuse_maintenance_while_outstanding, AtomicStageDisposition, AtomicStageLimits,
     AtomicStageOpenReport, ADMISSION_OUTSTANDING_ATOMICS, ATOMIC_COORD_FILE,
     ATOMIC_STAGE_CHECKPOINT_FILE,
 };
+pub use atomic_stage_status::{AtomicStageClass, AtomicStageStatus};
 pub use backup::{
     backup_manifest_path, backup_store_path, load_and_verify_manifest, restore_full_backup,
     verify_package_files, write_full_backup, BackupConsistency, BackupFileEntry, BackupManifest,

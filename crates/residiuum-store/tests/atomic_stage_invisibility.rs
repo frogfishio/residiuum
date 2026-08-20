@@ -428,8 +428,24 @@ fn examination_and_rotation_keep_staged_invisible() {
     );
     assert_staged_invisible(&store);
 
-    store.seal_active().unwrap();
-    store.compact_live().unwrap();
+    match store.seal_active() {
+        Err(StoreError::AtomicStage(detail)) => {
+            assert!(
+                detail.contains("outstanding Atomic"),
+                "seal must refuse while staged: {detail}"
+            );
+        }
+        other => panic!("expected AtomicStage refuse from seal_active, got {other:?}"),
+    }
+    match store.compact_live() {
+        Err(StoreError::AtomicStage(detail)) => {
+            assert!(
+                detail.contains("outstanding Atomic"),
+                "compact must refuse while staged: {detail}"
+            );
+        }
+        other => panic!("expected AtomicStage refuse from compact_live, got {other:?}"),
+    }
     assert_eq!(
         store.get("ordinary").unwrap().as_deref(),
         Some(b"visible".as_slice())

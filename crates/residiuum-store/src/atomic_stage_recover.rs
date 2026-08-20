@@ -20,7 +20,9 @@ use residiuum_atomics::{
     decode_member, decode_prepare, encode_member, encode_prepare, AtomicId, ChunkPlan, ContentRoot,
     HeapId,
 };
-use residiuum_format::{scan_forward, SafetyLimits, ScanRegion};
+use residiuum_format::{
+    read_atomic_evidence, scan_forward, AtomicEvidenceClass, SafetyLimits, ScanRegion,
+};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -283,6 +285,140 @@ pub fn atomic_stage_checkpoint_path(paths: &StorePaths) -> PathBuf {
 /// Path of the durable coordinator sequence snapshot.
 pub fn atomic_coord_path(paths: &StorePaths) -> PathBuf {
     paths.store_info().join(ATOMIC_COORD_FILE)
+}
+
+const ATOMIC_BODY_MAGICS: [&[u8]; 5] = [b"ATPAY1", b"ATSEAL1", b"ATPREP1", b"ATMAP1", b"ATCHK1"];
+
+/// True when durable Atomic staging evidence exists that seal, compact,
+/// reclaim, or identity-reassign clone must not retire (CR-ATMR6-006).
+///
+/// Detection is fail-closed and bounded:
+/// - an authenticated checkpoint with catalogue or covered media;
+/// - a present but unreadable checkpoint;
+/// - a coordinator snapshot with issued sequences;
+/// - Atomic frames or sidecar magics in the dirty active / pending-seal tails.
+pub fn outstanding_atomic_evidence(paths: &StorePaths) -> Result<bool, StoreError> {
+    if checkpoint_indicates_outstanding(paths)? {
+        return Ok(true);
+    }
+    if coordinator_indicates_outstanding(paths)? {
+        return Ok(true);
+    }
+    dirty_media_has_atomic_records(paths)
+}
+
+/// Refuse seal / compact / reclaim / identity-reassign while staging remains.
+pub fn refuse_maintenance_while_outstanding(paths: &StorePaths) -> Result<(), StoreError> {
+    if outstanding_atomic_evidence(paths)? {
+        return Err(StoreError::AtomicStage(
+            "seal/compact/reclaim refused while outstanding Atomic staging evidence exists".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn checkpoint_indicates_outstanding(paths: &StorePaths) -> Result<bool, StoreError> {
+    let path = atomic_stage_checkpoint_path(paths);
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let len = fs::metadata(&path)?.len();
+    if len == 0 {
+        return Ok(false);
+    }
+    let mut budget = Budget::new(AtomicStageLimits::operable());
+    match load_checkpoint(paths, &mut budget) {
+        Ok(Some((catalog, covered))) => {
+            Ok(catalog.has_outstanding_evidence() || !covered.is_empty())
+        }
+        Ok(None) => Ok(true),
+        Err(_) => Ok(true),
+    }
+}
+
+fn coordinator_indicates_outstanding(paths: &StorePaths) -> Result<bool, StoreError> {
+    let path = atomic_coord_path(paths);
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let bytes = match fs::read(&path) {
+        Ok(b) => b,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    if bytes.len() < COORD_MAGIC.len() + 1 + 8 + 4 + 32 {
+        return Ok(false);
+    }
+    let (body, digest) = bytes.split_at(bytes.len() - 32);
+    if !body.starts_with(COORD_MAGIC) || body[COORD_MAGIC.len()] != COORD_VERSION {
+        return Ok(true);
+    }
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(COORD_DOMAIN);
+    hasher.update(body);
+    if hasher.finalize().as_bytes() != digest {
+        return Ok(true);
+    }
+    let mut cur = &body[COORD_MAGIC.len() + 1..];
+    let _next = match read_u64(&mut cur) {
+        Some(v) => v,
+        None => return Ok(true),
+    };
+    let n = match read_u32(&mut cur) {
+        Some(v) => v,
+        None => return Ok(true),
+    };
+    Ok(n > 0)
+}
+
+fn dirty_media_has_atomic_records(paths: &StorePaths) -> Result<bool, StoreError> {
+    let mut budget = Budget::new(AtomicStageLimits::operable());
+    let mut files = Vec::new();
+    collect_files(&paths.active_dir(), 0, &mut budget, &mut files)?;
+    collect_files(&paths.pending_seal_dir(), 0, &mut budget, &mut files)?;
+    for path in files {
+        if file_has_atomic_records(&path, budget.limits.max_segment_bytes)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn file_has_atomic_records(path: &Path, max_bytes: u64) -> Result<bool, StoreError> {
+    let meta = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(err.into()),
+    };
+    if meta.len() == 0 {
+        return Ok(false);
+    }
+    let to_read = meta.len().min(max_bytes);
+    let mut file = File::open(path)?;
+    let mut buf = vec![0u8; to_read as usize];
+    let n = file.read(&mut buf)?;
+    buf.truncate(n);
+    if contains_atomic_body_magic(&buf) {
+        return Ok(true);
+    }
+    let report = read_atomic_evidence(&buf, SafetyLimits::draft_defaults());
+    Ok(report
+        .examined
+        .iter()
+        .any(|e| matches!(e.class, AtomicEvidenceClass::Valid(_))))
+}
+
+fn contains_atomic_body_magic(bytes: &[u8]) -> bool {
+    ATOMIC_BODY_MAGICS
+        .iter()
+        .any(|magic| find_subslice(bytes, magic))
+}
+
+fn find_subslice(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || hay.len() < needle.len() {
+        return false;
+    }
+    hay.windows(needle.len()).any(|w| w == needle)
 }
 
 pub(crate) struct CatalogOpen {
@@ -1376,4 +1512,47 @@ fn read_u64(cur: &mut &[u8]) -> Option<u64> {
     let v = u64::from_be_bytes(cur[..8].try_into().ok()?);
     *cur = &cur[8..];
     Some(v)
+}
+
+#[cfg(test)]
+mod checkpoint_v9_freeze {
+    use super::*;
+    use crate::atomic_stage_media::{
+        encode_stage_chunk_body, encode_stage_chunk_plan, encode_stage_payload, encode_stage_seal,
+    };
+
+    fn aid() -> AtomicId {
+        let mut b = [0u8; 32];
+        b[0] = 9;
+        AtomicId::from_bytes(b).unwrap()
+    }
+
+    #[test]
+    fn v9_empty_checkpoint_roundtrips() {
+        let catalog = StageCatalog::default();
+        let bytes = encode_checkpoint(&catalog, &[]).unwrap();
+        assert!(bytes.starts_with(CHECKPOINT_MAGIC));
+        assert_eq!(bytes[CHECKPOINT_MAGIC.len()], CHECKPOINT_VERSION);
+        let (decoded, covered) = decode_checkpoint(&bytes).expect("v9 empty");
+        assert!(covered.is_empty());
+        assert!(!decoded.has_outstanding_evidence());
+    }
+
+    #[test]
+    fn sidecar_magics_are_frozen() {
+        let id = aid();
+        let root = ContentRoot::from_bytes([0x11; 32]).unwrap();
+        assert!(encode_stage_payload(id, 0, b"x").starts_with(b"ATPAY1"));
+        assert!(encode_stage_seal(id, root).starts_with(b"ATSEAL1"));
+        assert!(encode_stage_chunk_plan(
+            id,
+            0,
+            &ChunkPlan {
+                total: 1,
+                chunk_hashes: vec![[0x22; 32]],
+            }
+        )
+        .starts_with(b"ATMAP1"));
+        assert!(encode_stage_chunk_body(id, 0, 0, b"c").starts_with(b"ATCHK1"));
+    }
 }

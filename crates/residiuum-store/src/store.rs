@@ -5851,6 +5851,10 @@ impl Store {
         }
     }
 
+    fn refuse_if_outstanding_atomic_evidence(&self) -> Result<(), StoreError> {
+        crate::atomic_stage_recover::refuse_maintenance_while_outstanding(&self.paths)
+    }
+
     /// Compact live state into a new sealed segment (sources retained).
     ///
     /// Runs the DEF-024 phase pipeline through **activate** and leaves sources
@@ -5872,6 +5876,7 @@ impl Store {
                 "compact reclaim requires allow_history_loss for live-projection coverage".into(),
             ));
         }
+        self.refuse_if_outstanding_atomic_evidence()?;
 
         self.seal_active()?;
         let source_paths = all_segment_paths(
@@ -6906,6 +6911,9 @@ impl Store {
                 })
                 .collect();
 
+            if !written_shards.is_empty() {
+                self.refuse_if_outstanding_atomic_evidence()?;
+            }
             for shard in written_shards {
                 if self.async_lifecycle_enabled() {
                     self.rotate_active_async(shard)?;
@@ -7724,6 +7732,7 @@ impl Store {
     /// `drain_lifecycle`, final active seal/publish, catalog publication,
     /// Hydra, and Chimera so campaigns can isolate interference.
     pub fn seal_active_with_breakdown(&mut self) -> Result<SealStageBreakdown, StoreError> {
+        self.refuse_if_outstanding_atomic_evidence()?;
         let mut out = SealStageBreakdown::default();
         let t_drain = std::time::Instant::now();
         // Wait for in-flight authoritative seals only — do not apply EnrichDone
@@ -8823,6 +8832,7 @@ impl Store {
         if !need {
             return Ok(());
         }
+        self.refuse_if_outstanding_atomic_evidence()?;
         let t0 = std::time::Instant::now();
         let r = if self.async_lifecycle_enabled() {
             // The async rotation path handles both ordinary authoritative seals

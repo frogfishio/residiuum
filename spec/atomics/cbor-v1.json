@@ -229,5 +229,25 @@
       "construction_deadline_ms": 5000,
       "emitted_violations": 1024
     }
+  },
+  "store_staging_records": {
+    "note": "Private store-owned staging authority (CR-ATMR6-006). Not ordinary ItemEvent puts. FORMAT_SPEC §4.7 is normative.",
+    "maintenance": "fail-closed seal/compact/reclaim/identity-reassign while outstanding; Recovery Shadow gated via seal refuse; backup copies store-info sidecars",
+    "ATCKP1": {
+      "file": "store-info/atomic-stage.ckpt",
+      "version": 9,
+      "domain": "RESIDIUUM-STORE-ATOMIC-STAGE-CKP-V9",
+      "covered_block_bytes": 65536
+    },
+    "ATCRD1": {
+      "file": "store-info/atomic-coord.ckpt",
+      "version": 1,
+      "domain": "RESIDIUUM-STORE-ATOMIC-COORD-V1"
+    },
+    "ATPAY1": { "role": "payload sidecar body", "layout": "atomic_id[32] || ordinal_u32be || payload" },
+    "ATSEAL1": { "role": "member-boundary sidecar body", "layout": "atomic_id[32] || content_root[32]" },
+    "ATMAP1": { "role": "frozen chunk-plan sidecar body", "layout": "atomic_id[32] || ordinal_u32be || total_u32be || hashes[32]*total" },
+    "ATCHK1": { "role": "chunk-body sidecar body", "layout": "atomic_id[32] || ordinal_u32be || index_u32be || bytes" },
+    "ATPREP1": { "role": "legacy prepare sidecar; writers must not emit" }
   }
 }
